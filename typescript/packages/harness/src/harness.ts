@@ -143,7 +143,7 @@ export interface PluginApi {
 	runCommand(sessionId: string, line: string, actorId: string): Promise<string | void>;
 	// sessions
 	startSession(options?: SessionStartOptions): Promise<string>;
-	openSession(id: string, actor?: Actor, prepare?: SessionPrepare): Promise<string>;
+	openSession(id: string, actor?: Actor, prepare?: SessionPrepare, operation?: "load" | "resume"): Promise<string>;
 	/** Add an actor to a session. Its authority must be within the authority of whoever grants it. */
 	join(sessionId: string, actor: Actor, grantedBy: string): Promise<void>;
 	leave(sessionId: string, actorId: string, requestedBy?: string): Promise<void>;
@@ -192,6 +192,7 @@ export interface PluginApi {
 	workActors(sessionId: string): string[];
 	workJobs(sessionId: string): string[];
 	workMay(sessionId: string, right: Authority, actors: string[], jobs?: string[]): boolean;
+	jobTrace?(sessionId: string, jobId: string): Operation | undefined;
 	findJob(jobId: string): { sessionId: string } | undefined;
 	onJobCancel(handler: (jobId: string) => Promise<void>): void;
 	/** Jobs this plugin started that the history shows as never ended, for example because the process stopped. */
@@ -407,7 +408,7 @@ export class Harness {
 			commands: () => [...this.commandTable].map(([name, c]) => ({ name, description: c.description, plugin: c.plugin })),
 			runCommand: (sessionId, line, actorId) => this.runCommand(sessionId, line, actorId),
 			startSession: (options) => this.startSession(options),
-			openSession: (id, actor, prepare) => this.openSession(id, actor, prepare),
+			openSession: (id, actor, prepare, operation) => this.openSession(id, actor, prepare, operation),
 			join: (sessionId, actor, grantedBy) => this.join(this.session(sessionId), actor, grantedBy, pluginName),
 			leave: async (sessionId, actorId, requestedBy) => {
 				const s = this.session(sessionId);
@@ -478,6 +479,10 @@ export class Harness {
 			workActors: (id) => this.workActors(this.session(id)),
 			workJobs: (id) => { const work = this.turnAuthority.getStore(); return work?.sessionId === id ? [...work.jobs] : []; },
 			workMay: (id, right, actors, jobs) => this.workRights(this.session(id), actors, jobs).includes(right),
+			jobTrace: (id, jobId) => {
+				const s = this.session(id);
+				return s.jobs.get(jobId)?.job.plugin === pluginName ? this.jobSpans.get(s)?.get(jobId) : undefined;
+			},
 			findJob: (jobId) => {
 				for (const s of this.sessions.values()) {
 					if (s.order.some((id) => { const e = s.entries.get(id)!; return e.kind === "jobStarted" && e.jobId === jobId && e.writer === pluginName; })) return { sessionId: s.id };
@@ -2865,6 +2870,7 @@ export class Harness {
 	private async invokeTool(s: Session, found: NonNullable<ReturnType<Harness["findTool"]>>, call: ToolCall, signal: AbortSignal, turnId: string | undefined, state: TurnState | undefined,
 		nested: { depth: number } | undefined, owners: string[], allowed: () => boolean, env: WorkingEnvironment | undefined, start: HistoryEntry): Promise<ToolResult | (ToolPending & { callId: string })> {
 		this.emit(s, "tool.started", { call }, found.source.id, { turnId, toolCallId: call.id, stepId: call.stepId });
+		const toolSpan = activeOperation();
 		let asked = 0;
 		const pendingQuestions: string[] = [];
 		const children = new Set<Promise<ToolResult>>();
@@ -2910,7 +2916,8 @@ export class Harness {
 						}
 						const childSignal = AbortSignal.any([signal, lifetime.signal, ...(askingSignal ? [askingSignal] : [])]);
 						if (childSignal.aborted) throw Object.assign(new Error("The callback was cancelled"), { code: "cancelled" });
-						const work = this.callNested(s, call, name, structuredClone(input), childSignal, (nested?.depth ?? 0) + 1, turnId, state, start.id);
+						const invoke = () => this.callNested(s, call, name, structuredClone(input), childSignal, (nested?.depth ?? 0) + 1, turnId, state, start.id);
+						const work = toolSpan ? toolSpan.run(invoke) : invoke();
 						children.add(work);
 						try { return await work; } finally { children.delete(work); }
 					},

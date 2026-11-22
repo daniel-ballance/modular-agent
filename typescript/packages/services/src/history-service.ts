@@ -1,5 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { readTrace, withTrace } from "@modular-agent/harness/telemetry";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -656,6 +657,7 @@ export async function historyService(options: HistoryServiceOptions) {
 				res.setHeader("WWW-Authenticate", "Bearer");
 				throw new BindingError(401, "unauthorized", "A valid service token is required");
 			}
+			return await withTrace(readTrace(req.headers), async () => {
 			const target = req.url ?? "/";
 			const q = target.indexOf("?");
 			const path = q < 0 ? target : target.slice(0, q);
@@ -765,6 +767,7 @@ export async function historyService(options: HistoryServiceOptions) {
 				}
 			}
 			send(res, 200, JSON.stringify(result));
+			});
 		} catch (e) {
 			if (e instanceof UncertainCommit || res.headersSent) { res.destroy(); return; }
 			if (!req.complete) { res.setHeader("Connection", "close"); req.resume(); }

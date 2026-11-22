@@ -1,4 +1,5 @@
 import { McpClient, normalizeMcpInputSchema, StdioTransport, StreamableHttpTransport, toLlmContent, limitMcpContent } from "@earendil-works/pi-mcp";
+import { carrier, currentSpan } from "@modular-agent/harness/telemetry";
 import { definePlugin } from "./plugin.js";
 import { tool, type Tool } from "./tool.js";
 import type { Content } from "./data.js";
@@ -7,6 +8,13 @@ import { pathToFileURL } from "node:url";
 export type McpServerConfig =
   | { command: string; args?: string[]; env?: Record<string, string>; cwd?: string }
   | { url: string; headers?: Record<string, string> };
+
+class TracedMcpClient extends McpClient {
+  override request<Result = unknown>(method: string, params?: Record<string, unknown>, options?: Parameters<McpClient["request"]>[2]): Promise<Result> {
+    const trace = carrier(currentSpan());
+    return super.request<Result>(method, trace && method !== "initialize" && method !== "ping" ? { ...params, _meta: trace } : params, options);
+  }
+}
 
 interface Connection { client: McpClient; tools: Tool[]; unsubscribe?: () => void }
 interface Options {
@@ -33,7 +41,7 @@ export function standardMcpTools(options: Options) {
     let current = connections.get(id);
     if (!current) connections.set(id, current = []);
     for (const [server, config] of Object.entries(servers)) {
-      const client = new McpClient({ name: "modular-agent", version: "0.1.0", roots: [{ uri: pathToFileURL(project).href, name: "project" }] });
+      const client = new TracedMcpClient({ name: "modular-agent", version: "0.1.0", roots: [{ uri: pathToFileURL(project).href, name: "project" }] });
       try {
         await client.connect("url" in config ? new StreamableHttpTransport({ url: config.url, headers: config.headers })
           : new StdioTransport({ command: config.command, args: config.args, env: config.env, cwd: config.cwd ?? project, stderr: "pipe" }));

@@ -54,6 +54,7 @@ export type PluginSpec = ExternalPluginSpec | ServicePluginSpec;
 
 /** What a plugin registered at its handshake. */
 export interface Registration {
+	traceContext?: 1;
 	binding: string;
 	name: string;
 	providers?: { id: string; supports?: Record<string, boolean | string>; models: unknown[] }[];
@@ -161,7 +162,7 @@ async function controlWait<T>(peer: WirePeer, reply: Promise<T>, ms: number, ope
 	try { return await reply; } finally { clearTimeout(timer); }
 }
 
-export async function registerExternalPlugin(peer: WirePeer, info: { project: string; home: string }, config: Record<string, unknown>, stop: ExternalPlugin["stop"], controlMs = 5_000): Promise<ExternalPlugin> {
+export async function registerExternalPlugin(peer: WirePeer, info: { project: string; home: string }, config: Record<string, unknown>, stop: ExternalPlugin["stop"], controlMs = 5_000, offerTraceContext = true): Promise<ExternalPlugin> {
 	const registration = await controlWait(peer, peer.request<Registration>("plugin/initialize", {
 		binding: PLUGIN_BINDING,
 		data: DATA_BINDING,
@@ -169,6 +170,7 @@ export async function registerExternalPlugin(peer: WirePeer, info: { project: st
 		project: info.project,
 		home: info.home,
 		config,
+		...(offerTraceContext ? { traceContext: 1 } : {}),
 	}), controlMs, "initialization").catch(async (error) => { await stop("refused", "Initialization failed"); throw error; });
 	try {
 		const reg = registration;
@@ -182,7 +184,7 @@ export async function registerExternalPlugin(peer: WirePeer, info: { project: st
 		];
 		const replacements = [...new Set([...(reg.replaces ?? []), ...(reg.runtime ? ["runtime"] : [])])];
 		return {
-			registration, plugin: hostPlugin(peer, reg, stop), stop, items, replacements,
+			registration, plugin: hostPlugin(peer, reg, stop, offerTraceContext && reg.traceContext === 1), stop, items, replacements,
 			refusal(harness, externalItems) {
 				if (peer.closed) return "Plugin connection was lost during registration";
 				if (harness.plugins().includes(reg.name)) return `Plugin ${reg.name} is already loaded`;
@@ -233,7 +235,7 @@ interface ProviderAttempt {
 	failure?: unknown;
 }
 
-function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>): Plugin {
+function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>, agreed: boolean): Plugin {
 	const parents = new Map<number | string, Parent>();
 	let workActors: PluginApi["workActors"];
 	let workJobs: PluginApi["workJobs"];
@@ -419,6 +421,14 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 			});
 
 			const activeJobs = new Set<string>();
+			peer.configureTracing(reg.name, agreed, p => {
+				if (p?.parentRequestId !== undefined) {
+					try { parentOf(p); } catch { return undefined; }
+					return peer.requestTrace(p.parentRequestId);
+				}
+				if (typeof p?.jobId !== "string" || !activeJobs.has(p.jobId)) return undefined;
+				try { return api.jobTrace?.(ownJob(p), p.jobId); } catch { return undefined; }
+			});
 			const ownJob = (p: any) => {
 				const job = typeof p.jobId === "string" && api.findJob(p.jobId);
 				if (!job || (p.sessionId != null && p.sessionId !== job.sessionId)) throw new WireError("invalid_request", "No such unfinished job of this plugin");
