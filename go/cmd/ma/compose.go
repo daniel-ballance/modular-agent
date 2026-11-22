@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/daniel-ballance/modular-agent/go/cmd/ma/internal/codemode"
-	"github.com/daniel-ballance/modular-agent/go/cmd/ma/internal/grok"
 	"github.com/daniel-ballance/modular-agent/go/modular"
 	"github.com/daniel-ballance/modular-agent/go/modular/files"
 	"github.com/daniel-ballance/modular-agent/go/modular/mcp"
@@ -42,7 +41,7 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 		if os.Getenv("MODULAR_AGENT_SCRIPT") != "" || chosenModel(settings) != "" || os.Getenv("OPENAI_API_KEY") != "" || os.Getenv("ANTHROPIC_API_KEY") != "" || os.Getenv("CLAUDE_CODE_OAUTH_TOKEN") != "" || len(d.mcp(o.project, io.Discard)) > 0 {
 			return nil, errors.New("conformance mode refuses configured production Providers or servers")
 		}
-		for _, v := range []string{"chatgpt", grok.ID} {
+		for _, v := range []string{"chatgpt", "grok"} {
 			l, err := d.auth().Login(v)
 			if err != nil {
 				return nil, err
@@ -120,19 +119,16 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 		if err != nil {
 			return nil, err
 		}
-		chat := subscription.ChatGPTOptions{Logins: d.auth(), ClientIdentity: o.clientIdentity}
-		for _, model := range overrides["chatgpt"] {
-			chat.CatalogOverrides = append(chat.CatalogOverrides, subscription.ChatGPTModelOverride{Model: modular.ModelInfo{ModelRef: modular.ModelRef{ID: model.ID}, ContextWindow: model.Context, MaxOutput: model.MaxTokens, Input: []string{"text", "image"}}, Effort: model.Effort})
-		}
-		chatgpt, err := subscription.ChatGPT(chat)
+		logins := d.auth()
+		chatgpt, err := subscription.ChatGPT(subscription.ChatGPTOptions{Logins: logins, ClientIdentity: o.clientIdentity, CatalogOverrides: overrides["chatgpt"]})
 		if err != nil {
 			return nil, err
 		}
-		models, err := grok.Catalog(overrides[grok.ID])
+		grok, err := subscription.Grok(subscription.GrokOptions{Logins: logins, ClientIdentity: o.clientIdentity, CatalogOverrides: overrides["grok"]})
 		if err != nil {
 			return nil, err
 		}
-		opts = append(opts, modular.WithProvider(chatgpt), modular.WithProvider(grok.Provider(models, d.auth())))
+		opts = append(opts, modular.WithProvider(chatgpt), modular.WithProvider(grok))
 		_, available := subscription.FindClaudeProgram(subscription.ClaudeOptions{})
 		if containsClaude(settings) || o.loadClaude || o.command == "models" && available == nil {
 			claude, err = subscription.Claude(ctx, subscription.ClaudeOptions{})
@@ -149,8 +145,13 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 	return a, err
 }
 
-func (d layout) modelOverrides() (map[string][]grok.Model, error) {
-	var overrides map[string][]grok.Model
+func (d layout) modelOverrides() (map[string][]subscription.ResponsesModelOverride, error) {
+	var overrides map[string][]struct {
+		ID        string            `json:"id"`
+		Context   int               `json:"contextWindow"`
+		MaxTokens int               `json:"maxTokens"`
+		Effort    map[string]string `json:"effort"`
+	}
 	if err := readJSON(filepath.Join(d.config, "models.json"), &overrides); err != nil {
 		return nil, err
 	}
@@ -161,7 +162,19 @@ func (d layout) modelOverrides() (map[string][]grok.Model, error) {
 			delete(overrides, old)
 		}
 	}
-	return overrides, nil
+	out := make(map[string][]subscription.ResponsesModelOverride)
+	for provider, models := range overrides {
+		for _, model := range models {
+			info := modular.ModelInfo{
+				ModelRef:      modular.ModelRef{ID: model.ID},
+				ContextWindow: model.Context,
+				MaxOutput:     model.MaxTokens,
+				Input:         []string{"text", "image"},
+			}
+			out[provider] = append(out[provider], subscription.ResponsesModelOverride{Model: info, Effort: model.Effort})
+		}
+	}
+	return out, nil
 }
 
 func scripted(path, log string) (modular.Provider, error) {

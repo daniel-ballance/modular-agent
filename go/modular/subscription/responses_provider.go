@@ -53,19 +53,24 @@ func clientIdentity(identity *string) (string, error) {
 	if identity == nil {
 		return "modular-agent", nil
 	}
-	label := *identity
+	return *identity, ValidateClientIdentity(*identity)
+}
+
+// ValidateClientIdentity checks an explicit subscription client label.
+// An empty label is invalid; use nil in options for the default.
+func ValidateClientIdentity(label string) error {
 	invalid := errors.New("client identity must be 1 to 64 characters from A-Z, a-z, 0-9, ., _, and -")
 	if len(label) < 1 || len(label) > 64 {
-		return "", invalid
+		return invalid
 	}
 	for _, c := range label {
 		switch {
 		case 'A' <= c && c <= 'Z', 'a' <= c && c <= 'z', '0' <= c && c <= '9', c == '.', c == '_', c == '-':
 		default:
-			return "", invalid
+			return invalid
 		}
 	}
-	return label, nil
+	return nil
 }
 
 // ResponsesModelOverride replaces a subscription catalog entry with the
