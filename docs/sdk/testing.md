@@ -154,7 +154,7 @@ Everything above runs offline. Each SDK also has a small set of live checks agai
 | `MODULAR_AGENT_LIVE_LOGINS`, a [login file](subscription-providers.md#logins), and `MODULAR_AGENT_LIVE_CHATGPT_MODEL` (default `gpt-6.1-sol`) and `MODULAR_AGENT_LIVE_GROK_MODEL` (default `grok-4.7`) | the `chatgpt` and `grok` Providers, each skipped without its login |
 | `MODULAR_AGENT_LIVE_CLAUDE_MODEL` (default `claude-haiku-5-5`) | the `claude` Provider, skipped without a Claude Code plan sign-in |
 
-For each Provider with a key, the checks run: one prompt that must come back `completed` with non-empty text; streamed `text` events that join to that text; one turn in which the model calls a `tide` tool and answers with its result; and a reasoning setting the model lists. They spend a few cents at most. Run them by hand before a release, never in a loop.
+For each subscription Provider with a sign-in, the checks send one short prompt and expect non-empty text, and never sign in. For each API-key Provider with a key, the checks run: one prompt that must come back `completed` with non-empty text; streamed `text` events that join to that text; one turn in which the model calls a `tide` tool and answers with its result; and a reasoning setting the model lists. They spend a few cents at most. Run them by hand before a release, never in a loop.
 
 ## Adding a scenario
 

@@ -31,7 +31,7 @@ A login is never written to history, events, logs or errors, and never sent anyw
 
 ## Signing in
 
-`signIn(provider, logins, options)` signs in to `chatgpt` or `grok` and stores the login. It reports what the person must do through `options.onStep(step)`:
+`signIn(provider, logins, options)` signs in to `chatgpt` and stores the login; `grok` joins it once the [Grok](#grok) section is decided. It reports what the person must do through `options.onStep(step)`:
 
 | Step | Meaning |
 |---|---|
