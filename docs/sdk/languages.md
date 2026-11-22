@@ -71,7 +71,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - Streams are `iter.Seq2[Event, error]`, used with `range`.
 - Use `agent.Session(ctx, modular.SessionOptions{Settings: settings, Tenant: tenant, Actors: actors})` for per-session options.
 - `ServeACP(ctx, options ...ServeACPOptions)` accepts at most one options value; `Input` and `Output` can replace stdin and stdout. `Compose(ctx, project)` gets the saved id on reopen through `modular.ACPReopeningSession(ctx)`. `ProjectSettings` supplies new-session defaults and `ProjectMCP` supplies trusted server configs. Use `ListenACP(ctx, options)` for the WebSocket listener handle.
-- Use `modular.HTTPHistory(url, tokenFile)` for the client store and `modular.ServeHistory(ctx, store, modular.HistoryOptions{Address: address, TokenFile: tokenFile})` for the service. It runs until the context is cancelled and does not return a listener address.
+- Use `modular.HTTPHistory(url, tokenFile)` for the client store and `modular.ServeHistory(ctx, store, modular.HistoryOptions{Address: address, TokenFile: tokenFile, LeaseTTL: leaseTTL})` for the service. `LeaseTTL` is a `time.Duration`: zero uses 15 seconds; other values must be whole milliseconds and at least 1 ms. A relay preserves the upstream lease. `ServeHistory` returns a service handle with `URL` and `Close()`, including when the address uses port `0`.
 - Set `Provider.CatalogChanges` to a `*modular.CatalogChanges` and call `Changed()` after updating the catalog. Register hooks with `Registrar.On(point, handler, options...)` or the typed methods; use `HookOrder` for explicit order.
 - Errors are values. `errors.As(err, &modularErr)` gives the code.
 - Minimum Go version: the one pinned in `go/mise.toml`.

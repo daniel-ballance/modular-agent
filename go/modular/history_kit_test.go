@@ -60,9 +60,10 @@ func TestServeHistoryKit(t *testing.T) {
 				done := make(chan error, 1)
 				child, stop := context.WithCancel(ctx)
 				go func() {
-					done <- serveHistory(child, store, HistoryOptions{
-						TokenFile: token, LeaseTTL: 3 * time.Second, AllowVolatileForTests: placement != "files",
-					}, l)
+					// The default lease: the kit holds one lease through its
+					// multi-megabyte paging section without renewing, and a 3 s
+					// lease ran out there on a loaded Mac under -race.
+					done <- serveHistory(child, store, HistoryOptions{TokenFile: token, AllowVolatileForTests: placement != "files"}, l)
 					_ = l.Close()
 				}()
 				t.Cleanup(func() {

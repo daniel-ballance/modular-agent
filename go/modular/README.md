@@ -125,6 +125,3 @@ A repeated publication returns the original intent ID and destinations in publis
 
 ### Specification findings
 
-Proposed replacement for the Go history service line in `docs/sdk/languages.md`:
-
-> - Use `modular.HTTPHistory(url, tokenFile)` for the client store and `modular.ServeHistory(ctx, store, modular.HistoryOptions{Address: address, TokenFile: tokenFile, LeaseTTL: leaseTTL})` for the service. `LeaseTTL` is a `time.Duration`: zero uses 15 seconds; other values must be whole milliseconds and at least 1 ms. A relay preserves the upstream lease. `ServeHistory` returns a service handle with `URL` and `Close()`, including when the address uses port `0`.
