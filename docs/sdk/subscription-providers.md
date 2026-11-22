@@ -5,7 +5,7 @@ Each SDK ships three Providers that use a person's own subscription plan instead
 | Constructor | Provider id | Plan | How it reaches the models |
 |---|---|---|---|
 | `chatgpt(options)` | `chatgpt` | ChatGPT (Plus, Pro, Business) | OAuth sign-in, then the Responses API |
-| `grok(options)` | `grok` | The X Subscription, and the SuperGrok and X Premium plans it replaces | OAuth sign-in, then xAI's Responses API ([Grok](#grok)) |
+| `grok(options)` | `grok` | The X Subscription, and the SuperGrok and X Premium plans it replaces | Not yet shipped: see [Grok](#grok) |
 | `claude(options)` | `claude` | Claude (Pro, Max, Team) | The Claude Agent SDK, signed in through Claude Code |
 
 They are ordinary [Providers](api.md#providers): an app adds them with `providers`, and they serve and load over the plugin binding like any other. They behave the same in all four languages.
@@ -67,7 +67,7 @@ Not yet decided. [Grok sign-in under The X Subscription](../research/grok-x-subs
 - `claude()` reaches Claude through the Claude Agent SDK, used as a plain model endpoint: the host's system prompt with no Claude Code preset; only the host's tools shown to the model; Claude Code's own tools, settings files, hooks, memory, MCP configuration, skills and session files off. When the model asks for a tool, the request ends with `toolCall` parts and stop `toolUse`; nothing runs inside the Agent SDK. Text and reasoning arrive as pieces.
 - TypeScript and Python use Anthropic's Agent SDK for their language. Anthropic publishes none for Rust or Go, so their `claude()` runs the TypeScript SDK's Claude program as a [process plugin](placement.md#a-plugin-in-another-process) and needs Node.js 22 or newer. The `program` option, or `MODULAR_AGENT_CLAUDE_SIDECAR`, names it; otherwise each SDK looks in its documented install location. A missing program is `invalid_composition` naming both.
 - The catalog starts from the `claude` entries in [subscription-models.json](subscription-models.json), then takes what Claude Code reports the account offers.
-- `available()` is true when Claude Code reports a Claude plan sign-in. If Claude Code is using an API key instead, `available()` is false and the reason names the key's source, so a plan is never silently replaced by metered use.
+- `available()` is true when Claude Code reports a Claude plan sign-in. If Claude Code is using an API key instead, `available()` is false and the reason names the key's source, so a plan is never silently replaced by metered use. Served, the Claude program sends that reason in `provider/available`.
 
 ## Checks
 

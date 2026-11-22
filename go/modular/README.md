@@ -122,24 +122,4 @@ A repeated publication returns the original intent ID and destinations in publis
 
 ### Specification findings
 
-**`docs/bindings/plugin.md`, The host asks a Provider.** Replace the `provider/available` row with:
-
-```markdown
-| `provider/available` | `{ provider: Id }` | `{ available: boolean, reason?: string }` | `invalid_request` for unknown Provider |
-```
-
-Add below the table:
-
-> When `available` is false, `reason` may explain why. It never contains a credential. The Claude program reports when Claude Code is using an API key and names its source. A legacy Claude program that returns only the boolean cannot report that source to Go.
-
-**`docs/sdk/subscription-providers.md`, opening paragraph.** Replace the first sentence with:
-
-> Each SDK ships ChatGPT and Claude Providers that use a person's own subscription plan instead of an API key. Grok is listed for a future round; its SDK constructor is not shipped while the sign-in is undecided.
-
-
-The [standard declarations table](../../docs/reference/standard-configuration.md#what-it-declares) joins the `forking` row and `commandContainment` row on one line. The platform values are correct, but Markdown does not render the containment declaration as its own row. Replace that line with:
-
-```markdown
-| `forking`, `portableSessions`, `nestedToolCalls`, `inputKeys` | true |
-| `commandContainment` | `strong` on Linux; `processGroup` on macOS, where a process that leaves its command's process group is not stopped |
-```
+None open. The `provider/available` reason and the Grok deferral are in the binding and the subscription Providers page; the declarations table pairs two declarations per row by design.

@@ -104,7 +104,7 @@ Example:
 | Host method | Params | Result | Errors |
 |---|---|---|---|
 | `provider/models` | `{ provider: Id }` | `{ models: ModelInfo[] }` | `invalid_request` for unknown Provider |
-| `provider/available` | `{ provider: Id }` | `{ available: boolean }` | `invalid_request` for unknown Provider |
+| `provider/available` | `{ provider: Id }` | `{ available: boolean, reason?: string }`: when `available` is false, `reason` may say why; it never contains a credential | `invalid_request` for unknown Provider |
 | `provider/request` | `{ provider: Id, model: ModelRef, request: ModelRequest, sessionId?: Id }` | Assistant message | `invalid_request` for unknown Provider or model, mismatched identity or missing required session |
 | `provider/discard` | `{ provider: Id, sessionId: Id, erase?: boolean, entryIds?: Id[] }` | `{}`, or `{ pending?: Id[], outOfReach?: string[] }` when erasing | `invalid_request` for bad scope or erasure params; `not_supported` for an unsupported discard or copy deletion |
 
