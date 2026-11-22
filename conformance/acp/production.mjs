@@ -482,13 +482,25 @@ async function eraseAcrossWriters(kit, cutoff) {
 	const scope = scoped([project], [null]);
 	const env = { MODULAR_AGENT_CONFORMANCE_ERASURE_DIR: dir };
 	const reached = deferred(), releaseReply = deferred();
-	let eraseSource;
+	let eraseSource, sourcePath;
+	let stage = "start writer", faultReached = false;
+	const trace = [], started = performance.now();
 	const proxy = cutoff === "reported pending" ? undefined : await store.observe({
+		onTrace({ method, path, start, upstreamStatus, upstreamMs, replyMs, sent }) {
+			const [, , group, session, suffix, , action] = path.split("?")[0].split("/");
+			const route = group !== "sessions" ? "version" : !session ? "list" : !suffix ? "session" :
+				suffix === "lease" && action === "renew" ? "renew" : ["entries", "lease", "pending-erasure", "erase"].includes(suffix) ? suffix : "other";
+			trace.push({ method, route, source: session !== undefined && `/v1/sessions/${session}` === sourcePath,
+				atMs: Math.round(start - started), upstreamStatus, upstreamMs: upstreamMs === undefined ? undefined : Math.round(upstreamMs),
+				replyMs: Math.round(replyMs), sent });
+			if (trace.length > 24) trace.shift();
+		},
 		async beforeReply({ method, path, ok, entries }) {
 			if (!eraseSource || !ok || method !== "POST") return;
 			const bookkeeping = path === `${eraseSource}/entries` && entries?.some((e) => e.kind === "erasure");
 			const tombstones = path === `${eraseSource}/erase`;
 			if (cutoff === "bookkeeping commit" ? bookkeeping : tombstones) {
+				faultReached = true;
 				reached.resolve(true);
 				await releaseReply.promise;
 			}
@@ -502,6 +514,8 @@ async function eraseAcrossWriters(kit, cutoff) {
 		check("agent and session declare coordination when the shared mechanism is configured",
 			meta(hello)?.declaration?.erasure === true && meta(source)?.declaration?.erasure === true);
 		const sid = await approvalOff(a, source);
+		sourcePath = store.path(sid);
+		stage = "commit source prompt";
 		const key = randomUUID(), secret = `erase-${randomUUID()}`;
 		await prompt(a, sid, secret, key);
 		const prefix = await store.pages(sid);
@@ -509,6 +523,7 @@ async function eraseAcrossWriters(kit, cutoff) {
 		if (!target) throw Error("source admission was not recorded in shared history");
 		const entryId = rows("turnEnd", prefix).at(-1)?.id;
 		const fork = (p, sessionId, entryId) => ext(p, "fork", { sessionId, entryId });
+		stage = "create and attach both forks";
 		const first = (await fork(a, sid, entryId)).sessionId;
 		const loadMs = await reopenWatchdog();
 		await within(loadMs, load(a, first, project), "attach first fork");
@@ -522,14 +537,16 @@ async function eraseAcrossWriters(kit, cutoff) {
 		const before = await store.pages(dst);
 		const copy = before.find((e) => e.kind === "inputAccepted" && contains(e, secret));
 		if (!copy) throw Error("fork-of-fork did not retain the fixture admission");
+		stage = "hold the destination and attach the independent reader";
 		releaseLease = await holdLease(store, store.path(dst));
 		reader = await host(kit, [scope], { dir: h.directory, extraEnv: env });
 		const { a: r } = await reader.peer();
 		await within(loadMs, load(r, first, project), "independent writer attaches first fork");
 		const erase = (p) => ext(p, "erase", { sessionId: sid, entryIds: [target.id] });
 		const pair = (entries, sessionId, id) => entries?.some((e) => e.sessionId === sessionId && e.id === id);
+		stage = "erase from the source";
 		if (proxy) {
-			eraseSource = store.path(sid);
+			eraseSource = sourcePath;
 			const received = await within(15000, Promise.race([reached.promise, settled(erase(a))]), `observe ${cutoff} before its HTTP reply`);
 			if (received !== true) throw Error(`erase settled before the fault cutoff: ${JSON.stringify(received)}`);
 			check("erase cannot mutate a held destination", equal(await store.pages(dst), before));
@@ -538,6 +555,7 @@ async function eraseAcrossWriters(kit, cutoff) {
 			check("held copy is reported pending, not changed", pair(report.pending, dst, copy.id) &&
 				!pair(report.erased, dst, copy.id) && equal(await store.pages(dst), before));
 		}
+		stage = "crash the eraser and inspect the independent reader";
 		await kit.crash(a);
 		releaseReply.resolve();
 		const visible = await history(r, first, { all: true }).catch((e) => e);
@@ -549,6 +567,7 @@ async function eraseAcrossWriters(kit, cutoff) {
 		const release = releaseLease;
 		releaseLease = undefined;
 		await release();
+		stage = "reopen and reconcile the pending intent";
 		reopener = await host(kit, [scope], { dir: h.directory, extraEnv: env, which: kit.second });
 		const { a: next } = await reopener.peer();
 		await within(loadMs, load(next, dst, project), "new writer reconciles fork-of-fork");
@@ -562,6 +581,9 @@ async function eraseAcrossWriters(kit, cutoff) {
 		const done = await erase(next);
 		check("repeated authorized erase reports convergence without duplicate bookkeeping", pair(done.erased, dst, copy.id) && !pair(done.pending, dst, copy.id) &&
 			rows("erasure", await store.pages(dst)).length === 1 && rows("erasure", await store.pages(sid)).length === 1);
+	} catch (error) {
+		const diagnostic = proxy ? `; fault reached: ${faultReached}; history HTTP: ${JSON.stringify(trace)}` : "";
+		throw Error(`${stage}: ${error.message}${diagnostic}`, { cause: error });
 	} finally {
 		releaseReply.resolve();
 		if (releaseLease) await releaseLease().catch(() => {});

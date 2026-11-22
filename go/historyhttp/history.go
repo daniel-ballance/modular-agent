@@ -70,6 +70,7 @@ type Server struct {
 	dir           string
 	ttl           time.Duration
 	holdUntil     time.Time
+	leaseMu       sync.Mutex // guards held; never held across I/O
 	held          map[string]held
 	count         int
 	lock          *os.File
@@ -171,10 +172,60 @@ func (s *Server) Close() error {
 	if s.lock == nil {
 		return nil
 	}
+	return s.closeFileStore()
+}
+
+// closeFileStore is called with mu held. Revoke the in-memory leases before
+// releasing the process lock, including after an uncertain commit.
+func (s *Server) closeFileStore() error {
+	s.leaseMu.Lock()
+	s.held = nil
+	s.leaseMu.Unlock()
 	err := s.lock.Close()
 	s.lock = nil
-	s.held = nil
 	return err
+}
+
+func (s *Server) activeLease(id string) (held, bool) {
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	h, ok := s.held[id]
+	if ok && !time.Now().Before(h.until) {
+		if s.store == nil {
+			delete(s.held, id)
+		}
+		return held{}, false
+	}
+	return h, ok
+}
+
+func (s *Server) setLease(id string, h held) {
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	if h.token == "" {
+		delete(s.held, id)
+	} else {
+		s.held[id] = h
+	}
+}
+
+// A current file-backed lease already proves the session exists. Renewal
+// does not read its document or wait for any document or registry I/O.
+func (s *Server) renewFileLease(id, token string) bool {
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	h, ok := s.held[id]
+	now := time.Now()
+	if !ok || h.token != token || !now.Before(h.until) {
+		return false
+	}
+	h.until = now.Add(s.ttl)
+	s.held[id] = h
+	return true
+}
+
+func (s *Server) renewed(w http.ResponseWriter) {
+	respond(w, 200, map[string]any{"ttlMs": s.ttl.Milliseconds()})
 }
 
 func (s *Server) path(id string) string {
@@ -268,8 +319,7 @@ func (s *Server) save(w http.ResponseWriter, d document, erasing bool) bool {
 func (s *Server) commit(w http.ResponseWriter, path string, b []byte) bool {
 	err := atomicFile(s.dir, path, b)
 	if errors.Is(err, uncertainCommit) {
-		_ = s.lock.Close()
-		s.lock = nil
+		_ = s.closeFileStore()
 		panic(http.ErrAbortHandler)
 	}
 	if err != nil {
@@ -294,6 +344,10 @@ func (s *Server) Handler(token string) http.Handler {
 		}
 		q, ok := parseRequest(w, r, s.registry)
 		if !ok {
+			return
+		}
+		if s.store == nil && q.op == "renew" && s.renewFileLease(q.id, q.lease) {
+			s.renewed(w)
 			return
 		}
 		s.mu.Lock()
@@ -560,14 +614,14 @@ func (s *Server) serve(w http.ResponseWriter, q request) {
 		read(w, q, d)
 		return
 	}
-	h, active := s.held[q.id]
-	if active && !time.Now().Before(h.until) {
+	h, active := s.activeLease(q.id)
+	if !active && s.store != nil {
 		_ = s.closeStoreLease(q.id)
-		delete(s.held, q.id)
-		active = false
+		s.setLease(q.id, held{})
 	}
 	current := func() bool {
-		if !active || h.token != q.lease || !time.Now().Before(h.until) {
+		latest, active := s.activeLease(q.id)
+		if !active || latest.token != q.lease {
 			return false
 		}
 		if l, ok := s.storeLeases[q.id].(interface{ CheckWriter() error }); ok {
@@ -596,7 +650,7 @@ func (s *Server) serve(w http.ResponseWriter, q request) {
 				s.storeLeases[q.id] = l
 			}
 			h = held{owner: q.owner, token: api.ID(), until: time.Now().Add(s.ttl)}
-			s.held[q.id] = h
+			s.setLease(q.id, h)
 			s.expireStoreLease(q.id, h)
 		}
 		respond(w, 200, map[string]any{"lease": h.token, "ttlMs": s.ttl.Milliseconds()})
@@ -606,18 +660,27 @@ func (s *Server) serve(w http.ResponseWriter, q request) {
 				unavailable(w)
 				return
 			}
-			delete(s.held, q.id)
+			s.setLease(q.id, held{})
 		}
 		respond(w, 200, fields{})
 	case "renew":
+		if s.store == nil {
+			// The slow path still distinguishes unknown sessions from lost leases.
+			if s.renewFileLease(q.id, q.lease) {
+				s.renewed(w)
+			} else {
+				lost(w)
+			}
+			return
+		}
 		if !current() {
 			lost(w)
 			return
 		}
 		h.until = time.Now().Add(s.ttl)
-		s.held[q.id] = h
+		s.setLease(q.id, h)
 		s.expireStoreLease(q.id, h)
-		respond(w, 200, map[string]any{"ttlMs": s.ttl.Milliseconds()})
+		s.renewed(w)
 	case "entries":
 		if !current() {
 			lost(w)
