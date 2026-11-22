@@ -1085,7 +1085,10 @@ class ACP(Plugin):
                 if point not in {e["id"] for e in es}:
                     raise AgentError("Unknown follow point")
                 es = es[next(i for i, e in enumerate(es) if e["id"] == point) + 1 :]
-            result = {"entries": es, "questions": await self.api.call("questions", "list", base)}
+            result = {
+                "entries": [ot.project_entry(e) for e in es],
+                "questions": await self.api.call("questions", "list", base),
+            }
         elif operation == "submit":
             result = await self.api.call(
                 "runtime",

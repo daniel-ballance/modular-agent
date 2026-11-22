@@ -5,6 +5,7 @@ Source: docs/bindings/acp.md. Internal entries are retained as additional fields
 
 from datetime import datetime
 
+from ma_core import telemetry as ot
 from ma_core.wire import entry_out
 
 
@@ -70,7 +71,7 @@ def entry(value):
         "tool_result",
         "turn_end",
     }:
-        return entry_out(value)
+        return ot.project_entry(entry_out(value))
     result = {
         **value,
         "parentId": value["parent"],

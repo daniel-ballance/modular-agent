@@ -82,7 +82,7 @@ class HostedRuntime(Runtime):
             else "handedBack",
         }
 
-    async def _run_turn(self, sid, queued, turn, recovering):
+    async def _run_turn(self, sid, queued, turn, recovering, segment):
         entries = await self.api.session("branch", session=sid)
         additions, problem = None, None
         if recovering:
@@ -116,6 +116,7 @@ class HostedRuntime(Runtime):
                     "source": source,
                     "startedBy": started_by,
                     **snapshot,
+                    **segment,
                 },
             )
         self.steering_closed.discard(sid)
@@ -1190,7 +1191,7 @@ class TurnHost:
 
     async def record(self, entry):
         async with self.journal:
-            return entry_out(await self._record(entry))
+            return ot.project_entry(entry_out(await self._record(entry)))
 
     async def _record(self, entry):
         if self.ended or any(k in entry for k in ("id", "sessionId", "parentId", "time", "turnId")):
@@ -1220,6 +1221,8 @@ class TurnHost:
             "resultFeedback",
             "result_feedback",
             STEP_AFTER,
+            ot.TURN_TRACE,
+            ot.DISCLOSURE,
         } or kind.startswith(("question_", "job_")):
             raise WireError("Entry kind is owned by the host", "invalid_request")
         sources = list(entry.get("sources") or [])

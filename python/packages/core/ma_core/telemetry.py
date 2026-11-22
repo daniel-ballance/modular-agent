@@ -8,6 +8,8 @@ from opentelemetry import context, metrics, trace
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 SCOPE = "modular_agent"
+TURN_TRACE = "modular-agent.turnTrace"
+DISCLOSURE = "modular-agent.disclosure"
 TRACE = TraceContextTextMapPropagator()
 _EMPTY = context.Context()
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}\Z")
@@ -45,6 +47,43 @@ def same_trace(parent, candidate):
     p = trace.get_current_span(parent).get_span_context()
     c = trace.get_current_span(candidate).get_span_context()
     return p.is_valid and c.is_valid and p.trace_id == c.trace_id
+
+
+def saved_turn_context(entries, sid, turn):
+    for entry in reversed(entries):
+        if (
+            entry.get("session") != sid
+            or entry.get("turn") != turn
+            or entry.get("kind") not in {"turn_start", TURN_TRACE}
+            or entry.get("fork_source")
+            or entry.get("erased")
+            or entry.get("visible")
+            or (entry["kind"] == TURN_TRACE and entry.get("writer") != "@harness")
+        ):
+            continue
+        data = entry.get("data") or {}
+        if not data.get("erased") and valid(saved := extract(data.get("traceContext"))):
+            return saved
+    return _EMPTY
+
+
+def link(ctx):
+    return [trace.Link(trace.get_current_span(ctx).get_span_context())] if valid(ctx) else []
+
+
+def segment(span, parent):
+    own = span.get_span_context()
+    if not own.is_valid or own == trace.get_current_span(parent).get_span_context():
+        return {}
+    return {"traceContext": inject(own_context(span))}
+
+
+def project_entry(entry):
+    if entry["kind"] == TURN_TRACE:
+        return {k: v for k, v in entry.items() if k not in {"data", "content", "message"}}
+    if entry["kind"] in {"turnStart", "turn_start"} and "traceContext" in (entry.get("data") or {}):
+        return {**entry, "data": {k: v for k, v in entry["data"].items() if k != "traceContext"}}
+    return entry
 
 
 def own_context(span):

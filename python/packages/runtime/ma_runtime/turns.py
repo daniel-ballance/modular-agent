@@ -83,6 +83,20 @@ class Turns:
         parent = ot.extract(None)
         if queued:
             parent = self.input_traces.pop((sid, queued["id"]), parent)
+        links = []
+        if recovering:
+            parent = ot.saved_turn_context(await self.api.session("branch", session=sid), sid, turn)
+            links = ot.link(parent)
+        elif queued:
+            origin = (queued["data"].get("source") or {}).get("continuesTurnId")
+            if origin:
+                links = ot.link(
+                    ot.saved_turn_context(
+                        await self.api.session("branch", session=sid),
+                        sid,
+                        origin,
+                    )
+                )
         label = "invoke_agent"
         agent = ot.name(self.api._harness.agent_name)
         if agent:
@@ -96,14 +110,27 @@ class Turns:
                     **{
                         "gen_ai.operation.name": "invoke_agent",
                         "gen_ai.agent.name": agent,
+                        "modular_agent.turn.resumed": True if recovering else None,
                     },
                 ),
                 parent=parent,
+                links=links,
             ) as operation,
             ot.Steps(sid, turn).track(),
         ):
             ot.set_attrs(operation, {"modular_agent.turn.outcome": "interrupted"})
-            result = await self._run_turn(sid, queued, turn, recovering)
+            segment = ot.segment(operation, parent) if self.declarations["durable"] else {}
+            if recovering and segment:
+                await self.api.session(
+                    "append",
+                    session=sid,
+                    turn=turn,
+                    kind=ot.TURN_TRACE,
+                    writer="@harness",
+                    visible=False,
+                    data=segment,
+                )
+            result = await self._run_turn(sid, queued, turn, recovering, segment)
             ot.set_attrs(operation, {"modular_agent.turn.outcome": result["outcome"]})
             if result["outcome"] == "failed":
                 ot.error(operation, "turn_failed")
@@ -187,7 +214,7 @@ class Turns:
             {**settings, **settings_in(snapshot.get("settings") or {})}, access
         )
 
-    async def _run_turn(self, sid, queued, turn, recovering):
+    async def _run_turn(self, sid, queued, turn, recovering, segment):
         outcome, error = "completed", None
         self.steering_closed.discard(sid)
         prior_starts = set()
@@ -210,6 +237,7 @@ class Turns:
                     "input": queued["id"],
                     "source": queued["data"].get("source"),
                     **snapshot,
+                    **segment,
                     **(
                         {"result_schema": queued["data"]["result_schema"]}
                         if "result_schema" in queued["data"]

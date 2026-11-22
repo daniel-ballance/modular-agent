@@ -1487,10 +1487,11 @@ class Harness(Authority, Erasure):
             )
             if self.supports_erasure():
                 branch = [e for e in branch if not e.get("data", {}).get("erased")]
+            branch = [e for e in branch if e["kind"] != ot.TURN_TRACE]
             mapping = {e["id"]: identity() for e in branch}
             entries = list(child["entries"])
             for e in branch:
-                copied = clone(e)
+                copied = clone(ot.project_entry(e))
                 copied.update(
                     id=mapping[e["id"]],
                     session=child["id"],

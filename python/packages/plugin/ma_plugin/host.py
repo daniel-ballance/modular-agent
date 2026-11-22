@@ -1238,7 +1238,7 @@ class External(Plugin):
                 raise WireError("Invalid history limit", "invalid_request")
             page, size = [], len(b'{"entries": []}')
             for e in entries[:limit]:
-                value = entry_out(e)
+                value = ot.project_entry(entry_out(e))
                 if value.get("message", {}).get("role") == "toolResult":
                     value["message"]["toolName"] = tool_names.get(e["call"], "unknown")
                 length = len(json.dumps(value, ensure_ascii=False).encode()) + (2 if page else 0)
