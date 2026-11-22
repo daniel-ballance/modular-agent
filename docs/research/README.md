@@ -15,6 +15,7 @@ Notes on other systems, gathered to inform the [architecture](../architecture.md
 | [T3 Code](t3-code-reference.md) | A layer above whole agents: how it drives Pi, and how agents delegate to and message each other |
 | [SDK findings](sdk-findings.md) | Decisions from the four SDK builds and the disposition of the other findings |
 | [API-key reasoning](sdk-api-key-reasoning.md) | OpenAI and Anthropic request settings and the research behind the shared catalog |
+| [Grok with The X Subscription](grok-x-subscription.md) | Grok Build sign-in and model access, the existing `ma` path, and what the SDKs can support |
 | [Protocol landscape](protocol-landscape-2026-11.md) | MCP, MCP Apps, AG-UI, A2A, ACP, A2UI and OpenTelemetry |
 | [Codemode engines](codemode-engines.md) | One sandbox for all four `ma` builds; Monty, QuickJS, Starlark, Lua, and Go worker tests |
 | [ChatGPT conversation](chatgpt-conversation.md) | Where the project started, and what we kept, changed or dropped |
