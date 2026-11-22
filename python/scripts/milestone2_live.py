@@ -13,27 +13,33 @@ import os
 import select
 import signal
 import sys
+from functools import cache
 from pathlib import Path
 
 
-# Some Python builds omit the optional os/signal wrappers even on a capable
-# kernel. Use glibc, documented by pidfd_open(2) and pidfd_send_signal(2).
-LIBC = ctypes.CDLL(None, use_errno=True)
-LIBC.pidfd_open.argtypes = [ctypes.c_int, ctypes.c_uint]
-LIBC.pidfd_open.restype = ctypes.c_int
-LIBC.pidfd_send_signal.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint]
-LIBC.pidfd_send_signal.restype = ctypes.c_int
+@cache
+def pidfd_libc():
+    if sys.platform != "linux":
+        raise OSError(errno.ENOSYS, "The live crash demonstration requires Linux pidfds")
+    # Some Python builds omit the optional os/signal wrappers. Bind glibc only
+    # when using pidfds, so the log validator can also be imported on macOS.
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.pidfd_open.argtypes = [ctypes.c_int, ctypes.c_uint]
+    libc.pidfd_open.restype = ctypes.c_int
+    libc.pidfd_send_signal.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint]
+    libc.pidfd_send_signal.restype = ctypes.c_int
+    return libc
 
 
 def pidfd_open(pid):
-    fd = LIBC.pidfd_open(pid, 0)
+    fd = pidfd_libc().pidfd_open(pid, 0)
     if fd < 0:
         raise OSError(ctypes.get_errno(), "pidfd_open failed")
     return fd
 
 
 def pidfd_kill(fd):
-    if LIBC.pidfd_send_signal(fd, signal.SIGKILL, None, 0) < 0:
+    if pidfd_libc().pidfd_send_signal(fd, signal.SIGKILL, None, 0) < 0:
         error = ctypes.get_errno()
         if error != errno.ESRCH:
             raise OSError(error, "pidfd_send_signal failed")

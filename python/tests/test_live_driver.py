@@ -3,14 +3,15 @@
 import asyncio
 import json
 import os
-
-import pytest
 import select
 import sys
+
+import pytest
 
 from scripts.milestone2_live import descendants, pidfd_kill, pidfd_open, validate
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux pidfds and procfs")
 async def test_pidfd_helpers_without_optional_python_wrappers(monkeypatch):
     monkeypatch.delattr(os, "pidfd_open", raising=False)
     import signal
