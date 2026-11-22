@@ -54,7 +54,7 @@ before(async () => {
 	flakyDir = mkdtempSync(join(tmpdir(), "ma-svc-flaky-"));
 	[history, shortLease, flakyHistory, environment, gateway] = await Promise.all([
 		startService("history", { dir: historyDir }),
-		startService("history", { dir: mkdtempSync(join(tmpdir(), "ma-svc-short-")), leaseMs: 800 }),
+		startService("history", { dir: mkdtempSync(join(tmpdir(), "ma-svc-short-")), leaseTtl: 800 }),
 		startService("history", { dir: flakyDir, dropAppendResponses: 3 }),
 		startService("environment", { root: project, runDir: mkdtempSync(join(tmpdir(), "ma-svc-run-")) }),
 		startService("provider", { models: { module: new URL("./fixtures/scripted-models.js", import.meta.url).href, export: "scriptedModels", options: { routes } } }),

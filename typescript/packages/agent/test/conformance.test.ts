@@ -18,19 +18,20 @@ test("this agent passes the ACP binding's conformance kit", t => {
 	assert.equal(run.status, 0, `${failures.join("\n")}\n${run.stdout.split("\n").at(-2)}\n${run.stderr.slice(-500)}`);
 });
 
-async function startHistoryService(): Promise<{ url: string; tokenFile: string; stop: () => void }> {
+async function startHistoryService(leaseTtl?: number): Promise<{ url: string; tokenFile: string; stop: () => void }> {
 	const dir = mkdtempSync(join(tmpdir(), "ma-hist-kit-"));
 	const token = `t-${Math.random().toString(36).slice(2)}`;
 	const tokenFile = join(dir, "token");
 	writeFileSync(tokenFile, token, { mode: 0o600 });
 	const serve = fileURLToPath(import.meta.resolve("@modular-agent/services").replace(/index\.js$/, "serve.js"));
-	const child = spawn(process.execPath, [serve, "history", JSON.stringify({ dir: join(dir, "h"), token })], { stdio: ["ignore", "pipe", "inherit"] });
+	const child = spawn(process.execPath, [serve, "history", JSON.stringify({ dir: join(dir, "h"), token, leaseTtl })], { stdio: ["ignore", "pipe", "inherit"] });
 	const url = await new Promise<string>((resolve) => child.stdout!.once("data", (d) => resolve(JSON.parse(String(d).split("\n")[0]).url)));
 	return { url, tokenFile, stop: () => child.kill("SIGTERM") };
 }
 
 test("this build's history service passes the history binding's conformance kit", async t => {
-	const svc = await startHistoryService();
+	// The kit waits for a lease to expire and also appends a large batch.
+	const svc = await startHistoryService(5_000);
 	try {
 		const run = spawnSync(process.execPath, [`${repo}conformance/history/run.mjs`, svc.url, svc.tokenFile], { encoding: "utf8", timeout: 60_000 });
 		t.diagnostic(run.stdout.trim().split("\n").at(-1) ?? "No kit summary");
