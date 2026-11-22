@@ -192,6 +192,7 @@ pub struct SignInTestEndpoints {
     device_code: String,
     device_token: String,
     bind: SocketAddr,
+    listener: Option<tokio::net::TcpListener>,
 }
 impl SignInTestEndpoints {
     pub fn new(
@@ -214,7 +215,19 @@ impl SignInTestEndpoints {
             device_code: device_code.into(),
             device_token: device_token.into(),
             bind,
+            listener: None,
         })
+    }
+    /// Supply a bound loopback listener, avoiding a race on port allocation.
+    pub fn with_listener(mut self, listener: tokio::net::TcpListener) -> Result<Self> {
+        if !listener.local_addr()?.ip().is_loopback() {
+            return Err(Error::new(
+                Code::InvalidParams,
+                "test redirect must be loopback",
+            ));
+        }
+        self.listener = Some(listener);
+        Ok(self)
     }
 }
 

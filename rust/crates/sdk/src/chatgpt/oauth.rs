@@ -404,6 +404,10 @@ pub(crate) async fn login(
     client_identity: &ClientIdentity,
     mut options: SignInOptions<'_>,
 ) -> Result<Login> {
+    let fixture_listener = options
+        .fixture
+        .as_mut()
+        .and_then(|fixture| fixture.listener.take());
     let (token, device_code, device_token, bind) = options.fixture.as_ref().map_or(
         (
             CODEX_TOKEN,
@@ -433,7 +437,10 @@ pub(crate) async fn login(
     if options.device {
         return codex_device(&client, &options, device_code, device_token, &token).await;
     }
-    let listener = tokio::net::TcpListener::bind(bind).await.ok();
+    let listener = match fixture_listener {
+        Some(listener) => Some(listener),
+        None => tokio::net::TcpListener::bind(bind).await.ok(),
+    };
     if listener.is_none() && options.paste.is_none() {
         options.notice("The sign-in port is in use. Using a device code instead.");
         return codex_device(&client, &options, device_code, device_token, &token).await;

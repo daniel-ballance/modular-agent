@@ -26,6 +26,10 @@ async fn check(
         .tool(modular_agent::testing::fixtures::tide())
         .build()
         .await?;
+    check_agent(id, &model_ref, agent).await
+}
+
+async fn check_agent(id: &str, model_ref: &str, agent: Agent) -> Result<()> {
     let session = agent.session().await?;
     let turn = session
         .prompt("Answer briefly: name a harbour in Yorkshire.")
@@ -88,4 +92,65 @@ async fn openai_live() -> Result<()> {
 #[tokio::test]
 async fn anthropic_live() -> Result<()> {
     check("anthropic", "ANTHROPIC", "claude-haiku-5-5", anthropic).await
+}
+
+fn live_logins() -> Option<modular_agent::SubscriptionLogins> {
+    if std::env::var("MODULAR_AGENT_LIVE").as_deref() != Ok("1") {
+        eprintln!("skip subscriptions: MODULAR_AGENT_LIVE is not 1");
+        return None;
+    }
+    let path = std::env::var_os("MODULAR_AGENT_LIVE_LOGINS").filter(|path| !path.is_empty());
+    if path.is_none() {
+        eprintln!("skip subscriptions: MODULAR_AGENT_LIVE_LOGINS is not set");
+    }
+    path.map(modular_agent::subscription_logins)
+}
+
+#[tokio::test]
+async fn chatgpt_live() -> Result<()> {
+    use modular_agent::{ChatGptOptions, Provider, chatgpt};
+    let Some(logins) = live_logins() else {
+        return Ok(());
+    };
+    let provider = chatgpt(ChatGptOptions::new(logins))?;
+    if !provider.available() {
+        eprintln!("skip chatgpt: no plan sign-in");
+        return Ok(());
+    }
+    let model =
+        std::env::var("MODULAR_AGENT_LIVE_CHATGPT_MODEL").unwrap_or_else(|_| "gpt-6.1-sol".into());
+    let model_ref = format!("chatgpt/{model}");
+    let agent = Agent::builder()
+        .provider(provider)
+        .model(&model_ref)
+        .tool(modular_agent::testing::fixtures::tide())
+        .build()
+        .await?;
+    check_agent("chatgpt", &model_ref, agent).await
+}
+
+#[tokio::test]
+async fn claude_live() -> Result<()> {
+    use modular_agent::{ClaudeOptions, claude};
+    if live_logins().is_none() {
+        return Ok(());
+    }
+    let Ok(provider) = claude(ClaudeOptions::default()) else {
+        eprintln!("skip claude: TypeScript program not installed");
+        return Ok(());
+    };
+    if let Some(reason) = provider.unavailable_reason().await {
+        eprintln!("skip claude: {reason}");
+        return Ok(());
+    }
+    let model = std::env::var("MODULAR_AGENT_LIVE_CLAUDE_MODEL")
+        .unwrap_or_else(|_| "claude-haiku-5-5".into());
+    let model_ref = format!("claude/{model}");
+    let agent = Agent::builder()
+        .claude_provider(provider)
+        .model(&model_ref)
+        .tool(modular_agent::testing::fixtures::tide())
+        .build()
+        .await?;
+    check_agent("claude", &model_ref, agent).await
 }
