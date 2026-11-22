@@ -26,9 +26,37 @@ function bootClock(): number {
 	if (!/^\d+\.\d{2}$/.test(field)) throw new Error("Invalid boot clock");
 	return Number(field) * 1000;
 }
+/**
+ * A clock that keeps counting through suspension, built from a monotonic clock that stops
+ * while the machine sleeps (performance.now() on macOS) and the wall clock, which does not.
+ * Each reading advances by the larger of the two clocks' advances since the last reading, so a
+ * sleep shows up at the next reading. If the wall clock moves back by more than the tolerance,
+ * a sleep in that interval could be hidden, so the clock jumps a day ahead: every lease measured
+ * before the jump has expired, and the writer treats it as lost rather than trusting it.
+ * (docs/bindings/history-http.md, Writing: one writer at a time.)
+ */
+export function sleepAwareClock(monotonic: () => number = () => performance.now(), wall: () => number = () => Date.now(), tolerance = 50) {
+	let lastMonotonic = monotonic(), lastWall = wall(), elapsed = 0;
+	return {
+		now(): number {
+			const m = monotonic(), w = wall();
+			const dm = Math.max(0, m - lastMonotonic), dw = w - lastWall;
+			lastMonotonic = m; lastWall = w;
+			elapsed += dw < dm - tolerance ? dm + 86_400_000 : Math.max(dm, dw);
+			return elapsed;
+		},
+		// A backward step smaller than the tolerance can hide that much sleep; Date.now() has 1 ms resolution.
+		margin: tolerance + 10,
+	};
+}
 function writerClock(configuredMargin?: number) {
 	if (process.platform === "linux") {
 		try { bootClock(); return { now: bootClock, margin: 10 }; } catch { /* No usable boot clock. */ }
+	}
+	if (process.platform === "darwin") {
+		// An operator margin, if set, is kept on top of the clock's own.
+		const clock = sleepAwareClock();
+		return positive(configuredMargin) ? { now: clock.now, margin: Math.max(clock.margin, configuredMargin) } : clock;
 	}
 	if (!positive(configuredMargin)) throw new Error("No suspension-aware clock is available to the history writer. Set MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS to a positive integer (milliseconds) in the process environment. Choose a margin that covers expected suspension and scheduling delays, or prevent suspension while writing.");
 	return { now: () => performance.now(), margin: configuredMargin };

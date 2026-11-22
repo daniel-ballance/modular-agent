@@ -67,7 +67,7 @@ git diff --check
 ## Known gaps
 
 - macOS local commands use process-group containment, not strong containment. A process that leaves its group is outside that guarantee.
-- If `MODULAR_AGENT_HISTORY_URL` selects HTTP history on macOS, set `MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS` as described in the [SDK's history configuration](../core/README.md#registering-or-serving-a-custom-history-store). Local file history does not need this setting.
+- HTTP history on macOS needs no clock setting: the writer derives a sleep-aware clock ([SDK history configuration](../core/README.md#registering-or-serving-a-custom-history-store)).
 - The terminal cannot switch to Claude unless it started the sidecar. In ACP, a project composition that did not start the sidecar does not offer Claude. Reopen with saved Claude settings or launch with `--model claude/ID`. See the [sidecar's own gaps](../../sidecars/claude/README.md#known-gaps-and-open-problems).
 - `find` honors `.gitignore` files at or below its search root, but not parent or global Git rules, `.ignore` or `.git/info/exclude`. Its glob parser, filesystem diagnostics and Monty's tracebacks can differ from Rust.
 
