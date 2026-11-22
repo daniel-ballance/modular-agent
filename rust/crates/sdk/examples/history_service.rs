@@ -17,13 +17,14 @@ async fn main() -> Result<()> {
         })?,
         token,
     );
-    opts.ttl = match std::env::var("MODULAR_AGENT_KIT_RESTART_PHASE").as_deref() {
-        Ok("initial") => Duration::from_millis(6000),
-        Ok("restart") => Duration::from_millis(1000),
-        _ => opts.ttl,
+    // The kit waits for expiry and checks a restart with a shorter lease.
+    opts.lease_ttl = match std::env::var("MODULAR_AGENT_KIT_RESTART_PHASE").as_deref() {
+        Ok("initial") => Duration::from_secs(6),
+        Ok("restart") => Duration::from_secs(1),
+        _ => Duration::from_millis(2500),
     };
     serve_history(
-        portable_file_history(store, opts.ttl, opts.max_sessions)?,
+        portable_file_history(store, opts.lease_ttl, opts.max_sessions)?,
         opts,
     )
     .await

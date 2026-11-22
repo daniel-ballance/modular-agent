@@ -41,7 +41,9 @@ const MAX_COUNT: u64 = 9_007_199_254_740_991;
 pub struct ServeHistoryOptions {
     pub address: SocketAddr,
     pub token_file: PathBuf,
-    pub ttl: Duration,
+    /// Writer lease declared as `ttlMs`. Defaults to 15 seconds. Use a positive
+    /// whole number of milliseconds. A portable store must declare the same TTL.
+    pub lease_ttl: Duration,
     pub max_sessions: usize,
 }
 impl ServeHistoryOptions {
@@ -49,7 +51,7 @@ impl ServeHistoryOptions {
         Self {
             address,
             token_file: token_file.into(),
-            ttl: Duration::from_millis(2500),
+            lease_ttl: Duration::from_secs(15),
             max_sessions: 10_000,
         }
     }
@@ -116,10 +118,11 @@ async fn prepare(
     store: Arc<dyn HistoryStore>,
     options: ServeHistoryOptions,
 ) -> agent_api::Result<(tokio::net::TcpListener, Arc<Server>)> {
-    let ttl = options.ttl;
+    let lease_ttl = options.lease_ttl;
     let max_sessions = options.max_sessions;
     let store =
-        tokio::task::spawn_blocking(move || SnapshotStore::new(store, ttl, max_sessions)).await??;
+        tokio::task::spawn_blocking(move || SnapshotStore::new(store, lease_ttl, max_sessions))
+            .await??;
     prepare_backend(Backend::Snapshot(Arc::new(store)), options).await
 }
 
@@ -132,10 +135,12 @@ async fn prepare_backend(
             store.supports_history_service() && store.supports_erasure(),
             "history store cannot serve durable opaque records, leases and tombstones"
         );
-        ensure!(
-            (1..=MAX_COUNT).contains(&store.ttl_ms()),
-            "invalid history lease TTL"
-        );
+        if store.ttl_ms() != lease_ttl_ms(options.lease_ttl)? {
+            return Err(OperationError::InvalidParams(
+                "lease_ttl must match the portable history store's lease TTL".into(),
+            )
+            .into());
+        }
     }
     ensure!(
         options.address.ip().is_loopback(),
@@ -216,21 +221,27 @@ struct Snapshot {
     entries: Vec<Value>,
 }
 
+fn lease_ttl_ms(lease_ttl: Duration) -> agent_api::Result<u64> {
+    match u64::try_from(lease_ttl.as_millis()) {
+        Ok(ms) if (1..=MAX_COUNT).contains(&ms) && lease_ttl == Duration::from_millis(ms) => Ok(ms),
+        _ => Err(OperationError::InvalidParams(format!(
+            "lease_ttl must be a whole number of milliseconds between 1 and {MAX_COUNT}"
+        ))
+        .into()),
+    }
+}
+
 impl SnapshotStore {
     pub fn new(
         store: Arc<dyn HistoryStore>,
-        ttl: Duration,
+        lease_ttl: Duration,
         max_sessions: usize,
     ) -> agent_api::Result<Self> {
         ensure!(
             store.supports_service_snapshots(),
             "the history service requires durable opaque snapshots and exclusive writer leases"
         );
-        let ttl_ms = u64::try_from(ttl.as_millis())?;
-        ensure!(
-            (1..=MAX_COUNT).contains(&ttl_ms) && ttl == Duration::from_millis(ttl_ms),
-            "history lease TTL must be a positive whole number of milliseconds"
-        );
+        let ttl_ms = lease_ttl_ms(lease_ttl)?;
         ensure!(max_sessions > 0, "history session quota must be positive");
         let exclusive = store.acquire(CONTROL)?;
         let (authoritative, hold) = Self::prepare_control(store.as_ref(), ttl_ms)?;

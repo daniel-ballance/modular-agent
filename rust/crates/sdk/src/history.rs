@@ -147,14 +147,15 @@ pub fn memory_history() -> History {
     History(Arc::new(MemoryHistory::default()), false, "memory", None)
 }
 /// A dedicated file store for opaque records. Use a directory separate from
-/// native file history. The lease TTL and quota belong to the store.
+/// native file history. When serving this store, set `ServeHistoryOptions::lease_ttl`
+/// to the same duration so the declaration matches the TTL the store enforces.
 pub fn portable_file_history(
     dir: impl AsRef<Path>,
-    ttl: std::time::Duration,
+    lease_ttl: std::time::Duration,
     max_sessions: usize,
 ) -> Result<History> {
     let snapshots = history_fs::FileHistory::new(dir.as_ref())?;
-    let store = history_http::SnapshotStore::new(Arc::new(snapshots), ttl, max_sessions)?;
+    let store = history_http::SnapshotStore::new(Arc::new(snapshots), lease_ttl, max_sessions)?;
     History::from_named_portable("portable file", Arc::new(store), true)
 }
 

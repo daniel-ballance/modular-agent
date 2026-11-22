@@ -21,12 +21,14 @@ struct RecordingStore {
     store: Arc<history_http::SnapshotStore>,
     journal: PathBuf,
 }
+const RECORDING_LEASE_TTL: Duration = Duration::from_secs(30);
+
 impl RecordingStore {
     fn new(root: &Path) -> Result<Self> {
         Ok(Self {
             store: Arc::new(history_http::SnapshotStore::new(
                 Arc::new(history_fs::FileHistory::new(&root.join("history"))?),
-                Duration::from_secs(30),
+                RECORDING_LEASE_TTL,
                 100,
             )?),
             journal: root.join("mutations.jsonl"),
@@ -273,13 +275,9 @@ async fn lifecycle(store: &str, served: bool) -> Result<()> {
             .open(&token)?
             .write_all(b"provisional-test-token-not-for-deployment\n")?;
         let history = History::from_portable(RecordingStore::new(root)?, true)?;
-        Some(
-            listen_history(
-                history,
-                ServeHistoryOptions::new("127.0.0.1:0".parse().unwrap(), token),
-            )
-            .await?,
-        )
+        let mut options = ServeHistoryOptions::new("127.0.0.1:0".parse().unwrap(), token);
+        options.lease_ttl = RECORDING_LEASE_TTL;
+        Some(listen_history(history, options).await?)
     } else {
         None
     };
