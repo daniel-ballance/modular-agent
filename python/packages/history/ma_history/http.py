@@ -5,6 +5,7 @@ import ipaddress
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 from urllib.error import HTTPError
@@ -18,12 +19,17 @@ from .portable import session_view
 from .profile import PendingErasure
 
 
+def _suspend_aware_clock_id():
+    if sys.platform == "darwin":
+        # Darwin's CLOCK_MONOTONIC advances during sleep; time.monotonic()
+        # uses mach_absolute_time, which stops during sleep.
+        return getattr(time, "CLOCK_MONOTONIC", None)
+    return getattr(time, "CLOCK_BOOTTIME", None)
+
+
 def lease_clock():
-    return (
-        time.clock_gettime(time.CLOCK_BOOTTIME)
-        if hasattr(time, "CLOCK_BOOTTIME")
-        else time.monotonic()
-    )
+    clock_id = _suspend_aware_clock_id()
+    return time.clock_gettime(clock_id) if clock_id is not None else time.monotonic()
 
 
 class ServiceError(AgentError):
@@ -66,7 +72,7 @@ class HTTPHistory(PendingErasure, Plugin):
         self.opening = {}
         self.must_renew = set()
         self.margin = 0
-        if not hasattr(time, "CLOCK_BOOTTIME"):
+        if _suspend_aware_clock_id() is None:
             margin = os.environ.get("MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS", "")
             if not re.fullmatch(r"[0-9]+", margin):
                 raise AgentError("Configure MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS on this platform")
