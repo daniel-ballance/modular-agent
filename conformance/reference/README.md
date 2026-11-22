@@ -16,6 +16,7 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 | Check | What it shows |
 |---|---|
 | `print` | Print mode prints the final answer; the model is offered only `codemode` |
+| `client-identity` | `MA_CLIENT_IDENTITY` is checked at startup: an invalid value stops `ma` with status 1, a valid one is accepted |
 | `codemode-nested` | Code reads and writes files through `tools`; the nested calls stay out of the model's view |
 | `codemode-tools-values` | `import tools`, a tool function held in a variable, and positional arguments make the same calls |
 | `codemode-positional-order` | Positional arguments: required fields, then the rest in alphabetical order, as the prompt shows |

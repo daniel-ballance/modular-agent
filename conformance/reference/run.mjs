@@ -48,6 +48,16 @@ const checks = [
     },
   },
   {
+    name: "client-identity",
+    about: "MA_CLIENT_IDENTITY must be 1 to 64 of A-Z a-z 0-9 . _ -; ma refuses to start otherwise, and accepts a valid one.",
+    script: [{ text: "Hello." }, { text: "Hello." }],
+    runs: [
+      { args: ["-p", "Say hello."], env: { MA_CLIENT_IDENTITY: "bad identity!" }, expect: { exit: 1, stderrContains: "MA_CLIENT_IDENTITY" } },
+      { args: ["-p", "Say hello."], env: { MA_CLIENT_IDENTITY: "x".repeat(65) }, expect: { exit: 1, stderrContains: "MA_CLIENT_IDENTITY" } },
+      { args: ["-p", "Say hello."], env: { MA_CLIENT_IDENTITY: "my-agent_2.0" }, expect: { stdout: "Hello.", exit: 0 } },
+    ],
+  },
+  {
     name: "codemode-nested",
     about: "Code reads and writes files through tools; the nested calls stay out of the model's view.",
     files: { "project/in.txt": "whitby\n" },
@@ -355,6 +365,7 @@ function runOnce(command, t, run) {
     MODULAR_AGENT_SCRIPT: t.scriptFile,
     MODULAR_AGENT_SCRIPT_LOG: t.logFile,
     ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}),
+    ...(run.env ?? {}),
   };
   return new Promise((done) => {
     const child = spawn(command[0], [...command.slice(1), ...run.args], { cwd: t.project, env, stdio: ["ignore", "pipe", "pipe"], detached: true });
@@ -421,6 +432,7 @@ async function runCheck(command, check) {
     if (e.exit !== undefined) ok(r.exit === e.exit, `${where}: exit status ${e.exit}`, `${r.exit}; stderr: ${r.stderr.slice(-500)}`);
     if (e.stdout !== undefined) ok(out === e.stdout, `${where}: stdout ${JSON.stringify(e.stdout)}`, out.slice(-300));
     if (e.stdoutContains) ok(out.includes(e.stdoutContains), `${where}: stdout contains ${e.stdoutContains}`, out.slice(-300));
+    if (e.stderrContains) ok(r.stderr.includes(e.stderrContains), `${where}: stderr mentions ${JSON.stringify(e.stderrContains)}`, r.stderr.slice(-300));
     if (e.stderrLacks) ok(!r.stderr.includes(e.stderrLacks), `${where}: stderr does not mention ${JSON.stringify(e.stderrLacks)}`, r.stderr.slice(-300));
     if (e.stdoutMatches) ok(e.stdoutMatches.test(out), `${where}: stdout matches ${e.stdoutMatches}`, out.slice(-300));
     if (e.json) { let v; try { v = JSON.parse(out); } catch { ok(false, `${where}: stdout is one JSON object`, out.slice(0, 300)); } if (v !== undefined) e.json(v, (c, w, g) => ok(c, `${where}: ${w}`, g)); }
