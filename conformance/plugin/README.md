@@ -2,7 +2,7 @@
 
 Checks a build's conformance plugin against the [plugin binding](../../docs/bindings/plugin.md), `modular-agent-plugin/1`. The kit is the host. It uses a temporary project and home, a scripted Provider and an environment that accepts only fixture callbacks. There is no external model or network dependency.
 
-Run on a disposable Linux environment with Node.js, Bash, `setsid` and GNU coreutils. Use absolute paths in the command and its arguments. The kit sets a fresh `HOME`; the launcher cannot depend on per-user tool lookup. The project directory is not a sandbox. Only run trusted test programs with no ambient credentials or production configuration.
+Run in a disposable environment with Node.js, Bash and core utilities. A fixture that declares strong containment on the current platform needs `setsid`. A fixture that declares process-group containment is checked with a child that stays in its process group. Use absolute paths in the command and its arguments. The kit sets a fresh `HOME`; the launcher cannot depend on per-user tool lookup. The project directory is not a sandbox. Only run trusted test programs with no ambient credentials or production configuration.
 
 ```sh
 node conformance/plugin/run.mjs -- <plugin command> [args...]
