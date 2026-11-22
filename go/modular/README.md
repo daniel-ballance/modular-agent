@@ -97,6 +97,10 @@ The scenario runner builds Go's fixture and discovers built peer programs. Build
 | Testing | Scripted Provider, memory environment, `Answers`, `OverWire`, simulated `Restart` and seven shared fixture plugins. Shared scenarios check real process termination separately from the simulated restart. |
 | ACP and history | ACP over stdio, supplied streams, or WebSocket, with operator project and tenant scope, rights ceilings, and optional representation. Multi-project composition checks saved scope before the factory receives metadata. Native file history keeps pending-erasure marks beside its session files; memory shares marks among agents holding the same store. `HTTPHistory` discovers `pendingErasure: 1` in `GET /v1`. It checks fresh plans at handoff and fences appends with `History-Revision`. A peer without version 1 does not support erasure. HTTP erasure is not declared with a stateful Provider: the history registry cannot track that Provider's deletion obligations. Embedded reopen waits for recovery; ACP reopen does not. The selected composition’s `Configuration.Trusted` controls project MCP loading. `NewPagedHistoryStore` gives local custom stores the binding's `Create`, cursor/limit `Read` and `List`, declared lease TTL, and lease, append and erase operations. `HistoryGrant.WriterLost` can signal revocation immediately. `ServeHistory` serves files, a `ServiceHistoryBackend`, or an authenticated HTTP relay; memory is test-only. The custom snapshot service adapter requires a persistent `HistoryOptions.StateDir` for lease fencing and a durable backend supporting atomic exact erasure. `ServeHistory` returns a service handle with `URL` and `Close()`, including when the address uses port zero. `ListenHistory` remains an alias. |
 
+### History service leases
+
+Set `modular.HistoryOptions.LeaseTTL` when calling `modular.ServeHistory` to choose the writer lease. Zero uses 15 seconds. A nonzero `time.Duration` must be a whole number of milliseconds and at least 1 ms, or the call returns `invalid_params`. The service declares the duration as `ttlMs`. An HTTP relay uses the upstream service's declaration and does not issue its own leases.
+
 ### HTTP pending erasure
 
 The dedicated file history service declares `pendingErasure: 1`. It keeps both pending and completed plans in `.history-erasure-v1`. Leases end on restart; the new writer reads the plans, reuses the reserved bookkeeping ID and verifies physical tombstones before completing a plan. A missing or unreadable registry makes coordinated requests unavailable. Restore history and registry together and prove freshness against an independent authority before serving either.
@@ -121,4 +125,6 @@ A repeated publication returns the original intent ID and destinations in publis
 
 ### Specification findings
 
-None open.
+Proposed replacement for the Go history service line in `docs/sdk/languages.md`:
+
+> - Use `modular.HTTPHistory(url, tokenFile)` for the client store and `modular.ServeHistory(ctx, store, modular.HistoryOptions{Address: address, TokenFile: tokenFile, LeaseTTL: leaseTTL})` for the service. `LeaseTTL` is a `time.Duration`: zero uses 15 seconds; other values must be whole milliseconds and at least 1 ms. A relay preserves the upstream lease. `ServeHistory` returns a service handle with `URL` and `Close()`, including when the address uses port `0`.

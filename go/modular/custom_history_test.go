@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/daniel-ballance/modular-agent/go/modular"
 )
@@ -115,7 +116,9 @@ func TestCustomHistoryBackendPassesHistoryKit(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend := &snapshotBackend{dir: t.TempDir(), held: map[string]bool{}}
-	svc, err := modular.ListenHistory(t.Context(), modular.NewHistoryStore(backend, true, true), modular.HistoryOptions{Address: "127.0.0.1:0", TokenFile: token, StateDir: t.TempDir()})
+	svc, err := modular.ListenHistory(t.Context(), modular.NewHistoryStore(backend, true, true), modular.HistoryOptions{
+		Address: "127.0.0.1:0", TokenFile: token, LeaseTTL: 3 * time.Second, StateDir: t.TempDir(),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -55,6 +55,10 @@ func HistoryServiceFiles(dir string) HistoryStore { return HistoryStore{serviceD
 type HistoryOptions struct {
 	Address   string
 	TokenFile string
+	// LeaseTTL is the writer lease duration. Zero uses 15 seconds. A nonzero
+	// value must be a positive whole number of milliseconds. An HTTP relay
+	// uses the upstream service's lease duration instead.
+	LeaseTTL time.Duration
 	// StateDir holds the restart exclusion bound for a custom snapshot
 	// backend. Use a persistent, private directory dedicated to this service.
 	StateDir string
@@ -113,6 +117,12 @@ func runHistory(ctx context.Context, store HistoryStore, options HistoryOptions,
 	if !ok || !addr.IP.IsLoopback() {
 		return &Error{Code: InvalidParams, Message: "plaintext history requires a loopback listener"}
 	}
+	ttl := options.LeaseTTL
+	if ttl == 0 {
+		ttl = 15 * time.Second
+	} else if ttl < time.Millisecond || ttl%time.Millisecond != 0 {
+		return &Error{Code: InvalidParams, Message: "history lease TTL must be a positive whole number of milliseconds"}
+	}
 	if store.serviceDir == "" && store.make == nil {
 		return &Error{Code: NotSupported, Message: "no eligible history store selected"}
 	}
@@ -124,7 +134,7 @@ func runHistory(ctx context.Context, store HistoryStore, options HistoryOptions,
 	var disk *historyhttp.Server
 	switch {
 	case store.serviceDir != "":
-		disk, err = historyhttp.New(store.serviceDir, 3*time.Second)
+		disk, err = historyhttp.New(store.serviceDir, ttl)
 	case store.make != nil:
 		var backing api.Store
 		backing, err = store.make()
@@ -133,14 +143,14 @@ func runHistory(ctx context.Context, store HistoryStore, options HistoryOptions,
 				defer client.Close()
 				handler = client.Relay(token)
 			} else if store.fileDir != "" {
-				disk, err = historyhttp.NewFileStoreServer(backing, store.fileDir, 3*time.Second)
+				disk, err = historyhttp.NewFileStoreServer(backing, store.fileDir, ttl)
 			} else if _, ok := backing.(*memoryStore); ok {
 				if !options.AllowVolatileForTests {
 					return &Error{Code: NotSupported, Message: "MemoryHistory is not durable and can only be served for tests"}
 				}
-				disk = historyhttp.NewStoreServer(backing, 3*time.Second)
+				disk = historyhttp.NewStoreServer(backing, ttl)
 			} else if store.persistent && store.erasure && store.serviceBackend != nil && options.StateDir != "" {
-				disk, err = historyhttp.NewFileStoreServer(store.serviceBackend, options.StateDir, 3*time.Second)
+				disk, err = historyhttp.NewFileStoreServer(store.serviceBackend, options.StateDir, ttl)
 			} else {
 				return &Error{Code: NotSupported, Message: "custom history backend requires ServiceHistoryBackend, persistence, erasure and a persistent HistoryOptions.StateDir"}
 			}
