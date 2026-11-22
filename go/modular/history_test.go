@@ -2,12 +2,91 @@ package modular
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestServeHistoryLeaseTTL(t *testing.T) {
+	const token = "offline-history-lease-fixture"
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte(token), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		store HistoryStore
+		ttl   time.Duration
+		want  int64
+	}{
+		{"default", FileHistory(t.TempDir()), 0, 15000},
+		{"explicit", HistoryServiceFiles(t.TempDir()), 2500 * time.Millisecond, 2500},
+		{"minimum", MemoryHistory(), time.Millisecond, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, err := ServeHistory(t.Context(), tc.store, HistoryOptions{
+				Address: "127.0.0.1:0", TokenFile: tokenFile, LeaseTTL: tc.ttl, AllowVolatileForTests: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := svc.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, svc.URL+"/v1", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+token)
+			res, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer res.Body.Close()
+			if res.StatusCode != http.StatusOK {
+				t.Fatalf("history declaration: %s", res.Status)
+			}
+			var declaration struct {
+				TTLMS int64 `json:"ttlMs"`
+			}
+			if err := json.NewDecoder(res.Body).Decode(&declaration); err != nil {
+				t.Fatal(err)
+			}
+			if declaration.TTLMS != tc.want {
+				t.Fatalf("ttlMs = %d, want %d", declaration.TTLMS, tc.want)
+			}
+		})
+	}
+}
+
+func TestServeHistoryRejectsInvalidLeaseTTL(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("offline-history-lease-fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, ttl := range []time.Duration{-time.Millisecond, time.Microsecond, 1500 * time.Microsecond} {
+		t.Run(ttl.String(), func(t *testing.T) {
+			svc, err := ServeHistory(t.Context(), FileHistory(t.TempDir()), HistoryOptions{
+				Address: "127.0.0.1:0", TokenFile: tokenFile, LeaseTTL: ttl,
+			})
+			if svc != nil {
+				_ = svc.Close()
+				t.Fatal("started a history service with an invalid lease duration")
+			}
+			var e *Error
+			if !errors.As(err, &e) || e.Code != InvalidParams {
+				t.Fatalf("want %s, got %v", InvalidParams, err)
+			}
+		})
+	}
+}
 
 func TestHTTPHistoryReopens(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)

@@ -42,7 +42,7 @@ func TestServeHistoryKit(t *testing.T) {
 		t.Skip("history kit requires Node.js")
 	}
 	kit := filepath.Join("..", "..", "conformance", "history", "run.mjs")
-	regex := regexp.MustCompile(`(?m)^([0-9]+)/([0-9]+) checks passed\s*$`)
+	regex := regexp.MustCompile(`(?m)^40/40 checks passed$`)
 	for _, placement := range []string{"memory", "files", "relay"} {
 		t.Run(placement, func(t *testing.T) {
 			t.Parallel()
@@ -60,7 +60,9 @@ func TestServeHistoryKit(t *testing.T) {
 				done := make(chan error, 1)
 				child, stop := context.WithCancel(ctx)
 				go func() {
-					done <- serveHistory(child, store, HistoryOptions{TokenFile: token, AllowVolatileForTests: placement != "files"}, l)
+					done <- serveHistory(child, store, HistoryOptions{
+						TokenFile: token, LeaseTTL: 3 * time.Second, AllowVolatileForTests: placement != "files",
+					}, l)
 					_ = l.Close()
 				}()
 				t.Cleanup(func() {
@@ -80,11 +82,11 @@ func TestServeHistoryKit(t *testing.T) {
 			}
 			url := start(store)
 			out, err := exec.CommandContext(ctx, node, kit, url, token).CombinedOutput()
-			m := regex.FindSubmatch(out)
-			if err != nil || len(m) != 3 || string(m[1]) != string(m[2]) {
+			m := regex.Find(out)
+			if err != nil || m == nil {
 				t.Fatalf("history kit: %v\n%s", err, out)
 			}
-			t.Logf("%s", m[0])
+			t.Logf("%s", m)
 		})
 	}
 }
