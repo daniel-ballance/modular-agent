@@ -73,10 +73,13 @@ async def test_sigkill_open_or_recorded_answer(tmp_path, runtime_kind, answered)
     )
     es = record["entries"]
     paired(es)
+    repeats = runtime_kind == "durable" and record["confirms_crash_cleanup"]
     opened = [e for e in record["events"] if e["kind"] == "input_request_opened"]
-    assert len(opened) == int(runtime_kind == "durable" and not answered)
+    assert len(opened) == int(repeats and not answered)
     answers = [e for e in es if e["kind"] == "question_answer"]
-    assert len(answers) == int(answered or runtime_kind == "durable")
+    assert len(answers) == int(answered or repeats)
+    (result,) = [e for e in es if e["kind"] == "tool_result"]
+    assert result["data"]["status"] == ("completed" if repeats else "outcome_unknown")
     if answered:
         assert answers[0]["data"]["value"] == "saved-before-crash"
     assert len([e for e in es if e["kind"] == "question_open"]) == 1

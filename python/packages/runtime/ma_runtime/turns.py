@@ -735,6 +735,11 @@ class Turns:
             return
         if any(e["kind"] == "tool_result" and e.get("call") == call["id"] for e in es):
             return
+        # An invocation settled without dispatch cannot consume another answer.
+        if answer["status"] == "outcome_unknown" and any(
+            e["kind"] == "question_open" and e.get("call") == call["id"] for e in es
+        ):
+            await self.api.call("questions", "close_call", {"session": sid, "call": call["id"]})
         sources = [
             e["id"]
             for e in es

@@ -64,6 +64,9 @@ async def main():
                 json.dumps(
                     {
                         "session": sid,
+                        "confirms_crash_cleanup": h.plugins["local"].declarations[
+                            "stops_commands_on_crash"
+                        ],
                         "entries": h.sessions[sid]["entries"],
                         "jobs": jobs,
                         "child_entries": child_entries,
