@@ -38,7 +38,7 @@ Under [ADR 0010](../adr/0010-describe-parts-not-wiring.md) we read these protoco
   - escape hatches: `RAW`, `CUSTOM`
 - **Interrupts:** `RUN_FINISHED` carries an optional `outcome` (success, `interrupt` or `cancelled`). A later `RunAgentInput` answers the interrupt with `resume` entries (an interrupt ID, a status of resolved or cancelled, and a payload).
 - **Frontend tools:** a run that stops on a frontend tool call finishes as a success, and may list the unanswered calls in `pendingToolCallIds`.
-- **Unknown versus malformed:** unrecognized events and fields survive and are passed on; a malformed known value is fatal.
+- **Unknown versus malformed:** a malformed known value is fatal. Unknown events are dropped, and unknown fields on a known event are stripped before application code sees them; open extension data, such as `CUSTOM` and `RAW` events, is kept ([processing](https://docs.ag-ui.com/spec/1.0/basic/processing.md), last modified 2026-09-17; corrected 2026-11-22 after the [round 2 pressure test](../pressure-test/round-2/rung-4-maximal.md) found the earlier wording wrong).
 - Tool results can carry content parts. Token usage can appear on `RUN_FINISHED` and `RUN_ERROR`. The protocol version travels in-band. Capabilities can be declared, but the stream itself is authoritative.
 - **Relevance:** the closest existing protocol to our Interface ↔ Harness boundary for UIs. Its thread, run and step map onto our session, turn and step, but AG-UI's "step" is not necessarily a model call.
 - Sources: <https://docs.ag-ui.com/spec/1.0/changelog>, <https://github.com/ag-ui-protocol/ag-ui>
@@ -107,6 +107,6 @@ Checked 2026-11-16 against <https://agentclientprotocol.com> (its `llms.txt` ind
 - **Three nested levels of work** in each of them (see [how units of work line up](README.md#how-units-of-work-line-up)).
 - **Messages are kept separate from bindings:** A2A's `protocolBinding`, AG-UI's two bindings, MCP's transports.
 - **Suspension is built into the protocol** in A2A, ACP, AG-UI and MCP, but in two different models (open question [Waiting for the user](../open-questions.md#waiting-for-the-user)). A2A and ACP pause in place, while AG-UI and MCP end and resume.
-- **Forward compatibility** comes from extensions identified by URI (A2A, MCP) and from passing unknown content on rather than failing (AG-UI).
+- **Forward compatibility** comes from extensions identified by URI (A2A, MCP) and from dropping unknown content rather than failing (AG-UI), so anything without an AG-UI equivalent must travel in its extension events.
 - **Moving away from hidden connection state:** MCP went stateless, and AG-UI resumes in a new run.
 - **Work is outgrowing the turn:** ACP v2 separates accepting a prompt from finishing the work, and tracks background work at the session level.
