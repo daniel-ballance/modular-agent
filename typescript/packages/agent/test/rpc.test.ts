@@ -68,19 +68,22 @@ test("RPC: cancelling reaches a tool in another process", async () => {
 	await h.stop();
 });
 
-test("RPC: a plugin in another process that dies takes its calls with it, and the turn says so", async () => {
+test("RPC: a plugin in another process that dies takes its calls with it, and the turn says so", async t => {
 	const d = dirs();
-	// bash's parent is the working environment's process: the command kills it.
-	const h = await createAgent({ ...d, model: "faux/faux-1", remote: ["env-local"], plugins: [remoteProvider([{ tool: "bash", args: { command: "kill -9 $PPID" } }, { text: "after" }])] });
+	const environment = remotePlugin({ name: "env-crashing", replaces: "env-local",
+		spawn: { module: new URL("./fixtures/crashing-environment.js", import.meta.url).href, export: "crashingEnvironment" } });
+	const h = await createAgent({ ...d, model: "faux/faux-1", remote: [],
+		plugins: [environment, remoteProvider([{ tool: "bash", args: { command: "unused" } }, { text: "after" }])] });
+	t.after(() => h.stop());
 	const api = h.api("t");
 	const s = await api.startSession();
 	await api.input(s, { content: "go", actorId: "user" });
 	await api.waitForIdle(s);
 	const result = api.history(s).find((e) => e.kind === "toolResult")!;
-	const lastText = () => (api.history(s).filter((e) => e.kind === "turnEnd").at(-1)!.data as { result: { text?: string } }).result.text;
+	const turn = api.history(s).filter((e) => e.kind === "turnEnd").at(-1)!.data as { result: { text?: string } };
 	assert.equal((result.data as { status: string }).status, "failed");
-	assert.match(JSON.stringify(result.message), /process running env-local ended/);
-	assert.ok(h.problems.some((p) => p.plugin === "env-local"), "the Harness reports the lost plugin");
-	assert.equal(lastText(), "after", "the turn carried on, with the failure as the call's result");
-	await h.stop();
+	assert.match(JSON.stringify(result.message), /process running env-crashing ended/);
+	assert.equal(turn.result.text, "after", "the turn carried on, with the failure as the call's result");
+	await h.stop(); // Wait for the exit event as well as EOF on the RPC pipe.
+	assert.ok(h.problems.some((p) => p.plugin === "env-crashing" && p.where === "process"), "the Harness reports the lost plugin");
 });
