@@ -12,6 +12,7 @@ from ma_core.wire import entry_out
 
 from ma_fake import Fake, call, reply
 from ma_cli import build
+from test_swap import dead, pid_ready, until
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVE = [str(ROOT / ".venv/bin/modular-agent-plugin")]
@@ -203,8 +204,7 @@ async def test_shared_plugin_loss_settles_unknown_and_stops_nested_command(
             t["name"] for t in await h.api().call("tools", "definitions", {"session": sid})
         ]
         pid = int((tmp_path / "lost-pid").read_text())
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+        await until(lambda: dead(pid))
     finally:
         await h.stop()
 
@@ -337,24 +337,26 @@ async def test_served_environment_stops_active_work_on_stdin_eof(tmp_path):
             },
         )
         async with asyncio.timeout(5):
-            assert "result" in json.loads(await process.stdout.readline())
+            registration = json.loads(await process.stdout.readline())["result"]
+        containment = registration["workingEnvironment"]["containment"]
+        # Use an escapee only when the serving environment promises to stop it.
+        child = "setsid sleep 60" if containment == "strong" else "sleep 60"
         send(
             2,
             "env/exec",
             {
                 "cwd": str(tmp_path),
                 "sessionId": "eof-session",
-                "command": "setsid sleep 60 & echo $! > eof-pid; sleep 60",
+                "command": f"{child} & echo $! > eof-pid; wait",
             },
         )
         async with asyncio.timeout(5):
-            while not (tmp_path / "eof-pid").exists():
-                await asyncio.sleep(0.01)
+            await until(lambda: pid_ready(tmp_path / "eof-pid"))
             pid = int((tmp_path / "eof-pid").read_text())
+            assert not dead(pid)
             process.stdin.close()
             await process.wait()
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+        await until(lambda: dead(pid))
     finally:
         if process.returncode is None:
             process.kill()
@@ -671,12 +673,15 @@ async def test_recovery_checks_tools_right(tmp_path, monkeypatch, external, tool
         assert result["outcome"] == "completed", result.get("error")
         entries = await a.session("branch", session=sid)
         statuses = [(e["call"], e["data"]["status"]) for e in entries if e["kind"] == "tool_result"]
+        # The local environment does not confirm crash cleanup on macOS. Even
+        # with tools rights, only the call known not to have started can run.
+        repeated = tools_right and h.plugins["local"].declarations["stops_commands_on_crash"]
         assert dict(statuses) == {
-            first["id"]: "completed" if tools_right else "outcome_unknown",
+            first["id"]: "completed" if repeated else "outcome_unknown",
             second["id"]: "completed" if tools_right else "refused",
         }
         assert len(statuses) == 2
-        assert sum(e["kind"] == "tool_started" for e in entries) == (3 if tools_right else 1)
+        assert sum(e["kind"] == "tool_started" for e in entries) == 1 + tools_right + repeated
     finally:
         await h.stop()
 

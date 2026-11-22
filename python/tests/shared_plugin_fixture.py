@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+from pathlib import Path
 
 from ma_core import content
 from ma_plugin.rpc import WireError
@@ -420,12 +421,19 @@ class Fixture(PluginServer):
             value = {"changed": True}
         elif operation == "die":
             # Die while the host is running a command for this tool. EOF must cancel it.
+            pid_file = Path(self.config["project"]) / "lost-pid"
+            command = "echo $$ > lost-pid.tmp; mv lost-pid.tmp lost-pid; exec sleep 60"
             task = asyncio.create_task(
-                host("env/exec", cwd=self.config["project"], command="echo $$ > lost-pid; sleep 60")
+                host("env/exec", cwd=self.config["project"], command=command)
             )
-            await asyncio.sleep(0.2)
+            async with asyncio.timeout(5):
+                while not pid_file.exists():
+                    if task.done():
+                        raise AssertionError(
+                            f"Command finished before PID publication: {task.result()}"
+                        )
+                    await asyncio.sleep(0.01)
             os._exit(7)
-            await task
         else:
             session = await host("session", sessionId=sid)
             declaration = await host("declaration", sessionId=sid)
