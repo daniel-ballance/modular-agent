@@ -11,7 +11,6 @@ import re
 import signal
 import stat
 import sys
-from urllib.parse import parse_qs
 
 from pydantic_monty import AsyncFunctionSnapshot, AsyncMontySession, AsyncNameLookupSnapshot
 import pytest
@@ -21,8 +20,6 @@ from modular_agent import (
     ApiKey,
     OAuth,
     subscription_logins,
-    ModelRef,
-    ProviderContext,
     Tool,
     ToolContext,
     ToolOutput,
@@ -34,7 +31,9 @@ from modular_agent import (
 )
 from modular_agent.files import file_tools
 from modular_agent.testing import memory_environment, scripted_provider, test_agent as offline_agent
-from ma_standard import cli, oauth, prompt, responses
+from ma_standard import cli, oauth, prompt
+from modular_agent.chatgpt import ChatGPT
+from modular_agent.grok import Grok
 from ma_standard.code import code_tool, functions, prompt as function_prompt
 from ma_standard.config import Paths, login_file
 from test_swap import pid_exists
@@ -50,6 +49,7 @@ def test_public_sdk_only() -> None:
         "modular_agent.claude",
         "modular_agent.compaction",
         "modular_agent.files",
+        "modular_agent.grok",
         "modular_agent.mcp",
         "modular_agent.testing",
     }
@@ -106,10 +106,6 @@ type Request = tuple[str, dict[str, str], bytes]
 type Reply = tuple[int, str, str]
 
 
-def _reply(value: object, status: int = 200) -> Reply:
-    return status, "application/json", json.dumps(value)
-
-
 @asynccontextmanager
 async def _http(handler: Callable[[Request], Reply]) -> AsyncIterator[str]:
     async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -132,39 +128,6 @@ async def _http(handler: Callable[[Request], Reply]) -> AsyncIterator[str]:
 
     async with await asyncio.start_server(serve, "127.0.0.1", 0) as server:
         yield f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
-
-
-@pytest.mark.loopback
-@pytest.mark.parametrize("expected_identity", ["modular-agent", "My-agent_2.0"])
-async def test_grok_device_sign_in(expected_identity, monkeypatch):
-    recorded = []
-
-    def route(request):
-        recorded.append(request)
-        if request[0] == "/oauth2/device/code":
-            return _reply(
-                {
-                    "device_code": "device",
-                    "user_code": "CODE",
-                    "verification_uri": "https://example.test/verify",
-                    "interval": 1,
-                }
-            )
-        assert request[0] == "/oauth2/token"
-        return _reply({"access_token": "fake", "refresh_token": "fake-refresh", "expires_in": 3600})
-
-    shown = []
-    async with _http(route) as url:
-        monkeypatch.setattr(oauth, "XAI", url)
-        options = (
-            {"client_identity": expected_identity} if expected_identity != "modular-agent" else {}
-        )
-        login = await oauth.sign_in(shown.append, **options)
-    assert shown[0].code == "CODE"
-    assert login.secret == "fake" and not login.expired and login.account is None
-    assert parse_qs(recorded[0][2].decode())["referrer"] == [expected_identity]
-    assert parse_qs(recorded[1][2].decode())["device_code"] == ["device"]
-    assert parse_qs(recorded[1][2].decode())["client_id"] == [oauth.CLIENT_ID]
 
 
 async def test_secret_answer_is_written_to_shared_auth_not_history(tmp_path: Path) -> None:
@@ -214,114 +177,6 @@ def test_ma_rejects_invalid_client_identity_before_startup(
     assert "MA_CLIENT_IDENTITY" in capsys.readouterr().err
 
 
-async def test_grok_rejects_invalid_client_identity(tmp_path, monkeypatch):
-    def no_client(**kwargs):
-        pytest.fail("invalid identity must be refused before starting a sign-in")
-
-    monkeypatch.setattr(oauth, "AsyncClient", no_client)
-    with pytest.raises(ValueError, match="client_identity"):
-        await oauth.sign_in(lambda _: None, client_identity="invalid name")
-    with pytest.raises(ValueError, match="client_identity"):
-        responses.Grok(
-            login_file(tmp_path / "auth.json"),
-            tmp_path / "models.json",
-            client_identity="invalid name",
-        )
-
-
-@pytest.mark.loopback
-async def test_grok_refresh_and_stream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    requests: list[Request] = []
-    actual = "fresh"
-    auth = login_file(tmp_path / "auth.json")
-    await auth.set_login("grok", OAuth("rejected", "old-refresh", 9_999_999_999_999))
-    emitted = []
-
-    async def sink(event: dict[str, object]) -> None:
-        emitted.append(event)
-
-    def route(request: Request) -> Reply:
-        requests.append(request)
-        path, headers, _ = request
-        if path.endswith("/token"):
-            return _reply({"access_token": actual, "refresh_token": "rotated"})
-        if headers["authorization"] == "Bearer rejected":
-            return _reply({"error": {"code": "token_expired"}}, 401)
-        events = [
-            {"type": "response.output_text.delta", "delta": "hello"},
-            {
-                "type": "response.output_item.done",
-                "item": {"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque-fixture"},
-            },
-            {
-                "type": "response.output_item.done",
-                "item": {"type": "message", "content": [{"type": "output_text", "text": "hello"}]},
-            },
-            {
-                "type": "response.completed",
-                "response": {"output": [], "usage": {"input_tokens": 9, "output_tokens": 2}},
-            },
-        ]
-        return (
-            200,
-            "text/event-stream",
-            "".join(f"data: {json.dumps(event)}\n\n" for event in events),
-        )
-
-    async with _http(route) as url:
-        monkeypatch.setattr(oauth, "XAI", url)
-        monkeypatch.setattr(responses, "ENDPOINT", url + "/responses")
-        provider = responses.Grok(auth, tmp_path / "models.json")
-        first, _ = await asyncio.gather(
-            *[
-                provider.request(
-                    ModelRef("grok", "grok-4.7"),
-                    {
-                        "systemPrompt": "instructions",
-                        "settings": {"reasoning": "high", "maxOutput": 25},
-                        "messages": [
-                            {"role": "user", "content": [{"type": "text", "text": "greet"}]}
-                        ],
-                        "tools": [],
-                    },
-                    ProviderContext("session-abc", "user", sink, lambda: None),
-                )
-                for _ in range(2)
-            ]
-        )
-        assert first["providerData"] == [
-            {"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque-fixture"}
-        ]
-        await provider.request(
-            ModelRef("grok", "grok-4.7"),
-            {
-                "systemPrompt": "instructions",
-                "settings": {"reasoning": "high", "maxOutput": 25},
-                "messages": [
-                    first,
-                    {"role": "user", "content": [{"type": "text", "text": "next"}]},
-                ],
-                "tools": [],
-            },
-            ProviderContext("session-abc", "user", sink, lambda: None),
-        )
-    token_requests = [body for path, _, body in requests if path.endswith("/token")]
-    assert len(token_requests) == 1 and parse_qs(token_requests[0].decode())["refresh_token"] == [
-        "old-refresh"
-    ]
-    assert isinstance(login := auth.login("grok"), OAuth) and login.refresh == "rotated"
-    assert len(emitted) == 3 and emitted[0]["event"] == {"type": "text", "delta": "hello"}
-    _, headers, body = requests[-1]
-    request = json.loads(body)
-    assert request["include"] == ["reasoning.encrypted_content"]
-    assert headers["authorization"] == "Bearer " + actual
-    assert {"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque-fixture"} in request[
-        "input"
-    ]
-    assert request["input"][0] == {"role": "system", "content": "instructions"}
-    assert request["max_output_tokens"] == 25
-
-
 @pytest.fixture
 def ma_args(tmp_path, monkeypatch):
     config = tmp_path / "config"
@@ -348,17 +203,12 @@ async def test_ma_login_and_logout_aliases(ma_args, monkeypatch, old, new):
     login = OAuth("new-fixture", "new-refresh", 2**62, "fixture-account")
     calls = []
 
-    async def chatgpt_sign_in(provider, logins, *, device, on_step, paste, client_identity):
-        assert provider == "chatgpt" and device
+    async def sign_in(provider, logins, *, device, on_step, paste, client_identity):
+        assert provider == new and device and paste is None
         calls.append(client_identity)
         await logins.set_login(provider, login)
 
-    async def grok_sign_in(show, *, client_identity):
-        calls.append(client_identity)
-        return login
-
-    monkeypatch.setattr(oauth, "chatgpt_sign_in", chatgpt_sign_in)
-    monkeypatch.setattr(oauth, "sign_in", grok_sign_in)
+    monkeypatch.setattr(oauth, "sign_in", sign_in)
     assert await cli._run(args("--device", "login", old)) == 0
     assert calls == ["old-config-client"]
     assert raw.login(new) == login
@@ -428,14 +278,16 @@ async def test_ma_selects_the_renamed_provider(
         options = ["--session", session.id]
 
     async with _http(route) as url:
-        monkeypatch.setattr("modular_agent.chatgpt._ENDPOINT", url + "/responses")
-        monkeypatch.setattr(responses, "ENDPOINT", url + "/responses")
+        monkeypatch.setattr(ChatGPT, "_endpoint", url + "/responses")
+        monkeypatch.setattr(Grok, "_endpoint", url + "/responses")
         assert await cli._run(args("--runtime", "transient", *options, "-p", "Hello")) == 0
     assert capsys.readouterr().out == "Test response\n"
     [(headers, body)] = sent
     assert body["model"] == model
     if new == "chatgpt":
         assert headers["originator"] == "old-config-client"
+    else:
+        assert "originator" not in headers and "referrer" not in headers
     if source == "reopen":
         async with create_agent(
             project=tmp_path,
@@ -458,7 +310,9 @@ async def test_ma_model_entries_accept_old_and_new_keys(ma_args, monkeypatch, ca
         for key in ("openai-codex", "chatgpt", "xai", "grok")
     }
     rows["openai-codex"].append({"id": "gpt-6.1-sol", "contextWindow": 12001, "maxTokens": 1234})
-    rows["xai"].append({"id": "grok-4.7", "contextWindow": 12002, "maxTokens": 1234})
+    rows["xai"].append(
+        {"id": "grok-4.7", "contextWindow": 12002, "maxTokens": 1234, "effort": {"high": "high"}}
+    )
     (config / "models.json").write_text(json.dumps(rows))
 
     class NoClaude:
@@ -472,7 +326,7 @@ async def test_ma_model_entries_accept_old_and_new_keys(ma_args, monkeypatch, ca
     assert await cli._run(args("--runtime", "transient", "models")) == 0
     shown = capsys.readouterr().out
     assert re.search(r"chatgpt/gpt-6.1-sol\s+context\s+12001\s+thinking minimal,low", shown)
-    assert re.search(r"grok/grok-4.7\s+context\s+12002", shown)
+    assert re.search(r"grok/grok-4.7\s+context\s+12002\s+thinking high", shown)
     for provider, keys in (("chatgpt", ["openai-codex", "chatgpt"]), ("grok", ["xai", "grok"])):
         for key in keys:
             assert f"{provider}/extra-{key}" in shown

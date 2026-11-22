@@ -8,7 +8,8 @@ import re
 import sys
 from typing import cast
 
-from modular_agent import Json, JsonObject, ModelInfo, SubscriptionLogins, subscription_logins
+from modular_agent import Json, JsonObject, SubscriptionLogins, subscription_logins
+from modular_agent.grok import GrokModelInfo
 
 
 PROVIDER_ALIASES = {"openai-codex": "chatgpt", "xai": "grok"}
@@ -36,9 +37,11 @@ def model_overrides(path: Path, provider: str) -> list[JsonObject]:
     return overrides
 
 
-def chatgpt_overrides(path: Path) -> list[ModelInfo]:
-    models: dict[str, ModelInfo] = {}
-    for row in model_overrides(path, "chatgpt"):
+def subscription_overrides(
+    path: Path, provider: str, *, use_effort: bool = False
+) -> list[GrokModelInfo]:
+    models: dict[str, GrokModelInfo] = {}
+    for row in model_overrides(path, provider):
         name, context, maximum = row.get("id"), row.get("contextWindow"), row.get("maxTokens")
         if (
             not isinstance(name, str)
@@ -52,14 +55,22 @@ def chatgpt_overrides(path: Path) -> list[ModelInfo]:
         inputs = row.get("input", ["text", "image"])
         if not isinstance(inputs, list) or not all(isinstance(item, str) for item in inputs):
             raise ValueError("model input must be an array of strings")
-        models[name] = ModelInfo(
-            provider="chatgpt",
+        info = GrokModelInfo(
+            provider=provider,
             id=name,
             contextWindow=context,
             maxOutput=maximum,
             input=cast(list[str], inputs),
             reasoning=False,
         )
+        if use_effort:
+            effort = row.get("effort")
+            if effort is not None and (
+                not isinstance(effort, dict) or any(not isinstance(v, str) for v in effort.values())
+            ):
+                raise ValueError("model effort must be an object of strings")
+            info["effort"] = cast(dict[str, str], effort or {})
+        models[name] = info
     return list(models.values())
 
 

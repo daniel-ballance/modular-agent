@@ -812,7 +812,6 @@ name = "modular-agent-standard"
 version = "0.1.0"
 source = { editable = "packages/ma" }
 dependencies = [
-    { name = "httpx2" },
     { name = "modular-agent" },
     { name = "opentelemetry-api" },
     { name = "pydantic-monty" },
@@ -820,7 +819,6 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "httpx2", specifier = "==2.16.2" },
     { name = "modular-agent", editable = "." },
     { name = "opentelemetry-api", specifier = "==1.45.2" },
     { name = "pydantic-monty", specifier = "==1.6.0" },

@@ -194,8 +194,5 @@ from ._subscription_logins import (
     subscription_logins as subscription_logins,
 )
 
-from ._chatgpt_auth import (
-    SignInStep as SignInStep,
-    sign_in as sign_in,
-    sign_out as sign_out,
-)
+from ._subscription_auth import sign_in as sign_in, sign_out as sign_out
+from ._subscription_oauth import SignInStep as SignInStep

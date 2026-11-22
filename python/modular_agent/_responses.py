@@ -1,29 +1,18 @@
-"""Grok subscription requests over the Responses API."""
+"""Request, stream and replay handling for subscription Responses Providers."""
 
-from dataclasses import dataclass
+from abc import ABC, abstractmethod
+from collections.abc import Sequence
+from copy import deepcopy
 import json
-from pathlib import Path
-from typing import Literal, cast
+from typing import Literal
 
 from httpx2 import AsyncClient, HTTPError, Timeout
-from modular_agent import (
-    Json,
-    JsonObject,
-    ModelFailure,
-    ModelInfo,
-    ModelRef,
-    ProviderContext,
-    ProviderSupports,
-    OAuth,
-    SubscriptionLogins,
-)
 
-from .config import model_overrides
-from .identity import DEFAULT_CLIENT_IDENTITY, validate_client_identity
-from .oauth import refresh
-
-ENDPOINT = "https://api.x.ai/v1/responses"
-LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh")
+from ._subscription_oauth import validate_client_identity
+from ._provider import ModelFailure, ModelInfo, ProviderContext, ProviderSupports
+from ._subscription_logins import Login, OAuth, SubscriptionLogins
+from ._subscription_models import SubscriptionModels
+from ._types import AgentError, ErrorCode, Json, JsonObject, ModelRef
 
 
 def _obj(value: Json) -> JsonObject:
@@ -38,35 +27,7 @@ def _text(parts: list[JsonObject]) -> str:
     return "".join(str(p.get("text", "")) for p in parts if p.get("type") == "text")
 
 
-@dataclass(frozen=True)
-class Model:
-    id: str
-    context: int
-    maximum: int
-    effort: dict[str, str]
-
-    @classmethod
-    def parse(cls, row: JsonObject) -> "Model":
-        model, context, maximum, effort = (
-            row.get(k) for k in ("id", "contextWindow", "maxTokens", "effort")
-        )
-        if (
-            not isinstance(model, str)
-            or not model
-            or type(context) is not int
-            or context <= 0
-            or type(maximum) is not int
-            or maximum <= 0
-        ):
-            raise ValueError("models need id, contextWindow and maxTokens")
-        if effort is not None and (
-            not isinstance(effort, dict) or any(not isinstance(v, str) for v in effort.values())
-        ):
-            raise ValueError("model effort must be an object of strings")
-        return cls(model, context, maximum, cast(dict[str, str], effort or {}))
-
-
-def _input_rows(request: JsonObject) -> list[JsonObject]:
+def _input_rows(provider: str, request: JsonObject) -> list[JsonObject]:
     rows: list[JsonObject] = []
     for message in _rows(request.get("messages")):
         role = message.get("role")
@@ -78,10 +39,15 @@ def _input_rows(request: JsonObject) -> list[JsonObject]:
             if p.get("type") == "image"
         ]
         if role == "assistant":
-            rows.extend(
-                row for row in _rows(message.get("providerData")) if row.get("type") == "reasoning"
-            )
             calls = [p for p in parts if p.get("type") == "toolCall"]
+            opaque = _obj(message.get("providerData"))
+            if opaque.get("provider") == provider and isinstance(opaque.get("output"), list):
+                ids = iter(calls)
+                for item in _rows(opaque["output"]):
+                    if item.get("type") == "function_call" and (call := next(ids, None)):
+                        item = {**item, "call_id": call["id"]}
+                    rows.append(item)
+                continue
             if text:
                 rows.append({"role": "assistant", "content": text})
             for call in calls:
@@ -111,8 +77,17 @@ def _input_rows(request: JsonObject) -> list[JsonObject]:
     return rows
 
 
-def request_body(model: Model, request: JsonObject) -> JsonObject:
-    messages = _input_rows(request)
+def _request_body(
+    provider: str,
+    model: str,
+    request: JsonObject,
+    session: str,
+    reasoning: JsonObject,
+    max_output: int,
+    *,
+    system_message: bool,
+) -> JsonObject:
+    messages = _input_rows(provider, request)
     tools: list[Json] = [
         {
             "type": "function",
@@ -124,7 +99,7 @@ def request_body(model: Model, request: JsonObject) -> JsonObject:
         for t in _rows(request.get("tools"))
     ]
     body: JsonObject = {
-        "model": model.id,
+        "model": model,
         "stream": True,
         "store": False,
         "include": ["reasoning.encrypted_content"],
@@ -133,24 +108,27 @@ def request_body(model: Model, request: JsonObject) -> JsonObject:
     }
     if tools:
         body["tools"] = tools
-    settings = _obj(request.get("settings"))
-    level = str(settings.get("reasoning", "off"))
-    if level in LEVELS:
-        for offered in reversed(LEVELS[: LEVELS.index(level) + 1]):
-            if offered in model.effort:
-                body["reasoning"] = {"effort": model.effort[offered], "summary": "auto"}
-                break
-    system = str(request.get("systemPrompt", ""))
-    if system:
-        messages.insert(0, {"role": "system", "content": system})
-    limit = settings.get("maxOutput", settings.get("max_output", model.maximum))
-    if type(limit) is int and limit > 0:
-        body["max_output_tokens"] = min(limit, model.maximum)
+    if reasoning:
+        body["reasoning"] = {**_obj(reasoning.get("reasoning")), "summary": "auto"}
+    system = request.get("systemPrompt")
+    if system_message:
+        if isinstance(system, str) and system:
+            messages.insert(0, {"role": "system", "content": system})
+        limit = _obj(request.get("settings")).get("maxOutput")
+        if type(limit) is int and limit > 0:
+            body["max_output_tokens"] = min(limit, max_output)
+    else:
+        # The Codex backend sets its own output limit and refuses one here.
+        body.update(
+            instructions=system or "You are a helpful assistant.",
+            text={"verbosity": "low"},
+            prompt_cache_key=session,
+        )
     body["input"] = list(messages)
     return body
 
 
-def response_body(raw: JsonObject) -> JsonObject:
+def _response_body(provider: str, raw: JsonObject, *, strict_arguments: bool) -> JsonObject:
     if not isinstance(raw.get("output"), list):
         raise ValueError("the model response has no output")
     parts: list[JsonObject] = []
@@ -172,8 +150,10 @@ def response_body(raw: JsonObject) -> JsonObject:
                 raise ValueError("missing tool name")
             try:
                 args = json.loads(str(item.get("arguments", "{}")).strip() or "{}")
-            except ValueError as exc:
-                raise ValueError(f"the model sent tool arguments that are not JSON: {exc}") from exc
+            except ValueError:
+                if strict_arguments:
+                    raise
+                args = item.get("arguments", "")
             parts.append({"type": "toolCall", "id": id, "name": name, "arguments": args})
         elif kind == "reasoning":
             parts.append(
@@ -196,11 +176,7 @@ def response_body(raw: JsonObject) -> JsonObject:
         "role": "assistant",
         "stop": stop,
         "content": list(parts),
-        **(
-            {"providerData": list[Json](reasoning)}
-            if (reasoning := [p for p in output if p.get("type") == "reasoning"])
-            else {}
-        ),
+        "providerData": {"provider": provider, "output": list(output)},
         "usage": {
             "input": usage.get("input_tokens", 0),
             "output": usage.get("output_tokens", 0),
@@ -209,14 +185,9 @@ def response_body(raw: JsonObject) -> JsonObject:
     }
 
 
-def _failure(error: Json, status: int = 0) -> ModelFailure:
+def _failure(label: str, error: Json, status: int = 0) -> ModelFailure:
     data = _obj(error)
     code = str(data.get("code") or data.get("type") or "")
-    message = str(
-        data.get("message")
-        or data.get("detail")
-        or (error if isinstance(error, str) and error else "the model service refused the request")
-    )
     kind: Literal["temporary", "contextTooLarge", "credentials", "refused", "other"]
     if code in {"context_length_exceeded", "context_window_exceeded"}:
         kind = "contextTooLarge"
@@ -237,66 +208,90 @@ def _failure(error: Json, status: int = 0) -> ModelFailure:
         kind = "refused"
     else:
         kind = "other"
-    suffix = f" ({code})" if code else f" (HTTP {status})" if status else ""
-    return ModelFailure({"kind": kind, "message": message + suffix})
+    message = (
+        f"{label} rejected the model request."
+        if status == 0
+        else f"{label} returned HTTP {status}."
+    )
+    if kind == "credentials":
+        message += " Sign in again."
+    return ModelFailure({"kind": kind, "message": message})
 
 
-class Grok:
-    id = "grok"
+class ResponsesProvider(ABC):
+    id: str
+    _label: str
+    _endpoint: str
+    _system_message = False
     supports = ProviderSupports()
 
     def __init__(
         self,
-        auth: SubscriptionLogins,
-        overrides: Path,
+        logins: SubscriptionLogins,
         *,
-        client_identity: str = DEFAULT_CLIENT_IDENTITY,
+        models: Sequence[str | ModelInfo] | None,
+        client_identity: str,
     ) -> None:
-        self.auth = auth
-        validate_client_identity(client_identity)
-        built = model_overrides(Path(__file__).with_name("models.json"), self.id)
-        extra = model_overrides(overrides, self.id)
-        self.catalog: dict[str, Model] = {}
-        for model in map(Model.parse, built + extra):
-            self.catalog.pop(model.id, None)
-            self.catalog[model.id] = model
+        self._logins = logins
+        self._client_identity = validate_client_identity(client_identity)
+        self._catalog = SubscriptionModels(self.id, models, override_limits=True)
+
+    @abstractmethod
+    async def _refresh(self, client: AsyncClient, old: OAuth) -> OAuth: ...
+
+    def _extra_headers(self, login: Login, session: str) -> dict[str, str]:
+        return {}
+
+    def available(self) -> bool:
+        return self._logins.login(self.id) is not None
 
     def models(self) -> list[ModelInfo]:
-        return [
-            {
-                "provider": self.id,
-                "id": m.id,
-                "contextWindow": m.context,
-                "maxOutput": m.maximum,
-                "input": ["text", "image"],
-                "reasoning": any(level != "off" for level in m.effort),
-                "thinking": [level for level in LEVELS if level in m.effort],
-            }
-            for m in self.catalog.values()
-        ]
+        return deepcopy(list(self._catalog.infos.values()))
 
     async def request(
         self, model: ModelRef, request: JsonObject, context: ProviderContext
     ) -> JsonObject:
-        body = request_body(self.catalog[model.id], request)
-        headers = {"Accept": "text/event-stream", "User-Agent": "modular-agent/0.1.0"}
+        if model.provider != self.id or model.id not in self._catalog.infos:
+            raise AgentError(ErrorCode.INVALID_REQUEST, f"Unknown {self._label} model")
+        session = context.session_id or ""
+        body = _request_body(
+            self.id,
+            model.id,
+            request,
+            session,
+            self._catalog.reasoning(model.id, request),
+            self._catalog.infos[model.id]["maxOutput"],
+            system_message=self._system_message,
+        )
         async with AsyncClient(
             timeout=Timeout(300, connect=15), follow_redirects=False, trust_env=False
         ) as client:
+            if self._system_message:
+                # Keep only the explicit headers and the HTTP/JSON framing.
+                client.headers.clear()
 
             async def renew(old: OAuth) -> OAuth:
-                return await refresh(client, old)
+                return await self._refresh(client, old)
 
             rejected: str | None = None
             while True:
                 try:
-                    login = await self.auth.current(self.id, renew, rejected=rejected)
-                    headers["Authorization"] = "Bearer " + login.secret
-                except (HTTPError, ValueError, OSError) as exc:
-                    raise ModelFailure({"kind": "credentials", "message": str(exc)}) from exc
+                    login = await self._logins.current(self.id, renew, rejected=rejected)
+                    headers = {
+                        "Accept": "text/event-stream",
+                        "Authorization": "Bearer " + login.secret,
+                        **self._extra_headers(login, session),
+                    }
+                except (OSError, ValueError):
+                    raise ModelFailure(
+                        {
+                            "kind": "credentials",
+                            "message": f"Could not read the {self._label} login. Check the login file or sign in again.",
+                        }
+                    ) from None
                 try:
                     async with client.stream(
-                        "POST", ENDPOINT, json=body, headers=headers
+                        "POST", self._endpoint, json=body, headers=headers
                     ) as result:
                         if (
                             result.status_code == 401
@@ -311,15 +306,9 @@ class Grok:
                                 error: Json = json.loads(raw)
                             except ValueError:
                                 error = raw[:500]
-                            failure = _failure(_obj(error).get("error", error), result.status_code)
-                            if failure.error["kind"] == "credentials":
-                                raise ModelFailure(
-                                    {
-                                        "kind": "credentials",
-                                        "message": f"{failure} Run `ma login grok` to sign in again.",
-                                    }
-                                )
-                            raise failure
+                            raise _failure(
+                                self._label, _obj(error).get("error", error), result.status_code
+                            )
                         completed: JsonObject | None = None
                         items: list[Json] = []
                         data: list[str] = []
@@ -354,9 +343,11 @@ class Grok:
                             ):
                                 completed = _obj(event.get("response"))
                             elif kind == "response.failed":
-                                raise _failure(_obj(event.get("response")).get("error"))
+                                raise _failure(
+                                    self._label, _obj(event.get("response")).get("error")
+                                )
                             elif kind == "error":
-                                raise _failure(event.get("error", event))
+                                raise _failure(self._label, event.get("error", event))
                         if completed is None:
                             raise ModelFailure(
                                 {
@@ -366,11 +357,14 @@ class Grok:
                             )
                         if not completed.get("output") and items:
                             completed["output"] = items
-                        return response_body(completed)
-                except HTTPError as exc:
+                        return _response_body(
+                            self.id, completed, strict_arguments=self._system_message
+                        )
+                except HTTPError:
                     raise ModelFailure(
-                        {
-                            "kind": "temporary",
-                            "message": f"could not reach Grok subscription: {exc}",
-                        }
-                    ) from exc
+                        {"kind": "temporary", "message": f"Could not reach {self._label}."}
+                    ) from None
+                except (KeyError, ValueError):
+                    raise ModelFailure(
+                        {"kind": "other", "message": f"Invalid {self._label} response."}
+                    ) from None
