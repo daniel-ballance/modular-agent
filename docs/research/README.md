@@ -17,6 +17,7 @@ Notes on other systems, gathered to inform the [architecture](../architecture.md
 | [API-key reasoning](sdk-api-key-reasoning.md) | OpenAI and Anthropic request settings and the research behind the shared catalog |
 | [Grok with The X Subscription](grok-x-subscription.md) | Grok Build sign-in and model access, the existing `ma` path, and what the SDKs can support |
 | [Protocol landscape](protocol-landscape-2026-11.md) | MCP, MCP Apps, AG-UI, A2A, ACP, A2UI and OpenTelemetry |
+| [Computers and filesystems for agents](agent-computers-and-filesystems.md) | Remote execution, sandbox forks, shared storage, and what fits inside one agent |
 | [Codemode engines](codemode-engines.md) | One sandbox for all four `ma` builds; Monty, QuickJS, Starlark, Lua, and Go worker tests |
 | [ChatGPT conversation](chatgpt-conversation.md) | Where the project started, and what we kept, changed or dropped |
 
