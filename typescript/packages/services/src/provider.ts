@@ -2,6 +2,7 @@ import type { MutableModels } from "@earendil-works/pi-ai";
 import type { AssistantMessage, ModelInfo, ModelRef, ModelRequest, Plugin, PluginApi, Provider, RequestOptions } from "@modular-agent/harness";
 import { PiAiProvider } from "@modular-agent/provider-pi-ai";
 import { call, type ClientOptions, ndjson, serve, stream } from "./http.js";
+import { checkSettings } from "./settings.js";
 
 /**
  * A model gateway: Providers as a service. The gateway holds the credentials; an
@@ -9,6 +10,7 @@ import { call, type ClientOptions, ndjson, serve, stream } from "./http.js";
  * around a request run in the agent, in the plugin that stands for the Provider.
  */
 export async function providerService(options: { models: MutableModels; token: string; port?: number }) {
+	checkSettings("provider", options, "models", "token", "port");
 	const noHooks = { runHook: async (_hook: string, payload: unknown) => payload } as unknown as PluginApi;
 	const providers = new Map(
 		options.models

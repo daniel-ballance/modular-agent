@@ -152,6 +152,72 @@ test("the model list narrows to what Claude Code reports", async () => {
 	assert.equal(provider.model("claude-opus-5"), undefined);
 });
 
+test("readiness and a request finish while the probe is still reading context windows", async (t) => {
+	let reading!: () => void, release!: () => void;
+	const started = new Promise<void>((resolve) => { reading = resolve; });
+	const windows = new Promise<void>((resolve) => { release = resolve; });
+	const fake = createFake(undefined, () => { reading(); return windows; });
+	const changes: number[] = [];
+	const id = "claude-haiku-5-5";
+	const provider = new ClaudeProvider({
+		version: "9.9.9", sdkVersion: "fake", query: fake.query, env: {}, loginVisible: () => true,
+		onChange: () => changes.push(provider.model(id)!.contextWindow),
+	});
+	t.after(() => { provider.close(); release(); });
+
+	let available: boolean | undefined;
+	const ready = provider.ready().then((answer) => { available = answer; });
+	await started;
+	// Let readiness settle without releasing the window read.
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(available, true);
+	await ready;
+	assert.equal(provider.model(id)!.contextWindow, 1_000_000);
+	assert.equal(fake.log.closed, 0);
+	assert.equal(fake.log.started.length, 1);
+	const message = await provider.infer(provider.model("claude-nova-9")!, request("hi"), new AbortController().signal, () => {});
+	assert.equal(message.stop, "finished");
+	assert.equal(fake.log.closed, 1);
+
+	const refreshed = provider.refresh();
+	release();
+	await refreshed;
+	assert.equal(provider.model(id)!.contextWindow, 200_000);
+	assert.equal(changes.at(-1), 200_000);
+	assert.equal(fake.log.closed, 2);
+});
+
+for (const end of ["close", "deadline"] as const) {
+	test(`the probe closes on ${end} even when a context read does not answer`, async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		let reading!: () => void;
+		const started = new Promise<void>((resolve) => { reading = resolve; });
+		let reads = 0;
+		const fake = createFake(undefined, () => {
+			reads++;
+			reading();
+			return new Promise<void>(() => {});
+		});
+		const provider = new ClaudeProvider({ version: "9.9.9", sdkVersion: "fake", query: fake.query, env: {}, loginVisible: () => true });
+		t.after(() => provider.close());
+
+		const refreshed = provider.refresh();
+		assert.equal(await provider.ready(), true);
+		await started;
+		if (end === "close") {
+			provider.close();
+			await assert.rejects(refreshed, Cancelled);
+			assert.equal(await provider.ready(), false);
+		} else {
+			t.mock.timers.tick(30_000);
+			await assert.rejects(refreshed, /did not answer in time/);
+			assert.equal(await provider.ready(), true);
+		}
+		assert.equal(fake.log.closed, 1);
+		assert.equal(reads, 1);
+	});
+}
+
 test("a login is seen from the environment without opening a file", () => {
 	const none = (): boolean => false;
 	assert.equal(loginVisible({}, none, "linux"), false);

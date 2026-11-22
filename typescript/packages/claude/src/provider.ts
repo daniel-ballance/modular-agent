@@ -38,7 +38,7 @@ export class Cancelled extends Error {
 const SIGN_IN = "Run `claude auth login`, sign in with your Claude account, then try again.";
 /** The account's model list changes rarely; ask Claude Code again after this long. */
 const CATALOG_MAX_AGE_MS = 24 * 60 * 60_000;
-/** How long the model-list handshake may take before it is given up. */
+/** Deadline for the entire account and model catalog probe. */
 const PROBE_MS = 30_000;
 
 /**
@@ -73,7 +73,8 @@ export class ClaudeProvider {
 	private readonly running = new Set<AgentQuery>();
 	private closed = false;
 
-	private checking?: Promise<void>;
+	private checking?: { accountChecked: Promise<void>; done: Promise<void> };
+	private probeAbort?: AbortController;
 
 	constructor(private readonly options: ProviderOptions) {
 		this.baseline = baselineModels(options.models);
@@ -106,7 +107,7 @@ export class ClaudeProvider {
 		} catch {
 			// No stored catalog yet, or one that cannot be read: the built-in list stands.
 		}
-		if (!fresh) void this.refresh().catch((error) => this.log(`The model list was not refreshed: ${scrub(error instanceof Error ? error.message : String(error))}`));
+		if (!fresh) void this.refresh();
 	}
 
 	catalog(): ModelInfo[] {
@@ -132,9 +133,8 @@ export class ClaudeProvider {
 	}
 
 	async ready(): Promise<boolean> {
-		if (this.account === undefined && this.available()) {
-			try { await this.refresh(); }
-			catch { return false; }
+		if (!this.closed && this.account === undefined && this.available()) {
+			await this.check().accountChecked;
 		}
 		return !this.closed && this.available() && this.usesPlan(this.account);
 	}
@@ -142,6 +142,7 @@ export class ClaudeProvider {
 	/** Stop every Claude Code process this Provider started. */
 	close(): void {
 		this.closed = true;
+		this.probeAbort?.abort(new Cancelled());
 		for (const query of [...this.running]) query.close();
 		this.running.clear();
 	}
@@ -152,66 +153,97 @@ export class ClaudeProvider {
 	 * than the API's.
 	 */
 	refresh(): Promise<void> {
-		this.checking ??= this.probe().finally(() => { this.checking = undefined; });
-		return this.checking;
+		return this.check().done;
 	}
 
-	private async probe(): Promise<void> {
+	private check(): NonNullable<ClaudeProvider["checking"]> {
+		if (this.checking) return this.checking;
+		let checked!: () => void;
+		const accountChecked = new Promise<void>((resolve) => { checked = resolve; });
+		const done = this.probe(checked).finally(() => {
+			checked(); // Also release readiness if the handshake fails or the provider closes.
+			this.checking = undefined;
+		});
+		void done.catch((error) => {
+			if (!this.closed) this.log(`The model list was not refreshed: ${scrub(error instanceof Error ? error.message : String(error))}`);
+		});
+		return this.checking = { accountChecked, done };
+	}
+
+	private async probe(accountChecked: () => void): Promise<void> {
 		if (!this.available() || this.closed) return;
-		const start = await this.query;
-		if (this.closed) return;
+		const abort = this.probeAbort = new AbortController();
+		const { signal } = abort;
+		const timer = setTimeout(() => abort.abort(new Error("Claude Code did not answer in time")), PROBE_MS);
+		const stopped = new Promise<never>((_, reject) => {
+			signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+		});
+		const beforeStop = <T>(run: () => Promise<T>): Promise<T> => {
+			signal.throwIfAborted();
+			return Promise.race([stopped, run()]);
+		};
 		const inbox = new Inbox();
-		const query = start({
-			prompt: inbox,
-			options: {
-				cwd: this.cwd,
-				env: subscriptionEnv(this.options.env, this.options.version),
-				tools: [],
-				settingSources: [],
-				strictMcpConfig: true,
-				persistSession: false,
-			},
-		});
-		this.running.add(query);
-		let timer: NodeJS.Timeout | undefined;
-		const late = new Promise<never>((_, reject) => {
-			timer = setTimeout(() => reject(new Error("Claude Code did not answer in time")), PROBE_MS);
-		});
-		late.catch(() => {});
+		let query: AgentQuery | undefined;
 		try {
-			const discovered = await Promise.race([late, (async () => {
-				const { account, models: reported } = await query.initializationResult();
-				this.account = account ?? {};
-				if (!this.usesPlan(account)) return [];
-				const found = discoveredModels(reported ?? [], this.baseline);
-				for (const model of found) {
-					try {
-						await query.setModel(model.id);
-						const window = (await query.getContextUsage({ detail: "summary" })).rawMaxTokens;
-						if (window > 0) model.contextWindow = window;
-					} catch {
-						// The built-in window stands for a model Claude Code would not describe.
-					}
-				}
-				return found;
-			})()]);
-			if (!discovered.length || this.closed) return;
-			this.models = discovered;
+			const start = await beforeStop(() => this.query);
+			signal.throwIfAborted();
+			const active = query = start({
+				prompt: inbox,
+				options: {
+					cwd: this.cwd,
+					env: subscriptionEnv(this.options.env, this.options.version),
+					tools: [],
+					settingSources: [],
+					strictMcpConfig: true,
+					persistSession: false,
+				},
+			});
+			this.running.add(active);
+			const { account, models: reported } = await beforeStop(() => active.initializationResult());
+			signal.throwIfAborted();
+			this.account = account ?? {};
+			accountChecked();
+			if (!this.usesPlan(account)) return;
+
+			// Make newly discovered models usable before asking for their windows.
+			const previous = new Map(this.models.map((model) => [model.id, model.contextWindow]));
+			const found = discoveredModels(reported ?? [], this.baseline).map((model) => ({
+				...model, contextWindow: previous.get(model.id) ?? model.contextWindow,
+			}));
+			if (!found.length) return;
+			this.models = found;
 			this.options.onChange?.();
-			this.log(`Claude Code reported ${discovered.length} models for this account.`);
+			for (const model of found) {
+				let window: number;
+				try {
+					await beforeStop(() => active.setModel(model.id));
+					window = (await beforeStop(() => active.getContextUsage({ detail: "summary" }))).rawMaxTokens;
+				} catch {
+					signal.throwIfAborted();
+					// Keep the previous window if Claude Code would not describe this model.
+					continue;
+				}
+				signal.throwIfAborted();
+				if (window > 0 && window !== model.contextWindow) {
+					model.contextWindow = window;
+					this.options.onChange?.();
+				}
+			}
+			signal.throwIfAborted();
+			this.log(`Claude Code reported ${found.length} models for this account.`);
 			if (this.home) {
 				try {
 					mkdirSync(this.home, { recursive: true });
-					writeFileSync(join(this.home, "catalog.json"), JSON.stringify({ sdkVersion: this.options.sdkVersion, checkedAt: Date.now(), models: discovered }, null, "\t"));
+					writeFileSync(join(this.home, "catalog.json"), JSON.stringify({ sdkVersion: this.options.sdkVersion, checkedAt: Date.now(), models: found }, null, "\t"));
 				} catch {
 					// The list still applies to this process.
 				}
 			}
 		} finally {
 			clearTimeout(timer);
+			this.probeAbort = undefined;
 			inbox.end();
-			query.close();
-			this.running.delete(query);
+			if (query && this.running.delete(query)) query.close();
 		}
 	}
 

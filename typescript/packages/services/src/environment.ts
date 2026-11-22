@@ -2,6 +2,7 @@ import { join, resolve, sep } from "node:path";
 import type { ExecResult, Plugin, WorkingEnvironment } from "@modular-agent/harness";
 import { LocalEnvironment, ProcessTracker } from "@modular-agent/env-local";
 import { call, type ClientOptions, HttpError, ndjson, serve, stream } from "./http.js";
+import { checkSettings } from "./settings.js";
 
 /**
  * A working environment as a service: a sandbox rooted at one folder. Paths and
@@ -10,6 +11,7 @@ import { call, type ClientOptions, HttpError, ndjson, serve, stream } from "./ht
  * interest in it, wherever the agent runs.
  */
 export async function environmentService(options: { root: string; token: string; port?: number; runDir?: string }) {
+	checkSettings("environment", options, "root", "token", "port", "runDir");
 	const root = resolve(options.root);
 	const local = new LocalEnvironment(root, new ProcessTracker(options.runDir ?? join(root, ".modular-agent", "run")));
 	const inside = (path: string) => {

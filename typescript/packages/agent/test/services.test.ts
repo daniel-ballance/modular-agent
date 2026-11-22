@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,6 +64,22 @@ const agents: Harness[] = [];
 after(async () => {
 	await Promise.all(agents.map((h) => h.stop().catch(() => undefined)));
 	services.forEach((s) => s.kill("SIGTERM"));
+});
+
+test("ma-service refuses unknown settings before listening or loading models", () => {
+	for (const [kind, member, settings] of [
+		["history", "leaseMs", { leaseMs: 2_500 }],
+		["environment", "runDirectory", { root: project, runDirectory: project }],
+		["provider", "unknown", { unknown: true, models: { module: "must-not-load", export: "models" } }],
+		["provider", "extra", { models: { module: "must-not-load", export: "models", extra: true } }],
+	] as const) {
+		const result = spawnSync(process.execPath, [serveJs, kind, JSON.stringify({ token: token(), ...settings })],
+			{ encoding: "utf8", timeout: 5_000 });
+		assert.ifError(result.error);
+		assert.equal(result.status, 1);
+		assert.equal(result.stdout, "");
+		assert.match(result.stderr, new RegExp(`Unknown ${kind} service setting: .*"${member}"`));
+	}
 });
 
 // ---------- an agent that uses them, served over HTTP ----------

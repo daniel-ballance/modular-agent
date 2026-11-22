@@ -8,6 +8,7 @@ import { filePendingErasure, memoryPendingErasure, type PendingErasure } from "@
 import type { HistoryEntry, HistoryStore, StoredSession } from "@modular-agent/harness";
 import { count, encodeJson, equalJson, nonnegativeNumber, object, parseJson, type Json, type JsonObject } from "./history-json.js";
 import { HistoryServiceError, historyStorageStatuses, type HistoryServiceStore } from "./history-backend.js";
+import { checkSettings } from "./settings.js";
 
 export const HISTORY_BINDING = "modular-agent-history/1";
 const maxBody = 64 * 1024 * 1024;
@@ -560,6 +561,7 @@ export interface HistoryServiceOptions {
 /** A single loopback HTTP listener. The operator must trust every local account,
  * provision a random bearer token, and keep this directory on durable local storage. */
 export async function historyService(options: HistoryServiceOptions) {
+	checkSettings("history", options, "dir", "archive", "store", "token", "port", "leaseTtl", "retention", "maxSessions", "dropAppendResponses");
 	const { leaseTtl } = options;
 	if (leaseTtl !== undefined && (!Number.isSafeInteger(leaseTtl) || leaseTtl < 1)) {
 		throw new RangeError("leaseTtl must be a whole number of milliseconds, at least 1");
