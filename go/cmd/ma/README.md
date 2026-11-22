@@ -86,7 +86,7 @@ The base ACP server published the SDK's declaration but went straight to Harness
 Proposed replacement text, without changing the shared documents from this worktree:
 
 **`docs/reference/standard-configuration.md`, Providers.** Replace “These are the SDK's …; `ma` adds none of its own.” with:
-> ChatGPT and Claude come from the SDK's [subscription Providers](../sdk/subscription-providers.md). Until the Grok sign-in and request path are specified, `ma` keeps its existing Grok adapter under the id `grok`. `auth.json` is the shared login file.
+> ChatGPT and Claude come from the SDK's [subscription Providers](../../../docs/sdk/subscription-providers.md). Until the Grok sign-in and request path are specified, `ma` keeps its existing Grok adapter under the id `grok`. `auth.json` is the shared login file.
 
 **`docs/reference/standard-configuration.md`, Providers, client identity.** Replace “In each implementation the ChatGPT and Grok Providers take the identity as a constructor option, so an agent built from this code sets its own name in one place without reading the variable.” with:
 > The SDK's ChatGPT constructor and sign-in take the identity as an option. Until the SDK ships a Grok Provider, `ma` passes the same identity to its own Grok sign-in.
