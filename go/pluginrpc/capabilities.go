@@ -68,11 +68,20 @@ func (p *remoteProvider) RefreshCatalog(ctx context.Context) error {
 	return nil
 }
 
-func (p *remoteProvider) Available() bool {
+func (p *remoteProvider) Available() bool { available, _ := p.Availability(); return available }
+func (p *remoteProvider) Availability() (bool, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	var out struct{ Available bool }
-	return p.remote.call(ctx, "provider/available", object{"provider": p.reg.ID}, &out) == nil && out.Available
+	ready, reason, err := p.status(ctx)
+	return err == nil && ready, reason
+}
+func (p *remoteProvider) status(ctx context.Context) (bool, string, error) {
+	var out struct {
+		Available bool
+		Reason    string
+	}
+	err := p.remote.call(ctx, "provider/available", object{"provider": p.reg.ID}, &out)
+	return out.Available, out.Reason, err
 }
 
 func (p *remoteProvider) Access(id string) (api.ModelAccess, error) {

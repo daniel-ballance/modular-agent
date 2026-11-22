@@ -12,11 +12,11 @@ mise exec -- go build -o .bin/ma ./cmd/ma
 .bin/ma --help
 ```
 
-The script checks out [Monty v1.6.0](https://github.com/pydantic/monty/tree/v1.6.0) at its pinned commit and uses the Rust toolchain from `rust/mise.toml` to build it with `cargo build --locked --release`. It writes `go/.bin/monty`. To install `ma`, copy both executables into the same directory on `PATH`. `go install ./cmd/ma` on its own does not install the worker. No Rust toolchain, cgo, Python installation or worker download is needed at run time. Go's working environment and credential locking are Linux-specific.
+The script checks out [Monty v1.6.0](https://github.com/pydantic/monty/tree/v1.6.0) at its pinned commit and uses the Rust toolchain from `rust/mise.toml` to build it with `cargo build --locked --release`. It writes `go/.bin/monty`. To install `ma`, copy both executables into the same directory on `PATH`. `go install ./cmd/ma` on its own does not install the worker. No Rust toolchain, cgo, Python installation or worker download is needed at run time. Go uses Unix file locking on Linux and macOS.
 
 ```sh
-ma login openai-codex            # browser; add --device to enter a code
-ma login xai                     # device code
+ma login chatgpt                 # browser; add --device to enter a code
+ma login grok                    # device code
 ma auth
 ma models
 ma --project ./my-project
@@ -29,13 +29,15 @@ Claude needs Node.js 22 or later and the [Claude sidecar](../../../typescript/si
 
 The four languages share `$XDG_CONFIG_HOME/modular-agent` (or `~/.config/modular-agent`). Go saves sessions, command state and spilled output under `$XDG_STATE_HOME/modular-agent/go` (or `~/.local/state/modular-agent/go`). `MODULAR_AGENT_DATA_DIR` puts configuration directly in that directory and puts state in its `state/` subdirectory. `ma --trust-project` records the canonical project path in `trusted-projects.json` outside the project. A project's own settings are read without granting it permission to start a server. One ACP connection can serve several canonical projects, each with its own settings, prompt and trusted MCP servers.
 
+ChatGPT and Claude come from the SDK. Grok still uses the existing adapter in `ma`. The former ids `openai-codex` and `xai` work in `--model`, `ma login`, `ma logout`, settings, `models.json` and reopened sessions. Reads find old sign-ins; the next write of `auth.json` moves them to `chatgpt` and `grok`, preferring the new slot if both exist. A file readable by other users is refused; make it private with `chmod 600` before use.
+
 ## Client identity
 
 The default is `modular-agent`. ChatGPT receives it as `originator` on model requests and in the browser sign-in address. Grok receives it as `referrer` when starting device sign-in. It is a label, not a credential or an OAuth client ID.
 
 Set `MA_CLIENT_IDENTITY` before running `ma`, including when you sign in. For example, run `export MA_CLIENT_IDENTITY=my-agent_2.0` in your shell. The value must be 1 to 64 characters from `A`–`Z`, `a`–`z`, `0`–`9`, `.`, `_` and `-`. Unset the variable to use the default. An empty or invalid value stops startup with status 1.
 
-In code under `cmd/ma`, call `subscription.ParseClientIdentity("my-agent_2.0")` and check the error. Set `subscription.Options{ClientIdentity: identity}` with the returned value, then pass the same options to `subscription.Provider` for both vendors and to `subscription.SignIn`. Use `subscription.Options{}` for the default. The subscription package does not read the environment.
+The SDK's `subscription.ChatGPT` and `subscription.SignIn` accept `ClientIdentity: &label` in their respective options structs. Use nil for the default. The SDK does not read `MA_CLIENT_IDENTITY`; `ma` reads it and uses the same value for ChatGPT and Grok.
 
 ## Code sandbox
 
@@ -55,7 +57,7 @@ From the repository root:
 export TMPDIR="$HOME/.cache/ma-std-tmp"
 mkdir -p "$TMPDIR"
 (cd conformance/acp && npm ci && cd ../tools && npm ci)
-(cd go && ./scripts/build-monty.sh && mise exec -- go build -o .bin/ma ./cmd/ma && mise exec -- go build -o .bin/modular ./cmd/modular)
+(cd go && ./scripts/build-monty.sh && mise exec -- go build -o .bin/ma ./cmd/ma && mise exec -- go build -o .bin/modular ./cmd/modular && mise exec -- go build -o .bin/modular-agent-fixtures ./modular/cmd/fixtures)
 node conformance/reference/run.mjs --agent go
 MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- "$PWD/go/.bin/ma" --acp
 scripts/websocket-kits.sh go
@@ -67,21 +69,27 @@ scripts/websocket-kits.sh go
 - **Reference checks:** 24/24 against Go `ma`, including client identity validation, tool function values, denied ambient access, codemode results and memory failure followed by recovery.
 - **ACP with `--crash-checks --probe-checks --job-checks`:** 188/188 on stdio and 193/193 over WebSocket against Go `ma`. The Go plugin WebSocket kit passed 153/153.
 - **Sandbox regressions:** the Go tests cover imports and function values, schema-order arguments, JSON and repr, terminal memory and time limits, which suspensions reset the active clock, a tool wait longer than the compute budget, 500 nested calls, recursion at 200 and 201, a UTF-8 print cut, worker death and cancellation, malformed messages, denied OS operations and seeded random.
-- **Go checks:** build, vet and formatting pass. The full suite passed 38 tested packages. The race run for `modular/...` and `cmd/ma/...` passed 7 tested packages. `cmd/modular` takes several minutes; use the default package timeout.
+- **Go checks:** build, vet and formatting pass. The full suite passed 39 tested packages. The race run for `modular/...` and `cmd/ma/...` passed 8 tested packages. `cmd/modular` takes several minutes; use the default package timeout.
 - **No network:** the Go `codemode-tools-values` and `sandbox-memory` reference checks both passed in a separate Linux network namespace.
-- **Claude:** the first pass tested the sidecar over stdio with its scripted SDK. No real sign-ins or model requests were made for any Provider.
+- **Subscriptions:** the alias tests cover both former ids in every listed entry point, including reopening a saved session. SDK tests exercise both ChatGPT sign-ins, refresh, and the Claude binding with fakes. No real sign-ins or model requests were made.
 
 ## Known gaps
 
 - `find` uses `git ls-files` where Git can read a worktree and falls back to `find` otherwise. It does not interpret `.gitignore` outside a Git worktree. The existing SDK command environment is required for this tool. Very long command output is held by that environment before being cut and spilled.
 - The SDK's question handler supports in-turn text and choice answers. `auth.json` preserves named answers written by Rust, but this configuration does not store new secret answers. The SDK's question tool keeps its existing definition, which is not word-for-word the Rust question tool.
-- The subscription Providers use the documented endpoints, not API-key Providers supplied by the SDK. Only loopback fixtures have checked the protocols. Model streams honor request cancellation and a response-header timeout; a quiet stream after headers has no independent idle timeout.
+- Only offline fixtures checked the subscription protocols in this round. ChatGPT and Grok streams honor request cancellation and a response-header timeout; a quiet stream after headers has no independent idle timeout.
 
 ## Findings for docs/reference and docs/sdk
 
 The base ACP server published the SDK's declaration but went straight to Harness operations for proposed input, joining another actor, changing the session limit and querying the tenant. It now checks the session declaration first and returns `not_supported` where appropriate, leaving `proposals`, `release` and `withdraw` usable for parked job reports. The base declares all three features true and still passes the positive checks.
 
 Proposed replacement text, without changing the shared documents from this worktree:
+
+**`docs/reference/standard-configuration.md`, Providers.** Replace “These are the SDK's …; `ma` adds none of its own.” with:
+> ChatGPT and Claude come from the SDK's [subscription Providers](../sdk/subscription-providers.md). Until the Grok sign-in and request path are specified, `ma` keeps its existing Grok adapter under the id `grok`. `auth.json` is the shared login file.
+
+**`docs/reference/standard-configuration.md`, Providers, client identity.** Replace “In each implementation the ChatGPT and Grok Providers take the identity as a constructor option, so an agent built from this code sets its own name in one place without reading the variable.” with:
+> The SDK's ChatGPT constructor and sign-in take the identity as an option. Until the SDK ships a Grok Provider, `ma` passes the same identity to its own Grok sign-in.
 
 **`docs/reference/standard-configuration.md`, Checks.** Replace the ACP-kit bullet with:
 > the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` with `--crash-checks --probe-checks --job-checks`, including refusal of operations disabled by the session declaration;

@@ -85,10 +85,12 @@ func (c *ProviderContext) Credential() (string, error) {
 
 type ProviderSupport struct{ KeepsState, SafeToRepeat bool }
 type Provider struct {
-	ID             string
-	Models         func() []ModelInfo
-	Supports       ProviderSupport
-	Available      func() bool
+	ID        string
+	Models    func() []ModelInfo
+	Supports  ProviderSupport
+	Available func() bool
+	// Availability, when set, replaces Available and may give a credential-free reason.
+	Availability   func() (bool, string)
 	Request        func(context.Context, ModelRef, ModelRequest, *ProviderContext) (AssistantMessage, error)
 	DiscardState   func(context.Context, string) error
 	EraseState     func(context.Context, string, []string) (ProviderErasure, error)
@@ -110,7 +112,13 @@ type providerAdapter struct {
 	read func(context.Context, string) (string, error)
 }
 
-func (p providerAdapter) Available() bool { return p.p.Available == nil || p.p.Available() }
+func (p providerAdapter) Available() bool { ready, _ := p.Availability(); return ready }
+func (p providerAdapter) Availability() (bool, string) {
+	if p.p.Availability != nil {
+		return p.p.Availability()
+	}
+	return p.p.Available == nil || p.p.Available(), ""
+}
 
 func (p providerAdapter) Catalog() []api.Model {
 	c := p.p.CatalogChanges

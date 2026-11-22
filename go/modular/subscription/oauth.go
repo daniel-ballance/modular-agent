@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/daniel-ballance/modular-agent/go/modular"
 	"io"
 	"net"
 	"net/http"
@@ -23,61 +24,99 @@ const (
 	codexClient         = "app_EMoamEEZ73f0CkXaXp7hrann"
 	codexScope          = "openid profile email offline_access"
 	codexDeviceRedirect = "https://auth.openai.com/deviceauth/callback"
-	xaiClient           = "b1a00492-073a-47ea-816f-4c329264a828"
-	xaiScope            = "openid profile email offline_access grok-cli:access api:access"
 )
 
-type Vendor string
+// SignInStepKind is an instruction reported by SignIn.
+type SignInStepKind string
 
 const (
-	Codex Vendor = "openai-codex"
-	Xai   Vendor = "xai"
+	OpenAndPaste SignInStepKind = "openAndPaste"
+	DeviceCode   SignInStepKind = "deviceCode"
+	Waiting      SignInStepKind = "waiting"
 )
 
-func (v Vendor) Label() string {
-	if v == Codex {
-		return "ChatGPT subscription"
-	}
-	return "Grok subscription"
+// SignInStep tells the caller what to show. A retry can carry a Note without a URL.
+type SignInStep struct {
+	Kind            SignInStepKind
+	URL, Code, Note string
+	CanPaste        bool
 }
 
-type Step struct {
-	Address, Code, Note string
-	OpenAndPaste        bool
+// SignInOptions lets the caller show progress and supply pasted input.
+// Paste must return when its context is cancelled. SignIn never opens a browser.
+type SignInOptions struct {
+	Device         bool
+	Paste          func(context.Context) (string, error)
+	OnStep         func(SignInStep)
+	ClientIdentity *string
+	HTTPTransport  http.RoundTripper
 }
+
+// SignIn signs in to ChatGPT and stores the resulting login.
+func SignIn(ctx context.Context, provider string, logins Logins, opts SignInOptions) error {
+	return oauthDefaults().signIn(ctx, provider, logins, opts)
+}
+
+func (c oauthClient) signIn(ctx context.Context, provider string, logins Logins, opts SignInOptions) error {
+	invalid := func(message string) error { return &modular.Error{Code: modular.InvalidParams, Message: message} }
+	if provider != "chatgpt" {
+		return invalid("subscription sign-in supports chatgpt only")
+	}
+	identity, err := clientIdentity(opts.ClientIdentity)
+	if err != nil {
+		return invalid(err.Error())
+	}
+	if opts.HTTPTransport != nil {
+		c.client.Transport = opts.HTTPTransport
+	}
+	show := opts.OnStep
+	if show == nil {
+		show = func(SignInStep) {}
+	}
+	var login Login
+	switch {
+	case opts.Device:
+		login, err = c.codexSignIn(ctx, show)
+	default:
+		var listener net.Listener
+		listener, err = net.Listen("tcp4", c.listen)
+		switch {
+		case err == nil:
+			login, err = c.browser(ctx, listener, opts.Paste, show, identity)
+		case !errors.Is(err, syscall.EADDRINUSE):
+			return err
+		case opts.Paste != nil:
+			show(SignInStep{Kind: OpenAndPaste, CanPaste: true, Note: "Port 1455 is in use, so paste the address the browser comes back to."})
+			login, err = c.browser(ctx, nil, opts.Paste, show, identity)
+		default:
+			show(SignInStep{Kind: DeviceCode, Note: "Port 1455 is in use, so the browser sign-in cannot return here. Using a code instead."})
+			login, err = c.codexSignIn(ctx, show)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	return logins.Set(ctx, provider, &login)
+}
+
+// SignOut removes a ChatGPT login without contacting the service.
+func SignOut(ctx context.Context, provider string, logins Logins) error {
+	if provider != "chatgpt" {
+		return &modular.Error{Code: modular.InvalidParams, Message: "subscription sign-out supports chatgpt only"}
+	}
+	return logins.Set(ctx, provider, nil)
+}
+
 type oauthClient struct {
-	client                                                                                          *http.Client
-	authorize, redirect, listen, codexToken, codexDevice, codexPoll, codexPage, xaiToken, xaiDevice string
-	unit, wait                                                                                      time.Duration
+	client                                                                     *http.Client
+	authorize, redirect, listen, codexToken, codexDevice, codexPoll, codexPage string
+	unit, wait                                                                 time.Duration
 }
 
 func oauthDefaults() oauthClient {
-	return oauthClient{client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: noRedirect}, authorize: "https://auth.openai.com/oauth/authorize", redirect: "http://localhost:1455/auth/callback", listen: "127.0.0.1:1455", codexToken: "https://auth.openai.com/oauth/token", codexDevice: "https://auth.openai.com/api/accounts/deviceauth/usercode", codexPoll: "https://auth.openai.com/api/accounts/deviceauth/token", codexPage: "https://auth.openai.com/codex/device", xaiToken: "https://auth.x.ai/oauth2/token", xaiDevice: "https://auth.x.ai/oauth2/device/code", unit: time.Second, wait: 15 * time.Minute}
+	return oauthClient{client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: noRedirect}, authorize: "https://auth.openai.com/oauth/authorize", redirect: "http://localhost:1455/auth/callback", listen: "127.0.0.1:1455", codexToken: "https://auth.openai.com/oauth/token", codexDevice: "https://auth.openai.com/api/accounts/deviceauth/usercode", codexPoll: "https://auth.openai.com/api/accounts/deviceauth/token", codexPage: "https://auth.openai.com/codex/device", unit: time.Second, wait: 15 * time.Minute}
 }
 func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-func SignIn(ctx context.Context, v Vendor, device bool, pasted <-chan string, show func(Step), opts Options) (Login, error) {
-	return oauthDefaults().signIn(ctx, v, device, pasted, show, opts)
-}
-func (c oauthClient) signIn(ctx context.Context, v Vendor, device bool, pasted <-chan string, show func(Step), opts Options) (Login, error) {
-	if v == Xai {
-		return c.xaiSignIn(ctx, show, opts.ClientIdentity)
-	}
-	if !device {
-		listener, err := net.Listen("tcp4", c.listen)
-		if err == nil {
-			return c.browser(ctx, listener, pasted, show, opts.ClientIdentity)
-		}
-		if !errors.Is(err, syscall.EADDRINUSE) {
-			return Login{}, err
-		}
-		if pasted != nil {
-			show(Step{Note: "Port 1455 is in use, so paste the address the browser comes back to."})
-			return c.browser(ctx, nil, pasted, show, opts.ClientIdentity)
-		}
-		show(Step{Note: "Port 1455 is in use, so the browser sign-in cannot return here. Using a code instead."})
-	}
-	return c.codexSignIn(ctx, show)
-}
 func (c oauthClient) post(ctx context.Context, target string, body any) (int, map[string]any, error) {
 	var content, kind string
 	switch v := body.(type) {
@@ -98,12 +137,15 @@ func (c oauthClient) post(ctx context.Context, target string, body any) (int, ma
 	req.Header.Set("Accept", "application/json")
 	res, err := c.client.Do(req)
 	if err != nil {
-		return 0, nil, err
+		if ctx.Err() != nil {
+			return 0, nil, ctx.Err()
+		}
+		return 0, nil, errors.New("could not reach the ChatGPT sign-in endpoint")
 	}
 	defer res.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if err != nil {
-		return res.StatusCode, nil, err
+		return res.StatusCode, nil, errors.New("could not read the ChatGPT sign-in reply")
 	}
 	var out map[string]any
 	_ = json.Unmarshal(data, &out)
@@ -123,20 +165,6 @@ func number(v map[string]any, key string, fallback int) int {
 		}
 	}
 	return fallback
-}
-func oauthError(action string, status int, body map[string]any) error {
-	// Never show an arbitrary successful or non-JSON body: it may contain tokens.
-	detail := str(body, "error")
-	if desc := str(body, "error_description"); desc != "" {
-		if detail != "" {
-			detail += ": "
-		}
-		detail += desc
-	}
-	if detail != "" {
-		detail = ": " + detail
-	}
-	return fmt.Errorf("%s failed (HTTP %d)%s", action, status, detail)
 }
 func account(access string) (string, error) {
 	parts := strings.Split(access, ".")
@@ -159,7 +187,7 @@ func account(access string) (string, error) {
 	}
 	return auth.Account, nil
 }
-func tokens(v Vendor, body map[string]any, previous string) (Login, error) {
+func tokens(body map[string]any, previous string) (Login, error) {
 	access, refresh := str(body, "access_token"), str(body, "refresh_token")
 	if access == "" {
 		return Login{}, errors.New("the sign-in answer has no access token")
@@ -171,32 +199,30 @@ func tokens(v Vendor, body map[string]any, previous string) (Login, error) {
 		return Login{}, errors.New("the sign-in answer has no refresh token")
 	}
 	l := Login{Type: "oauth", Access: access, Refresh: refresh, Expires: uint64(time.Now().UnixMilli() + int64(number(body, "expires_in", 3600))*1000 - 300000)}
-	if v == Codex {
-		a, err := account(access)
-		if err != nil {
-			return Login{}, err
-		}
-		l.Account = &a
+	a, err := account(access)
+	if err != nil {
+		return Login{}, err
 	}
+	l.Account = &a
 	return l, nil
 }
-func (c oauthClient) refresh(ctx context.Context, v Vendor, l Login) (Login, error) {
+func (c oauthClient) refresh(ctx context.Context, l Login) (Login, error) {
 	if l.Type != "oauth" {
-		return l, nil
+		return Login{}, errors.New("no ChatGPT plan login; sign in again")
 	}
-	endpoint, id := c.codexToken, codexClient
-	if v == Xai {
-		endpoint, id = c.xaiToken, xaiClient
-	}
-	status, body, err := c.post(ctx, endpoint, url.Values{"grant_type": {"refresh_token"}, "client_id": {id}, "refresh_token": {l.Refresh}})
+	status, body, err := c.post(ctx, c.codexToken, url.Values{"grant_type": {"refresh_token"}, "client_id": {codexClient}, "refresh_token": {l.Refresh}})
 	if err != nil {
-		return Login{}, fmt.Errorf("could not reach %s to refresh the sign-in: %w", v.Label(), err)
+		return Login{}, errors.New("could not reach ChatGPT to refresh the sign-in")
 	}
 	if !ok(status) {
-		return Login{}, oauthError(fmt.Sprintf("refreshing the %s sign-in (run `ma login %s`)", v.Label(), v), status, body)
+		if str(body, "error") == "invalid_grant" || status == 401 || status == 403 {
+			return Login{}, errors.New("ChatGPT refused the refresh; sign in again")
+		}
+		return Login{}, fmt.Errorf("refreshing the ChatGPT sign-in failed (HTTP %d)", status)
 	}
-	return tokens(v, body, l.Refresh)
+	return tokens(body, l.Refresh)
 }
+
 func (c oauthClient) poll(ctx context.Context, interval int, limit time.Duration, attempt func(context.Context) (bool, bool, error)) error {
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
@@ -218,65 +244,17 @@ func (c oauthClient) poll(ctx context.Context, interval int, limit time.Duration
 		}
 	}
 }
-func (c oauthClient) xaiSignIn(ctx context.Context, show func(Step), identity ClientIdentity) (Login, error) {
-	status, body, err := c.post(ctx, c.xaiDevice, url.Values{"client_id": {xaiClient}, "scope": {xaiScope}, "referrer": {identity.name()}})
-	if err != nil {
-		return Login{}, err
-	}
-	if !ok(status) {
-		return Login{}, oauthError("starting the Grok sign-in", status, body)
-	}
-	address := str(body, "verification_uri_complete")
-	if address == "" {
-		address = str(body, "verification_uri")
-	}
-	code, id := str(body, "user_code"), str(body, "device_code")
-	if !strings.HasPrefix(address, "https://") {
-		return Login{}, errors.New("the Grok sign-in gave an address that is not https")
-	}
-	if code == "" || id == "" {
-		return Login{}, errors.New("the Grok sign-in answer is incomplete")
-	}
-	show(Step{Address: address, Code: code})
-	var login Login
-	interval := number(body, "interval", 5)
-	if interval == 0 {
-		interval = 5
-	}
-	err = c.poll(ctx, interval, time.Duration(number(body, "expires_in", 900))*c.unit, func(ctx context.Context) (bool, bool, error) {
-		status, data, err := c.post(ctx, c.xaiToken, url.Values{"grant_type": {"urn:ietf:params:oauth:grant-type:device_code"}, "client_id": {xaiClient}, "device_code": {id}})
-		if err != nil {
-			return false, false, err
-		}
-		if ok(status) {
-			login, err = tokens(Xai, data, "")
-			return true, false, err
-		}
-		switch str(data, "error") {
-		case "authorization_pending":
-			return false, false, nil
-		case "slow_down":
-			return false, true, nil
-		case "access_denied", "authorization_denied":
-			return false, false, errors.New("the Grok sign-in was denied")
-		case "expired_token":
-			return false, false, errors.New("the Grok sign-in code expired")
-		}
-		return false, false, oauthError("the Grok sign-in", status, data)
-	})
-	return login, err
-}
 func (c oauthClient) exchange(ctx context.Context, code, verifier, redirect string) (Login, error) {
 	status, body, err := c.post(ctx, c.codexToken, url.Values{"grant_type": {"authorization_code"}, "client_id": {codexClient}, "code": {code}, "code_verifier": {verifier}, "redirect_uri": {redirect}})
 	if err != nil {
 		return Login{}, err
 	}
 	if !ok(status) {
-		return Login{}, oauthError("the ChatGPT sign-in", status, body)
+		return Login{}, fmt.Errorf("the ChatGPT sign-in failed (HTTP %d)", status)
 	}
-	return tokens(Codex, body, "")
+	return tokens(body, "")
 }
-func (c oauthClient) codexSignIn(ctx context.Context, show func(Step)) (Login, error) {
+func (c oauthClient) codexSignIn(ctx context.Context, show func(SignInStep)) (Login, error) {
 	status, body, err := c.post(ctx, c.codexDevice, map[string]string{"client_id": codexClient})
 	if err != nil {
 		return Login{}, err
@@ -288,7 +266,8 @@ func (c oauthClient) codexSignIn(ctx context.Context, show func(Step)) (Login, e
 	if device == "" || code == "" {
 		return Login{}, errors.New("the ChatGPT sign-in answer is incomplete")
 	}
-	show(Step{Address: c.codexPage, Code: code})
+	show(SignInStep{Kind: DeviceCode, URL: c.codexPage, Code: code})
+	show(SignInStep{Kind: Waiting})
 	var auth, verifier string
 	err = c.poll(ctx, max(1, number(body, "interval", 5)), c.wait, func(ctx context.Context) (bool, bool, error) {
 		status, data, err := c.post(ctx, c.codexPoll, map[string]string{"device_auth_id": device, "user_code": code})
@@ -329,17 +308,14 @@ func pastedCode(line, state string) (string, error) {
 	}
 	code, found, hasState := input, "", false
 	_, query, address := strings.Cut(input, "?")
-	if address || strings.Contains(input, "code=") {
+	if queryOnly := strings.Contains(input, "code=") || strings.Contains(input, "error=") || strings.Contains(input, "state="); address || queryOnly {
 		if address {
 			query, _, _ = strings.Cut(query, "#")
-			if reason, ok := pastedParam(query, "error"); ok {
-				if desc, ok := pastedParam(query, "error_description"); ok {
-					reason = desc
-				}
-				return "", fmt.Errorf("the sign-in was not completed: %s", reason)
-			}
 		} else {
 			query = input
+		}
+		if _, present := pastedParam(query, "error"); present {
+			return "", errors.New("the sign-in was not completed")
 		}
 		code, _ = pastedParam(query, "code")
 		found, hasState = pastedParam(query, "state")
@@ -368,11 +344,11 @@ func pastedParam(query, name string) (string, bool) {
 	return "", false
 }
 
-func (c oauthClient) browser(ctx context.Context, l net.Listener, pasted <-chan string, show func(Step), identity ClientIdentity) (Login, error) {
+func (c oauthClient) browser(ctx context.Context, l net.Listener, paste func(context.Context) (string, error), show func(SignInStep), identity string) (Login, error) {
 	verifier := base64.RawURLEncoding.EncodeToString(randBytes(32))
 	state := base64.RawURLEncoding.EncodeToString(randBytes(16))
 	challenge := sha256.Sum256([]byte(verifier))
-	values := url.Values{"response_type": {"code"}, "client_id": {codexClient}, "redirect_uri": {c.redirect}, "scope": {codexScope}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"}, "state": {state}, "id_token_add_organizations": {"true"}, "codex_cli_simplified_flow": {"true"}, "originator": {identity.name()}}
+	values := url.Values{"response_type": {"code"}, "client_id": {codexClient}, "redirect_uri": {c.redirect}, "scope": {codexScope}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"}, "state": {state}, "id_token_add_organizations": {"true"}, "codex_cli_simplified_flow": {"true"}, "originator": {identity}}
 	type callback struct {
 		code string
 		err  error
@@ -395,16 +371,12 @@ func (c oauthClient) browser(ctx context.Context, l net.Listener, pasted <-chan 
 			}
 			code := q.Get("code")
 			var err error
-			if code == "" {
-				reason := q.Get("error_description")
-				if reason == "" {
-					reason = q.Get("error")
-				}
-				if reason == "" {
-					reason = "no code returned"
-				}
-				err = fmt.Errorf("the sign-in was not completed: %s", reason)
+			if q.Has("error") || code == "" {
 				http.Error(w, "The sign-in did not complete. Return to the terminal.", 400)
+				if paste != nil {
+					return
+				} // A failed browser return must not end a pending paste.
+				err = errors.New("the sign-in was not completed")
 			} else {
 				fmt.Fprint(w, "Signed in. You can close this tab and return to the terminal.")
 			}
@@ -419,9 +391,25 @@ func (c oauthClient) browser(ctx context.Context, l net.Listener, pasted <-chan 
 		defer server.Close()
 		go func() { errCh <- server.Serve(l) }()
 	}
-	show(Step{Address: c.authorize + "?" + values.Encode(), OpenAndPaste: pasted != nil})
+	show(SignInStep{Kind: OpenAndPaste, URL: c.authorize + "?" + values.Encode(), CanPaste: paste != nil})
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	timer := time.NewTimer(c.wait)
 	defer timer.Stop()
+	type pasteResult struct {
+		line string
+		err  error
+	}
+	var pasted <-chan pasteResult
+	readPaste := func() {
+		if paste == nil {
+			return
+		}
+		next := make(chan pasteResult, 1)
+		pasted = next
+		go func() { line, err := paste(ctx); next <- pasteResult{line, err} }()
+	}
+	readPaste()
 	for {
 		select {
 		case r := <-result:
@@ -429,17 +417,21 @@ func (c oauthClient) browser(ctx context.Context, l net.Listener, pasted <-chan 
 				return Login{}, r.err
 			}
 			return c.exchange(ctx, r.code, verifier, c.redirect)
-		case line, open := <-pasted:
-			if !open {
-				pasted = nil // The terminal closed; keep waiting for the browser.
+		case p := <-pasted:
+			if p.err != nil {
+				pasted = nil
+				if l == nil {
+					return Login{}, errors.New("could not read the pasted sign-in code")
+				}
 				continue
 			}
-			code, err := pastedCode(line, state)
+			code, err := pastedCode(p.line, state)
 			if err != nil {
-				show(Step{Note: err.Error() + ". Paste it again."})
+				show(SignInStep{Kind: OpenAndPaste, CanPaste: true, Note: err.Error() + ". Paste it again."})
 			} else if code != "" {
 				return c.exchange(ctx, code, verifier, c.redirect)
 			}
+			readPaste()
 		case err := <-errCh:
 			return Login{}, err
 		case <-ctx.Done():

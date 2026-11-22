@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -68,6 +69,7 @@ type options struct {
 	project, dataDir, model                 string
 	durability                              Durability
 	providers                               []Provider
+	providerAliases                         map[string]string
 	plugins                                 []Plugin
 	tools                                   []Tool
 	process                                 []ProcessPlugin
@@ -121,6 +123,13 @@ func WithDurability(d Durability) Option {
 func WithProvider(p Provider) Option {
 	return func(o *options) error { o.providers = append(o.providers, p); return nil }
 }
+
+// WithProviderAliases resolves former Provider ids when reopening saved sessions.
+// The catalog lists only current ids. History records are not rewritten.
+func WithProviderAliases(aliases map[string]string) Option {
+	return func(o *options) error { o.providerAliases = maps.Clone(aliases); return nil }
+}
+
 func WithTool(t Tool) Option {
 	return func(o *options) error { o.tools = append(o.tools, t); return nil }
 }
@@ -299,6 +308,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 		specs = append(specs, more...)
 	}
 	h := harness.NewWithLocalActor(localActor)
+	h.SetProviderAliases(o.providerAliases)
 	if o.durability != Ephemeral {
 		h.DeferPersistentHistory()
 	}

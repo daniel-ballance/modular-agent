@@ -1,14 +1,8 @@
-package subscription
+package grok
 
 import "errors"
 
 const defaultClientIdentity = "modular-agent"
-
-// Options configures a subscription Provider or sign-in. Its zero value uses
-// the default client identity.
-type Options struct {
-	ClientIdentity ClientIdentity
-}
 
 // ClientIdentity is a validated client label. Its zero value uses the default.
 type ClientIdentity struct {

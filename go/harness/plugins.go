@@ -29,6 +29,7 @@ type handler struct {
 }
 type Harness struct {
 	localActor      string
+	providerAliases map[string]string
 	deferHistory    bool
 	handBackOnOpen  bool
 	parkJobReports  bool
@@ -71,6 +72,17 @@ func NewWithLocalActor(actor string) *Harness {
 		h.hooks[name] = &hook{owner: "harness", rule: rule}
 	}
 	return h
+}
+
+// SetProviderAliases configures model-id migration before any sessions open.
+func (h *Harness) SetProviderAliases(aliases map[string]string) { h.providerAliases = aliases }
+
+func (h *Harness) currentModel(ref string) string {
+	provider, id, ok := strings.Cut(ref, "/")
+	if current := h.providerAliases[provider]; ok && current != "" {
+		return current + "/" + id
+	}
+	return ref
 }
 
 // DeferPersistentHistory keeps new public sessions provisional until admission.

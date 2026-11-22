@@ -15,8 +15,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/daniel-ballance/modular-agent/go/cmd/ma/internal/subscription"
+	"github.com/daniel-ballance/modular-agent/go/cmd/ma/internal/grok"
 	"github.com/daniel-ballance/modular-agent/go/modular"
+	"github.com/daniel-ballance/modular-agent/go/modular/subscription"
 	"golang.org/x/sys/unix"
 )
 
@@ -25,7 +26,7 @@ const help = `ma, the standard Modular Agent
 Usage:
   ma [options]                 talk to the agent in this folder
   ma [options] -p PROMPT       answer one prompt and exit
-  ma login PROVIDER [--device] sign in: openai-codex, xai or claude
+  ma login PROVIDER [--device] sign in: chatgpt, grok or claude
   ma logout PROVIDER
   ma auth                      show what is signed in
   ma models                    list the models on offer
@@ -34,7 +35,7 @@ Usage:
   ma sessions [--all]          list saved sessions
 
 Options:
-  --model PROVIDER/ID   for example openai-codex/gpt-6.1-sol, xai/grok-4.7, claude/claude-sonnet-5-5
+  --model PROVIDER/ID   for example chatgpt/gpt-6.1-sol, grok/grok-4.7, claude/claude-sonnet-5-5
   --thinking LEVEL      off, minimal, low, medium, high or xhigh, as the model allows
   --session ID          reopen a session
   -c, --continue        reopen this folder's most recent session
@@ -63,7 +64,7 @@ type options struct {
 	command, provider, project, session, model, thinking                            string
 	listen, tokenFile, policyPath                                                   string
 	policy                                                                          operatorPolicy
-	subscriptions                                                                   subscription.Options
+	clientIdentity                                                                  *string
 	prompt                                                                          *string
 	loadClaude                                                                      bool
 	device, resume, all, trust, transient, verbose, json, history, declaration, acp bool
@@ -100,13 +101,14 @@ func parse(args []string) (o options, err error) {
 			o.command = name
 			if name == "login" || name == "logout" {
 				if i+1 >= len(args) {
-					return o, errors.New("which provider? openai-codex, xai or claude")
+					return o, errors.New("which provider? chatgpt, grok or claude")
 				}
 				i++
-				o.provider = args[i]
+				o.provider = currentProvider(args[i])
 			}
 		case "--model":
 			o.model, err = take()
+			o.model = currentModel(o.model)
 		case "--thinking":
 			o.thinking, err = take()
 			if err == nil && !slices.Contains([]string{"off", "minimal", "low", "medium", "high", "xhigh"}, o.thinking) {
@@ -199,13 +201,12 @@ func main() {
 	}
 }
 func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Writer, interrupts <-chan os.Signal) error {
-	var identity subscription.ClientIdentity
+	var identity *string
 	if value, set := os.LookupEnv("MA_CLIENT_IDENTITY"); set {
-		var err error
-		identity, err = subscription.ParseClientIdentity(value)
-		if err != nil {
+		if _, err := grok.ParseClientIdentity(value); err != nil {
 			return fmt.Errorf("MA_CLIENT_IDENTITY: %w", err)
 		}
+		identity = &value
 	}
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		return errors.New("ma supports only Linux and macOS")
@@ -214,7 +215,7 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 	if err != nil {
 		return err
 	}
-	o.subscriptions = subscription.Options{ClientIdentity: identity}
+	o.clientIdentity = identity
 	switch o.command {
 	case "help":
 		fmt.Fprintln(out, help)
@@ -348,7 +349,7 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 		return err
 	}
 	if saved != nil && saved.Model != "" {
-		settings["model"] = saved.Model
+		settings["model"] = currentModel(saved.Model)
 	}
 	if o.model != "" {
 		settings["model"] = o.model
@@ -364,7 +365,7 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 		if name != "" {
 			settings["model"] = name
 		} else {
-			return errors.New("no model is available. Sign in with `ma login openai-codex`, `ma login xai` or `ma login claude`, or pass --model. See `ma models`.")
+			return errors.New("no model is available. Sign in with `ma login chatgpt`, `ma login grok` or `ma login claude`, or pass --model. See `ma models`.")
 		}
 	}
 	a, err := d.compose(ctx, bootstrap, settings, store, stderr)
@@ -493,35 +494,22 @@ func showSkills(out, stderr io.Writer, skills []skill, problems []string) {
 	}
 }
 func claudeStatus(ctx context.Context) (string, bool) {
-	cmd := exec.CommandContext(ctx, "claude", "auth", "status")
-	if err := cmd.Run(); err == nil {
-		return "signed in through Claude Code", true
-	} else if errors.Is(err, exec.ErrNotFound) {
-		return "Claude Code is not installed", false
+	c, err := subscription.Claude(ctx, subscription.ClaudeOptions{})
+	if err != nil {
+		return err.Error(), false
 	}
-	return "not signed in (run `ma login claude`)", false
-}
-func (d layout) claudeSidecar() string {
-	paths := []string{os.Getenv("MODULAR_AGENT_CLAUDE_SIDECAR")}
-	if exe, err := os.Executable(); err == nil {
-		for p, i := filepath.Dir(exe), 0; i < 4; i, p = i+1, filepath.Dir(p) {
-			paths = append(paths, filepath.Join(p, "typescript/sidecars/claude/dist/main.js"))
-		}
+	defer c.Close()
+	if ready, reason := c.Status(ctx); !ready {
+		return reason, false
 	}
-	paths = append(paths, filepath.Join(d.home, ".local/share/modular-agent/sidecars/claude/dist/main.js"))
-	for _, p := range paths {
-		if s, e := os.Stat(p); e == nil && s.Mode().IsRegular() {
-			return p
-		}
-	}
-	return ""
+	return "signed in through Claude Code", true
 }
 func (d layout) defaultModel(ctx context.Context) (string, error) {
 	for _, v := range []struct {
-		v     subscription.Vendor
+		v     string
 		model string
-	}{{subscription.Codex, "openai-codex/gpt-6.1-sol"}, {subscription.Xai, "xai/grok-4.7"}} {
-		l, err := d.auth().Login(string(v.v))
+	}{{"chatgpt", "chatgpt/gpt-6.1-sol"}, {grok.ID, "grok/grok-4.7"}} {
+		l, err := d.auth().Login(v.v)
 		if err != nil {
 			return "", err
 		}
@@ -529,16 +517,14 @@ func (d layout) defaultModel(ctx context.Context) (string, error) {
 			return v.model, nil
 		}
 	}
-	if d.claudeSidecar() != "" {
-		if _, ok := claudeStatus(ctx); ok {
-			return "claude/claude-sonnet-5-5", nil
-		}
+	if _, ok := claudeStatus(ctx); ok {
+		return "claude/claude-sonnet-5-5", nil
 	}
 	return "", nil
 }
 func (d layout) authStatus(ctx context.Context, out io.Writer) error {
-	for _, v := range []subscription.Vendor{subscription.Codex, subscription.Xai} {
-		l, err := d.auth().Login(string(v))
+	for _, v := range []string{"chatgpt", grok.ID} {
+		l, err := d.auth().Login(v)
 		if err != nil {
 			return err
 		}
@@ -549,13 +535,10 @@ func (d layout) authStatus(ctx context.Context, out io.Writer) error {
 				state = "signed in (token will refresh on next use)"
 			}
 		}
-		fmt.Fprintf(out, "%-13s %-22s %s\n", v, v.Label(), state)
+		fmt.Fprintf(out, "%-13s %-22s %s\n", v, planLabel(v), state)
 	}
 	state, _ := claudeStatus(ctx)
 	fmt.Fprintf(out, "%-13s %-22s %s\n", "claude", "Claude subscription", state)
-	if d.claudeSidecar() == "" {
-		fmt.Fprintln(out, "              the Claude sidecar is not installed (build typescript/sidecars/claude)")
-	}
 	return nil
 }
 
@@ -585,6 +568,13 @@ func terminalLines(ctx context.Context, in io.Reader) <-chan string {
 }
 
 func (d layout) signIn(ctx context.Context, o options, in io.Reader, out, stderr io.Writer) error {
+	return d.signInUsing(ctx, o, in, out, stderr, subscription.SignIn, grok.SignIn)
+}
+
+func (d layout) signInUsing(ctx context.Context, o options, in io.Reader, out, stderr io.Writer,
+	chatSignIn func(context.Context, string, subscription.Logins, subscription.SignInOptions) error,
+	grokSignIn func(context.Context, func(grok.Step), grok.ClientIdentity) (subscription.Login, error),
+) error {
 	if o.provider == "claude" {
 		if o.command == "logout" {
 			return errors.New("Claude Code holds that sign-in; run `claude auth logout`")
@@ -600,61 +590,107 @@ func (d layout) signIn(ctx context.Context, o options, in io.Reader, out, stderr
 		}
 		return nil
 	}
-	v := subscription.Vendor(o.provider)
-	if v != subscription.Codex && v != subscription.Xai {
-		return fmt.Errorf("unknown provider %s; use openai-codex, xai or claude", v)
+	v := o.provider
+	if v != "chatgpt" && v != grok.ID {
+		return fmt.Errorf("unknown provider %s; use chatgpt, grok or claude", v)
 	}
 	if o.command == "logout" {
-		if err := d.auth().Set(ctx, string(v), nil); err != nil {
+		var err error
+		if v == "chatgpt" {
+			err = subscription.SignOut(ctx, v, d.auth())
+		} else {
+			err = d.auth().Set(ctx, v, nil)
+		}
+		if err != nil {
 			return err
 		}
-		fmt.Fprintf(stderr, "Signed out of %s.\n", v.Label())
+		fmt.Fprintf(stderr, "Signed out of %s.\n", planLabel(v))
 		return nil
 	}
-	var pasted <-chan string
-	if v == subscription.Codex && !o.device {
-		lineCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
-		pasted = terminalLines(lineCtx, in)
-	}
-	l, err := subscription.SignIn(ctx, v, o.device, pasted, func(s subscription.Step) {
-		if s.Note != "" {
-			fmt.Fprintln(stderr, s.Note)
-			return
-		}
-		if s.OpenAndPaste {
-			fmt.Fprintf(stderr, "Open this address in a browser, on this machine or any other:\n\n  %s\n\n", s.Address)
-		} else if s.Code != "" {
-			fmt.Fprintf(stderr, "Open this address in a browser:\n\n  %s\n\nand enter the code: %s\n\n", s.Address, s.Code)
-		} else {
-			fmt.Fprintf(stderr, "Open this address in a browser to sign in:\n\n  %s\n\n", s.Address)
-		}
-		_, disabled := os.LookupEnv("MA_NO_BROWSER")
-		_, ssh := os.LookupEnv("SSH_CONNECTION")
-		_, sshTTY := os.LookupEnv("SSH_TTY")
-		_, display := os.LookupEnv("DISPLAY")
-		_, wayland := os.LookupEnv("WAYLAND_DISPLAY")
-		if !disabled && !ssh && !sshTTY && (display || wayland) && strings.HasPrefix(s.Address, "https://") {
-			c := exec.Command("xdg-open", s.Address)
-			if c.Start() == nil {
-				go func() { _ = c.Wait() }()
+	if v == "chatgpt" {
+		opts := subscription.SignInOptions{Device: o.device, ClientIdentity: o.clientIdentity, OnStep: func(s subscription.SignInStep) {
+			if s.Note != "" {
+				fmt.Fprintln(stderr, s.Note)
+				if s.CanPaste && strings.Contains(s.Note, "Paste it again.") {
+					fmt.Fprint(stderr, "Paste the address (or the code): ")
+				}
+				return
+			}
+			if s.Kind == subscription.Waiting {
+				fmt.Fprintln(stderr, "Waiting for the sign-in to finish...")
+				return
+			}
+			showSignIn(stderr, s.URL, s.Code, s.CanPaste)
+		}}
+		if !o.device {
+			lineCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			if lines := terminalLines(lineCtx, in); lines != nil {
+				opts.Paste = func(ctx context.Context) (string, error) {
+					select {
+					case <-ctx.Done():
+						return "", ctx.Err()
+					case line, ok := <-lines:
+						if !ok {
+							return "", io.EOF
+						}
+						return line, nil
+					}
+				}
 			}
 		}
-		if s.OpenAndPaste {
-			fmt.Fprint(stderr, "After you sign in, the browser goes to a localhost address. If the browser is on this\n"+
-				"machine, that finishes the sign-in. Otherwise the page will not load: copy the whole\n"+
-				"address from the browser's address bar and paste it here.\n\n")
-			fmt.Fprint(stderr, "Paste the address (or the code): ")
-		} else {
-			fmt.Fprintln(stderr, "Waiting for the sign-in to finish...")
+		if err := chatSignIn(ctx, v, d.auth(), opts); err != nil {
+			return err
 		}
-	}, o.subscriptions)
-	if err != nil {
-		return err
+	} else {
+		var identity grok.ClientIdentity
+		if o.clientIdentity != nil {
+			identity, _ = grok.ParseClientIdentity(*o.clientIdentity)
+		}
+		login, err := grokSignIn(ctx, func(s grok.Step) {
+			showSignIn(stderr, s.Address, s.Code, false)
+			fmt.Fprintln(stderr, "Waiting for the sign-in to finish...")
+		}, identity)
+		if err != nil {
+			return err
+		}
+		if err := d.auth().Set(ctx, v, &login); err != nil {
+			return err
+		}
 	}
-	if err := d.auth().Set(ctx, string(v), &l); err != nil {
-		return err
-	}
-	fmt.Fprintf(stderr, "Signed in to %s (%s).\n", v.Label(), v)
+	fmt.Fprintf(stderr, "Signed in to %s (%s).\n", planLabel(v), v)
 	return nil
+}
+
+func planLabel(id string) string {
+	if id == grok.ID {
+		return grok.Label
+	}
+	return "ChatGPT subscription"
+}
+
+func showSignIn(stderr io.Writer, address, code string, paste bool) {
+	if paste {
+		fmt.Fprintf(stderr, "Open this address in a browser, on this machine or any other:\n\n  %s\n\n", address)
+	} else if code != "" {
+		fmt.Fprintf(stderr, "Open this address in a browser:\n\n  %s\n\nand enter the code: %s\n\n", address, code)
+	} else {
+		fmt.Fprintf(stderr, "Open this address in a browser to sign in:\n\n  %s\n\n", address)
+	}
+	_, disabled := os.LookupEnv("MA_NO_BROWSER")
+	_, ssh := os.LookupEnv("SSH_CONNECTION")
+	_, sshTTY := os.LookupEnv("SSH_TTY")
+	_, display := os.LookupEnv("DISPLAY")
+	_, wayland := os.LookupEnv("WAYLAND_DISPLAY")
+	if !disabled && !ssh && !sshTTY && (display || wayland) && strings.HasPrefix(address, "https://") {
+		c := exec.Command("xdg-open", address)
+		if c.Start() == nil {
+			go func() { _ = c.Wait() }()
+		}
+	}
+	if paste {
+		fmt.Fprint(stderr, "After you sign in, the browser goes to a localhost address. If the browser is on this\n"+
+			"machine, that finishes the sign-in. Otherwise the page will not load: copy the whole\n"+
+			"address from the browser's address bar and paste it here.\n\nPaste the address (or the code): ")
+	}
 }
