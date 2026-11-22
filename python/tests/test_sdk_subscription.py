@@ -359,6 +359,8 @@ async def test_chatgpt_request_and_replay(
         assert headers["authorization"] == "Bearer fixture-access"
         assert headers["chatgpt-account-id"] == "fixture-account"
         assert headers["openai-beta"] == "responses=experimental"
+        assert headers["user-agent"] == "modular-agent/0.1.0"
+        assert headers["content-type"] == "application/json"
         assert headers["originator"] == (identity or "modular-agent")
         assert (
             headers["session-id"]
@@ -569,6 +571,7 @@ async def test_grok_request_replay_and_refused_refresh(
             "content-type": "application/json",
             "content-length": str(len(request.content)),
             "host": "api.x.ai",
+            "user-agent": "modular-agent/0.1.0",
         }
         seen.append(json.loads(request.content))
         return _grok_stream()

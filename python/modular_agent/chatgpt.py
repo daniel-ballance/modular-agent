@@ -21,7 +21,6 @@ class ChatGPT(ResponsesProvider):
 
     def _extra_headers(self, login: Login, session: str) -> dict[str, str]:
         return {
-            "User-Agent": "modular-agent/0.1.0",
             "chatgpt-account-id": (login.account if isinstance(login, OAuth) else None)
             or account(login.secret),
             "OpenAI-Beta": "responses=experimental",

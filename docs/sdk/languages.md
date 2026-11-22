@@ -92,7 +92,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - A plugin is a `Plugin(name, tools=[…], hooks={…})` or a subclass overriding `setup`.
 - Every public function and type is fully type-annotated and passes a strict type checker.
 - Minimum Python version: the one pinned in `python/mise.toml`.
-- Subscription Providers: `subscription_logins(path)`, `await sign_in("chatgpt", logins, …)`, `await sign_out("chatgpt", logins)`, `modular_agent.chatgpt.chatgpt(logins=…)`, and `modular_agent.claude.claude(…)` on Anthropic's Python Agent SDK.
+- Subscription Providers: `subscription_logins(path)`, `await sign_in(provider, logins, …)` and `await sign_out(provider, logins)`, where `provider` is `"chatgpt"` or `"grok"`. Construct the Providers with `modular_agent.chatgpt.chatgpt(logins=…)` or `modular_agent.grok.grok(logins=…)`, and `modular_agent.claude.claude(…)` on Anthropic's Python Agent SDK.
 
 ## Packages
 

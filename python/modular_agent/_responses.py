@@ -10,9 +10,14 @@ from httpx2 import AsyncClient, HTTPError, Timeout
 
 from ._subscription_oauth import validate_client_identity
 from ._provider import ModelFailure, ModelInfo, ProviderContext, ProviderSupports
+from importlib.metadata import version as _package_version
+
 from ._subscription_logins import Login, OAuth, SubscriptionLogins
 from ._subscription_models import SubscriptionModels
 from ._types import AgentError, ErrorCode, Json, JsonObject, ModelRef
+
+# Sent on every model request, as the other SDKs do.
+USER_AGENT = f"modular-agent/{_package_version('modular-agent')}"
 
 
 def _obj(value: Json) -> JsonObject:
@@ -280,6 +285,7 @@ class ResponsesProvider(ABC):
                     headers = {
                         "Accept": "text/event-stream",
                         "Authorization": "Bearer " + login.secret,
+                        "User-Agent": USER_AGENT,
                         **self._extra_headers(login, session),
                     }
                 except (OSError, ValueError):

@@ -135,8 +135,6 @@ The history kit passed 42/42 base and restart checks and 18/18 profile checks, i
 
 ## Specification findings
 
-- **SDK, Languages, Python.** Replace the Subscription Providers bullet with: “Subscription Providers: `subscription_logins(path)`, `await sign_in(provider, logins, …)`, and `await sign_out(provider, logins)`, where `provider` is `"chatgpt"` or `"grok"`. Construct the Providers with `modular_agent.chatgpt.chatgpt(logins=…)` or `modular_agent.grok.grok(logins=…)`. Use `modular_agent.claude.claude(…)` for Anthropic's Python Agent SDK.”
-- **Subscription Providers, Grok.** Replace the first sentence of Requests with: “Send a streamed JSON POST to `https://api.x.ai/v1/responses` with `store: false`, the bearer token and `Accept: text/event-stream`. Use only the headers needed for HTTP and JSON framing in addition to those two headers.”
 
 - **SDK, The agent.** Add to the session reopening options: “A composition can name former Provider ids and their current ids for saved model settings. When reopening a session, record the current model ref before recovery; do not rewrite earlier entries.” Python passes this map as `create_agent(model_aliases=...)`.
 - **SDK API, The agent.** The stdio options describe how to constrain a configured principal but give no way to select that principal, which `ma` policy requires. Replace the first sentence starting “On stdio, `serveAcp` accepts” with: “On stdio, `serveAcp` accepts an operator-supplied `actor` with `id`, `kind` and `rights`, and optional `projects`, `tenants`, `rights` and `represents` lists. When both the actor and a rights list are supplied, intersect the two rights lists. Without an actor, use the local principal as defined in the ACP binding.”
