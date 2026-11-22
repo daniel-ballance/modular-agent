@@ -46,7 +46,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - Streams are the boxed `EventStream`, so `StreamExt::next` works on them without pinning. An unboxed `impl Stream` made the guide's own loop fail to compile.
 - Data types own their data and implement `Serialize`, `Deserialize`, `Clone` and `Debug`.
 - Minimum Rust version: the one pinned in `rust/mise.toml`. Edition 2024.
-- Subscription Providers: `chatgpt(ChatGptOptions::new(subscription_logins(path)))`, given to `AgentBuilder::provider`. `sign_in` and `sign_out` are async; `SignInOptions::paste` is an optional Tokio receiver of pasted lines. `AgentBuilder::claude_provider(claude(ClaudeOptions::default())?)` starts the Claude program as a process plugin; it needs Node.js 22 or later.
+- Subscription Providers: `chatgpt(ChatGptOptions::new(subscription_logins(path)))` and `grok(GrokOptions::new(subscription_logins(path)))`, given to `AgentBuilder::provider`. `sign_in` and `sign_out` are async and take `"chatgpt"` or `"grok"`. `SignInOptions::paste` is an optional Tokio receiver of pasted lines, ignored for Grok. `AgentBuilder::claude_provider(claude(ClaudeOptions::default())?)` starts the Claude program as a process plugin; it needs Node.js 22 or later.
 
 ## TypeScript
 

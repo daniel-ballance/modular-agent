@@ -94,7 +94,7 @@ impl ResponsesProvider {
         auth: SubscriptionLogins,
         client_identity: ClientIdentity,
     ) -> Result<Self> {
-        let client = Self::client(options.format, false)?;
+        let client = Self::client(false)?;
         Ok(Self {
             id: options.id,
             label: options.label,
@@ -109,14 +109,12 @@ impl ResponsesProvider {
         })
     }
 
-    fn client(format: ResponsesFormat, fixture: bool) -> Result<reqwest::Client> {
+    fn client(fixture: bool) -> Result<reqwest::Client> {
         let mut client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(15))
-            .read_timeout(Duration::from_secs(300));
-        if format == ResponsesFormat::ChatGpt {
-            client = client.user_agent(concat!("modular-agent/", env!("CARGO_PKG_VERSION")));
-        }
+            .read_timeout(Duration::from_secs(300))
+            .user_agent(concat!("modular-agent/", env!("CARGO_PKG_VERSION")));
         if fixture {
             client = client.no_proxy();
         }
@@ -131,7 +129,7 @@ impl ResponsesProvider {
         validate_loopback(token).map_err(invalid_params)?;
         self.endpoint = responses.into();
         self.token_endpoint = token.into();
-        self.client = Self::client(self.format, true).map_err(invalid_params)?;
+        self.client = Self::client(true).map_err(invalid_params)?;
         Ok(self)
     }
 }

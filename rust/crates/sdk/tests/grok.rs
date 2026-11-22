@@ -369,6 +369,10 @@ async fn requests_use_one_locked_refresh_and_replay_encrypted_reasoning() -> Res
                 ("authorization", "Bearer fresh-access"),
                 ("accept", "text/event-stream"),
                 ("content-type", "application/json"),
+                (
+                    "user-agent",
+                    concat!("modular-agent/", env!("CARGO_PKG_VERSION")),
+                ),
             ] {
                 assert_eq!(req.header(name), Some(value));
             }
@@ -387,7 +391,8 @@ async fn requests_use_one_locked_refresh_and_replay_encrypted_reasoning() -> Res
                     "authorization",
                     "content-length",
                     "content-type",
-                    "host"
+                    "host",
+                    "user-agent"
                 ]
             );
             let body: Value = serde_json::from_str(&req.body)?;
