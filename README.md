@@ -95,7 +95,7 @@ Then read on:
 ```sh
 git clone https://github.com/daniel-ballance/modular-agent.git && cd modular-agent
 rust/scripts/install.sh      # builds ma into ~/.local/bin, with the Claude sidecar
-ma login openai-codex        # or xai, or claude (uses your Claude Code sign-in)
+ma login chatgpt             # or grok, or claude (uses your Claude Code sign-in)
 ma                           # in a project folder
 ```
 

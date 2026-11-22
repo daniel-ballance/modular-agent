@@ -344,7 +344,7 @@ A Provider may return opaque `providerData` in a response. The SDK keeps it in t
 
 The Provider gets its credential through `context.credential()`; it never receives one in configuration. `request` and `discardState` are the SDK 0.1 Provider port. A Provider may keep state per session, declared with `keepsState`; the agent may call `discardState` to invalidate it. The core also allows a Provider to run tools itself, hold a live session or answer late ([Model request and response](../contracts.md#model-request-and-response)), but this port does not expose those modes, and a Provider registered through it cannot declare them.
 
-The `openai()` and `anthropic()` constructors make API-key Providers for the Responses and Messages APIs, respectively. Their catalogs and reasoning settings follow the [shared API-key model table](api-key-models.md).
+The `openai()` and `anthropic()` constructors make API-key Providers for the Responses and Messages APIs, respectively. Their catalogs and reasoning settings follow the [shared API-key model table](api-key-models.md). The `chatgpt()`, `grok()` and `claude()` constructors make [subscription Providers](subscription-providers.md), which use a person's own plan; `signIn`, `signOut` and `subscriptionLogins(path)` manage their sign-ins.
 
 ## Hooks
 

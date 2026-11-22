@@ -13,6 +13,7 @@ An agent builds each SDK from these documents and the specification. Where it ha
 | This page | What the SDK is for, the principles behind it, how it is versioned and checked |
 | [Concepts](concepts.md) | What a developer sees, what is hidden until needed, and the defaults |
 | [API](api.md) | The shape of the API, in language-neutral terms |
+| [Subscription Providers](subscription-providers.md) | `chatgpt`, `grok` and `claude`: using a person's own plan, sign-in and the login file |
 | [Placement and durability](placement.md) | Where each part can run and what survives a restart, and how a developer chooses |
 | [Testing](testing.md) | The testing kit each SDK ships, and the shared scenarios that check the SDKs against each other |
 | [API reference](reference.md) | How to build each language's generated reference |

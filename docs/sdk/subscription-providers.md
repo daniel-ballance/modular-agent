@@ -1,0 +1,76 @@
+# Subscription Providers
+
+Each SDK ships three Providers that use a person's own subscription plan instead of an API key ([ADR 0031](../adr/0031-subscription-providers.md)):
+
+| Constructor | Provider id | Plan | How it reaches the models |
+|---|---|---|---|
+| `chatgpt(options)` | `chatgpt` | ChatGPT (Plus, Pro, Business) | OAuth sign-in, then the Responses API |
+| `grok(options)` | `grok` | The X Subscription, and the SuperGrok and X Premium plans it replaces | OAuth sign-in, then xAI's Responses API ([Grok](#grok)) |
+| `claude(options)` | `claude` | Claude (Pro, Max, Team) | The Claude Agent SDK, signed in through Claude Code |
+
+They are ordinary [Providers](api.md#providers): an app adds them with `providers`, and they serve and load over the plugin binding like any other. They behave the same in all four languages.
+
+## Terms of use
+
+These Providers are for a person using their own plan, on their own machine. Each service sets its own terms, and an app that offers these Providers to other people must follow them:
+
+- **Claude.** Anthropic does not permit third-party developers to offer Claude.ai login in their own applications, to route requests through Free, Pro, Max or Ultra credentials on behalf of their users, or to collect, store or intermediate Claude.ai credentials ([Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)). So `claude()` has no sign-in of its own and never reads or stores a Claude credential: it uses the sign-in Claude Code keeps, made with Anthropic's own flow (`claude auth login`). A product for other people uses the `anthropic()` API-key Provider instead.
+- **ChatGPT and Grok.** The sign-in uses the OAuth client of the vendor's own coding tool (Codex, Grok Build), because the vendors issue no client to other tools. An app built on these Providers is responsible for checking that its use is allowed.
+
+## Logins
+
+`chatgpt()` and `grok()` keep their sign-in in a **login file**, made with `subscriptionLogins(path)`:
+
+- The file is JSON, `{"logins": {PROVIDER: LOGIN}, ...}`. Other top-level members are kept unchanged; `ma` keeps its `answers` there. A login is `{"type": "oauth", "access", "refresh", "expires", "account"?}`, with `expires` in milliseconds since the epoch already brought forward by five minutes, so a token is refreshed before it dies in a request.
+- The file is created with mode 0600 and refused if it is readable by anyone else. Every change replaces the file atomically.
+- Every change, and every token refresh, holds an exclusive kernel lock (`flock(2)`) on the file from reading it to replacing it, including while waiting for the token endpoint. Two processes refreshing at once therefore spend one refresh token: the second finds the new token when it gets the lock. Programs in different languages share the lock.
+- A Provider reads its login when it needs a token. If the stored token expires within the margin, it refreshes under the lock and writes the result. A refresh the service refuses (`invalid_grant`) leaves the login in place and fails the request with ModelError `credentials`, saying to sign in again.
+- `available()` is true when the file holds a login for the Provider. It does not call the service.
+
+A login is never written to history, events, logs or errors, and never sent anywhere but the vendor's token and model endpoints.
+
+## Signing in
+
+`signIn(provider, logins, options)` signs in to `chatgpt` or `grok` and stores the login. It reports what the person must do through `options.onStep(step)`:
+
+| Step | Meaning |
+|---|---|
+| `openAndPaste { url }` | Open `url` in a browser. When the browser returns, either the agent hears it on the loopback redirect, or the person pastes the address from the browser's address bar. |
+| `deviceCode { url, code }` | Open `url` on any machine and enter `code`. |
+| `waiting` | The SDK is polling; nothing to do. |
+
+`options.device: true` asks for the device-code flow. `options.paste()` supplies a pasted line when the caller can read one; the SDK accepts the whole address, its query (`code=…&state=…`), `code#state`, or the bare code, checks a present state against the sign-in's, and asks again on a mismatch or an `error`. A redirect port already in use leaves pasting as the only return; with no `paste` either, the SDK uses the device code. `options.clientIdentity` is sent as below. The SDK opens no browser itself; the caller decides.
+
+`signOut(provider, logins)` removes the login.
+
+## Client identity
+
+Requests and sign-ins name the client to the service: `originator` on ChatGPT requests and in the ChatGPT authorize address, and the field [Grok](#grok) names. It is `modular-agent` unless the `clientIdentity` option names another: 1 to 64 characters from `A`–`Z`, `a`–`z`, `0`–`9`, `.`, `_` and `-`. Anything else is `invalid_composition` for a constructor and `invalid_params` for `signIn`. The identity is a label, not a credential.
+
+## Models
+
+`chatgpt()` and `grok()` offer the models in [subscription-models.json](subscription-models.json), which uses the format and reasoning rules of the [API-key model table](api-key-models.md). The `claude` entries map each level to the Agent SDK's `thinking` and `effort` options, in the TypeScript SDK's spelling; the Python SDK uses its own names for the same settings. Each SDK MUST ship it unchanged and test that its copy is byte-identical. The `models` option enrolls an unlisted id with its limits, as for the API-key Providers.
+
+## ChatGPT
+
+- **Sign-in.** OAuth 2.0 with PKCE against `https://auth.openai.com`, client `app_EMoamEEZ73f0CkXaXp7hrann`, scope `openid profile email offline_access`, redirect `http://localhost:1455/auth/callback`; the authorize address also carries `id_token_add_organizations=true`, `codex_cli_simplified_flow=true` and `originator`. The device flow uses `/api/accounts/deviceauth/usercode` and `/api/accounts/deviceauth/token`, with the page `https://auth.openai.com/codex/device`. `account` is the ChatGPT account id from the access token's `https://api.openai.com/auth` claim, `chatgpt_account_id`.
+- **Requests.** The Responses API at `https://chatgpt.com/backend-api/codex/responses`, streamed, `store: false`, with the bearer token, `chatgpt-account-id`, `OpenAI-Beta: responses=experimental`, `originator`, and the session id as both `session-id` and `x-client-request-id`. Encrypted reasoning is requested and kept as `providerData`.
+
+These are the values `ma` uses today; the Rust `provider-responses` crate is the reference for the exact request.
+
+## Grok
+
+Set from [Grok sign-in under The X Subscription](../research/grok-x-subscription.md).
+
+## Claude
+
+- `claude()` reaches Claude through the Claude Agent SDK, used as a plain model endpoint: the host's system prompt with no Claude Code preset; only the host's tools shown to the model; Claude Code's own tools, settings files, hooks, memory, MCP configuration, skills and session files off. When the model asks for a tool, the request ends with `toolCall` parts and stop `toolUse`; nothing runs inside the Agent SDK. Text and reasoning arrive as pieces.
+- TypeScript and Python use Anthropic's Agent SDK for their language. Anthropic publishes none for Rust or Go, so their `claude()` runs the TypeScript SDK's Claude program as a [process plugin](placement.md#a-plugin-in-another-process) and needs Node.js 22 or newer. The `program` option, or `MODULAR_AGENT_CLAUDE_SIDECAR`, names it; otherwise each SDK looks in its documented install location. A missing program is `invalid_composition` naming both.
+- The catalog starts from the `claude` entries in [subscription-models.json](subscription-models.json), then takes what Claude Code reports the account offers.
+- `available()` is true when Claude Code reports a Claude plan sign-in. If Claude Code is using an API key instead, `available()` is false and the reason names the key's source, so a plan is never silently replaced by metered use.
+
+## Checks
+
+Each SDK MUST test offline, against loopback servers or by inspecting the built request: both sign-in flows for `chatgpt` and `grok`, including paste forms, state mismatch and a busy redirect port; the authorize address and request headers, with the default and a configured client identity; refresh under the lock with two concurrent refreshers spending one refresh token; a refused refresh; the file mode check; and model mapping from the shared table. `claude()` is tested against the Agent SDK's fixtures, as the TypeScript sidecar's tests do today.
+
+[Live checks](testing.md#live-checks) for subscriptions run only with `MODULAR_AGENT_LIVE=1` and `MODULAR_AGENT_LIVE_LOGINS` naming a login file, and skip each Provider without a login (for `claude`, without a Claude Code sign-in). They make one short request per Provider and never sign in.

@@ -18,7 +18,7 @@ The command is `ma` in every language. Only one is installed at a time.
 ```
 ma [options]                 talk to the agent in this folder
 ma [options] -p PROMPT       answer one prompt and exit
-ma login PROVIDER [--device] sign in: openai-codex, xai or claude
+ma login PROVIDER [--device] sign in: chatgpt, grok or claude
 ma logout PROVIDER
 ma auth                      show what is signed in
 ma models                    list the models on offer
@@ -29,7 +29,7 @@ ma sessions [--all]          list saved sessions
 
 | Option | Meaning |
 |---|---|
-| `--model PROVIDER/ID` | the model, such as `openai-codex/gpt-6.1-sol`, `xai/grok-4.7` or `claude/claude-sonnet-5-5` |
+| `--model PROVIDER/ID` | the model, such as `chatgpt/gpt-6.1-sol`, `grok/grok-4.7` or `claude/claude-sonnet-5-5` |
 | `--thinking LEVEL` | `off`, `minimal`, `low`, `medium`, `high` or `xhigh`, as the model allows |
 | `--session ID` | reopen a session |
 | `-c`, `--continue` | reopen this folder's most recent session |
@@ -48,7 +48,7 @@ ma sessions [--all]          list saved sessions
 
 ACP project scope, tenant reach and any narrower rights come from operator configuration, never from project files. `ma` MUST enforce an operator restriction before reading project settings or composing that project. Its single-user profile does not enable configured representation. The unrestricted local shorthand is for a trusted launcher, not an untrusted stdio proxy. See [ACP starting](../bindings/acp.md#starting) and [ACP authorization](../bindings/acp.md#authorization).
 
-With no `--model` and none in settings, `ma` uses the first Provider that is signed in, in the order `openai-codex`, `xai`, `claude`. With none signed in it exits with status 1 and says how to sign in.
+With no `--model` and none in settings, `ma` uses the first Provider that is signed in, in the order `chatgpt`, `grok`, `claude`. With none signed in it exits with status 1 and says how to sign in.
 
 **Interactive mode** is line-based. While the agent works, a line typed steers the running turn; `/after TEXT` queues a new turn; `/cancel` or Ctrl-C stops the turn. Commands: `/commands`, `/model`, `/thinking`, `/compact`, `/skills`, `/skill:NAME`. Model text streams to stdout; calls and diagnostics go to stderr.
 
@@ -62,7 +62,7 @@ With no `--model` and none in settings, `ma` uses the first Provider that is sig
 | `policy.json` | Operator-owned [connection policy and limits](#connection-policy-and-limits). |
 | `auth.json` | Sign-ins, written by `ma login`. Mode 0600. Format below. |
 | `mcp.json` | `{"mcpServers": {...}}` in the form Pi and other clients use. `${NAME}` takes a value from the environment. |
-| `models.json` | Catalog additions or replacements: `{"openai-codex": [{"id", "name", "contextWindow", "maxTokens", "effort"}], "xai": [...]}` |
+| `models.json` | Catalog additions or replacements: `{"chatgpt": [{"id", "name", "contextWindow", "maxTokens", "effort"}], "grok": [...]}` |
 | `AGENTS.md` | Standing instructions for every project |
 | `skills/` | Skills |
 | `trusted-projects.json` | Projects trusted with `--trust-project`: an object mapping each canonical project path to `true`. Written by replacing the file atomically. |
@@ -108,15 +108,15 @@ The ordinary pool cannot use control headroom or outstanding settlement reservat
 
 | Provider | Models | Sign-in |
 |---|---|---|
-| `openai-codex` | ChatGPT subscription models over the Responses API | `ma login openai-codex`: browser, or a device code with `--device`. Tokens refresh. |
-| `xai` | Grok subscription models over the Responses API | `ma login xai`: a device code |
-| `claude` | Claude subscription models, through the Claude Agent SDK | `ma login claude` runs `claude auth login`; Claude Code keeps the sign-in |
+| `chatgpt` | ChatGPT plan models | `ma login chatgpt`: browser, or a device code with `--device`. Tokens refresh. |
+| `grok` | The X Subscription's Grok models | `ma login grok` |
+| `claude` | Claude plan models, through the Claude Agent SDK | `ma login claude` runs `claude auth login`, Anthropic's own sign-in; Claude Code keeps it |
 
-Request shapes, headers, endpoints and client ids follow Pi 1.5.2, as the Rust `provider-responses` crate does.
+These are the SDK's [subscription Providers](../sdk/subscription-providers.md), with their sign-in, login file, refresh, request shapes and model table; `ma` adds none of its own. `auth.json` is their login file. `ma` accepts the former ids `openai-codex` (for `chatgpt`) and `xai` (for `grok`) in `--model`, `ma login`, `ma logout`, settings, `models.json` and reopened sessions, and moves a login stored under a former id to the new id the next time it writes `auth.json` ([ADR 0031](../adr/0031-subscription-providers.md)).
 
 **Signing in to ChatGPT** works where the browser is not on the agent's machine, as over SSH:
 
-- `ma login openai-codex` prints the sign-in address and, when standard input is a terminal, also asks the person to paste. The browser returns to `http://localhost:1455/auth/callback`. If the browser runs on the agent's machine, `ma` hears that on port 1455 and finishes. If it runs elsewhere the page fails to load; the person copies the address from the browser's address bar and pastes it. Whichever comes first finishes the sign-in.
+- `ma login chatgpt` prints the sign-in address and, when standard input is a terminal, also asks the person to paste. The browser returns to `http://localhost:1455/auth/callback`. If the browser runs on the agent's machine, `ma` hears that on port 1455 and finishes. If it runs elsewhere the page fails to load; the person copies the address from the browser's address bar and pastes it. Whichever comes first finishes the sign-in.
 - A pasted line may be the whole address, its query (`code=…&state=…`), `code#state`, or the bare code. A state that is present must match the sign-in's; a mismatch, or an `error` in the address, is reported and the prompt asks again.
 - If port 1455 is in use, pasting is the only way back. If it is in use and standard input is not a terminal, `ma` uses the device code sign-in.
 - `--device` uses the device code sign-in: a code typed at a page on any machine. The ChatGPT account must allow device code sign-in in its security settings.
