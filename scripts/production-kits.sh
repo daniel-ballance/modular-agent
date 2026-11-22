@@ -63,7 +63,7 @@ history_service() { # Store directory; sets history_url when the service is read
     typescript)
       local settings
       settings=$(node -e 'const fs=require("fs"), dir=process.argv[1]; console.log(JSON.stringify({
-        dir: `${dir}/store`, token: fs.readFileSync(`${dir}/token`, "utf8").trim(), leaseMs: 2500,
+        dir: `${dir}/store`, token: fs.readFileSync(`${dir}/token`, "utf8").trim(), leaseTtl: 2500,
       }))' "$dir")
       service=(node "$repo/typescript/packages/services/dist/src/serve.js" history "$settings")
       ;;
@@ -131,7 +131,7 @@ if ! $erasure_only; then
     rust) restart=--restart-ttl
       registry=("$repo/rust/target/debug/examples/history_service" "127.0.0.1:$port" "$work/registry/token" "$work/registry/store") ;;
     typescript)
-      registry=(node "$repo/typescript/packages/services/dist/src/serve.js" history "$(node -e 'const fs=require("fs"); console.log(JSON.stringify({ dir: process.argv[1] + "/store", token: fs.readFileSync(process.argv[1] + "/token", "utf8").trim(), port: +process.argv[2], leaseMs: 2500 }))' "$work/registry" "$port")") ;;
+      registry=(node "$repo/typescript/packages/services/dist/src/serve.js" history "$(node -e 'const fs=require("fs"); console.log(JSON.stringify({ dir: process.argv[1] + "/store", token: fs.readFileSync(process.argv[1] + "/token", "utf8").trim(), port: +process.argv[2], leaseTtl: 2500 }))' "$work/registry" "$port")") ;;
     go) registry=("$repo/go/.bin/modular-service" --role history --listen "127.0.0.1:$port" --token-file "$work/registry/token" --state "$work/registry/store" --history-ttl 2500ms) ;;
     python) registry=("$repo/python/.venv/bin/python" -c '
 import signal, sys

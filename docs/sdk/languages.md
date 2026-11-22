@@ -56,7 +56,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - `run` may return a value or a Promise. Streams are async iterables, used with `for await`. A tool refuses by calling `cx.refuse(reason)`, which throws and does not return.
 - Standard Schema validators must expose the Standard JSON Schema input export, for example Zod 4. For plain JSON Schema assigned to a variable, use `as const` so its keywords keep their literal types for inference.
 - `registrar.on("tool.before", handler)` infers the payload and answer from the point. A gate can return `"allow"` or `{ refuse: reason }`.
-- A service can take `serve(() => makePlugin(), options)` for fresh plugin state per connection. `serveHistory(fileHistory(dir), { address, tokenFile })` resolves to `{ url, close }`; tests can ask for port `0` and await `close()` when done.
+- A service can take `serve(() => makePlugin(), options)` for fresh plugin state per connection. `serveHistory(fileHistory(dir), { address, tokenFile, leaseTtl? })` resolves to `{ url, close }`; tests can ask for port `0` and await `close()` when done. `leaseTtl` is a whole number of milliseconds, at least 1, and defaults to 15,000.
 - Use `defineProvider` to get `changed()`. `agent.refreshModels()` explicitly refreshes served catalogs.
 - ACP's `compose(project, saved?)` takes an optional `SessionInfo`. `projectSettings(project)` and `projectMcp(project)` may be async. The stdio actor id comes from `actorId`, then `MODULAR_AGENT_ACTOR`, then `acp-user`.
 - No default exports.

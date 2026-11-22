@@ -15,7 +15,7 @@ scratch=$(mktemp -d)
 token=$(openssl rand -hex 16)
 printf '%s\n' "$token" > "$scratch/token"
 node packages/services/dist/src/serve.js history \
-  "{\"dir\":\"$scratch/store\",\"token\":\"$token\",\"port\":39071,\"leaseMs\":2500}"
+  "{\"dir\":\"$scratch/store\",\"token\":\"$token\",\"port\":39071,\"leaseTtl\":2500}"
 ```
 
 From another shell, run the kit against `http://127.0.0.1:39071` with the path to `$scratch/token`. An agent using this service takes the same URL and token file via the two variables above.
