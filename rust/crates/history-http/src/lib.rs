@@ -150,6 +150,9 @@ impl Service {
         let mut request = client
             .request(method.clone(), url)
             .bearer_auth(token.as_ref());
+        if let Some(parent) = agent_api::telemetry::traceparent(&agent_api::telemetry::current()) {
+            request = request.header("traceparent", parent);
+        }
         if let Some(revision) = revision {
             request = request.header("History-Revision", revision);
         }
@@ -261,7 +264,8 @@ impl Service {
         let after = after.map(str::to_owned);
         let revision = revision.map(str::to_owned);
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        io().spawn(async move {
+        let cx = agent_api::telemetry::current();
+        io().spawn(agent_api::telemetry::within(cx, async move {
             let path: Vec<_> = path.iter().map(String::as_str).collect();
             let send = service.send(
                 method,
@@ -280,7 +284,7 @@ impl Service {
                 send.await
             };
             let _ = tx.send(result);
-        });
+        }));
         rx.recv()?
     }
     fn get(&self, path: &[&str], project: Option<&Path>) -> Result<Value> {

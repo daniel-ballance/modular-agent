@@ -170,13 +170,15 @@ impl Connection {
         name: String,
         arguments: Map<String, Value>,
     ) -> Result<Option<CallToolResult>> {
-        match tokio::time::timeout(
-            Duration::from_secs(60),
-            self.service
-                .call_tool(CallToolRequestParams::new(name).with_arguments(arguments)),
-        )
-        .await
-        {
+        let mut request = CallToolRequestParams::new(name).with_arguments(arguments);
+        if let Some(parent) = agent_api::telemetry::traceparent(&agent_api::telemetry::current()) {
+            request.meta = Some(rmcp::model::RequestMetaObject::from(
+                [("traceparent".into(), Value::String(parent))]
+                    .into_iter()
+                    .collect::<Map<String, Value>>(),
+            ));
+        }
+        match tokio::time::timeout(Duration::from_secs(60), self.service.call_tool(request)).await {
             Ok(result) => Ok(Some(result?)),
             Err(_) => Ok(None),
         }

@@ -26,6 +26,7 @@ struct OpenSession {
     interruption: CancellationToken,
     queue: VecDeque<Input>,
     input_contexts: BTreeMap<String, Context>,
+    question_contexts: BTreeMap<String, String>,
     interrupted: Vec<(Arc<dyn Runtime>, Scope)>,
     active: bool,
     rewinding: bool,
@@ -326,6 +327,7 @@ impl Harness {
                         interruption: CancellationToken::new(),
                         queue: VecDeque::new(),
                         input_contexts: BTreeMap::new(),
+                        question_contexts: BTreeMap::new(),
                         interrupted: Vec::new(),
                         active: false,
                         rewinding: false,
@@ -463,6 +465,7 @@ impl Harness {
                     interruption: CancellationToken::new(),
                     queue: VecDeque::new(),
                     input_contexts: BTreeMap::new(),
+                    question_contexts: BTreeMap::new(),
                     interrupted: Vec::new(),
                     active: false,
                     rewinding: recovery,
@@ -2179,6 +2182,15 @@ impl AgentApi for Harness {
     fn tool_registration(&self, key: &str) -> Value {
         self.registry.read().unwrap().tool_registration(key)
     }
+    fn question_trace(&self, session: &str, question: &str) -> Option<String> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(session)?
+            .question_contexts
+            .get(question)
+            .cloned()
+    }
     fn snapshot(&self, session: &str) -> Result<SessionData> {
         let mut sessions = self.sessions.lock().unwrap();
         let open = sessions
@@ -2403,6 +2415,23 @@ impl AgentApi for Harness {
         next.entries.push(entry.clone());
         self.commit(open, &next)?;
         open.data = next;
+        if let Some(content) = &entry.content {
+            match entry.kind.as_str() {
+                "request.open" => {
+                    if let Some(id) = content["id"].as_str()
+                        && let Some(parent) = telemetry::traceparent(&telemetry::current())
+                    {
+                        open.question_contexts.insert(id.into(), parent);
+                    }
+                }
+                "request.answer" | "request.closed" => {
+                    if let Some(id) = content["request"].as_str() {
+                        open.question_contexts.remove(id);
+                    }
+                }
+                _ => {}
+            }
+        }
         observe_question(&open.data, &entry);
         self.pending_events
             .lock()
@@ -2772,6 +2801,7 @@ impl AgentApi for Harness {
                 interruption: CancellationToken::new(),
                 queue: VecDeque::new(),
                 input_contexts: BTreeMap::new(),
+                question_contexts: BTreeMap::new(),
                 interrupted: Vec::new(),
                 active: false,
                 rewinding: false,

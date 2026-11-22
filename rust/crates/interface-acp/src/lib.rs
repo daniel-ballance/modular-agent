@@ -247,6 +247,34 @@ impl State {
         request: UntypedMessage,
         cx: ConnectionTo<acp::Client>,
     ) -> Result<Value> {
+        // Stdio is an operator-launched peer. Network authentication grants work,
+        // not trace trust, so WebSocket requests start in a fresh trace.
+        let context = if !self.principal.network
+            && matches!(
+                request.method.as_str(),
+                "session/prompt"
+                    | "session/new"
+                    | "session/load"
+                    | "session/resume"
+                    | "session/close"
+                    | "_modular/submit"
+                    | "_modular/answer"
+                    | "_modular-agent/input"
+                    | "_modular-agent/requests/answer"
+                    | "_modular-agent/answer"
+            ) {
+            telemetry::extract(&request.params["_meta"]).unwrap_or_default()
+        } else {
+            telemetry::Context::new()
+        };
+        telemetry::within(context, self.dispatch_work(request, cx)).await
+    }
+
+    async fn dispatch_work(
+        &self,
+        request: UntypedMessage,
+        cx: ConnectionTo<acp::Client>,
+    ) -> Result<Value> {
         let method = request.method.clone();
         let prompt = method == "session/prompt";
         let before = if request.params["sessionId"].is_string()

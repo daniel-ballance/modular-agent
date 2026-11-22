@@ -70,6 +70,12 @@ pub fn traceparent(cx: &Context) -> Option<String> {
     })
 }
 
+pub fn same_trace_or(candidate: Option<Context>, parent: &Context) -> Context {
+    candidate
+        .filter(|cx| cx.span().span_context().trace_id() == parent.span().span_context().trace_id())
+        .unwrap_or_else(|| parent.clone())
+}
+
 pub fn link(cx: &Context) -> Option<Link> {
     let span = cx.span();
     let sc = span.span_context();

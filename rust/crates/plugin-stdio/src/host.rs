@@ -518,16 +518,20 @@ const CONTROL: Duration = Duration::from_secs(5);
 
 async fn initialize(peer: &Peer, project: &Path, home: &Path, config: Value) -> Reply {
     let config = if config.is_null() { json!({}) } else { config };
-    control(
+    let registration = control(
         peer,
         "plugin/initialize",
         json!({
             "binding":"modular-agent-plugin/1","data":"modular-agent-data/1",
             "host":{"name":"modular-agent-rs","version":env!("CARGO_PKG_VERSION")},
-            "project":project,"home":home,"config":config
+            "project":project,"home":home,"config":config,"traceContext":1
         }),
     )
-    .await
+    .await?;
+    if let Some(name) = registration["name"].as_str() {
+        peer.configure_trace(name, registration["traceContext"] == 1, false);
+    }
+    Ok(registration)
 }
 
 fn validate_binding(registration: &Value) -> Result<()> {

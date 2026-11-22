@@ -327,7 +327,7 @@ impl Endpoint for Served {
                         }
                     })));
                 }
-                let v = registration(&self.plugin.name, &self.plugin.replaces, &r);
+                let mut v = registration(&self.plugin.name, &self.plugin.replaces, &r);
                 let environment = r.environment.is_some() || r.portable_environment.is_some();
                 if environment && let Some(projects) = &self.projects {
                     if !self.fresh_instance {
@@ -365,10 +365,16 @@ impl Endpoint for Served {
                     *self.environment_project.lock().unwrap() = Some(project);
                 }
                 if r.environment.is_some() && r.portable_environment.is_none() {
-                    let env = plugin_stdio::server::EnvironmentServer::new(peer, &p).await?;
+                    let env =
+                        plugin_stdio::server::EnvironmentServer::new(peer.clone(), &p).await?;
                     *self.environment.lock().unwrap() = Some(Arc::new(env));
                 }
                 *self.registered.lock().unwrap() = Some(Arc::new(r));
+                let agreed = p["traceContext"] == 1;
+                if agreed {
+                    v["traceContext"] = json!(1);
+                }
+                peer.configure_trace(&self.plugin.name, agreed, true);
                 Ok(v)
             }
             "plugin/shutdown" => Ok(json!({})),

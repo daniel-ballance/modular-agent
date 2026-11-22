@@ -1221,7 +1221,7 @@ async fn handle(
         .unwrap())
 }
 async fn request(server: Arc<Server>, req: Request<Incoming>) -> Answer {
-    let (parts, mut stream) = req.into_parts();
+    let (parts, stream) = req.into_parts();
     let authorized = parts
         .headers
         .get(header::AUTHORIZATION)
@@ -1238,6 +1238,20 @@ async fn request(server: Arc<Server>, req: Request<Incoming>) -> Answer {
             Some(("www-authenticate", "Bearer")),
         ));
     }
+    let context = parts
+        .headers
+        .get("traceparent")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| agent_api::telemetry::extract(&json!({"traceparent":v})))
+        .unwrap_or_default();
+    agent_api::telemetry::within(context, authorized_request(server, parts, stream)).await
+}
+
+async fn authorized_request(
+    server: Arc<Server>,
+    parts: hyper::http::request::Parts,
+    mut stream: Incoming,
+) -> Answer {
     let mut route = Route::parse(parts.uri.path())?;
     let profile = match &server.backend {
         Backend::Snapshot(_) => true,

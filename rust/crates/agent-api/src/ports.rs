@@ -183,6 +183,9 @@ pub trait AgentApi: Send + Sync {
         json!({"plugin":capability,"toolSource":capability.strip_prefix("tools.").unwrap_or(capability)})
     }
     fn snapshot(&self, session: &str) -> Result<SessionData>;
+    fn question_trace(&self, _session: &str, _question: &str) -> Option<String> {
+        None
+    }
     fn authority(&self, session: &str, actor: &str) -> Result<Authority>;
     fn grant(&self, scope: &Scope, actor: &str, authority: Authority) -> Result<()>;
     /// One history-store commit, optionally admitting input in that same commit.

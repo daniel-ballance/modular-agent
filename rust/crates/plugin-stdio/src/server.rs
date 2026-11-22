@@ -306,9 +306,19 @@ impl Endpoint for Conformance {
                 }))
                 .await?;
             }
-            h.load(Arc::new(Sink(peer))).await?;
+            h.load(Arc::new(Sink(peer.clone()))).await?;
+            let agreed = p["traceContext"] == 1;
             *self.state.lock().unwrap() = Some((h, p));
-            return Ok(self.registration());
+            let mut registration = self.registration();
+            if agreed {
+                registration["traceContext"] = json!(1);
+            }
+            peer.configure_trace(
+                registration["name"].as_str().unwrap_or("conformance"),
+                agreed,
+                true,
+            );
+            return Ok(registration);
         }
         let api = self.state().map_err(|e| Fault::new("invalid_request", e))?;
         if let Some((project, _)) = &self.service_scope
