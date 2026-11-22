@@ -145,7 +145,7 @@ The runner MUST report each failed expectation with the scenario, placement, ste
 
 ## Shared telemetry check
 
-The planned `conformance/telemetry/` check reuses the [shared scenarios](#the-shared-scenarios) without replacing their outcome or history assertions. It needs no live Provider or collector.
+The planned [`conformance/telemetry/` check](../../conformance/telemetry/README.md) reuses the [shared scenarios](#the-shared-scenarios) without replacing their outcome or history assertions. It needs no live Provider or collector.
 
 The harness runs a receiver on a fresh loopback port outside the agent and plugin process groups. It accepts [OTLP/HTTP](https://opentelemetry.io/docs/specs/otlp/#otlphttp) at `/v1/traces` in both encodings, protobuf and JSON, and returns a successful OTLP response. Each SDK's scenario runner and each participating fixture program install their language's OpenTelemetry SDK with an always-on sampler and the language's official OTLP/HTTP span exporter, using `http/protobuf`, pointed at that receiver. Every language's official exporter supports protobuf, and it is the encoding `ma` and common backends such as Arize Phoenix use; Go's exporter has no JSON encoding. Pass the endpoint explicitly to children. Do not use production credentials or endpoints. Force a flush on normal exit and wait for the acknowledged exports before comparing spans. Do not require a flush from a killed process.
 
