@@ -2149,7 +2149,8 @@ impl Callbacks {
                         let mut page=vec![];
                         let mut size=b"{\"entries\":[]}".len();
                         for (i,e) in entries.iter().enumerate().skip(start).take(limit) {
-                            let v=wire::entry(e,&data)?;
+                            let mut v=wire::entry(e,&data)?;
+                            portable::omit_trace_metadata(&mut v);
                             let n=serde_json::to_vec(&v)?.len();
                             let cursor_size=if i+1<entries.len() {b",\"next\":".len()+serde_json::to_vec(&e.id)?.len()}else{0};
                             let total=size+n+usize::from(!page.is_empty());

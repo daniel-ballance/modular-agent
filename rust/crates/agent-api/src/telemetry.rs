@@ -115,6 +115,7 @@ pub fn scope_attributes(scope: Option<&Scope>) -> Vec<KeyValue> {
 pub struct Operation {
     cx: Context,
     on_drop: Option<KeyValue>,
+    parent_id: SpanId,
 }
 impl Operation {
     pub fn new(
@@ -149,6 +150,7 @@ impl Operation {
         Self {
             cx: Context::new().with_span(span),
             on_drop: None,
+            parent_id: parent.span().span_context().span_id(),
         }
     }
     pub fn interrupted(mut self, key: &'static str) -> Self {
@@ -165,6 +167,12 @@ impl Operation {
     pub fn error(&self, kind: &'static str) {
         self.attr("error.type", kind);
         self.cx.span().set_status(Status::error(""));
+    }
+    /// The no-op API propagates its parent without creating a span ID.
+    pub fn own_carrier(&self) -> Option<Value> {
+        (self.cx.span().span_context().span_id() != self.parent_id)
+            .then(|| carrier(&self.cx))
+            .flatten()
     }
     pub fn context(&self) -> Context {
         self.cx.clone()

@@ -600,7 +600,39 @@ impl Harness {
         }
         let result = async {
             for (runtime, scope) in interrupted {
-                runtime.interrupted(self.api(), scope).await?;
+                if runtime.declaration()["continues_after_restart"] == true {
+                    let data = self.snapshot(id)?;
+                    let saved = saved_turn_trace(&data, scope.turn.as_deref());
+                    let links = saved
+                        .as_ref()
+                        .and_then(telemetry::link)
+                        .into_iter()
+                        .collect();
+                    let mut op = self.invocation(&scope, &saved.unwrap_or_default(), links, true);
+                    op.run(async {
+                        if let Some(carrier) = op.own_carrier() {
+                            self.append(
+                                &scope,
+                                "harness",
+                                Draft::new(
+                                    telemetry::TURN_TRACE,
+                                    false,
+                                    json!({"traceContext":carrier}),
+                                ),
+                            )?;
+                        }
+                        runtime.interrupted(self.api(), scope.clone()).await
+                    })
+                    .await?;
+                    if let Some(kind) = recorded_outcome(&self.snapshot(id)?, &scope) {
+                        op.outcome("modular_agent.turn.outcome", kind);
+                        if kind == "failed" {
+                            op.error("turn_failed");
+                        }
+                    }
+                } else {
+                    runtime.interrupted(self.api(), scope).await?;
+                }
             }
             Ok(())
         }
@@ -1734,7 +1766,19 @@ impl Harness {
                 );
             }
         }
-        let op = invocation.insert(self.invocation(scope, &telemetry::current(), vec![], false));
+        let links = start["continuesTurnId"]
+            .as_str()
+            .and_then(|id| saved_turn_trace(&data, Some(id)))
+            .as_ref()
+            .and_then(telemetry::link)
+            .into_iter()
+            .collect();
+        let op = invocation.insert(self.invocation(scope, &telemetry::current(), links, false));
+        if runtime.declaration()["continues_after_restart"] == true
+            && let Some(context) = op.own_carrier()
+        {
+            start["traceContext"] = context;
+        }
         entries.push(Draft::new("turn.start", false, start).copying(sources));
         let mut taken = json!({"text":input.text,"inputId":input_id,"key":input.key,"authority":cap,"context":context});
         if let Some(value) = source.and_then(|s| s.content.as_ref()) {
@@ -2692,7 +2736,9 @@ impl AgentApi for Harness {
         let branch = source.branch();
         let branch: Vec<_> = branch
             .iter()
-            .filter(|e| e.writer != "rust.derived" && e.content.is_some())
+            .filter(|e| {
+                e.writer != "rust.derived" && e.content.is_some() && e.kind != telemetry::TURN_TRACE
+            })
             .collect();
         for original in &branch {
             let mut entry = (*original).clone();
@@ -2700,7 +2746,11 @@ impl AgentApi for Harness {
             entry.parent = next.position.clone();
             entry.scope.session = new_id.clone();
             if let Some(v) = entry.content.as_mut() {
-                if entry.kind == "request.open" {
+                if entry.kind == "turn.start" {
+                    if let Some(value) = v.as_object_mut() {
+                        value.remove("traceContext");
+                    }
+                } else if entry.kind == "request.open" {
                     let mut q: Question = serde_json::from_value(v.clone())?;
                     q.scope.session = new_id.clone();
                     for s in &mut q.route {
@@ -3244,6 +3294,41 @@ fn observe_question(data: &SessionData, entry: &Entry) {
     } else {
         telemetry::event("modular_agent.question.open", &entry.scope, attrs);
     }
+}
+
+fn saved_turn_trace(data: &SessionData, turn: Option<&str>) -> Option<Context> {
+    let turn = turn?;
+    let copied: std::collections::BTreeSet<_> = if data.origin.is_some() {
+        data.entries
+            .iter()
+            .take_while(|e| !e.copies.is_empty() || e.content.is_none())
+            .map(|e| &e.id)
+            .collect()
+    } else {
+        Default::default()
+    };
+    data.branch()
+        .iter()
+        .rev()
+        .filter(|e| {
+            e.scope.session == data.id
+                && e.scope.turn.as_deref() == Some(turn)
+                && !copied.contains(&e.id)
+                && !e.visible
+                && matches!(e.kind.as_str(), "turn.start" | telemetry::TURN_TRACE)
+        })
+        .filter_map(|e| e.content.as_ref()?.get("traceContext"))
+        .find_map(telemetry::extract)
+}
+
+fn recorded_outcome(data: &SessionData, scope: &Scope) -> Option<&'static str> {
+    let entry = data
+        .branch()
+        .into_iter()
+        .rev()
+        .find(|e| e.kind == "turn.end" && e.scope.turn == scope.turn)?;
+    let outcome = serde_json::from_value::<Outcome>(entry.content?["outcome"].clone()).ok()?;
+    Some(outcome_name(&outcome))
 }
 
 fn outcome_name(outcome: &Outcome) -> &'static str {

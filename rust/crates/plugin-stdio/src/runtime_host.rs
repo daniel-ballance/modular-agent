@@ -1562,7 +1562,11 @@ impl TurnWork {
             }
             // Don't interpret a plugin's private kinds as trusted Harness entries.
             _ => {
-                ensure!(kind.contains('.'), "record kind is host-owned");
+                ensure!(
+                    kind.contains('.')
+                        && !matches!(kind, telemetry::TURN_TRACE | "modular-agent.disclosure"),
+                    "record kind is host-owned"
+                );
                 if let Some(id) = v["toolCallId"].as_str() {
                     let (sc, call, _) = self.call_scope(api, scope, id)?;
                     scope = sc;
