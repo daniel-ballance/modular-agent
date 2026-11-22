@@ -3,6 +3,10 @@ import { chatgptAccount, chatgptOAuth, grokOAuth, loopback, type OAuthTestOption
 import type { Login, SubscriptionLogins } from "./logins.js";
 import { resolveClientIdentity, type ClientIdentityOptions } from "./client-identity.js";
 import { modelInfo, reasoningFields, subscriptionModels, type ModelEnrollment, type SubscriptionModel } from "./models.js";
+import { createRequire } from "node:module";
+
+/** Sent on every model request, as the other SDKs do: `modular-agent/VERSION`. */
+const USER_AGENT = `modular-agent/${(createRequire(import.meta.url)("../../package.json") as { version: string }).version}`;
 
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 const textOf = (content: ContentPart[]) => content.filter(p => p.type === "text").map(p => p.text).join("");
@@ -168,7 +172,7 @@ export function responsesProvider(id: SubscriptionProviderId, url: string,
       let credential = await login();
       for (let attempt = 0; ; attempt++) {
         const bearer = credential.type === "oauth" ? credential.access : credential.key;
-        const headers: Record<string, string> = { authorization: `Bearer ${bearer}`, accept: "text/event-stream", "content-type": "application/json" };
+        const headers: Record<string, string> = { authorization: `Bearer ${bearer}`, accept: "text/event-stream", "content-type": "application/json", "user-agent": USER_AGENT };
         if (id === "chatgpt") {
           let account: string;
           try { account = (credential.type === "oauth" ? credential.account : undefined) ?? chatgptAccount(bearer); }

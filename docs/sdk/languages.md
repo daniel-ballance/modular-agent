@@ -60,7 +60,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - Use `defineProvider` to get `changed()`. `agent.refreshModels()` explicitly refreshes served catalogs.
 - ACP's `compose(project, saved?)` takes an optional `SessionInfo`. `projectSettings(project)` and `projectMcp(project)` may be async. The stdio actor id comes from `actorId`, then `MODULAR_AGENT_ACTOR`, then `acp-user`.
 - No default exports.
-- Subscription Providers come from `@modular-agent/subscription` (`subscriptionLogins(path)`, `chatgpt({ logins, … })`, `signIn("chatgpt", logins, options)`, `signOut`) and `@modular-agent/claude` (`claude(options)`, in process on Anthropic's Agent SDK). The Claude package also has the program the Rust and Go SDKs start.
+- Subscription Providers come from `@modular-agent/subscription` (`subscriptionLogins(path)`, `chatgpt({ logins, … })`, `grok({ logins, … })`, `signIn(provider, logins, options)` and `signOut(provider, logins)`, with `provider` `"chatgpt"` or `"grok"`) and `@modular-agent/claude` (`claude(options)`, in process on Anthropic's Agent SDK). The Claude package also has the program the Rust and Go SDKs start.
 
 ## Go
 

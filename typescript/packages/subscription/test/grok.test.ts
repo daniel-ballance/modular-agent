@@ -143,6 +143,7 @@ for (const served of [false, true]) {
       assert.equal(req.headers.authorization, "Bearer fixture-key");
       assert.equal(req.headers.accept, "text/event-stream");
       assert.equal(req.headers["content-type"], "application/json");
+      assert.equal(req.headers["user-agent"], "modular-agent/0.1.0");
       for (const name of ["chatgpt-account-id", "openai-beta", "originator", "referrer", "session-id", "x-client-request-id"])
         assert.equal(req.headers[name], undefined, name);
       const request = JSON.parse(await body(req));

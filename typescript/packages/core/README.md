@@ -130,8 +130,6 @@ Use `encodeHistoryJson`, `parseHistoryJson` and `equalHistoryJson` to preserve o
 
 These are proposed documentation replacements, not changes to the specification.
 
-- **Grok request headers.** Rust's `.json(body)` sends `Content-Type: application/json`, as does TypeScript. In [Grok](../../../docs/sdk/subscription-providers.md#grok), replace the first sentence of **Requests** with: “The Responses API at `https://api.x.ai/v1/responses`, streamed, `store: false`, with `Authorization: Bearer …`, `Accept: text/event-stream` and `Content-Type: application/json`. It sends no ChatGPT-specific, client identity or session headers.”
-- **TypeScript subscription spelling.** In [Languages](../../../docs/sdk/languages.md#typescript), replace the TypeScript Subscription Providers bullet with: “Subscription Providers come from `@modular-agent/subscription` (`subscriptionLogins(path)`, `chatgpt({ logins, … })`, `grok({ logins, … })`, `signIn(provider, logins, options)`, `signOut(provider, logins)`, with `provider` either `"chatgpt"` or `"grok"`) and `@modular-agent/claude` (`claude(options)`, in process on Anthropic's Agent SDK). The Claude package also has the program the Rust and Go SDKs start.”
 - **Availability diagnostics.** In [Providers](../../../docs/sdk/api.md#providers), replace the `available` description with: “Whether the Provider can take requests now, for example whether it has credentials. A Provider may expose a separate diagnostic in process. The `/1` plugin binding reports only a boolean.” Claude can name an API-key source locally without extending the wire reply.
 
 

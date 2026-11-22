@@ -18,6 +18,8 @@ for (const served of [false, true]) {
       assert.equal(req.headers.originator, expected);
       assert.equal(req.headers["chatgpt-account-id"], "fixture-account");
       assert.equal(req.headers["openai-beta"], "responses=experimental");
+      assert.equal(req.headers["user-agent"], "modular-agent/0.1.0");
+      assert.equal(req.headers["content-type"], "application/json");
       assert.equal(req.headers.authorization, `Bearer ${access}`);
       assert.ok(req.headers["session-id"]);
       assert.equal(req.headers["session-id"], req.headers["x-client-request-id"]);
