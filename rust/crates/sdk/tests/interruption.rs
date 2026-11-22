@@ -5,9 +5,13 @@ use modular_agent::{
     Tool, ToolContext, ToolStatus, testing::test_agent,
 };
 use serde_json::{Value, json};
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    io::Write,
+    os::unix::fs::OpenOptionsExt,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio::{
     sync::mpsc,
@@ -199,7 +203,12 @@ async fn acp_receives_both_interruptions_and_lost_prompt_errors() -> Result<()> 
         for reason in ["writerLost", "commitFailed"] {
             let mut f = Fixture::build().await?;
             let token = f.project.path().join("token");
-            std::fs::write(&token, "9bb7a90490c023d02c87f9123ef55837")?;
+            std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(&token)?
+                .write_all(b"9bb7a90490c023d02c87f9123ef55837")?;
             let service = f
                 .agent
                 .serve_acp_websocket(
