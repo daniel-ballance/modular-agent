@@ -767,6 +767,12 @@ impl Engine {
         if result.status == ToolStatus::Waiting {
             return Ok(true);
         }
+        if result.status == ToolStatus::Unknown
+            && let Ok(requests) = requests(api.as_ref())
+        {
+            // An abandoned call will not take an answer, even if the turn continues.
+            requests.close_turn_with_reason(api.as_ref(), scope, "noLongerAnswerable")?;
+        }
         if !self
             .turn_entries(api, scope)?
             .iter()
@@ -810,20 +816,12 @@ impl Engine {
                 .find(|e| e.kind == "tool.call" && e.scope.call == scope.call)
                 .ok_or_else(|| anyhow!("open call left branch"))?;
             let result = self.execute(api, &execution, &scope, call, &entry).await?;
-            if result.status == ToolStatus::Waiting {
+            if self
+                .publish_tool_result(api, &scope, &entry, result)
+                .await?
+            {
                 open.push(call.clone());
-                continue;
             }
-            self.record(
-                api,
-                &scope,
-                "tool.result",
-                true,
-                json!(result),
-                vec![entry.id],
-            )?;
-            api.emit(Event::new(&scope, "tool.ended", json!(result)))
-                .await?;
         }
         Ok(if open.is_empty() {
             None

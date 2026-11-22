@@ -8,6 +8,10 @@ use std::{
 };
 use support::*;
 use tempfile::TempDir;
+// These probes use the local environment. Only the Linux implementation
+// confirms cleanup after SIGKILL well enough to repeat a started call.
+const CAN_REPEAT_STARTED_CALL: bool = cfg!(target_os = "linux");
+
 struct Pause {
     root: PathBuf,
     before: bool,
@@ -128,7 +132,9 @@ async fn m3_process_helper() {
     if reopen {
         let id = std::fs::read_to_string(root.join("session")).unwrap();
         svc.presence(&id, "user", true);
-        if (case == "open" && runtime == "durable") || (case == "job" && durable_jobs) {
+        if CAN_REPEAT_STARTED_CALL
+            && ((case == "open" && runtime == "durable") || (case == "job" && durable_jobs))
+        {
             let h2 = h.clone();
             let svc2 = svc.clone();
             let id2 = id.clone();
@@ -326,9 +332,10 @@ async fn sigkill_open_question_reasks_with_durable_and_closes_with_transient() {
     for runtime in ["transient", "durable"] {
         let (_, report) = crash_and_reopen(runtime, "open", true).await;
         let events = report["events"].as_array().unwrap();
+        let can_reask = runtime == "durable" && CAN_REPEAT_STARTED_CALL;
         assert_eq!(
             events.iter().any(|e| e["kind"] == "request.opened"),
-            runtime == "durable"
+            can_reask
         );
         let data: SessionData = serde_json::from_value(report["data"].clone()).unwrap();
         assert!(questions(&data).unwrap().iter().all(|q| !q.answerable));
@@ -342,11 +349,7 @@ async fn sigkill_open_question_reasks_with_durable_and_closes_with_transient() {
             .unwrap();
         assert_eq!(
             result["status"],
-            if runtime == "durable" {
-                "completed"
-            } else {
-                "unknown"
-            }
+            if can_reask { "completed" } else { "unknown" }
         );
     }
 }
@@ -363,10 +366,10 @@ async fn sigkill_saved_answer_is_reused_but_revoked_approval_is_not() {
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0].content.as_ref().unwrap()["status"],
-            if case == "answered" {
-                "completed"
-            } else {
-                "refused"
+            match case {
+                "answered" if CAN_REPEAT_STARTED_CALL => "completed",
+                "answered" => "unknown",
+                _ => "refused",
             }
         );
         assert!(

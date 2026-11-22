@@ -3,10 +3,12 @@ use modular_agent::{Agent, Gate, Outcome, Plugin, Session, Tool, ToolOutput};
 use modular_agent_mcp::Mcp;
 use serde_json::{Value, json};
 use standard::{Standard, script::Script};
+#[cfg(target_os = "linux")]
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::{
     collections::BTreeMap,
-    os::fd::{FromRawFd, OwnedFd},
-    path::Path,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -44,7 +46,7 @@ impl Rig {
         let root = TempDir::new().unwrap();
         let project = TempDir::new().unwrap();
         prepare(project.path());
-        Self::start(scripts, plugins, settings, root, project, true).await
+        Self::start(scripts, plugins, settings, root, project, true, None).await
     }
     async fn start(
         scripts: Vec<Value>,
@@ -53,6 +55,7 @@ impl Rig {
         root: TempDir,
         project: TempDir,
         durable: bool,
+        worker: Option<PathBuf>,
     ) -> Self {
         let ids = scripts
             .iter()
@@ -64,8 +67,11 @@ impl Rig {
             })
             .collect();
         // Give each rig a distinct command line so tests can find their own worker.
-        let worker = root.path().join("sandbox-worker");
-        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_ma"), &worker).unwrap();
+        let worker = worker.unwrap_or_else(|| {
+            let worker = root.path().join("sandbox-worker");
+            std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_ma"), &worker).unwrap();
+            worker
+        });
         let standard = Standard {
             limits: standard::policy::Bounds::default().counts(),
             byte_limits: standard::policy::Bounds::default().bytes(),
@@ -517,6 +523,30 @@ async fn the_memory_limit_fails_the_run_and_the_next_run_works() {
     assert_eq!(next.text, "still here\n");
 }
 
+#[tokio::test]
+async fn starting_the_worker_does_not_spend_the_execution_budget() {
+    let root = TempDir::new().unwrap();
+    let worker = root.path().join("delayed-worker");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_ma"), worker.with_extension("ma")).unwrap();
+    // Model a cold launch that outlasts the compute budget plus the pipe allowance.
+    std::fs::write(&worker, "#!/bin/sh\n/bin/sleep 1\nexec \"$0.ma\" \"$@\"\n").unwrap();
+    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let rig = Rig::start(
+        vec![code("fast", "print(42)"), text("done")],
+        vec![],
+        json!({}),
+        root,
+        TempDir::new().unwrap(),
+        true,
+        Some(worker),
+    )
+    .await;
+    assert_eq!(rig.run("go").await, Outcome::Completed);
+    let result = rig.result("fast").await;
+    assert_eq!(result.status, "completed", "{}", result.text);
+    assert_eq!(result.text, "42\n");
+}
+
 /// Stop at a known point in a run, without guessing how long worker startup takes.
 async fn suspended_rig(scripts: Vec<Value>) -> (Rig, Arc<tokio::sync::Notify>) {
     let started = Arc::new(tokio::sync::Notify::new());
@@ -533,26 +563,26 @@ async fn suspended_rig(scripts: Vec<Value>) -> (Rig, Arc<tokio::sync::Notify>) {
     )
 }
 
-fn sandbox_pid(rig: &Rig) -> i32 {
-    use std::os::unix::ffi::OsStrExt;
-    let path = rig.root.path().join("sandbox-worker");
-    std::fs::read_dir("/proc")
-        .unwrap()
-        .filter_map(Result::ok)
-        .find_map(|entry| {
-            let pid = entry.file_name().to_str()?.parse().ok()?;
-            let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
-            let argv0 = cmdline.split(|b| *b == 0).next()?;
-            (argv0 == path.as_os_str().as_bytes()).then_some(pid)
+fn sandbox_pid(rig: &Rig) -> libc::pid_t {
+    let expected = format!(
+        "{} subprocess",
+        rig.root.path().join("sandbox-worker").display()
+    );
+    let processes = std::process::Command::new("ps")
+        .args(["-axww", "-o", "pid=,command="])
+        .output()
+        .unwrap();
+    assert!(processes.status.success());
+    String::from_utf8_lossy(&processes.stdout)
+        .lines()
+        .find_map(|line| {
+            let (pid, command) = line.trim_start().split_once(' ')?;
+            (command.trim_start() == expected).then(|| pid.parse().unwrap())
         })
         .expect("the suspended sandbox worker is running")
 }
 
 #[tokio::test]
-#[cfg_attr(
-    not(target_os = "linux"),
-    ignore = "requires Linux process inspection or strong containment"
-)]
 async fn a_worker_death_fails_its_call_without_waiting_for_the_nested_tool() {
     let (rig, held) = suspended_rig(vec![
         code("lost", "tools.hold()"),
@@ -561,13 +591,14 @@ async fn a_worker_death_fails_its_call_without_waiting_for_the_nested_tool() {
     ])
     .await;
     let rig = Arc::new(rig);
-    let turn = tokio::spawn({
+    let mut turn = tokio::spawn({
         let rig = rig.clone();
         async move { rig.run("go").await }
     });
-    tokio::time::timeout(Duration::from_secs(10), held.notified())
-        .await
-        .unwrap();
+    tokio::select! {
+        held = tokio::time::timeout(Duration::from_secs(10), held.notified()) => held.unwrap(),
+        outcome = &mut turn => panic!("turn ended before the nested call: {outcome:?}, {:?}", rig.result("lost").await.text),
+    }
     assert_eq!(unsafe { libc::kill(sandbox_pid(&rig), libc::SIGKILL) }, 0);
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(10), turn)
@@ -777,7 +808,7 @@ async fn mcp_servers_from_configuration_are_functions_and_a_dead_one_is_skipped(
             "found = [t['name'] for t in search_tools('offline echo')]\nout = tools.mcp_notes__echo(text='hello')\n[found, out]",
         ),
         text("done"),
-], vec![], json!({}), root, project, false).await;
+], vec![], json!({}), root, project, false, None).await;
     assert_eq!(rig.run("go").await, Outcome::Completed);
     let requests = rig.requests();
     assert!(

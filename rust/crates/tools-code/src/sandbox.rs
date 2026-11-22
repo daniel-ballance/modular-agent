@@ -22,6 +22,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::{sync::Notify, time::timeout};
 
 const MAX_MEMORY: usize = 256 * 1024 * 1024;
+const WORKER_STARTUP_LIMIT: Duration = Duration::from_secs(10);
 const PIPE_ALLOWANCE: Duration = Duration::from_millis(250);
 const TIME_LIMIT: &str = "TimeoutError: sandbox time limit exceeded";
 
@@ -80,6 +81,18 @@ impl Run<'_> {
         // Never finish this checkout back into the pool. On success, error or
         // cancellation, Drop kills the worker and releases its pool slot. In
         // particular Monty cannot safely reset a heap after a limit fires.
+        // Checkout spawns the worker but does not wait for it to be ready.
+        // Acknowledge Configure before starting the first execution deadline.
+        match timeout(WORKER_STARTUP_LIMIT, worker.open()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return (Err(RunError::Failed(error.to_string())), String::new()),
+            Err(_) => {
+                return (
+                    Err(RunError::Failed("sandbox worker did not start".into())),
+                    String::new(),
+                );
+            }
+        }
         let mut printed = String::new();
         let full = Notify::new();
         let cap = self.tool.print_bytes;
