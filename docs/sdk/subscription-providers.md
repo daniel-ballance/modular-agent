@@ -5,7 +5,7 @@ Each SDK ships three Providers that use a person's own subscription plan instead
 | Constructor | Provider id | Plan | How it reaches the models |
 |---|---|---|---|
 | `chatgpt(options)` | `chatgpt` | ChatGPT (Plus, Pro, Business) | OAuth sign-in, then the Responses API |
-| `grok(options)` | `grok` | The X Subscription, and the SuperGrok and X Premium plans it replaces | Not yet shipped: see [Grok](#grok) |
+| `grok(options)` | `grok` | The X Subscription, and the SuperGrok and X Premium plans it replaces | OAuth device sign-in, then xAI's Responses API |
 | `claude(options)` | `claude` | Claude (Pro, Max, Team) | The Claude Agent SDK, signed in through Claude Code |
 
 They are ordinary [Providers](api.md#providers): an app adds them with `providers`, and they serve and load over the plugin binding like any other. They behave the same in all four languages.
@@ -31,7 +31,7 @@ A login is never written to history, events, logs or errors, and never sent anyw
 
 ## Signing in
 
-`signIn(provider, logins, options)` signs in to `chatgpt` and stores the login; `grok` joins it once the [Grok](#grok) section is decided. It reports what the person must do through `options.onStep(step)`:
+`signIn(provider, logins, options)` signs in to `chatgpt` or `grok` and stores the login. It reports what the person must do through `options.onStep(step)`:
 
 | Step | Meaning |
 |---|---|
@@ -39,13 +39,13 @@ A login is never written to history, events, logs or errors, and never sent anyw
 | `deviceCode { url, code }` | Open `url` on any machine and enter `code`. |
 | `waiting` | The SDK is polling; nothing to do. |
 
-`options.device: true` asks for the device-code flow. `options.paste()` supplies a pasted line when the caller can read one; the SDK accepts the whole address, its query (`code=…&state=…`), `code#state`, or the bare code, checks a present state against the sign-in's, and asks again on a mismatch or an `error`. A redirect port already in use leaves pasting as the only return; with no `paste` either, the SDK uses the device code. `options.clientIdentity` is sent as below. The SDK opens no browser itself; the caller decides.
+`options.device: true` asks for the device-code flow. Grok has only the device-code flow, so for `grok` the SDK ignores `device` and `paste` and never reports `openAndPaste`. `options.paste()` supplies a pasted line when the caller can read one; the SDK accepts the whole address, its query (`code=…&state=…`), `code#state`, or the bare code, checks a present state against the sign-in's, and asks again on a mismatch or an `error`. A redirect port already in use leaves pasting as the only return; with no `paste` either, the SDK uses the device code. `options.clientIdentity` is sent as below. The SDK opens no browser itself; the caller decides.
 
 `signOut(provider, logins)` removes the login.
 
 ## Client identity
 
-Requests and sign-ins name the client to the service: `originator` on ChatGPT requests and in the ChatGPT authorize address, and the field [Grok](#grok) names. It is `modular-agent` unless the `clientIdentity` option names another: 1 to 64 characters from `A`–`Z`, `a`–`z`, `0`–`9`, `.`, `_` and `-`. Anything else is `invalid_composition` for a constructor and `invalid_params` for `signIn`. The identity is a label, not a credential.
+Requests and sign-ins name the client to the service: `originator` on ChatGPT requests and in the ChatGPT authorize address, and `referrer` when starting a [Grok](#grok) sign-in; Grok requests carry no identity. It is `modular-agent` unless the `clientIdentity` option names another: 1 to 64 characters from `A`–`Z`, `a`–`z`, `0`–`9`, `.`, `_` and `-`. Anything else is `invalid_composition` for a constructor and `invalid_params` for `signIn`. The identity is a label, not a credential.
 
 ## Models
 
@@ -60,7 +60,11 @@ These are the values `ma` uses through each SDK's `chatgpt` Provider; the Rust S
 
 ## Grok
 
-Not yet decided. [Grok sign-in under The X Subscription](../research/grok-x-subscription.md) found that the OAuth sign-in `ma` uses today is Grok Build's own registration, that xAI documents no sign-in for other clients, and that the public API host `ma` calls may bill separately from the plan. Until this section is written, SDKs ship no `grok()`, and `ma` keeps its existing Grok code under the id `grok`.
+- **Sign-in.** The OAuth 2.0 device-code flow against `https://auth.x.ai`, client `b1a00492-073a-47ea-816f-4c329264a828`, scope `openid profile email offline_access grok-cli:access api:access`. Start with a form POST to `/oauth2/device/code` carrying `client_id`, `scope` and `referrer` (the client identity). Show `verification_uri_complete`, else `verification_uri`, and refuse either unless it is `https`; it currently points to `https://accounts.x.ai/oauth2/device`. Poll `/oauth2/token` with `grant_type=urn:ietf:params:oauth:grant-type:device_code`, `client_id` and `device_code` at the advertised `interval` (5 seconds if absent), within `expires_in` (900 seconds if absent). Carry on after `authorization_pending`, wait 5 seconds longer after each `slow_down`, and stop after `access_denied`, `authorization_denied` or `expired_token`. The login has no `account`.
+- **Refresh.** A form POST to `/oauth2/token` with `grant_type=refresh_token`, `refresh_token` and `client_id`. If the answer has no `refresh_token`, the old one is kept. If it has no `expires_in`, the token is taken to last 3600 seconds.
+- **Requests.** The Responses API at `https://api.x.ai/v1/responses`, streamed, `store: false`, with the bearer token, `Accept: text/event-stream` and no other headers. The system prompt is the first `input` item, with role `system`, rather than `instructions`, and `maxOutput` becomes `max_output_tokens`, capped at the model's limit. Encrypted reasoning is requested and kept as `providerData`, and sent back on later requests to the same Provider.
+
+The client is the one xAI registered for its own Grok Build CLI; xAI publishes none for other tools, and documents only API keys for `api.x.ai` ([research](../research/grok-x-subscription.md)). Used this way, it draws on the person's X Subscription; this was checked on a real account on 2026-11-22. xAI could stop accepting it at any time. These are the values `ma` uses; the Rust SDK is the reference for the exact request.
 
 ## Claude
 
@@ -71,6 +75,6 @@ Not yet decided. [Grok sign-in under The X Subscription](../research/grok-x-subs
 
 ## Checks
 
-Each SDK MUST test offline, against loopback servers or by inspecting the built request: both sign-in flows for `chatgpt` (Grok's checks come with its section), including paste forms, state mismatch and a busy redirect port; the authorize address and request headers, with the default and a configured client identity; refresh under the lock with two concurrent refreshers spending one refresh token; a refused refresh; the file mode check; and model mapping from the shared table. `claude()` is tested against the Agent SDK's fixtures, as the TypeScript sidecar's tests do today.
+Each SDK MUST test offline, against loopback servers or by inspecting the built request: both sign-in flows for `chatgpt` and the device flow for `grok`, with Grok's polling answers (`authorization_pending`, `slow_down`, denial, expiry) and a refused non-`https` address, including paste forms, state mismatch and a busy redirect port; the authorize address and request headers, with the default and a configured client identity; refresh under the lock with two concurrent refreshers spending one refresh token; a refused refresh; the file mode check; and model mapping from the shared table. `claude()` is tested against the Agent SDK's fixtures, as the TypeScript sidecar's tests do today.
 
 [Live checks](testing.md#live-checks) for subscriptions run only with `MODULAR_AGENT_LIVE=1` and `MODULAR_AGENT_LIVE_LOGINS` naming a login file, and skip each Provider without a login (for `claude`, without a Claude Code sign-in). They make one short request per Provider and never sign in.

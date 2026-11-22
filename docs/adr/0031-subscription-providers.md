@@ -26,10 +26,12 @@ The ids are the names people know the plans by. `ma` accepts `openai-codex` and 
 - **Keep the subscription Providers in `ma`.** Every developer who wanted a plan would copy `ma`'s code, and Go's could not be imported at all.
 - **Reimplement the Claude Code protocol in Rust and Go.** It would avoid Node.js, but it would not be the Agent SDK: it would track a private protocol by hand, and an unofficial port is what the Agent SDK exists to replace.
 - **A third-party Rust Agent SDK.** Not Anthropic's, and not available for Go.
+- **Grok through Grok Build over ACP, as Claude goes through Claude Code.** xAI's supported route for a plan, but Grok Build is a whole agent with its own tools, not a model endpoint that hands tool calls back.
+- **Grok with an xAI API key only.** Supported, but billed per request rather than drawing on the plan, which is what this Provider is for.
 - **Keep `openai-codex` and `xai` as the ids.** They name an internal product and a company, not the plans people pay for.
 
 ## Consequences
 
 - Rust and Go `claude()` need Node.js 22 or newer and the TypeScript Claude program installed. TypeScript and Python need only their Agent SDK package, which brings Claude Code.
-- The ChatGPT and Grok sign-ins use the vendors' own coding tools' OAuth clients. The SDK documents this, and an app that ships them to other people must check the vendors' terms.
+- The ChatGPT and Grok sign-ins use the vendors' own coding tools' OAuth clients. The SDK documents this, and an app that ships them to other people must check the vendors' terms. Grok's is the riskier: xAI documents no sign-in for other tools and only API keys for `api.x.ai` ([research](../research/grok-x-subscription.md)). It was kept because it works and draws on the plan, checked on a real account on 2026-11-22; if xAI stops accepting it, `grok()` stops working until xAI offers a route.
 - The shared table must be updated when a plan gains a model.

@@ -1,6 +1,8 @@
 # Research: Grok with The X Subscription
 
-Checked 2026-11-22. Can the four SDKs sign a person in with their own X Subscription, SuperGrok, or X Premium and call Grok against that plan, as Grok Build does?
+Checked 2026-11-22. **Outcome:** [ADR 0031](../adr/0031-subscription-providers.md) keeps the existing device sign-in for `grok()`, after a real account confirmed that requests made this way draw on the plan.
+
+Can the four SDKs sign a person in with their own X Subscription, SuperGrok, or X Premium and call Grok against that plan, as Grok Build does?
 
 **Answer:** Grok Build supports browser and device sign-in. The old `ma` device request still starts a login and now sends the person to `accounts.x.ai`. That is not evidence of a new OAuth issuer, or proof that a freshly migrated account can finish sign-in and use its included credits through `ma`. Grok Build's subscription inference proxy is not the public API host that `ma` uses. There is no documented third-party subscription OAuth registration or raw model API contract in the sources checked. Do not ship the first-party client ID as an SDK default on the strength of this research.
 
