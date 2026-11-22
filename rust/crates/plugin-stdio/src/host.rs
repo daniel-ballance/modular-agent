@@ -21,6 +21,29 @@ pub struct Launch {
     #[serde(default)]
     pub config: Value,
 }
+impl Launch {
+    fn spawn(&self, project: &Path) -> Result<tokio::process::Child> {
+        let (program, args) = self
+            .command
+            .split_first()
+            .ok_or_else(|| anyhow!("empty plugin command"))?;
+        Ok(Command::new(program)
+            .args(args)
+            .env_clear()
+            .env(
+                "PATH",
+                std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
+            )
+            .envs(&self.env)
+            .current_dir(project)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()?)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ServiceLaunch {
@@ -111,14 +134,72 @@ impl ExternalLaunch {
     }
 }
 
-type ReadinessFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>;
-
-/// A local readiness check for one Provider in a process plugin. It supplies
-/// diagnostics that the boolean readiness reply does not carry.
-#[derive(Clone)]
+/// The hang guard and fallback message for a dedicated Provider program.
+#[derive(Clone, Copy, Debug)]
 pub struct ProviderReadiness {
     pub id: &'static str,
-    pub check: Arc<dyn Fn() -> ReadinessFuture + Send + Sync>,
+    pub guard: Duration,
+    pub fallback: &'static str,
+}
+
+impl ProviderReadiness {
+    fn validate(&self, registration: &Value) -> Result<()> {
+        ensure!(
+            registration["providers"]
+                .as_array()
+                .is_some_and(|providers| providers.len() == 1 && providers[0]["id"] == self.id),
+            "process program did not register the expected {} Provider",
+            self.id
+        );
+        Ok(())
+    }
+
+    /// Ask a fresh process for readiness without composing an agent or sending model work.
+    pub async fn probe(self, launch: &Launch, state: &Path) -> Result<Option<String>> {
+        let state = state.canonicalize()?;
+        let mut child = launch.spawn(&state)?;
+        let peer = Peer::start(
+            child.stdout.take().unwrap(),
+            child.stdin.take().unwrap(),
+            Arc::new(ProbeCallbacks),
+        );
+        let _close_on_drop = peer.closed.clone().drop_guard();
+        let result = async {
+            let registration = initialize(&peer, &state, &state, launch.config.clone()).await?;
+            validate_binding(&registration)?;
+            wire::string(&registration, "name")?;
+            self.validate(&registration)?;
+            provider_availability(&peer, self.id, Some(self), CancellationToken::new()).await
+        }
+        .await;
+        if !peer.closed.is_cancelled() && result.is_ok() {
+            let _ = control(&peer, "plugin/shutdown", json!({"reason":"stop"})).await;
+        }
+        peer.close();
+        if result.is_err() || tokio::time::timeout(CONTROL, child.wait()).await.is_err() {
+            let _ = child.kill().await;
+        }
+        result
+    }
+}
+
+struct ProbeCallbacks;
+
+#[async_trait]
+impl Endpoint for ProbeCallbacks {
+    async fn request(
+        &self,
+        _: Arc<Peer>,
+        _: Value,
+        _: &str,
+        _: Value,
+        _: CancellationToken,
+    ) -> Reply {
+        Err(Fault::new(
+            "invalid_request",
+            "readiness probes do not allow host callbacks",
+        ))
+    }
 }
 
 pub(crate) struct Shared {
@@ -255,20 +336,7 @@ async fn load_transport(
             peer
         }
         Transport::Process(launch) => {
-            let mut cmd = Command::new(&launch.command[0]);
-            cmd.args(&launch.command[1..])
-                .env_clear()
-                .env(
-                    "PATH",
-                    std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
-                )
-                .envs(launch.env)
-                .current_dir(&project)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::inherit())
-                .kill_on_drop(true);
-            let mut child = cmd.spawn()?;
+            let mut child = launch.spawn(&project)?;
             let peer = Peer::start(
                 child.stdout.take().unwrap(),
                 child.stdin.take().unwrap(),
@@ -291,18 +359,7 @@ async fn load_transport(
             peer
         }
     };
-    let config = if config.is_null() { json!({}) } else { config };
-    let registration = control(
-        &peer,
-        "plugin/initialize",
-        json!({
-            "binding":"modular-agent-plugin/1","data":"modular-agent-data/1",
-            "host":{"name":"modular-agent-rs","version":env!("CARGO_PKG_VERSION")},
-            "project":project,"home":home,"config":config
-        }),
-    )
-    .await;
-    let registration = match registration {
+    let registration = match initialize(&peer, &project, &home, config).await {
         Ok(r) => r,
         Err(e) => {
             peer.close();
@@ -311,22 +368,15 @@ async fn load_transport(
         }
     };
     let result: Result<Arc<Remote>> = async {
-        ensure!(
-            registration["binding"] == "modular-agent-plugin/1",
-            "not_supported: plugin binding"
-        );
+        validate_binding(&registration)?;
         let name = format!("external.{index}.{}", wire::string(&registration, "name")?);
         for field in ["providers", "toolSources", "hooks", "commands", "replaces"] {
             if let Some(value) = wire::optional(&registration, field) {
                 ensure!(value.is_array(), "registration {field} must be an array");
             }
         }
-        if let Some(check) = &shared.readiness {
-            ensure!(
-                registration["providers"].as_array().is_some_and(|providers|
-                    providers.len() == 1 && providers[0]["id"] == check.id),
-                "process program did not register the expected {} Provider", check.id
-            );
+        if let Some(readiness) = shared.readiness {
+            readiness.validate(&registration)?;
         }
         if let Some(environment) = registration
             .get("workingEnvironment")
@@ -465,6 +515,28 @@ async fn load_transport(
     result
 }
 const CONTROL: Duration = Duration::from_secs(5);
+
+async fn initialize(peer: &Peer, project: &Path, home: &Path, config: Value) -> Reply {
+    let config = if config.is_null() { json!({}) } else { config };
+    control(
+        peer,
+        "plugin/initialize",
+        json!({
+            "binding":"modular-agent-plugin/1","data":"modular-agent-data/1",
+            "host":{"name":"modular-agent-rs","version":env!("CARGO_PKG_VERSION")},
+            "project":project,"home":home,"config":config
+        }),
+    )
+    .await
+}
+
+fn validate_binding(registration: &Value) -> Result<()> {
+    ensure!(
+        registration["binding"] == "modular-agent-plugin/1",
+        "not_supported: plugin binding"
+    );
+    Ok(())
+}
 
 async fn control(peer: &Peer, method: &str, params: Value) -> Reply {
     tokio::time::timeout(
@@ -946,6 +1018,56 @@ struct RemoteModel {
     supports: Value,
     dirty: Arc<Mutex<BTreeSet<String>>>,
 }
+impl RemoteModel {
+    async fn check_availability(
+        &self,
+        readiness: Option<ProviderReadiness>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        if let Some(reason) = provider_availability(&self.peer, &self.id, readiness, cancel).await?
+        {
+            bail!("{reason}");
+        }
+        Ok(())
+    }
+}
+
+async fn provider_availability(
+    peer: &Peer,
+    id: &str,
+    readiness: Option<ProviderReadiness>,
+    cancel: CancellationToken,
+) -> Result<Option<String>> {
+    let call = peer.call("provider/available", json!({"provider":id}), None, cancel);
+    let value = if let Some(readiness) = readiness {
+        match tokio::time::timeout(readiness.guard, call).await {
+            Ok(result) => result?,
+            Err(_) => {
+                peer.close();
+                bail!(
+                    "the {id} program did not answer provider/available within {:?}",
+                    readiness.guard
+                );
+            }
+        }
+    } else {
+        call.await?
+    };
+    match value["available"].as_bool() {
+        Some(true) => Ok(None),
+        Some(false) => Ok(Some(
+            value["reason"]
+                .as_str()
+                .filter(|reason| !reason.is_empty())
+                .unwrap_or_else(|| {
+                    readiness.map_or("external Provider is unavailable", |check| check.fallback)
+                })
+                .to_owned(),
+        )),
+        None => bail!("invalid provider/available reply: expected a boolean available field"),
+    }
+}
+
 #[async_trait]
 impl ModelAccess for RemoteModel {
     fn safe_to_repeat(&self) -> bool {
@@ -972,53 +1094,42 @@ impl ModelAccess for RemoteModel {
         Ok(())
     }
     async fn refresh(&self, api: &Api, scope: &Scope, cancel: CancellationToken) -> Result<()> {
-        if let Some(check) = &self.shared.readiness
-            && check.id == self.id
-        {
-            let reason = tokio::select! {
-                _ = cancel.cancelled() => bail!("Provider readiness check cancelled"),
-                reason = (check.check)() => reason,
-            };
-            if let Some(reason) = reason {
-                bail!("{reason}");
-            }
+        let readiness = self.shared.readiness.filter(|check| check.id == self.id);
+        if let Some(check) = readiness {
+            // The readiness probe can discover models. Read the catalog after it finishes.
+            self.check_availability(Some(check), cancel.clone()).await?;
         }
-        for method in ["provider/models", "provider/available"] {
-            let value = self
-                .peer
-                .call(
-                    method,
-                    json!({"provider":self.id}),
-                    Some(Work::new(api, scope, method, cancel.clone())),
-                    cancel.clone(),
-                )
-                .await?;
-            if method == "provider/models" {
-                let catalog = value["models"]
-                    .as_array()
-                    .ok_or_else(|| anyhow!("missing Provider catalog"))?;
-                let mut ids = BTreeSet::new();
-                let models = catalog
-                    .iter()
-                    .map(|model| {
-                        ensure!(
-                            model["provider"] == self.id && ids.insert(wire::string(model, "id")?),
-                            "invalid Provider catalog"
-                        );
-                        wire::model(model, &self.supports)
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                *self.models.lock().unwrap() = models;
+        let method = "provider/models";
+        let value = self
+            .peer
+            .call(
+                method,
+                json!({"provider":self.id}),
+                Some(Work::new(api, scope, method, cancel.clone())),
+                cancel.clone(),
+            )
+            .await?;
+        let catalog = value["models"]
+            .as_array()
+            .ok_or_else(|| anyhow!("missing Provider catalog"))?;
+        let mut ids = BTreeSet::new();
+        let models = catalog
+            .iter()
+            .map(|model| {
                 ensure!(
-                    ids.contains(self.info.name.split_once('/').unwrap().1),
-                    "selected model is unavailable"
+                    model["provider"] == self.id && ids.insert(wire::string(model, "id")?),
+                    "invalid Provider catalog"
                 );
-            } else {
-                ensure!(
-                    value["available"] == true,
-                    "external Provider is unavailable"
-                );
-            }
+                wire::model(model, &self.supports)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        *self.models.lock().unwrap() = models;
+        ensure!(
+            ids.contains(self.info.name.split_once('/').unwrap().1),
+            "selected model is unavailable"
+        );
+        if readiness.is_none() {
+            self.check_availability(None, cancel).await?;
         }
         Ok(())
     }

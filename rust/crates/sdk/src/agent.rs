@@ -81,6 +81,16 @@ impl ProcessPlugin {
     }
 }
 
+impl From<ProcessPlugin> for plugin_stdio::Launch {
+    fn from(plugin: ProcessPlugin) -> Self {
+        Self {
+            command: plugin.command,
+            env: plugin.env,
+            config: plugin.config,
+        }
+    }
+}
+
 /// A plugin service configured by its URL, bearer-token file and registration settings.
 pub use plugin_stdio::ServiceLaunch as ServicePlugin;
 
@@ -783,16 +793,7 @@ impl AgentBuilder {
         let mut launches: Vec<_> = self
             .process_plugins
             .into_iter()
-            .map(|(p, readiness)| {
-                (
-                    ExternalLaunch::Process(plugin_stdio::Launch {
-                        command: p.command,
-                        env: p.env,
-                        config: p.config,
-                    }),
-                    readiness,
-                )
-            })
+            .map(|(p, readiness)| (ExternalLaunch::Process(p.into()), readiness))
             .chain(
                 self.service_plugins
                     .into_iter()

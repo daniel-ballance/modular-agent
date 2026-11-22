@@ -16,7 +16,13 @@ async function answer(id, method, p) {
         case 'plugin/initialize':
             return { binding: p.binding, name: 'fake-claude', providers: [{ id: 'claude', supports: {}, models: [model('claude-haiku-5-5'), model('claude-sonnet-5-5')] }] };
         case 'provider/models': return { models: [model('claude-haiku-5-5')] };
-        case 'provider/available': return { available: true };
+        case 'provider/available':
+            if (p.provider !== 'claude') throw new Error('expected the Claude Provider id');
+            if (process.argv[2] === 'hang') return new Promise(() => {});
+            if (process.argv[2] === 'api-key') {
+                return { available: false, reason: 'The fixture is using an API key from ANTHROPIC_API_KEY, not a Claude plan.' };
+            }
+            return { available: true };
         case 'provider/request': {
             const scope = { sessionId: p.sessionId, provider: p.provider, model: p.model };
             const { request } = await hostHook(id, 'provider.request', { ...scope, request: p.request });
