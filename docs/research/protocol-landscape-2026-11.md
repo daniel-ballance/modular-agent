@@ -99,7 +99,7 @@ Checked 2026-11-16 against <https://agentclientprotocol.com> (its `llms.txt` ind
 - **Moved** to their own repository, `open-telemetry/semantic-conventions-genai`. The pages in the main semconv repository now only point there. **The status is still Development**, not stable.
 - `gen_ai.operation.name` values include `chat`, `generate_content`, `text_completion`, `embeddings`, `retrieval`, `execute_tool`, `create_agent`, `invoke_agent` and `invoke_workflow`.
 - The agent spans are create agent, invoke agent (client and internal), a **plan** span, and execute tool. `gen_ai.conversation.id` is described as "conversation (session, thread)". The repository also covers MCP conventions.
-- **Relevance:** `invoke_agent`, `chat`, `execute_tool` and `conversation.id` match turn, step, tool call and session. OTel export is a translation of our event stream.
+- **Relevance:** `invoke_agent`, `chat`, `execute_tool` and `conversation.id` map to turn, model attempt, tool call and session. See the [follow-up research](opentelemetry-genai.md) and the [proposed Harness instrumentation](../telemetry.md).
 - Sources: <https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-agent-spans.md>, <https://github.com/open-telemetry/semantic-conventions-genai>
 
 ## What these protocols have in common
