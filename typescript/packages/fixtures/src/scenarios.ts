@@ -119,19 +119,28 @@ async function waitGroup(pid: number) {
   }
 }
 
-function killGroup(pid?: number) {
-  if (pid) try { process.kill(-pid, "SIGKILL"); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+async function killGroup(pid?: number) {
+  if (!pid) return;
+  try { process.kill(-pid, "SIGKILL"); }
+  catch (error) {
+    const { code } = error as NodeJS.ErrnoException;
+    if (code === "ESRCH") return;
+    // Darwin can return EPERM for an exited group with zombies still present.
+    // Do not mistake a live, unsignalable group for confirmed cleanup.
+    if (process.platform === "darwin" && code === "EPERM") return await waitGroup(pid);
+    throw error;
+  }
 }
 
 async function servicesFor(s: Scenario, dir: string, p: Placement) {
   const children: { pid?: number; reaped: Promise<void> }[] = [];
-  const kill = () => { for (const { pid } of children) killGroup(pid); };
-  const stop = async () => {
-    kill();
-    await Promise.all(children.map(async ({ pid, reaped }) => { await reaped; if (pid) await waitGroup(pid); }));
-  };
-  if (!p.name.startsWith("service:")) return { placement: p, kill, stop };
+  let stopping: Promise<void> | undefined;
+  const stop = () => stopping ??= Promise.all(children.map(async ({ pid, reaped }) => {
+    await killGroup(pid);
+    await reaped;
+    if (pid) await waitGroup(pid);
+  })).then(() => {});
+  if (!p.name.startsWith("service:")) return { placement: p, stop };
   try {
     const tokenFile = join(dir, "service-token");
     if (!existsSync(tokenFile)) await writeFile(tokenFile, randomBytes(32).toString("hex"), { mode: 0o600, flag: "wx" });
@@ -160,7 +169,7 @@ async function servicesFor(s: Scenario, dir: string, p: Placement) {
         servicePlugins.push({ url, tokenFile, config: { path: countFile(dir) } });
       } finally { clearTimeout(timer); lines.close(); child.stdout.resume(); }
     }
-    return { placement: { name: p.name, servicePlugins }, kill, stop };
+    return { placement: { name: p.name, servicePlugins }, stop };
   } catch (error) { await stop(); throw error; }
 }
 
@@ -191,10 +200,13 @@ async function crashRun(path: string, dir: string, p: Placement, i: number, when
     return sessionId;
   } finally {
     const pid = child.pid;
-    killGroup(pid);
-    services.kill();
-    await Promise.all([services.stop(), reaped.then(async () => { if (pid) await waitGroup(pid); })]);
-    lines.close();
+    try {
+      await Promise.all([services.stop(), (async () => {
+        await killGroup(pid);
+        await reaped;
+        if (pid) await waitGroup(pid);
+      })()]);
+    } finally { lines.close(); }
   }
 }
 
