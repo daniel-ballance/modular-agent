@@ -77,7 +77,7 @@ func TestResponsesRequestsAndRefresh(t *testing.T) {
 				}
 			}))
 			defer httpFixture.Close()
-			a := AuthFile(filepath.Join(t.TempDir(), "auth.json"))
+			a := OpenAuthFile(filepath.Join(t.TempDir(), "auth.json"))
 			acct := "acct-fixture"
 			before := Login{Type: "oauth", Access: "stale", Refresh: "refresh-one", Expires: 1}
 			if v == Codex {

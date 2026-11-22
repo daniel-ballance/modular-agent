@@ -21,7 +21,7 @@ import (
 )
 
 func (d layout) auth() subscription.AuthFile {
-	return subscription.AuthFile(filepath.Join(d.config, "auth.json"))
+	return subscription.OpenAuthFile(filepath.Join(d.config, "auth.json"))
 }
 func (d layout) compose(ctx context.Context, o options, settings modular.Settings, store modular.HistoryStore, stderr io.Writer) (*modular.Agent, error) {
 	durability := modular.Durable
