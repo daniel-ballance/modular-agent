@@ -1,28 +1,15 @@
 use futures_util::StreamExt;
 use modular_agent::{Agent, ClaudeOptions, Code, Outcome, Plugin, claude};
-use std::{os::unix::fs::PermissionsExt, path::PathBuf};
+use std::path::PathBuf;
 
-fn options(dir: &std::path::Path, status: &str) -> ClaudeOptions {
-    let executable = dir.join("claude-status");
-    std::fs::write(
-        &executable,
-        format!("#!/bin/sh\nprintf '%s\\n' '{status}'\n"),
-    )
-    .unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-    ClaudeOptions {
-        program: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude.cjs")),
-        status_program: Some(executable),
-    }
-}
+const API_KEY_REASON: &str =
+    "The fixture is using an API key from ANTHROPIC_API_KEY, not a Claude plan.";
 
 #[tokio::test]
 async fn claude_runs_as_a_process_plugin_and_the_host_runs_its_tool() -> modular_agent::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let provider = claude(options(
-        dir.path(),
-        r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}"#,
-    ))?;
+    let provider = claude(ClaudeOptions {
+        program: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude.cjs")),
+    })?;
     assert!(provider.available().await);
     let agent = Agent::builder()
         .claude_provider(provider)
@@ -61,17 +48,21 @@ async fn claude_runs_as_a_process_plugin_and_the_host_runs_its_tool() -> modular
 #[tokio::test]
 async fn a_claude_api_key_is_not_a_plan_sign_in() -> modular_agent::Result<()> {
     let dir = tempfile::tempdir()?;
-    let provider = claude(options(
-        dir.path(),
-        r#"{"loggedIn":true,"authMethod":"api_key","apiKeySource":"ANTHROPIC_API_KEY"}"#,
-    ))?;
+    let program = dir.path().join("claude.cjs");
+    std::fs::write(
+        &program,
+        concat!(
+            "process.argv[2] = 'api-key';\n",
+            include_str!("fixtures/claude.cjs")
+        ),
+    )?;
+    let provider = claude(ClaudeOptions {
+        program: Some(program),
+    })?;
     assert!(!provider.available().await);
-    assert!(
-        provider
-            .unavailable_reason()
-            .await
-            .unwrap()
-            .contains("ANTHROPIC_API_KEY")
+    assert_eq!(
+        provider.unavailable_reason().await.as_deref(),
+        Some(API_KEY_REASON)
     );
     let agent = Agent::builder()
         .claude_provider(provider)
@@ -81,20 +72,20 @@ async fn a_claude_api_key_is_not_a_plan_sign_in() -> modular_agent::Result<()> {
     let session = agent.session().await?;
     let result = session.prompt("Do not send this").await?;
     assert!(
-        matches!(result.outcome, Some(Outcome::Failed { error }) if error.contains("ANTHROPIC_API_KEY"))
+        matches!(result.outcome, Some(Outcome::Failed { error }) if error.contains(API_KEY_REASON))
     );
     agent.close().await
 }
 
 #[test]
-fn a_missing_program_names_both_configuration_sources() {
+fn a_missing_program_names_both_configuration_sources_and_node() {
     let dir = tempfile::tempdir().unwrap();
     let err = claude(ClaudeOptions {
         program: Some(dir.path().join("missing.cjs")),
-        ..Default::default()
     })
     .unwrap_err();
     assert_eq!(err.code(), Code::InvalidComposition);
     assert!(err.message().contains("ClaudeOptions::program"));
     assert!(err.message().contains("MODULAR_AGENT_CLAUDE_SIDECAR"));
+    assert!(err.message().contains("Node.js"));
 }

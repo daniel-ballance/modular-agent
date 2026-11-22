@@ -1,17 +1,22 @@
 //! Claude runs in the TypeScript SDK's process plugin. Rust does not read or
 //! pass Claude credentials, and never signs in on the caller's behalf.
 use crate::{Code, Error, ProcessPlugin, Result};
-use std::path::{Path, PathBuf};
+use plugin_stdio::ProviderReadiness;
+use std::{path::PathBuf, time::Duration};
 
 const INSTALLED: &str = ".local/share/modular-agent/sidecars/claude/dist/main.js";
 const PROGRAM_ENV: &str = "MODULAR_AGENT_CLAUDE_SIDECAR";
+const READINESS: ProviderReadiness = ProviderReadiness {
+    id: "claude",
+    // Let the program finish its own 30-second probe (PROBE_MS in
+    // typescript/packages/claude/src/provider.ts) before treating it as hung.
+    guard: Duration::from_secs(35),
+    fallback: "Claude Code has no available plan sign-in; run `claude auth login`",
+};
 
 #[derive(Clone, Debug, Default)]
 pub struct ClaudeOptions {
     pub program: Option<PathBuf>,
-    /// An alternate Claude Code executable for offline fixtures.
-    #[doc(hidden)]
-    pub status_program: Option<PathBuf>,
 }
 
 /// A Provider supplied by a process plugin. Add it with
@@ -19,7 +24,6 @@ pub struct ClaudeOptions {
 #[derive(Clone, Debug)]
 pub struct ClaudeProvider {
     launch: ProcessPlugin,
-    status_program: PathBuf,
 }
 
 pub fn claude(options: ClaudeOptions) -> Result<ClaudeProvider> {
@@ -29,7 +33,7 @@ pub fn claude(options: ClaudeOptions) -> Result<ClaudeProvider> {
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(INSTALLED)));
     let program = program.and_then(|path| path.canonicalize().ok()).filter(|path| path.is_file())
         .ok_or_else(|| Error::new(Code::InvalidComposition, format!(
-            "Claude program not found; set ClaudeOptions::program or {PROGRAM_ENV}, or install ~/{INSTALLED}"
+            "Claude program not found; set ClaudeOptions::program or {PROGRAM_ENV}, or install ~/{INSTALLED}. The program needs Node.js 22 or newer."
         )))?;
     let script = program
         .to_str()
@@ -42,88 +46,72 @@ pub fn claude(options: ClaudeOptions) -> Result<ClaudeProvider> {
             launch = launch.env(name, value);
         }
     }
-    Ok(ClaudeProvider {
-        launch,
-        status_program: options.status_program.unwrap_or_else(|| "claude".into()),
-    })
+    Ok(ClaudeProvider { launch })
 }
 
 impl ClaudeProvider {
     pub fn id(&self) -> &'static str {
-        "claude"
+        READINESS.id
     }
 
-    /// Whether Claude Code reports a Claude plan sign-in. This checks status,
-    /// not a model endpoint. The plugin binding also checks its own readiness.
+    /// Whether the Claude program reports a Claude plan sign-in. This checks
+    /// readiness without making a model request.
     pub async fn available(&self) -> bool {
         self.unavailable_reason().await.is_none()
     }
 
     pub async fn unavailable_reason(&self) -> Option<String> {
-        self.status().await
+        self.probe(READINESS).await
     }
 
-    async fn status(&self) -> Option<String> {
-        status(&self.status_program).await
+    async fn probe(&self, readiness: ProviderReadiness) -> Option<String> {
+        let result = async {
+            let state = tempfile::tempdir()?;
+            readiness
+                .probe(&self.launch.clone().into(), state.path())
+                .await
+        }
+        .await;
+        result.unwrap_or_else(|error| {
+            Some(format!("could not check the Claude Code sign-in through the Claude program (Node.js): {error:#}"))
+        })
     }
 
-    pub(crate) fn into_launch(self) -> (ProcessPlugin, plugin_stdio::ProviderReadiness) {
-        let executable = self.status_program;
-        let check = std::sync::Arc::new(move || {
-            let executable = executable.clone();
-            Box::pin(async move { status(&executable).await })
-                as futures_util::future::BoxFuture<'static, _>
-        });
-        (
-            self.launch,
-            plugin_stdio::ProviderReadiness {
-                id: "claude",
-                check,
-            },
-        )
+    pub(crate) fn into_launch(self) -> (ProcessPlugin, ProviderReadiness) {
+        (self.launch, READINESS)
     }
 }
 
-async fn status(executable: &Path) -> Option<String> {
-    // `auth status` reports JSON without opening a model request. See
-    // https://code.claude.com/docs/en/cli-reference#cli-commands
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tokio::process::Command::new(executable)
-            .args(["auth", "status"])
-            .stdin(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await;
-    let Ok(Ok(output)) = output else {
-        return Some("Could not check Claude Code sign-in with `claude auth status`.".into());
-    };
-    let auth = serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap_or_default();
-    let method = auth["authMethod"].as_str();
-    let source = auth["apiKeySource"]
-        .as_str()
-        .filter(|source| !source.is_empty() && *source != "none");
-    if source.is_some() || matches!(method, Some("api_key" | "api_key_helper")) {
-        let source = match (source, method) {
-            (Some("ANTHROPIC_API_KEY"), _) => "ANTHROPIC_API_KEY",
-            (Some("ANTHROPIC_AUTH_TOKEN"), _) => "ANTHROPIC_AUTH_TOKEN",
-            (Some("apiKeyHelper"), _) | (_, Some("api_key_helper")) => "apiKeyHelper",
-            (Some("user" | "console"), _) => "the stored Anthropic Console sign-in",
-            _ => "Claude Code's configured API credential",
-        };
-        return Some(format!(
-            "Claude Code is using an API key from {source}; sign in to a Claude plan with `claude auth login`."
-        ));
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_claude_program_that_never_answers_readiness_hits_the_guard() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let program = dir.path().join("claude.cjs");
+        std::fs::write(
+            &program,
+            concat!(
+                "process.argv[2] = 'hang';\n",
+                include_str!("../tests/fixtures/claude.cjs")
+            ),
+        )?;
+        let provider = claude(ClaudeOptions {
+            program: Some(program),
+        })?;
+        let guard = Duration::from_millis(100);
+        let start = std::time::Instant::now();
+        let reason = provider
+            .probe(ProviderReadiness { guard, ..READINESS })
+            .await;
+        assert!(start.elapsed() >= guard);
+        assert_eq!(
+            reason.as_deref(),
+            Some(
+                "could not check the Claude Code sign-in through the Claude program (Node.js): the claude program did not answer provider/available within 100ms"
+            )
+        );
+        Ok(())
     }
-    if output.status.success()
-        && auth["loggedIn"] == true
-        && method == Some("claude.ai")
-        && auth["apiProvider"]
-            .as_str()
-            .is_none_or(|provider| provider == "firstParty")
-    {
-        return None;
-    }
-    Some("Claude Code is not signed in to a Claude plan; run `claude auth login`.".into())
 }
