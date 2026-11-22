@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -75,13 +76,22 @@ func TestQuestionSIGKILLReplay(t *testing.T) {
 				_ = cmd.Wait()
 				b, _ := os.ReadFile(filepath.Join(root, "session"))
 				id := string(b)
-				p := fake.New(fake.Script{Require: "cobalt", Response: api.Response{Content: api.Text("continued"), Stop: "finished"}})
+				p := fake.New(fake.Script{Response: api.Response{Content: api.Text("continued"), Stop: "finished"}})
 				h, err := vanilla.New(vanilla.Options{History: filepath.Join(root, "history"), Runtime: runtimetest.Plugin(t), Provider: p.Plugin(), Model: "fake"})
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer h.Close()
 				a := h.API()
+				isDurable := runtimetest.Plugin(t).Name == "durable"
+				canRepeat := isDurable && runtimetest.StopsOnCrash(t, a)
+				wantStatus, wantContext, wantAsked := "unknown", "outcome is unknown", 0
+				if canRepeat {
+					wantStatus, wantContext = "completed", "cobalt"
+					if cut == "open" {
+						wantAsked = 1
+					}
+				}
 				v, _ := a.Get("questions")
 				q := v.(api.Questions)
 				asked := 0
@@ -98,20 +108,38 @@ func TestQuestionSIGKILLReplay(t *testing.T) {
 					t.Fatal(err)
 				}
 				out := wait(t, a, id)
-				isDurable := runtimetest.Plugin(t).Name == "durable"
+				if asked != wantAsked {
+					t.Fatalf("opened %d questions after restart, want %d", asked, wantAsked)
+				}
+				requests := p.Requests()
+				checkResult := func(r api.ToolResult) {
+					t.Helper()
+					if r.Call != "ask" || r.Status != wantStatus || !strings.Contains(r.Content.Text(), wantContext) {
+						t.Fatal(r, wantStatus, wantContext)
+					}
+				}
 				if isDurable {
-					want := 0
-					if cut == "open" {
-						want = 1
+					if out.Status != "completed" || out.Result.Text() != "continued" || len(requests) != 1 {
+						t.Fatal(out, requests)
 					}
-					if asked != want || out.Result.Text() != "continued" || len(p.Requests()) != 1 {
-						t.Fatal(asked, out)
+					results := 0
+					for _, msg := range requests[0].Messages {
+						if msg.Result != nil {
+							checkResult(*msg.Result)
+							results++
+						}
 					}
-				} else {
-					if asked != 0 || out.Status != "failed" || len(p.Requests()) != 0 {
-						t.Fatal(asked, out)
+					if results != 1 {
+						t.Fatalf("model saw %d tool results, want one", results)
 					}
-					list, _ := q.List(id)
+				} else if out.Status != "failed" || len(requests) != 0 {
+					t.Fatal(out, requests)
+				}
+				if !canRepeat {
+					list, err := q.List(id)
+					if err != nil {
+						t.Fatal(err)
+					}
 					for _, question := range list {
 						if question.Answerable {
 							t.Fatal("lost question still answerable")
@@ -123,6 +151,7 @@ func TestQuestionSIGKILLReplay(t *testing.T) {
 				for _, e := range s.Entries {
 					if e.Kind == "tool.result" {
 						results++
+						checkResult(api.Decode[api.ToolResult](e.Data))
 					}
 				}
 				if results != 1 {

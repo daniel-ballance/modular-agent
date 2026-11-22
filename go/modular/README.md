@@ -36,6 +36,7 @@ export TMPDIR="$HOME/.cache/ma-std-tmp"
 mkdir -p "$TMPDIR"
 npm ci --prefix conformance/tools
 npm ci --prefix conformance/acp
+npm ci --prefix conformance/tools
 # Build the four fixture programs per conformance/sdk/fixtures/*.json.
 (cd go && ./scripts/build-monty.sh)
 export MODULAR_AGENT_SDK_REQUIRE=all
@@ -49,13 +50,15 @@ ma="$PWD/go/.bin/ma"
 scripts/websocket-kits.sh go
 ```
 
-The base suites use Linux with unprivileged user, PID and mount namespaces. The scenario runner builds Go's fixture and discovers built peer programs. Build each peer with its [fixture registry](../../conformance/sdk/fixtures/) command. `MODULAR_AGENT_SDK_REQUIRE=all` requires all four programs and runs the whole matrix.
+On Linux, the base suites need unprivileged user, PID and mount namespaces. On macOS, the local working environment declares `processGroup` containment. The suite checks that scope rather than requiring cleanup of descendants that leave their process group. The history writer uses `CLOCK_BOOTTIME` on Linux and `CLOCK_MONOTONIC` on macOS. Both clocks advance during sleep, so neither platform needs a lease margin.
+
+The scenario runner builds Go's fixture and discovers built peer programs. Build each peer with its [fixture registry](../../conformance/sdk/fixtures/) command. `MODULAR_AGENT_SDK_REQUIRE=all` requires all four programs and runs the whole matrix.
 
 ### What is checked
 
-- **Go build, vet, and formatting:** pass. The Monty worker, `ma`, `modular`, and the shared-scenario fixture build from this checkout. The full Go suite passed 38 packages (17 had no tests); the SDK and `ma` race suite passed seven packages (seven had no tests).
+- **Linux and Apple silicon macOS:** the Monty worker, `ma`, `modular`, and the shared-scenario fixture built on both platforms. On each, the full Go suite passed 38 packages (17 had no tests), and the SDK and `ma` race suite passed seven packages (seven had no tests). The stdio plugin kit passed **146/146**, `ma` passed **23/23** reference checks, and the ACP stdio kit with crash, probe, and job checks passed **188/188**. Go build, vet, and formatting checks also passed on Linux.
 - **Shared scenarios:** **153/153** with `MODULAR_AGENT_SDK_REQUIRE=all` (17 in process and 17 per process and service placement for each of the four SDKs).
-- **Reference and bindings:** Go `ma` passed **23/23** reference checks. The ACP kit with crash, probe, and job checks passed **188/188** over stdio and **193/193** over WebSocket. The WebSocket plugin kit passed **153/153**. The standalone history service passed **42/42**, including a restart. The SDK history kit passed **39/39** on each of memory (test-only), file, relay, and custom persistent snapshot backends.
+- **Other binding checks on Linux:** the ACP WebSocket kit with crash, probe, and job checks passed **193/193**. The WebSocket plugin kit passed **153/153**, plus **14/14** for separate-listener isolation. The standalone history service passed **42/42**, including a restart. The SDK history kit passed **39/39** on each of memory (test-only), file, relay, and custom persistent snapshot backends.
 - **ADR 0030:** stdio ACP isolation passed **15/15** on `ma` and **16/17** on the base launcher. Capacity passed **28/28** on each. On `ma` WebSocket, isolation passed **17/17** and capacity passed **28/28**. HTTP erasure exercised held copies and loss after the bookkeeping or tombstone commit; see the remaining writer-loss finding below. The history isolation kit passed **42/42**, including the default history checks. The plugin isolation profile requires a multi-credential listener, which the Go deployment does not offer. The SDK tests cover both sides of the HTTP copy publication cutoff, registry loss, interrupted work before erasure, durable Provider retry, and charging output buffers at all three scopes.
 - **Public SDK:** six interruption cases cover failed history commits and writer revocation through `Prompt`, `PromptStream` and ACP, with gated live events, cancellation, `lost` replies and recovery on reopen. An idle-session test revokes a lease without a subsequent write. Image progress from a served job and tool reaches the event follower through their own output gate over stdio and WebSocket. Other checks cover nested callbacks during Runtime model streaming and environment output, and catalog refreshes and emitted events on the same connection. Additional tests check proposal settlement conflicts, lazy custom-store creation and paging, and SDK Provider declarations in both placements. Other public tests cover typed hook handlers, rejected out-of-scope transforms, typed session and turn events, custom working environments and Runtimes in process and over the wire, Configuration trust for ACP project MCP, and remote job resume after the host is killed. ACP token tests cover omitted and explicit no-tenant scope, named tenants, empty scopes, exact projects, composition bounds and the rights ceiling without rewriting a recorded grant.
 - **Provisional sessions:** the public SDK checks file history, an HTTP client against a history service, and a custom store registered through the Registrar, each with an in-process and a served Runtime. Before this fix, file history created a lock and the custom store was acquired at session creation; the HTTP client already deferred PUT. An unused session leaves no session records or leases after close or process-group `SIGKILL`. Native file history initializes an empty pending-erasure registry for the store, not for each session. A refused input leaves nothing either. The first admitted input commits the original setup and its receipt together. A fork commits its copied prefix and fresh setup in one batch and does not recover copied turns as live work. `ma --acp` tests check `session/new` and `session/close` against file and HTTP history.
@@ -104,4 +107,9 @@ A repeated publication returns the original intent ID and destinations in publis
 
 ### Specification findings
 
-None open.
+The [standard declarations table](../../docs/reference/standard-configuration.md#what-it-declares) joins the `forking` row and `commandContainment` row on one line. The platform values are correct, but Markdown does not render the containment declaration as its own row. Replace that line with:
+
+```markdown
+| `forking`, `portableSessions`, `nestedToolCalls`, `inputKeys` | true |
+| `commandContainment` | `strong` on Linux; `processGroup` on macOS, where a process that leaves its command's process group is not stopped |
+```

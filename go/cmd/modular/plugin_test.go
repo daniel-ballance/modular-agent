@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -22,10 +23,12 @@ func TestPluginBindingConformanceKit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	kit, _ := filepath.Abs("../../conformance/plugin/run.mjs")
-	// The setsid check still probes a shell PID from outside its namespace.
-	// Isolate that probe and leave the low PID slots unused.
-	cmd := exec.CommandContext(ctx, "unshare", "--user", "--map-root-user", "--pid", "--fork", "--kill-child", "--mount-proc", "--",
-		"bash", "-c", `for ((i=0;i<128;i++)); do /bin/true; done; exec node "$@"`, "bash", kit, "--verbose", "--", binary, "--serve-plugin")
+	command := []string{"node", kit, "--verbose", "--", binary, "--serve-plugin"}
+	if runtime.GOOS == "linux" {
+		// Isolate the strong-containment test, which starts a setsid descendant.
+		command = append([]string{"unshare", "--user", "--map-root-user", "--pid", "--fork", "--kill-child", "--mount-proc", "--"}, command...)
+	}
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 	cmd.Env = append(os.Environ(), "GORACE=atexit_sleep_ms=0", "MODULAR_AGENT_PLUGIN_PARTS=provider,tools,environment,hooks")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = 5 * time.Second

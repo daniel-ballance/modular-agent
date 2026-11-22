@@ -84,7 +84,7 @@ func newClient(backend operations) *Client {
 func escape(id string) string { return strings.ReplaceAll(url.QueryEscape(id), "+", "%20") }
 func path(id string) string   { return "/v1/sessions/" + escape(id) }
 
-// CLOCK_BOOTTIME is monotonic and advances while the system is suspended.
+// Both Linux CLOCK_BOOTTIME and macOS CLOCK_MONOTONIC advance during suspension.
 func leaseClock() int64 {
 	var t unix.Timespec
 	if unix.ClockGettime(leaseClockID, &t) != nil {

@@ -6,6 +6,7 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/fake"
 	"github.com/daniel-ballance/modular-agent/go/history"
+	"github.com/daniel-ballance/modular-agent/go/internal/runtimetest"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 	"github.com/daniel-ballance/modular-agent/go/vanilla"
 	"slices"
@@ -154,8 +155,12 @@ func TestHostedRuntimeReopensStandardHistory(t *testing.T) {
 				if tc.revoked {
 					want["new"] = "refused"
 				} else {
-					wantRan = []string{"yes", "new"}
-					want["yes"], want["new"] = "completed", "completed"
+					wantRan = []string{"new"}
+					want["new"] = "completed"
+					if runtimetest.StopsOnCrash(t, h.API()) {
+						wantRan = []string{"yes", "new"}
+						want["yes"] = "completed"
+					}
 				}
 				if out.Status != "completed" || out.Result.Text() != "carried on" || out.Steps != 2 || out.Usage.Input != 10 {
 					t.Fatal(out)

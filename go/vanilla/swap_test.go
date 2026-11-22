@@ -8,6 +8,7 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/vanilla"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -55,7 +56,8 @@ func TestDurableReplacesOnlyRuntimeAndKeepsFeatureHandlers(t *testing.T) {
 		t.Fatal(err)
 	}
 	declarations := api.Decode[map[string]bool]([]byte(support))
-	if !declarations["durable_turns"] || !declarations["sigkill_command_cleanup"] || !declarations["parallel_tools"] {
+	// The local environment confirms full cleanup after SIGKILL only on Linux.
+	if !declarations["durable_turns"] || declarations["sigkill_command_cleanup"] != (runtime.GOOS == "linux") || !declarations["parallel_tools"] {
 		t.Fatal(support)
 	}
 }
