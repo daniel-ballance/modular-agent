@@ -4,8 +4,8 @@ import { cp, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { definePlugin, fileHistory, httpHistory, serveHistory } from "@modular-agent/core";
-import { testAgent } from "@modular-agent/core/testing";
+import { createAgent, definePlugin, fileHistory, httpHistory, serveHistory } from "@modular-agent/core";
+import { memoryEnvironment, testAgent } from "@modular-agent/core/testing";
 import { historyService } from "@modular-agent/services";
 
 test("pending marks follow forks across held writers and survive restart", async t => {
@@ -59,31 +59,35 @@ test("HTTP erasure refuses a history delivery waiting at its output gate", async
   const atGate = new Promise<void>(resolve => { gated = resolve; });
   const release = new Promise<void>(resolve => { resume = resolve; });
   let pause = false;
-  let a: Awaited<ReturnType<typeof testAgent>> | undefined;
+  let a: Awaited<ReturnType<typeof createAgent>> | undefined;
   t.after(async () => {
     resume();
     try { await a?.close(); } finally {
       try { await service.close(); } finally { await rm(dir, { recursive: true, force: true }); }
     }
   });
-  a = await testAgent({ durability: "kept", history: httpHistory(service.url, tokenFile), script: [{ text: "private answer" }],
-    plugins: [definePlugin({ name: "pause-delivery", setup(registrar) {
-      registrar.on("output", async () => { if (pause) { gated(); await release; } });
-    } })],
-  });
-  const view = await a.session();
-  await view.prompt("private input");
-  const target = (await view.history()).find(e => e.kind === "input")!.id;
   const request = async <T = unknown>(path: string, method: string, body?: object): Promise<T> => {
     const reply = await fetch(service.url + path, { method, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: body && JSON.stringify(body) });
     assert.equal(reply.status, 200);
     return await reply.json() as T;
   };
-  const source = "/v1/sessions/source", dest = `/v1/sessions/${view.id}`;
-  await request(source, "PUT", { created: Date.now(), project: dir });
+  const source = "/v1/sessions/source", dest = "/v1/sessions/destination";
+  for (const [path, id] of [[source, "source-target"], [dest, "dest-target"]]) {
+    await request(path, "PUT", { created: Date.now(), project: dir });
+    const { lease } = await request<{ lease: string }>(path + "/lease", "POST", { owner: "wire-writer" });
+    await request(path + "/entries", "POST", { lease, entries: [{ id, parentId: null, kind: "input", content: [{ type: "text", text: "private input" }] }] });
+    await request(`${path}/lease/${lease}`, "DELETE");
+  }
+  // This checks the history delivery fence, not a model turn. Seed before opening the writer.
+  a = await createAgent({ durability: "kept", history: httpHistory(service.url, tokenFile), project: dir, environment: memoryEnvironment(),
+    plugins: [definePlugin({ name: "pause-delivery", setup(registrar) {
+      registrar.on("output", async () => { if (pause) { gated(); await release; } });
+    } })],
+  });
+  const view = await a.openSession("destination");
+  assert.ok((await view.history()).some(entry => entry.id === "dest-target"));
   const { lease } = await request<{ lease: string }>(source + "/lease", "POST", { owner: "wire-writer" });
-  await request(source + "/entries", "POST", { lease, entries: [{ id: "source-target", parentId: null }] });
   pause = true;
   const refused = assert.rejects(view.history(), { code: "unavailable" });
   await atGate;
@@ -91,7 +95,7 @@ test("HTTP erasure refuses a history delivery waiting at its output gate", async
     const { revision } = await request<{ revision: string }>(source + "/pending-erasure", "GET");
     await request(source + "/pending-erasure", "POST", { lease, revision, intentId: "mark", entryIds: ["source-target"],
       copies: [{ sessionId: "source", recordId: "source-book", entryIds: ["source-target"] },
-        { sessionId: view.id, recordId: "dest-book", entryIds: [target] }] });
+        { sessionId: view.id, recordId: "dest-book", entryIds: ["dest-target"] }] });
     const { plans } = await request<{ plans: { copies: { complete: boolean }[] }[] }>(dest + "/pending-erasure", "GET");
     assert.equal(plans[0].copies[0].complete, false);
   } finally { resume(); }
