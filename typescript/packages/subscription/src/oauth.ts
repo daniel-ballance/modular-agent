@@ -31,9 +31,9 @@ export function pastedCode(line: string, state: string): string | undefined {
   if (!input) return;
   let code: string | null, found: string | null;
   const question = input.indexOf("?");
-  if (question !== -1 || input.includes("code=")) {
+  if (question !== -1 || /(?:^|&)(?:code|error|state)=/.test(input)) {
     const query = new URLSearchParams(question === -1 ? input : input.slice(question + 1).split("#", 1)[0]);
-    if (question !== -1 && query.has("error")) {
+    if (query.has("error")) {
       throw new Error("the pasted address reports a sign-in error");
     }
     code = query.get("code");
