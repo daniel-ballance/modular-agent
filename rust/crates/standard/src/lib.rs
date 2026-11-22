@@ -22,7 +22,7 @@ use modular_agent::{
     Agent, AgentBuilder, Durability, FilesConfiguration, History, Plugin, ProcessPlugin,
 };
 use modular_agent_mcp::Mcp;
-use provider_responses::{ClientIdentity, ResponsesPlugin, Vendor};
+use provider_responses::{ClientIdentity, Vendor};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -238,7 +238,7 @@ pub fn builder(
     } else {
         let overrides = standard.model_overrides()?;
         for vendor in [Vendor::Codex, Vendor::Xai] {
-            b = b.provider(ResponsesPlugin::new(
+            b = b.provider(provider_responses::provider(
                 vendor,
                 provider_responses::catalog(vendor, &overrides)?,
                 standard.auth(),

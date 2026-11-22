@@ -2,7 +2,7 @@
 //! streamed answer becomes. No network and no real sign-in.
 use credentials_auth::AuthFile;
 use modular_agent::{Agent, Outcome, Plugin, Session};
-use provider_responses::{ClientIdentity, ResponsesPlugin, Vendor, catalog};
+use provider_responses::{ClientIdentity, Vendor, catalog, provider};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -80,7 +80,7 @@ async fn agent(
     client_identity: ClientIdentity,
     plugins: Vec<Plugin>,
 ) -> (Agent, Session) {
-    let provider = ResponsesPlugin::new(
+    let provider = provider(
         vendor,
         catalog(vendor, &Value::Null).unwrap(),
         AuthFile::new("unused-auth.json".into(), &[]),

@@ -39,6 +39,10 @@ impl AuthFile {
         }
     }
 
+    pub fn subscription_logins(&self) -> SubscriptionLogins {
+        self.logins.clone()
+    }
+
     pub fn login(&self, provider: &str) -> Result<Option<Login>> {
         self.logins.login(provider)
     }
