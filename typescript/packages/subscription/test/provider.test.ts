@@ -99,3 +99,31 @@ for (const served of [false, true]) {
     assert.equal(spent, 2);
   });
 }
+
+test("ChatGPT refreshes an unexpired login once after a 401", async t => {
+  const logins = await loginFile(t);
+  await logins.setLogin("chatgpt", { ...old, expires: Date.now() + 60_000, account: "fixture-account" });
+  const requests: string[] = [];
+  const server = await fixture(t, async (req, res) => {
+    requests.push(req.url!);
+    if (req.url === "/token") {
+      assert.equal(new URLSearchParams(await body(req)).get("refresh_token"), old.refresh);
+      res.end(JSON.stringify(tokens));
+    } else if (req.headers.authorization === `Bearer ${old.access}`) {
+      res.writeHead(401).end("{}");
+    } else {
+      assert.equal(req.headers.authorization, `Bearer ${access}`);
+      const prompt = JSON.parse(await body(req));
+      assert.equal(prompt.instructions, "You are a helpful assistant.");
+      res.end('data: {"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"café"}]}}\n\n' +
+        'data: {"type":"response.completed",\n' + 'data: "response":{"output":[],"usage":{"input_tokens":7,"output_tokens":2,"input_tokens_details":{"cached_tokens":1}}}}\n\n');
+    }
+  });
+  const p = chatgpt({ logins, test: { endpoint: `${server.url}/model`, oauth: { endpoints: { codexToken: `${server.url}/token` } } } });
+  const agent = await createAgent({ providers: [p], model: "chatgpt/gpt-6.1-sol", environment: memoryEnvironment() });
+  t.after(() => agent.close());
+  const reply = await (await agent.session()).prompt("hello");
+  assert.equal(reply.text, "café");
+  assert.equal(reply.usage?.cacheRead, 1);
+  assert.deepEqual(requests, ["/model", "/token", "/model"]);
+});

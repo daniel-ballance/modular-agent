@@ -16,6 +16,8 @@ try {
 
 ## What is checked
 
+For the subscription Provider change on Linux, `npm ci`, `npm run build` and both workspace suites passed: **422 offline tests** each, with **four live tests skipped**. The Claude package passed **47 offline tests**, including its original 44; its live check skipped. The subscription tests use loopback fixtures and the public SDK, both in process and over the plugin binding. They cover both ChatGPT sign-ins, the lock, a refused refresh, model settings and replay of encrypted reasoning. The `ma` tests cover both old ids at each accepted entry point. The reference kit passed **24/24**, the stdio ACP kit **188/188**, and the WebSocket plugin, listener isolation and ACP kits **153/153**, **14/14**, and **193/193**. No live checks ran.
+
 ADR 0030 checks include SDK calls, fixture barriers, and separate processes. The current opt-in results are:
 
 | Kit option | ma stdio | Base stdio | ma WebSocket | Base WebSocket |
@@ -35,10 +37,10 @@ npm ci
 npm run build
 MODULAR_AGENT_SDK_REQUIRE=all npm test
 MODULAR_AGENT_SDK_REQUIRE=all MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test
-(cd sidecars/claude && npm ci && npm test)
+npm test --workspace=@modular-agent/claude
 ```
 
-The TypeScript-only run used Node 26.13.1 on Apple silicon macOS 27.2 and on Linux. Both workspaces include the base CLI, SDK and `ma`, and run 51 shared scenarios across embedded, TypeScript stdio and TypeScript WebSocket placements. The other SDK fixtures were not built for this run.
+An earlier TypeScript-only run used Node 26.13.1 on Apple silicon macOS 27.2 and on Linux. Both workspaces include the base CLI, SDK and `ma`, and run 51 shared scenarios across embedded, TypeScript stdio and TypeScript WebSocket placements. The other SDK fixtures were not built for this run.
 
 | Check | macOS | Linux |
 |---|---:|---:|
@@ -48,7 +50,7 @@ The TypeScript-only run used Node 26.13.1 on Apple silicon macOS 27.2 and on Lin
 | `ma` reference | 23/23 | 23/23 |
 | `ma` stdio ACP with crash, probe and job checks | 188/188 | 188/188 |
 
-Two live Provider tests are disabled by default. macOS also skips four tests that read Linux `/proc`: two check cleanup after watcher or agent death, and two find the Monty worker PID. macOS tests still check process-group cleanup and declare no safe repeat for interrupted local commands. Earlier full shared-matrix runs passed **446/446** offline tests in both workspace configurations. The workspace has no separate lint or formatter script.
+The two API-key and two subscription live tests are disabled by default. macOS also skips four tests that read Linux `/proc`: two check cleanup after watcher or agent death, and two find the Monty worker PID. macOS tests still check process-group cleanup and declare no safe repeat for interrupted local commands. Earlier full shared-matrix runs passed **446/446** offline tests in both workspace configurations. The workspace has no separate lint or formatter script.
 - **Base kits:** The stdio runs cover local and HTTP history, an external Provider and tool source, and a served durable Runtime. The history kit also exercises an SDK file store, test-only memory, a relay, and a custom lease-aware store.
 - **SDK coverage:** The offline guide tests cover approvals, Providers, hook placements, process plugins, ACP stdio, and history handoff. Four tests kill a child process at specific secret-answer boundaries and reopen without leaking the value. Public API tests cover raw tool history and gated events in process, over stdio and over WebSocket, context lifetime and credential scope, and typed errors. The live Provider file compiles and skips both cases by default. Run live checks by hand only with `MODULAR_AGENT_LIVE=1`; each Provider test also requires its own API key. No live requests were made for this change.
 - **Same-connection callbacks:** The Go job-progress deadlock did not reproduce. The host registers notifications in arrival order without waiting for gated delivery. Public SDK tests over stdio and WebSocket check that the job owner's gate sees and redacts two ordered image-bearing progress events and that an `events()` follower receives both. Tests also cover tool progress, environment and nested tool callbacks, a served Runtime calling its own Provider, tools and hooks, model pieces, scoped and unscoped catalog changes, and custom events. A WebSocket test covers gated diagnostics. An output hook can read raw history under its live request but cannot use that scope to emit more output.
@@ -86,7 +88,7 @@ The SDK adds Ajv 8 (its [2020-12 entry point](https://ajv.js.org/json-schema.htm
 | 8. Remote plugins | Loads in-process, explicit process, explicit service, then `MODULAR_AGENT_PLUGINS` entries in array order. Invalid startup fails composition. Connection loss settles a dispatched tool as `outcomeUnknown`. `pingIntervalMs` and `controlTimeoutMs` default to 30,000 and 5,000 ms. |
 | 9. Testing | Scripted Provider driven by the final request, test agent, `answers().assertDone()`, memory environment, `overWire`, and seven shared fixtures, including `note`. `restart(agent)` interrupts an in-process agent without recording graceful settlement or running session or plugin shutdown hooks, releases writer leases, and rebuilds over the same store. The shared suite kills a real process group. |
 | 10. Guides | Offline equivalents of the TypeScript examples in guides 01–09 are checked. Guide 03's production example uses a deployed Python program; its offline test loads the TypeScript fixture over the same binding. |
-| 11. Providers | Core interface and `@modular-agent/openai`, `@modular-agent/anthropic`. API-key catalogs and reasoning payloads come from the shipped byte-identical model table; the loopback tests exercise each mapping. `models` can enroll an unlisted model without levels. Local catalog changes notify subscribers; served catalogs refresh with `provider/models`, not a private notification. Unknown models fail before admission; admitted failures become typed AssistantMessages. `context.credential()` reads the Provider's own credential in either placement. Passing a name is in-process only. |
+| 11. Providers | Core interface and `@modular-agent/openai`, `@modular-agent/anthropic`. API-key catalogs and reasoning payloads come from the shipped byte-identical model table; the loopback tests exercise each mapping. `models` can enroll an unlisted model without levels. `@modular-agent/subscription` adds `chatgpt`, `subscriptionLogins`, `signIn` and `signOut`. `@modular-agent/claude` adds `claude` and the Claude process plugin. No SDK `grok()` yet. Local catalog changes notify subscribers; served catalogs refresh with `provider/models`, not a private notification. Unknown models fail before admission; admitted failures become typed AssistantMessages. `context.credential()` reads the Provider's own credential in either placement. Passing a name is in-process only. |
 | 12. Nested calls | `context.tools.list()` and `.call()` work in process and over `/1`. The Harness supports **eight child levels** under a top-level invocation; deeper requests settle refused. The Harness authorizes, commits and settles children, including on cancellation or recovery. `modelTools` narrows only the model offer. ACP declares `nestedToolCalls` and identifies the parent on the child's first update. |
 | 13. Declaration and ACP | Declaration reflects the store, environment, Runtime and host, including queue policies and output holding. The SDK Provider port can declare kept state but not Provider-run tools or live sessions. `serveAcp` supports project composition, new-session settings and trusted MCP configuration. WebSocket listeners answer `$/ping` before and after initialization, apply the control deadline, and use exact project scopes and per-token tenant and rights ceilings without rewriting grants. Client-supplied MCP servers default to stdio only. Embedded `openSession` can wait for idle; ACP only installs recovery before returning. ACP sends writer interruption as the `_modular-agent/interrupted` notification and fails waiting `session/prompt` calls with `lost`; the HTTP Interface delivers the live interruption over SSE and ends that stream. |
 | 14. History over HTTP | `serveHistory` serves `fileHistory(dir)` or a custom `HistoryServiceStore`, relays a trusted `httpHistory(url, tokenFile)`, and allows `memoryHistory()` only with `{ testOnly: true }`. Default kept/durable data directories still use base JSONL. Each `/1` credential gives raw access to its entire namespace. Use separate listeners, stores and credentials for separate trust scopes. |
@@ -94,6 +96,19 @@ The SDK adds Ajv 8 (its [2020-12 entry point](https://ajv.js.org/json-schema.htm
 | 16. Reservations | `createAgent({ resourceReservations })` sets finite `session`, `tenant` and `agent` bounds. Each has `inputs`, `calls`, `jobs`, `bufferedBytes`, `storageBytes` and `controlBytes`. `entryBytes`, `batchBytes` and `settlementBytes` bound write and result sizes. `agent.resourceLimits()` reports configured bounds, not occupancy. The count ceilings are included in the declaration. A backed-up admission returns `busy`; a model attempt or call list that does not fit ends the turn at `capacity`. |
 | 17. Pending erasure | `httpHistory(url, tokenFile)` discovers the [pending-erasure registry profile](../../../docs/bindings/history-http.md#pending-erasure-registry-profile-pendingerasure-1). Without version `1` the composition declares `erasure: false`. With it, the agent checks plans before handoff and a later writer completes them under its lease. `Session.erase()` reports confirmed and pending pairs and out-of-reach descriptions. Local history still uses its own SQLite registry. `fileHistory(dir, { pendingErasureDir })` can keep that local registry outside history backups. |
 | 18. ma policy | `ma` reads the default `policy.json` or `--policy FILE` before protected project setup, applies principals and exact scope on both ACP transports, and keeps the one-token shorthand. `ma --declaration` prints operator byte bounds under `limits`. |
+
+### Subscription Providers
+
+```ts
+import { createAgent } from "@modular-agent/core";
+import { chatgpt, subscriptionLogins } from "@modular-agent/subscription";
+import { claude } from "@modular-agent/claude";
+
+const logins = subscriptionLogins("/private/app/auth.json");
+const agent = await createAgent({ providers: [chatgpt({ logins }), claude()] });
+```
+
+Call `signIn("chatgpt", logins, { onStep, paste, device, clientIdentity })` and `signOut("chatgpt", logins)` from `@modular-agent/subscription`. `onStep` reports `openAndPaste`, `deviceCode` and `waiting`. The SDK opens no browser; `paste` can supply one line at a time. The login file must be private, and refresh uses `flock(2)` through util-linux `flock` on Linux or system Perl on macOS. `available()` does not call ChatGPT. Claude uses Claude Code's plan sign-in and rejects API-key use; `unavailableReason()` gives the reason after the availability check. The [Claude package](../claude/README.md) also builds the process entry used by Rust and Go, including the compatibility path `typescript/sidecars/claude/dist/main.js`.
 
 ### Registering or serving a custom history store
 
@@ -112,6 +127,11 @@ Use `encodeHistoryJson`, `parseHistoryJson` and `equalHistoryJson` to preserve o
 ## Findings
 
 These are proposed documentation replacements, not changes to the specification.
+
+- **Which subscription Providers ship.** Replace the first sentence of [Subscription Providers](../../../docs/sdk/subscription-providers.md) with: “Each SDK ships ChatGPT and Claude subscription Providers. Grok subscription support is deferred; only `ma` keeps its existing Grok adapter.”
+- **Availability diagnostics.** In [Providers](../../../docs/sdk/api.md#providers), replace the `available` description with: “Whether the Provider can take requests now, for example whether it has credentials. A Provider may expose a separate diagnostic in process. The `/1` plugin binding reports only a boolean.” Claude can name an API-key source locally without extending the wire reply.
+- **Live subscription checks.** Replace “For each Provider with a key, the checks run” in [Live checks](../../../docs/sdk/testing.md#live-checks) with: “For each API-key Provider with a key, the checks run”. Add after that paragraph: “Each subscription check requires `MODULAR_AGENT_LIVE_LOGINS`, skips if its Provider has no plan sign-in, and sends one short prompt. It never signs in.”
+
 
 - **Cross-session restore.** The SQLite registry can detect a missing freshness source while an agent is running. A process restarted with both an older history and an older registry cannot tell that either one is stale. An independent registry fences erased content but does not prove the freshness of authority records. Replace the last sentence of [Cross-session coordination](../../../docs/contracts.md#cross-session-coordination)'s completion rule with: “Before serving a restored backend, the operator MUST compare its erasure generation with a high-water mark stored outside restored data. The Harness MUST refuse service for affected scopes until that check and any required reconciliation succeed.”
 - **Storage accounting.** TypeScript counts encoded record and reserved payload bytes, not the filesystem blocks needed by SQLite journals, JSONL batch markers, compaction or backups. Replace the first sentence of the write-space rule in [Resource reservations](../../../docs/contracts.md#resource-reservations) with: “The Harness MUST reserve processing capacity and a conservative bound on encoded writes, including batch and individual entry limits. The operator MUST provision additional space for backend framing, journal and rewrite amplification, and MUST allocate non-overlapping writer shares when there is no shared allocator.”

@@ -1,13 +1,12 @@
 #!/usr/bin/env node
-import { realpath, stat } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { fileURLToPath } from "node:url";
-import { createAgent, defaultAcpActor, httpHistory, type Agent, type ProcessPlugin, type Settings } from "@modular-agent/core";
+import { createAgent, defaultAcpActor, httpHistory, definePlugin, type Agent, type Settings } from "@modular-agent/core";
 import { standardFileTools } from "@modular-agent/tools-files/sdk";
 import { standardMcpTools } from "@modular-agent/tools-mcp/sdk";
-import { paths, settingsFor, skillsFor, standardSettings, mcpServers, optionalJson, trusted, type Paths } from "./configuration.js";
+import { paths, settingsFor, skillsFor, standardSettings, mcpServers, optionalJson, trusted } from "./configuration.js";
 import { standardPrompt } from "./prompt.js";
 import { codemode } from "./codemode.js";
 import { loadScript } from "./script.js";
@@ -15,9 +14,11 @@ import { line, print } from "./terminal.js";
 import { HELP } from "./help.js";
 import { loadPolicy } from "./policy.js";
 import { AuthFile, expired } from "./auth.js";
-import { labels, oauth, vendors, type Step, type Vendor } from "./oauth.js";
-import { responses } from "./responses.js";
-import { resolveClientIdentity, type ClientIdentityOptions } from "./client-identity.js";
+import { claude } from "@modular-agent/claude";
+import { chatgpt, resolveClientIdentity, signIn, signOut, type ClientIdentityOptions, type SignInStep } from "@modular-agent/subscription";
+import { grokOAuth } from "./grok-oauth.js";
+import { grokResponses, modelRows } from "./grok-responses.js";
+import { formerProviderIds, modelRef, providerId } from "./provider-ids.js";
 
 function parse(argv: string[]) {
   const opts: { command?: string; project: string; runtime: "durable" | "transient"; session?: string; prompt?: string;
@@ -44,7 +45,7 @@ function parse(argv: string[]) {
       case "--all": opts.all = true; break;
       case "--project": opts.project = value(); break;
       case "--session": opts.session = value(); break;
-      case "--model": opts.settings.model = value(); break;
+      case "--model": opts.settings.model = modelRef(value()); break;
       case "--thinking": {
         const level = value();
         if (!["off", "minimal", "low", "medium", "high", "xhigh"].includes(level)) throw new Error("thinking must be off, minimal, low, medium, high or xhigh");
@@ -65,55 +66,42 @@ function parse(argv: string[]) {
   }
   return opts;
 }
-async function claudeLaunch(p: Paths): Promise<ProcessPlugin | undefined> {
-  const candidates = [process.env.MODULAR_AGENT_CLAUDE_SIDECAR, fileURLToPath(new URL("../../../../sidecars/claude/dist/main.js", import.meta.url)),
-    join(p.home, ".local/share/modular-agent/sidecars/claude/dist/main.js")];
-  for (const candidate of candidates) if (candidate && (await stat(candidate).catch(() => undefined))?.isFile()) {
-    const env: Record<string, string> = {};
-    for (const name of ["HOME", "PATH", "CLAUDE_CONFIG_DIR"]) if (process.env[name] !== undefined) env[name] = process.env[name];
-    return { command: [process.execPath, resolve(candidate)], env };
-  }
-}
-const noModel = "no model is available. Sign in with `ma login openai-codex`, `ma login xai` or `ma login claude`, or pass --model. See `ma models`.";
-const modelRef = (v: unknown): string | undefined => typeof v === "string" ? v :
-  v && typeof v === "object" && "provider" in v && "id" in v ? `${v.provider}/${v.id}` : undefined;
+const noModel = "no model is available. Sign in with `ma login chatgpt`, `ma login grok` or `ma login claude`, or pass --model. See `ma models`.";
+const labels = { chatgpt: "ChatGPT subscription", grok: "Grok subscription" } as const;
 
-function claudeSignedIn() {
-  return spawnSync("claude", ["auth", "status"], { stdio: "ignore", timeout: 10_000 });
-}
-function show(step: Step) {
-  if (step.kind === "note") { console.error(step.message); return; }
-  if (step.kind === "open-and-paste") console.error(`Open this address in a browser, on this machine or any other:\n\n  ${step.address}\n`);
-  else if (step.kind === "code") console.error(`Open this address in a browser:\n\n  ${step.address}\n\nand enter the code: ${step.code}\n`);
-  else console.error(`Open this address in a browser to sign in:\n\n  ${step.address}\n`);
+function show(step: SignInStep) {
+  if (step.kind === "waiting") { console.error("Waiting for the sign-in to finish..."); return; }
+  if (step.kind === "openAndPaste") console.error(`Open this address in a browser, on this machine or any other:\n\n  ${step.url}\n`);
+  else console.error(`Open this address in a browser:\n\n  ${step.url}\n\nand enter the code: ${step.code}\n`);
   const { MA_NO_BROWSER, SSH_CONNECTION, SSH_TTY, DISPLAY, WAYLAND_DISPLAY } = process.env;
-  if (step.address.startsWith("https://") && MA_NO_BROWSER === undefined &&
+  if (step.url.startsWith("https://") && MA_NO_BROWSER === undefined &&
       SSH_CONNECTION === undefined && SSH_TTY === undefined && (DISPLAY !== undefined || WAYLAND_DISPLAY !== undefined)) {
-    const child = spawn(process.platform === "darwin" ? "open" : "xdg-open", [step.address], { stdio: "ignore" });
+    const child = spawn(process.platform === "darwin" ? "open" : "xdg-open", [step.url], { stdio: "ignore" });
     child.on("error", () => {});
     child.unref();
   }
-  if (step.kind === "open-and-paste") {
+  if (step.kind === "openAndPaste" && process.stdin.isTTY) {
     console.error("After you sign in, the browser goes to a localhost address. If the browser is on this\n" +
       "machine, that finishes the sign-in. Otherwise the page will not load: copy the whole\n" +
       "address from the browser's address bar and paste it here.\n");
-    process.stderr.write("Paste the address (or the code): ");
-  } else console.error("Waiting for the sign-in to finish...");
+  }
 }
-async function authCommand(argv: string[], p: Paths, auth: AuthFile, identity: ClientIdentityOptions) {
-  const [cmd, provider, ...rest] = argv;
-  const isVendor = (name: string): name is Vendor => (vendors as readonly string[]).includes(name);
+async function authCommand(argv: string[], auth: AuthFile, identity: ClientIdentityOptions) {
+  const [cmd, name, ...rest] = argv;
+  const provider = name && providerId(name);
   if (cmd === "auth") {
-    for (const vendor of vendors) {
+    for (const vendor of ["chatgpt", "grok"] as const) {
       const login = await auth.login(vendor);
       console.log(`${vendor.padEnd(13)} ${labels[vendor].padEnd(22)} ${!login ? "not signed in" : expired(login) ? "signed in (token will refresh on next use)" : "signed in"}`);
     }
-    const claude = claudeSignedIn();
-    console.log(`${"claude".padEnd(13)} ${"Claude subscription".padEnd(22)} ${claude.error ? "Claude Code is not installed" : claude.status === 0 ? "signed in through Claude Code" : "not signed in (run `ma login claude`)"}`);
-    if (!await claudeLaunch(p)) console.log("              the Claude sidecar is not installed (build typescript/sidecars/claude)");
+    const p = claude();
+    try {
+      const status = await p.available() ? "signed in through Claude Code" : p.unavailableReason();
+      console.log(`${"claude".padEnd(13)} ${"Claude subscription".padEnd(22)} ${status}`);
+    } finally { p.close(); }
     return 0;
   }
-  if (!provider) throw new Error(cmd === "login" ? "which provider? openai-codex, xai or claude" : "which provider?");
+  if (!provider) throw new Error(cmd === "login" ? "which provider? chatgpt, grok or claude" : "which provider?");
   const bad = rest.find((a, i) => cmd !== "login" || a !== "--device" || i > 0);
   if (bad) throw new Error(`unknown argument ${bad}`);
   if (provider === "claude") {
@@ -124,15 +112,35 @@ async function authCommand(argv: string[], p: Paths, auth: AuthFile, identity: C
     if (result.status !== 0) throw new Error("claude auth login did not complete");
     return 0;
   }
-  if (!isVendor(provider)) throw new Error(`unknown provider ${provider}${cmd === "login" ? "; use openai-codex, xai or claude" : ""}`);
-  if (cmd === "logout") { await auth.setLogin(provider); console.error(`Signed out of ${labels[provider]}.`); }
-  else {
-    const pasted = process.stdin.isTTY ? (onLine: (line: string) => void) => {
-      const reader = createInterface({ input: process.stdin });
-      reader.on("line", onLine);
-      return () => { reader.off("line", onLine); reader.close(); };
-    } : undefined;
-    await auth.setLogin(provider, await oauth(identity).login(provider, rest[0] === "--device", show, pasted));
+  if (provider !== "chatgpt" && provider !== "grok") throw new Error(`unknown provider ${provider}${cmd === "login" ? "; use chatgpt, grok or claude" : ""}`);
+  if (cmd === "logout") {
+    if (provider === "chatgpt") await signOut(provider, auth);
+    else await auth.setLogin(provider);
+    console.error(`Signed out of ${labels[provider]}.`);
+  } else {
+    if (provider === "chatgpt") {
+      let reader: ReturnType<typeof createInterface> | undefined;
+      let lines: AsyncIterator<string> | undefined;
+      try {
+        await signIn(provider, auth, { ...identity, device: rest[0] === "--device", onStep: show,
+          paste: process.stdin.isTTY ? async (signal, problem) => {
+            if (problem) console.error(problem);
+            if (!reader) {
+              reader = createInterface({ input: process.stdin });
+              lines = reader[Symbol.asyncIterator]();
+              signal.addEventListener("abort", () => reader?.close(), { once: true });
+            }
+            process.stderr.write("Paste the address (or the code): ");
+            return (await lines!.next()).value;
+          } : undefined,
+        });
+      } finally { reader?.close(); }
+    } else {
+      await auth.setLogin(provider, await grokOAuth(identity).login(step => {
+        show({ kind: "deviceCode", url: step.address, code: step.code });
+        show({ kind: "waiting" });
+      }));
+    }
     console.error(`Signed in to ${labels[provider]} (${provider}).`);
   }
   return 0;
@@ -141,7 +149,7 @@ async function main(argv: string[]) {
   const identity = { clientIdentity: resolveClientIdentity(process.env.MA_CLIENT_IDENTITY, "MA_CLIENT_IDENTITY") };
   if (process.platform !== "linux" && process.platform !== "darwin") throw new Error("ma supports only Linux and macOS");
   const p = paths(), auth = new AuthFile(p.config);
-  if (["login", "logout", "auth"].includes(argv[0])) return authCommand(argv, p, auth, identity);
+  if (["login", "logout", "auth"].includes(argv[0])) return authCommand(argv, auth, identity);
   const opts = parse(argv);
   if (opts.help) { console.log(HELP); return 0; }
   if (opts.version) { console.log("ma 0.1.0 (typescript)"); return 0; }
@@ -187,32 +195,43 @@ async function main(argv: string[]) {
     } finally { await index.close(); }
   }
   const inspecting = opts.history || opts.declaration || opts.command === "models";
-  const launch = !script && !conformance ? await claudeLaunch(p) : undefined;
   const overrides = script || conformance ? {} : await optionalJson(join(p.config, "models.json"));
+  // Canonical keys win when both spellings of the same catalog are present.
+  for (const [former, current] of Object.entries(formerProviderIds)) {
+    if (!Object.hasOwn(overrides, current) && Object.hasOwn(overrides, former)) overrides[current] = overrides[former];
+  }
+  const chatgptOverrides = modelRows("chatgpt", overrides).map(m => ({ id: m.id, name: m.name, contextWindow: m.contextWindow,
+    maxOutput: m.maxTokens, input: ["text", "image"], reasoning: Object.keys(m.effort).some(l => l !== "off"),
+    levels: Object.fromEntries(Object.entries(m.effort).map(([level, effort]) => [level, { reasoning: { effort } }])) }));
   const projectMcp = async (cwd: string) => mcpServers(p, cwd, await trusted(p, cwd));
   if (opts.trust) await trusted(p, project, true);
   let defaultModel: string | undefined;
   if (!script && !conformance && !inspecting) {
-    if (await auth.login("openai-codex")) defaultModel = "openai-codex/gpt-6.1-sol";
-    else if (await auth.login("xai")) defaultModel = "xai/grok-4.7";
+    if (await auth.login("chatgpt")) defaultModel = "chatgpt/gpt-6.1-sol";
+    else if (await auth.login("grok")) defaultModel = "grok/grok-4.7";
   }
   const build = async (cwd: string, saved?: string, projectSettings = true) => {
     const source = projectSettings ? await settingsFor(p, cwd) : await optionalJson(join(p.config, "settings.json"));
     const settings = { ...standardSettings(source), ...opts.settings };
     let model = script ? "scripted/script" : conformance ? "conformance/echo" :
       saved ?? modelRef(settings.model) ?? defaultModel;
-    if (!model && !inspecting && launch && claudeSignedIn().status === 0) model = "claude/claude-sonnet-5-5";
+    const claudeProvider = !script && !conformance && (model?.startsWith("claude/") || !model && !inspecting || opts.command === "models")
+      ? claude({ project: cwd }) : undefined;
+    const claudeReady = claudeProvider && await claudeProvider.available();
+    if (!model && !inspecting && claudeReady) model = "claude/claude-sonnet-5-5";
     if (!model && !inspecting && !opts.acp) throw new Error(noModel);
     if (conformance) settings.modelTools = null;
     delete settings.model;
-    const claude = model?.startsWith("claude/") || opts.command === "models" ? launch : undefined;
-    if (model?.startsWith("claude/") && !claude) throw new Error("the Claude sidecar is not installed; build typescript/sidecars/claude or set MODULAR_AGENT_CLAUDE_SIDECAR");
-    const providers = script ? [script] : conformance ? [] : vendors.map(v => responses(v, auth, overrides, identity));
+    const providers = script ? [script] : conformance ? [] : [chatgpt({ logins: auth, ...identity, modelOverrides: chatgptOverrides }), grokResponses(auth, overrides, identity)];
     const plugins = [standardFileTools({ spill: join(p.state, "output") }), codemode(), standardPrompt(p)];
     if (!opts.acp) plugins.push(standardMcpTools({ servers: projectMcp }));
+    if (claudeProvider && (model?.startsWith("claude/") || opts.command === "models")) plugins.push(definePlugin({
+      name: "provider.claude", setup: r => r.provider(claudeProvider), stop: claudeProvider.close,
+    }));
+    else claudeProvider?.close();
     return createAgent({ ...base, project: cwd, settings, credentials: auth.credentials(), model: opts.command === "models" ? undefined : model, providers, plugins,
       compaction: !conformance, conformance, questionsOutlastTurns: true, jobReportsStartTurns: true, settingsDuringTurn: "refused",
-      pluginHost: opts.acp || !!claude, ...(claude ? { processPlugins: [claude] } : {}) });
+      pluginHost: opts.acp, reopenModelAliases: formerProviderIds });
   };
   const scoped = opts.listen ? policy.actors?.some(actor => actor.projects !== undefined) : policy.stdio?.projects !== undefined;
   const agent = await build(project, modelRef(opts.settings.model) ?? savedModel, !opts.acp || !scoped);

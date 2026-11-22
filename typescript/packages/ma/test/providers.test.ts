@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { once } from "node:events";
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -6,13 +5,11 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { setTimeout as wait } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { createAgent } from "@modular-agent/core";
 import { AuthFile } from "../src/auth.js";
-import { oauth, pastedCode } from "../src/oauth.js";
-import { responses } from "../src/responses.js";
+import { grokOAuth } from "../src/grok-oauth.js";
+import { grokResponses } from "../src/grok-responses.js";
 
 const run = promisify(execFile);
 const jwt = `header.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" } })).toString("base64url")}.signature`;
@@ -41,180 +38,23 @@ async function authFile(t: TestContext) {
   return new AuthFile(dir);
 }
 
-for (const [label, clientIdentity, expected] of [
-  ["default", undefined, "modular-agent"],
-  ["configured", "My-Agent_2.0", "My-Agent_2.0"],
-] as const) {
-  test(`ChatGPT requests and both sign-ins send the ${label} client identity`, { timeout: 10_000 }, async t => {
-    const base = await fixture(t, (req, res, body) => {
-      switch (req.url) {
-        case "/responses":
-          assert.equal(req.headers.originator, expected);
-          res.writeHead(200, { "content-type": "text/event-stream" })
-            .end('data: {"type":"response.completed","response":{"output":[]}}\n\n');
-          break;
-        case "/device":
-          assert.equal(new URLSearchParams(body).get("referrer"), expected);
-          send(res, { verification_uri: "https://example.invalid", user_code: "CODE", device_code: "device", interval: 1 });
-          break;
-        case "/token": send(res, token()); break;
-        default: assert.fail(`unexpected request to ${req.url}`);
-      }
-    });
-    const identity = clientIdentity === undefined ? {} : { clientIdentity };
-    const service = oauth({ ...identity, test: { endpoints: {
-      codexAuthorize: `${base}/authorize`, codexToken: `${base}/token`, xaiDeviceCode: `${base}/device`, xaiToken: `${base}/token`,
-    }, port: 0, pollUnit: 1 } });
-    await service.login("openai-codex", false, step => {
-      assert.equal(step.kind, "open-and-paste");
-      assert.equal(new URL(step.address).searchParams.get("originator"), expected);
-    }, receive => { receive("fixture-code"); return () => {}; });
-    await service.login("xai", true, step => { assert.equal(step.kind, "code"); });
-
-    const credential = { type: "api_key", key: jwt } as const;
-    const auth = { async login() { return credential; }, async current() { return credential; } };
-    const provider = responses("openai-codex", auth, {}, { ...identity, test: { endpoint: `${base}/responses`, oauth: service } });
-    await provider.request({ provider: "openai-codex", id: "gpt-6.1-sol" }, { systemPrompt: "", messages: [], tools: [], settings: {} }, {
-      cancelled: t.signal, async credential() { return undefined; }, piece() {}, log() {}, emit() {},
-    });
-  });
-}
-
-test("provider and sign-in options refuse invalid client identities", () => {
-  const unexpected = async () => { throw new Error("unexpected credential lookup"); };
-  const auth = { login: unexpected, current: unexpected };
-  for (const clientIdentity of ["", "x".repeat(65), "bad identity", "id!", "café", "id\n"]) {
-    const identity = { clientIdentity };
-    assert.throws(() => oauth(identity), /clientIdentity must be/, JSON.stringify(clientIdentity));
-    for (const vendor of ["openai-codex", "xai"] as const)
-      assert.throws(() => responses(vendor, auth, {}, identity), /clientIdentity must be/, JSON.stringify(clientIdentity));
-  }
-});
-
 test("auth.json matches Rust serde_json bytes and keeps its answers and private mode", async t => {
   const auth = await authFile(t);
   // Rendered by serde_json::to_vec_pretty on credentials_auth::Contents:
   // two-space indent, snake-case tags, BTreeMap order and no final newline.
-  const rust = '{\n  "logins": {\n    "openai-codex": {\n      "type": "oauth",\n      "access": "test-access",\n      "refresh": "test-refresh",\n      "expires": 2000000000000,\n      "account": "test-account"\n    },\n    "xai": {\n      "type": "api_key",\n      "key": "dummy"\n    }\n  },\n  "answers": {\n    "test-answer": "test-value"\n  }\n}';
+  const rust = '{\n  "logins": {\n    "chatgpt": {\n      "type": "oauth",\n      "access": "test-access",\n      "refresh": "test-refresh",\n      "expires": 2000000000000,\n      "account": "test-account"\n    },\n    "grok": {\n      "type": "api_key",\n      "key": "dummy"\n    }\n  },\n  "answers": {\n    "test-answer": "test-value"\n  }\n}';
   await writeFile(auth.path, rust, { mode: 0o600 });
   await chmod(auth.path, 0o644);
-  await assert.rejects(auth.login("openai-codex"), /credential file must be private/);
+  await assert.rejects(auth.login("chatgpt"), /credential file must be private/);
   await chmod(auth.path, 0o600);
-  const codex = await auth.login("openai-codex");
+  const codex = await auth.login("chatgpt");
   assert.equal(codex?.type === "oauth" && codex.account, "test-account");
-  assert.deepEqual(await auth.login("xai"), { type: "api_key", key: "dummy" });
-  await auth.setLogin("openai-codex", codex);
+  assert.deepEqual(await auth.login("grok"), { type: "api_key", key: "dummy" });
+  await auth.setLogin("chatgpt", codex);
   assert.equal(await readFile(auth.path, "utf8"), rust);
   assert.equal((await stat(auth.path)).mode & 0o777, 0o600);
-  await auth.setLogin("xai");
+  await auth.setLogin("grok");
   assert.deepEqual(JSON.parse(await readFile(auth.path, "utf8")).answers, { "test-answer": "test-value" });
-});
-
-test("ChatGPT browser sign-in verifies state and exchanges PKCE over loopback", async t => {
-  let challenge: string | null = null, redirect: string | null = null;
-  const base = await fixture(t, (req, res, body) => {
-    assert.equal(req.url, "/token");
-    const form = new URLSearchParams(body);
-    assert.equal(form.get("grant_type"), "authorization_code");
-    assert.equal(form.get("code"), "fixture+code");
-    assert.equal(form.get("redirect_uri"), redirect);
-    assert.equal(createHash("sha256").update(form.get("code_verifier")!).digest("base64url"), challenge);
-    send(res, token());
-  });
-  const service = oauth({ test: { endpoints: { codexToken: `${base}/token`, codexAuthorize: `${base}/authorize` }, port: 0 } });
-  let callback: Promise<number> | undefined;
-  const login = await service.login("openai-codex", false, step => {
-    assert.equal(step.kind, "open");
-    if (step.kind !== "open") return;
-    const url = new URL(step.address);
-    challenge = url.searchParams.get("code_challenge");
-    redirect = url.searchParams.get("redirect_uri");
-    const link = new URL(redirect!);
-    link.searchParams.set("state", url.searchParams.get("state")!);
-    link.searchParams.set("code", "fixture+code");
-    callback = fetch(link).then(async r => { await r.text(); return r.status; });
-  });
-  assert.equal(await callback, 200);
-  assert.equal(login.account, "test-account");
-  assert.ok(login.expires - Date.now() <= 3_300_000 && login.expires - Date.now() > 3_290_000);
-  const denied = service.login("openai-codex", false, step => {
-    assert.equal(step.kind, "open");
-    if (step.kind === "open") callback = fetch(`${new URL(step.address).searchParams.get("redirect_uri")}?code=no&state=wrong`).then(async r => { await r.text(); return r.status; });
-  });
-  await assert.rejects(denied, /wrong state/);
-  assert.equal(await callback, 400);
-});
-
-test("ChatGPT sign-in finishes by pasting when the callback port is busy", { timeout: 4000 }, async t => {
-  const redirect = "http://localhost:1455/auth/callback";
-  const base = await fixture(t, (req, res, body) => {
-    assert.equal(req.url, "/token");
-    const form = new URLSearchParams(body);
-    assert.equal(form.get("code"), "pasted-code");
-    assert.equal(form.get("redirect_uri"), redirect);
-    send(res, token());
-  });
-  // The token fake holds the callback port; no local callback can complete this login.
-  const service = oauth({ test: { endpoints: { codexToken: `${base}/token`, codexAuthorize: `${base}/authorize` }, port: Number(new URL(base).port) } });
-  const notes: string[] = [];
-  let state: string | null = null;
-  const login = await service.login("openai-codex", false, step => {
-    if (step.kind === "note") { notes.push(step.message); return; }
-    assert.equal(step.kind, "open-and-paste");
-    const query = new URL(step.address).searchParams;
-    state = query.get("state");
-    assert.ok(state);
-    assert.equal(query.get("redirect_uri"), redirect);
-  }, receive => {
-    receive("");
-    receive(`${redirect}?code=stale&state=other`);
-    receive(`${redirect}?code=pasted-code&scope=x&state=${state}`);
-    return () => {};
-  });
-  assert.equal(login.account, "test-account");
-  assert.equal(login.refresh, "refresh");
-  assert.equal(notes.length, 2);
-  assert.match(notes[0], /Port 1455 is in use/);
-  assert.match(notes[1], /different sign-in.*Paste it again/);
-});
-
-test("pasted ChatGPT codes are read from each accepted form", () => {
-  const read = (input: string) => pastedCode(input, "st");
-  assert.equal(read("http://localhost:1455/auth/callback?code=c1&state=st"), "c1");
-  assert.equal(read("  code=a%2Fb+c&state=st  "), "a/b c");
-  assert.equal(read("c3#st"), "c3");
-  assert.equal(read("c4"), "c4");
-  assert.equal(read("   "), undefined);
-  assert.throws(() => read("http://localhost:1455/auth/callback?code=c&state=other"), /different sign-in/);
-  assert.throws(() => read("code=c&state="), /different sign-in/);
-  assert.throws(() => read("http://localhost:1455/auth/callback?error=access_denied&state=st"), /not completed/);
-  assert.throws(() => read("http://localhost:1455/auth/callback?state=st"), /no code/);
-});
-
-test("ChatGPT device sign-in waits for authorization and exchanges the device verifier", async t => {
-  let polls = 0;
-  const base = await fixture(t, (req, res, body) => {
-    if (req.url === "/device") {
-      assert.equal(JSON.parse(body).client_id, "app_EMoamEEZ73f0CkXaXp7hrann");
-      send(res, { device_auth_id: "id", user_code: "CODE", interval: "1" });
-    } else if (req.url === "/poll") {
-      assert.deepEqual(JSON.parse(body), { device_auth_id: "id", user_code: "CODE" });
-      if (++polls === 1) send(res, {}, 404);
-      else send(res, { authorization_code: "approved", code_verifier: "verifier" });
-    } else {
-      const form = new URLSearchParams(body);
-      assert.equal(form.get("redirect_uri"), "https://auth.openai.com/deviceauth/callback");
-      assert.equal(form.get("code"), "approved");
-      assert.equal(form.get("code_verifier"), "verifier");
-      send(res, token());
-    }
-  });
-  const service = oauth({ test: { endpoints: { codexDeviceCode: `${base}/device`, codexDeviceToken: `${base}/poll`, codexToken: `${base}/token` }, pollUnit: 1 } });
-  const steps: unknown[] = [];
-  const login = await service.login("openai-codex", true, s => steps.push(s));
-  assert.equal(login.account, "test-account");
-  assert.equal(polls, 2);
-  assert.deepEqual(steps, [{ kind: "code", address: "https://auth.openai.com/codex/device", code: "CODE" }]);
 });
 
 test("Grok device sign-in handles slow_down and never opens a non-HTTPS verification address", async t => {
@@ -223,6 +63,7 @@ test("Grok device sign-in handles slow_down and never opens a non-HTTPS verifica
     const form = new URLSearchParams(body);
     assert.equal(form.get("client_id"), "b1a00492-073a-47ea-816f-4c329264a828");
     if (req.url === "/device") {
+      assert.equal(form.get("referrer"), "fixture-grok");
       send(res, { verification_uri_complete: bad ? "http://example.invalid" : "https://example.invalid", user_code: "CODE", device_code: "dev", interval: 1 });
     } else {
       assert.equal(form.get("device_code"), "dev");
@@ -232,18 +73,18 @@ test("Grok device sign-in handles slow_down and never opens a non-HTTPS verifica
       else send(res, token("access"));
     }
   });
-  const service = oauth({ test: { endpoints: { xaiDeviceCode: `${base}/device`, xaiToken: `${base}/token` }, pollUnit: 1 } });
-  const login = await service.login("xai", false, s => { assert.equal(s.kind, "code"); });
+  const service = grokOAuth({ clientIdentity: "fixture-grok", test: { endpoints: { xaiDeviceCode: `${base}/device`, xaiToken: `${base}/token` }, pollUnit: 1 } });
+  const login = await service.login( s => { assert.equal(s.kind, "code"); });
   assert.equal(login.access, "access");
   assert.equal(login.account, undefined);
   assert.equal(polls, 3);
   bad = true;
-  await assert.rejects(service.login("xai", false, () => assert.fail("should not show an HTTP URL")), /not https/);
+  await assert.rejects(service.login( () => assert.fail("should not show an HTTP URL")), /not https/);
 });
 
 test("refresh holds Rust's flock while awaiting the token endpoint, and concurrent refreshes spend one token", async t => {
   const auth = await authFile(t);
-  await auth.setLogin("xai", { type: "oauth", access: "expired", refresh: "once", expires: 1 });
+  await auth.setLogin("grok", { type: "oauth", access: "expired", refresh: "once", expires: 1 });
   let requests = 0;
   const base = await fixture(t, async (_req, res, body) => {
     requests++;
@@ -257,63 +98,18 @@ test("refresh holds Rust's flock while awaiting the token endpoint, and concurre
     }
     send(res, { access_token: "fresh", expires_in: 3600 });
   });
-  const service = oauth({ test: { endpoints: { xaiToken: base } } });
-  const refresh = () => auth.current("xai", old => service.refresh("xai", old));
+  const service = grokOAuth({ test: { endpoints: { xaiToken: base } } });
+  const refresh = () => auth.current("grok", old => service.refresh(old));
   const [a, b] = await Promise.all([refresh(), refresh()]);
   assert.equal(requests, 1);
   assert.deepEqual(a, b);
-  assert.deepEqual(await auth.login("xai"), a);
+  assert.deepEqual(await auth.login("grok"), a);
   assert.equal(a.type === "oauth" && a.refresh, "once");
-});
-
-test("Codex sends the expected headers and request shape, refreshes a rejected token once, and decodes split SSE", async t => {
-  const auth = await authFile(t);
-  await auth.setLogin("openai-codex", { type: "oauth", access: "old", account: "test-account", refresh: "rotate", expires: Date.now() + 999_999 });
-  let requests = 0, refreshes = 0;
-  const base = await fixture(t, async (req, res, body) => {
-    if (req.url === "/token") {
-      assert.equal(new URLSearchParams(body).get("refresh_token"), "rotate");
-      refreshes++;
-      send(res, token());
-      return;
-    }
-    assert.equal(req.url, "/responses");
-    assert.equal(req.headers["openai-beta"], "responses=experimental");
-    assert.equal(req.headers["chatgpt-account-id"], "test-account");
-    const parsed = JSON.parse(body);
-    assert.equal(parsed.prompt_cache_key, req.headers["x-client-request-id"]);
-    assert.equal(parsed.prompt_cache_key, req.headers["session-id"]);
-    assert.equal(parsed.instructions, "You are a helpful assistant.");
-    assert.deepEqual(parsed.input, [{ role: "user", content: "hello" }]);
-    assert.deepEqual(parsed.include, ["reasoning.encrypted_content"]);
-    assert.equal(parsed.store, false);
-    assert.equal(parsed.max_output_tokens, undefined);
-    if (++requests === 1) { assert.equal(req.headers.authorization, "Bearer old"); send(res, {}, 401); return; }
-    assert.equal(req.headers.authorization, `Bearer ${jwt}`);
-    res.writeHead(200, { "content-type": "text/event-stream" });
-    const event = Buffer.from('data: {"type":"response.output_text.delta","delta":"café"}\r\n\r\n');
-    const split = event.indexOf(0xc3) + 1;
-    res.write(event.subarray(0, split));
-    await wait(5);
-    res.write(event.subarray(split));
-    res.write('data: {"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"café"}]}}\n\n');
-    res.end('data: {"type":"response.completed",\n' + 'data: "response":{"output":[],"usage":{"input_tokens":7,"output_tokens":2,"input_tokens_details":{"cached_tokens":1}}}}\n\n');
-  });
-  const provider = responses("openai-codex", auth, {}, {
-    test: { endpoint: `${base}/responses`, oauth: oauth({ test: { endpoints: { codexToken: `${base}/token` } } }) },
-  });
-  const agent = await createAgent({ providers: [provider], model: "openai-codex/gpt-6.1-sol", settings: { maxOutput: 20 } });
-  t.after(() => agent.close());
-  const result = await (await agent.session()).prompt("hello");
-  assert.equal(result.text, "café");
-  assert.equal(result.usage?.cacheRead, 1);
-  assert.equal(requests, 2);
-  assert.equal(refreshes, 1);
 });
 
 test("Grok sends the system item, caps output, and maps a stream error", async t => {
   const auth = await authFile(t);
-  await auth.setLogin("xai", { type: "api_key", key: "fake-key" });
+  await auth.setLogin("grok", { type: "api_key", key: "fake-key" });
   const base = await fixture(t, (req, res, body) => {
     assert.equal(req.headers.authorization, "Bearer fake-key");
     assert.equal(req.headers.originator, undefined);
@@ -324,8 +120,8 @@ test("Grok sends the system item, caps output, and maps a stream error", async t
     assert.deepEqual(parsed.reasoning, { effort: "high", summary: "auto" });
     res.writeHead(200, { "content-type": "text/event-stream" }).end('data: {"type":"response.failed","response":{"error":{"code":"context_length_exceeded","message":"too long"}}}\n\n');
   });
-  const provider = responses("xai", auth, { xai: [{ id: "test", name: "Test", contextWindow: 1000, maxTokens: 20, effort: { off: "none", high: "high" } }] }, { test: { endpoint: base, oauth: oauth({ test: { endpoints: {} } }) } });
-  await assert.rejects(async () => provider.request({ provider: "xai", id: "test" }, { systemPrompt: "rules", messages: [{ role: "user", content: [{ type: "text", text: "hey" }] }], tools: [], settings: { reasoning: "xhigh", maxOutput: 99 } }, {
+  const provider = grokResponses(auth, { grok: [{ id: "test", name: "Test", contextWindow: 1000, maxTokens: 20, effort: { off: "none", high: "high" } }] }, { test: { endpoint: base, oauth: grokOAuth({ test: { endpoints: {} } }) } });
+  await assert.rejects(async () => provider.request({ provider: "grok", id: "test" }, { systemPrompt: "rules", messages: [{ role: "user", content: [{ type: "text", text: "hey" }] }], tools: [], settings: { reasoning: "xhigh", maxOutput: 99 } }, {
     cancelled: new AbortController().signal, async credential() { return undefined; }, piece() {}, log() {}, emit() {},
   }), { modelError: { kind: "contextTooLarge", message: "too long (context_length_exceeded)" } });
 });

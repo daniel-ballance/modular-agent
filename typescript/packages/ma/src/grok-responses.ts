@@ -1,29 +1,35 @@
 import { ModelFailure, type AssistantMessage, type ContentPart, type ModelError, type ModelRequest, type Provider, type ProviderContext, type Settings } from "@modular-agent/core";
 import defaults from "./models.json" with { type: "json" };
 import { type AuthFile, type Login } from "./auth.js";
-import { chatgptAccount, labels, loopback, oauth, type Vendor } from "./oauth.js";
-import { resolveClientIdentity, type ClientIdentityOptions } from "./client-identity.js";
+import { loopback, grokOAuth } from "./grok-oauth.js";
+import type { ClientIdentityOptions } from "@modular-agent/subscription";
 
-const endpoints = { "openai-codex": "https://chatgpt.com/backend-api/codex/responses", xai: "https://api.x.ai/v1/responses" };
+const vendor = "grok";
+const endpointUrl = "https://api.x.ai/v1/responses";
 const levels = ["off", "minimal", "low", "medium", "high", "xhigh"];
 interface Model { id: string; name: string; contextWindow: number; maxTokens: number; effort: Record<string, string> }
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
-export function catalogModels(vendor: Vendor, overrides: Settings): Model[] {
-  const entries = new Map<string, Model>(defaults[vendor].map(m => [m.id, m as Model]));
+function catalogModels(overrides: Settings): Model[] {
+  const entries = new Map<string, Model>(defaults.grok.map(m => [m.id, m as Model]));
+  for (const model of modelRows(vendor, overrides)) entries.set(model.id, model);
+  return [...entries.values()];
+}
+export function modelRows(vendor: string, overrides: Settings): Model[] {
   const extra = overrides[vendor];
+  const entries: Model[] = [];
   if (extra !== undefined && !Array.isArray(extra)) throw new Error(`models.json: ${vendor} must be an array`);
   for (const m of extra ?? []) {
     if (!object(m) || typeof m.id !== "string" || typeof m.name !== "string" || !Number.isSafeInteger(m.contextWindow) || !Number.isSafeInteger(m.maxTokens) ||
         (m.contextWindow as number) <= 0 || (m.maxTokens as number) <= 0 || !object(m.effort) || Object.values(m.effort).some(e => typeof e !== "string"))
       throw new Error(`models.json: invalid ${vendor} model`);
-    entries.set(m.id, m as unknown as Model);
+    entries.push(m as unknown as Model);
   }
-  return [...entries.values()];
+  return entries;
 }
 const textOf = (content: ContentPart[]) => content.filter(p => p.type === "text").map(p => p.text).join("");
 const images = (parts: ContentPart[]) => parts.flatMap(p => p.type === "image" && typeof p.mimeType === "string" && typeof p.data === "string"
   ? [{ type: "input_image", image_url: `data:${p.mimeType};base64,${p.data}` }] : []);
-export function requestBody(vendor: Vendor, model: Model, request: ModelRequest, session: string) {
+function requestBody(model: Model, request: ModelRequest) {
   const input: unknown[] = [];
   for (const message of request.messages) {
     const text = textOf(message.content), attachments = images(message.content);
@@ -47,20 +53,14 @@ export function requestBody(vendor: Vendor, model: Model, request: ModelRequest,
   const asked = levels.indexOf(request.settings.reasoning ?? "");
   const level = levels.slice(0, asked + 1).findLast(l => Object.hasOwn(model.effort, l));
   if (level) body.reasoning = { effort: model.effort[level], summary: "auto" };
-  if (vendor === "openai-codex") {
-    body.instructions = request.systemPrompt || "You are a helpful assistant.";
-    body.text = { verbosity: "low" };
-    body.prompt_cache_key = session;
-  } else {
-    if (request.systemPrompt) input.unshift({ role: "system", content: request.systemPrompt });
-    const cap = request.settings.maxOutput;
-    if (cap && cap > 0) body.max_output_tokens = Math.min(cap, model.maxTokens);
-  }
+  if (request.systemPrompt) input.unshift({ role: "system", content: request.systemPrompt });
+  const cap = request.settings.maxOutput;
+  if (cap && cap > 0) body.max_output_tokens = Math.min(cap, model.maxTokens);
   body.input = input;
   return body;
 }
 const failure = (kind: ModelError["kind"], message: string) => new ModelFailure({ kind, message });
-function apiFailure(status: number | undefined, error: unknown, vendor?: Vendor) {
+function apiFailure(status: number | undefined, error: unknown, loginHint = false) {
   const e = object(error) ? error : {};
   const code = typeof e.code === "string" ? e.code : typeof e.type === "string" ? e.type : "";
   const message = [e.message, e.detail, error].find((m): m is string => typeof m === "string") ?? "the model service refused the request";
@@ -70,7 +70,7 @@ function apiFailure(status: number | undefined, error: unknown, vendor?: Vendor)
   else if (["invalid_api_key", "authentication_error", "token_expired"].includes(code) || status === 401 || status === 403) kind = "credentials";
   else if (["rate_limit_exceeded", "server_error", "overloaded"].includes(code) || status === 429 || (status && status >= 500)) kind = "temporary";
   else if (code === "content_policy_violation") kind = "refused";
-  return failure(kind, message + (code ? ` (${code})` : status ? ` (HTTP ${status})` : "") + (vendor && kind === "credentials" ? ` Run \`ma login ${vendor}\` to sign in again.` : ""));
+  return failure(kind, message + (code ? ` (${code})` : status ? ` (HTTP ${status})` : "") + (loginHint && kind === "credentials" ? ` Run \`ma login grok\` to sign in again.` : ""));
 }
 
 async function readStream(res: Response, ctx: ProviderContext) {
@@ -114,7 +114,7 @@ async function readStream(res: Response, ctx: ProviderContext) {
   if ((!Array.isArray(completed.output) || !completed.output.length) && items.length) completed.output = items;
   return completed;
 }
-function message(vendor: Vendor, raw: Record<string, unknown>): AssistantMessage {
+function message(raw: Record<string, unknown>): AssistantMessage {
   const content: ContentPart[] = [];
   if (!Array.isArray(raw.output)) throw new Error("the model response has no output");
   for (const item of raw.output) {
@@ -143,12 +143,11 @@ function message(vendor: Vendor, raw: Record<string, unknown>): AssistantMessage
       cacheRead: usage?.input_tokens_details?.cached_tokens ?? 0, cacheWrite: 0, cost: 0 } };
 }
 
-type ResponsesOptions = ClientIdentityOptions & { test?: { endpoint: string; oauth: ReturnType<typeof oauth> } };
-export function responses(vendor: Vendor, auth: Pick<AuthFile, "login" | "current">, overrides: Settings = {},
-  { clientIdentity: identity, test }: ResponsesOptions = {}): Provider {
-  const clientIdentity = resolveClientIdentity(identity);
-  const models = catalogModels(vendor, overrides), tokenService = test?.oauth ?? oauth({ clientIdentity });
-  const endpoint = test ? loopback(test.endpoint) : endpoints[vendor];
+type ResponsesOptions = ClientIdentityOptions & { test?: { endpoint: string; oauth: ReturnType<typeof grokOAuth> } };
+export function grokResponses(auth: Pick<AuthFile, "login" | "current">, overrides: Settings = {},
+  { clientIdentity, test }: ResponsesOptions = {}): Provider {
+  const models = catalogModels(overrides), tokenService = test?.oauth ?? grokOAuth({ clientIdentity });
+  const endpoint = test ? loopback(test.endpoint) : endpointUrl;
   return {
     id: vendor, supports: { keepsState: false, safeToRepeat: true }, inProcessOnly: true,
     async available() { return !!await auth.login(vendor); },
@@ -157,21 +156,16 @@ export function responses(vendor: Vendor, auth: Pick<AuthFile, "login" | "curren
     async request(ref, request, ctx) {
       const model = models.find(m => m.id === ref.id);
       if (!model) throw new Error(`${vendor} does not offer ${ref.id}`);
-      const session = ctx.sessionId ?? "", body = JSON.stringify(requestBody(vendor, model, request, session));
-      const login = async (rejected?: Login) => auth.current(vendor, old => tokenService.refresh(vendor, old, ctx.cancelled), rejected, ctx.cancelled)
+      const body = JSON.stringify(requestBody(model, request));
+      const login = async (rejected?: Login) => auth.current(vendor, old => tokenService.refresh(old, ctx.cancelled), rejected, ctx.cancelled)
         .catch(err => { throw failure("credentials", (err as Error).message); });
       let credential = await login();
       for (let attempt = 0; ; attempt++) {
         const bearer = credential.type === "oauth" ? credential.access : credential.key;
         const headers: Record<string, string> = { authorization: `Bearer ${bearer}`, accept: "text/event-stream", "content-type": "application/json" };
-        if (vendor === "openai-codex") {
-          try { headers["chatgpt-account-id"] = (credential.type === "oauth" ? credential.account : undefined) ?? chatgptAccount(bearer); }
-          catch (err) { throw failure("credentials", (err as Error).message); }
-          Object.assign(headers, { "OpenAI-Beta": "responses=experimental", originator: clientIdentity, "session-id": session, "x-client-request-id": session });
-        }
         const res = await fetch(endpoint, { method: "POST", headers, body, redirect: "manual", signal: AbortSignal.any([ctx.cancelled, AbortSignal.timeout(300_000)]) })
-          .catch(err => { throw failure("temporary", `could not reach ${labels[vendor]}: ${(err as Error).message}`); });
-        if (res.ok) return message(vendor, await readStream(res, ctx));
+          .catch(err => { throw failure("temporary", `could not reach Grok subscription: ${(err as Error).message}`); });
+        if (res.ok) return message(await readStream(res, ctx));
         if (res.status === 401 && attempt === 0 && credential.type === "oauth") {
           await res.body?.cancel();
           credential = await login(credential);
@@ -180,7 +174,7 @@ export function responses(vendor: Vendor, auth: Pick<AuthFile, "login" | "curren
         const text = await res.text().catch(() => "");
         let data: unknown;
         try { data = JSON.parse(text); } catch { data = undefined; }
-        throw apiFailure(res.status, object(data) ? object(data.error) ? data.error : data : { message: [...text].slice(0, 500).join("") }, vendor);
+        throw apiFailure(res.status, object(data) ? object(data.error) ? data.error : data : { message: [...text].slice(0, 500).join("") }, true);
       }
     },
   };

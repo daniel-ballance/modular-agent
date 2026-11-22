@@ -209,7 +209,7 @@ export interface PluginApi {
 	config(): Record<string, unknown>;
 }
 
-export interface HarnessOptions { project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn" | "refused"; jobReportsStartTurns?: boolean; rejectUnknownModel?: boolean; resourceReservations?: ReservationOptions; tenants?: Record<string, Tenant> | null }
+export interface HarnessOptions { project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn" | "refused"; jobReportsStartTurns?: boolean; rejectUnknownModel?: boolean; reopenModelAliases?: Readonly<Record<string, string>>; resourceReservations?: ReservationOptions; tenants?: Record<string, Tenant> | null }
 
 export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"];
 
@@ -250,6 +250,7 @@ export class Harness {
 	private readonly settingsDuringTurn?: "nextTurn" | "refused";
 	private readonly jobReportsStartTurns: boolean;
 	private readonly rejectUnknownModel: boolean;
+	private readonly reopenModelAliases: Readonly<Record<string, string>>;
 	private newId: () => string;
 	private jobCancels = new Map<string, (jobId: string) => Promise<void>>();
 	private refusedTools = new Set<string>();
@@ -269,6 +270,7 @@ export class Harness {
 		this.settingsDuringTurn = options.settingsDuringTurn;
 		this.jobReportsStartTurns = options.jobReportsStartTurns ?? true;
 		this.rejectUnknownModel = options.rejectUnknownModel === true;
+		this.reopenModelAliases = { ...options.reopenModelAliases };
 		this.hooks = new HookRegistry(({ hook, plugin, error }) => this.problem(plugin, `hook ${hook}`, error));
 		const h = (name: string, rule: HookRule, owner: string) => this.hooks.define(name, rule, owner);
 		// Harness hook points
@@ -894,6 +896,8 @@ export class Harness {
 		const s = new Session(meta, false);
 		if (store.historyErasure) this.storedTombstones.set(s, new Set(entries.filter(e => e.erased === true).map(e => e.id)));
 		for (const e of entries) s.apply(e);
+		const model = parseModel(s.settings.model);
+		if (model) s.settings.model = this.reopenModel(model);
 		return s;
 	}
 
@@ -2570,9 +2574,14 @@ export class Harness {
 		} };
 	}
 
+	private reopenModel(ref: { provider: string; id: string }): { provider: string; id: string } {
+		return Object.hasOwn(this.reopenModelAliases, ref.provider) ? { ...ref, provider: this.reopenModelAliases[ref.provider] } : ref;
+	}
+
 	private providerFor(s: Session, ref = parseModel(s.settings.model) as ReturnType<typeof parseModel> | null): Provider | undefined {
 		if (!ref) return undefined;
-		return this.useAll<Provider>("provider").find((p) => p.id === ref.provider);
+		const { provider } = this.reopenModel(ref);
+		return this.useAll<Provider>("provider").find((p) => p.id === provider);
 	}
 
 	private modelAccess(s: Session, ref = parseModel(s.settings.model) as ReturnType<typeof parseModel> | null): ModelAccess | undefined {
@@ -2589,7 +2598,7 @@ export class Harness {
 				options.signal.throwIfAborted();
 				if (available === false) return { role: "assistant", stop: "failed", content: [],
 					error: { kind: "credentials", message: "Provider is not available" } };
-				return provider.request(ref, request, { ...options, sessionId: s.id });
+				return provider.request(this.reopenModel(ref), request, { ...options, sessionId: s.id });
 			},
 		};
 	}

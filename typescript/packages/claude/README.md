@@ -105,7 +105,7 @@ Which levels a model lists follows the reference: Fable 5.x cannot switch thinki
 
 ## Verification
 
-### Offline tests: 44 pass
+### Offline tests: 47 pass
 
 `npm test`, with a scripted fake in place of the SDK's `query()`:
 
@@ -113,6 +113,7 @@ Which levels a model lists follows the reference: Fable 5.x cannot switch thinki
 - `transcript.test.ts` (6): ModelRequest to SDK input.
 - `response.test.ts` (11): SDK output to the assistant message (text, thinking, tool calls, usage, stop reasons), error kinds, token scrubbing.
 - `provider.test.ts` (12): one request end to end against the fake: the SDK options that make it a plain endpoint, streaming, tool use, failures, a login that is not a subscription, cancel, catalog refresh, login detection, tool names.
+- `api.test.ts` (3 offline, one gated live): the public constructor in process and over the plugin binding, including an API key source refusal.
 - `stdio.test.ts` (9): a host-side test that starts `dist/src/main.js` with only `PATH` in its environment and drives it over stdio: handshake, `provider/models`, `provider/available`, `provider/discard`, a request with both hook callbacks and streamed events in order, use of the hook's changed request, a sessionless request, a failed request, refused requests, a refused hook, cancel mid-stream, shutdown and exit on stdin EOF.
 
 The fake is selected in the built program with `CLAUDE_SIDECAR_TEST_FAKE_SDK` (test only; `signed-out` makes it report no login). It starts no process and reaches no model.
