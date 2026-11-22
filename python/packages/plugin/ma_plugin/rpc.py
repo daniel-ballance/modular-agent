@@ -176,6 +176,8 @@ class Peer:
                 await self.writer.drain()
 
     def _traced_params(self, method, params):
+        if method == "plugin/initialize":
+            return params
         result = {k: v for k, v in params.items() if k != "traceContext"}
         scoped = (
             not method.startswith("host/")

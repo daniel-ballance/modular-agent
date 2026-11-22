@@ -168,6 +168,9 @@ class NativeProvider:
             lambda: self.service.generate(d, piece),
             local=self.target in {"fake", "scripted"},
         )
+        for call in response.get("calls", []):
+            original = call.pop("_provider_call_id", call["id"])
+            self.h.provider_trace_ids[d["session"], call["id"]] = original
         await self.h.fire(
             "@harness",
             "provider.response",

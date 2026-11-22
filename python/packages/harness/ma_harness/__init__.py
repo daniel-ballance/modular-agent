@@ -58,6 +58,7 @@ class Harness(Authority, Erasure):
         self.capacity = Reservations(reservations)
         self.trace = []
         self.agent_name = agent_name
+        self.provider_trace_ids = {}
         self.define_hook("@harness", "plugin.load", "gate")
         self.define_hook("@harness", "session.prepare", "observe")
         self.define_hook("@harness", "session.join", "observe")
@@ -383,6 +384,9 @@ class Harness(Authority, Erasure):
         attributes = ot.tool_attrs(
             sid, data.get("turn"), data.get("step"), call, data["definition"]["name"]
         )
+        provider_id = ot.name(self.provider_trace_ids.pop((sid, call["id"]), None))
+        if provider_id:
+            attributes["gen_ai.tool.call.id"] = provider_id
         tool_name = attributes.get("gen_ai.tool.name")
         with ot.span(
             "execute_tool " + tool_name if tool_name else "execute_tool", attributes

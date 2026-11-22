@@ -269,9 +269,6 @@ def tool_attrs(sid, turn, step, call, registered=None):
         **{
             "gen_ai.operation.name": "execute_tool",
             "gen_ai.tool.name": name(registered),
-            "gen_ai.tool.call.id": call.get("id")
-            if call.get("initiator", "model") == "model" and not call.get("parentCallId")
-            else None,
             "modular_agent.tool.call.id": call.get("id"),
             "modular_agent.tool.parent_call.id": call.get("parentCallId"),
         },
