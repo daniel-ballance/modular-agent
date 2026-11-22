@@ -178,8 +178,8 @@ func contentBlocks(content api.Content) []any {
 	return out
 }
 func entryValue(e api.Entry) map[string]any {
-	if (e.Kind == "erasure" && len(e.Data) == 0) || e.Kind == "turn.start" || e.Kind == "tool.started" || e.Kind == "model" {
-		return portable.Entry(e)
+	if e.Kind == "modular-agent.turnTrace" || (e.Kind == "erasure" && len(e.Data) == 0) || e.Kind == "turn.start" || e.Kind == "tool.started" || e.Kind == "model" {
+		return portable.EntryWithoutTrace(e)
 	}
 	var parent any
 	if e.Parent != "" {

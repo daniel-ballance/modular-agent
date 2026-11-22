@@ -785,8 +785,13 @@ func (c *client) Fork(ctx context.Context, id, target string) (string, error) {
 	parent := ""
 	mapping := map[string]string{}
 	for _, e := range snap.Branch() {
-		if e.IsErased() || e.Kind == "position" || e.Kind == "tenant" || e.Kind == "limit" || e.Kind == "erasure" {
+		if e.IsErased() || e.Kind == "position" || e.Kind == "tenant" || e.Kind == "limit" || e.Kind == "erasure" || e.Kind == telemetry.TurnTrace {
 			continue
+		}
+		if e.Kind == "turn.start" {
+			start := api.Decode[api.TurnStart](e.Data)
+			start.TraceContext = nil
+			e.Data = api.JSON(start)
 		}
 		source := e.ID
 		e.ID = api.ID()

@@ -16,7 +16,7 @@ func newRuntimeWork(t api.Turn) *runtimeWork {
 
 func reservedRuntimeKind(kind string) bool {
 	switch kind {
-	case "model", "model.request", "tool.call", "tool.open", "tool.started", "tool.result", "turn.start", "turn.end", "step.start", "step.end", "input.accepted", "input.returned", "input.withdrawn", "plugins.set", "actor.set", "actor.left", "question.open", "question.answer", "job.start", "job.end", "resultFeedback", portable.StepAfterKind:
+	case "model", "model.request", "tool.call", "tool.open", "tool.started", "tool.result", "turn.start", "turn.end", "step.start", "step.end", "input.accepted", "input.returned", "input.withdrawn", "plugins.set", "actor.set", "actor.left", "question.open", "question.answer", "job.start", "job.end", "resultFeedback", portable.StepAfterKind, "modular-agent.turnTrace", "modular-agent.disclosure":
 		return true
 	}
 	return false

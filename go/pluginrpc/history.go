@@ -6,5 +6,5 @@ import (
 )
 
 func entryOut(e api.Entry) object {
-	return portable.Entry(e)
+	return portable.EntryWithoutTrace(e)
 }

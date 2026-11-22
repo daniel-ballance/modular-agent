@@ -124,6 +124,19 @@ type storedQuestion struct {
 
 // Entry encodes the shared entry shape, keeping unrecognized fields from other
 // writers. Local-only fields use a namespace and never replace a standard key.
+// EntryWithoutTrace keeps private trace records in the topology but does not
+// disclose their data to ACP or a plugin.
+func EntryWithoutTrace(e api.Entry) map[string]any {
+	v := Entry(e)
+	switch e.Kind {
+	case telemetry.TurnTrace:
+		delete(v, "data")
+	case "turn.start":
+		delete(asObject(v["data"]), "traceContext")
+	}
+	return v
+}
+
 func Entry(e api.Entry) map[string]any {
 	v := obj(e.Wire)
 	var parent any
