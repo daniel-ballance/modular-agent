@@ -62,7 +62,7 @@ Version 1 records no content. Telemetry MUST NOT include prompts, instructions, 
 
 ## Conformance checks
 
-The [shared SDK check](sdk/testing.md#shared-telemetry-check) uses OTLP/HTTP JSON to compare exports across languages. For local checks, use an in-memory exporter.
+The [shared SDK check](sdk/testing.md#shared-telemetry-check) receives each language's exports over OTLP/HTTP (protobuf) to compare them across languages. For local checks, use an in-memory exporter.
 
 Install an OpenTelemetry SDK with an always-on test sampler. Use a scripted Provider, deterministic tools, fixture barriers and a controlled store. No collector or live model is needed. The check can assert:
 
