@@ -234,7 +234,7 @@ await run("validation and paging", async () => {
 	check("paging: oversized entry rejects the whole append", err(await append(sid, lease, [entry("staged"), tooBig]), 413, "entry_too_large") && ok(await read(sid), { session: { id: sid, ...meta }, entries: [] }));
 	const entries = Array.from({ length: 501 }, (_, i) => entry(i));
 	entries.push(entry(501, "😀".repeat(550000)), entry(502, "😀".repeat(550000)));
-	await append(sid, lease, entries);
+	check("paging: a 503-entry append of about 4.4 MB is kept whole", ok(await append(sid, lease, entries), { kept: entries.length }));
 	const pages = [];
 	for (let i = 0, after; i < 5; i++) {
 		const r = await read(sid, after ? `?after=${encodeURIComponent(after)}` : "");
