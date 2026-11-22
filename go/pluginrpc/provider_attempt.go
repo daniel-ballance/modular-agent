@@ -30,6 +30,9 @@ func (a *providerAttempt) hook(ctx context.Context, h *host, hook string, payloa
 		a.response = asObject(payload["message"])
 		a.answered = true
 		a.streaming.Store(false)
+		if h == nil {
+			return nil, nil // An enclosing in-process Provider owns the host hooks.
+		}
 		_, err := h.h.API().Invoke(ctx, hookNames[hook], payload)
 		return nil, err
 	}
@@ -38,7 +41,7 @@ func (a *providerAttempt) hook(ctx context.Context, h *host, hook string, payloa
 	}
 	a.requested = true
 	final := payload
-	if !a.fence.Replay {
+	if h != nil && !a.fence.Replay {
 		changed, err := h.h.API().Invoke(ctx, hookNames[hook], payload)
 		if err != nil {
 			return nil, err
