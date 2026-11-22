@@ -260,9 +260,14 @@ impl Engine {
             };
             let mut dispatch: ModelRequest = serde_json::from_value(request.clone())?;
             dispatch.provider_tools = provider_tools;
-            let generated = input
-                .model
-                .generate_attempt(
+            let retry_step = (attempt > 0)
+                .then(|| telemetry::Operation::internal("modular_agent.step", &attempt_scope));
+            let parent = retry_step
+                .as_ref()
+                .map_or_else(telemetry::current, telemetry::Operation::context);
+            let generated = telemetry::within(
+                parent,
+                input.model.generate_attempt(
                     api.clone(),
                     attempt_scope.clone(),
                     dispatch,
@@ -281,8 +286,9 @@ impl Engine {
                         replay: None,
                         authorized_wire: None,
                     },
-                )
-                .await;
+                ),
+            )
+            .await;
             let response = match generated {
                 Ok(r) => r,
                 Err(e) if e.downcast_ref::<ModelAttemptLimit>().is_some() => return Err(e),
@@ -499,6 +505,7 @@ impl Engine {
         if interrupted && denied.is_some() {
             return Ok(unknown());
         }
+        let mut dispatched = false;
         let mut result = if let Some((status, text)) = denied {
             ToolResult::new(call, status, text)
         } else if !offered || definition.is_none() {
@@ -594,6 +601,7 @@ impl Engine {
                             "registration or authority changed before dispatch",
                         )
                     } else {
+                        dispatched = true;
                         let result = api
                             .dispatch_tool(scope, changed, input.cancel.child_token())
                             .await;
@@ -628,6 +636,9 @@ impl Engine {
                 }
             }
         };
+        if !dispatched && matches!(result.status, ToolStatus::Refused | ToolStatus::NotStarted) {
+            telemetry::disposition(scope, call, &result.status);
+        }
         if result.status == ToolStatus::Waiting {
             return Ok(result);
         }
@@ -872,165 +883,181 @@ impl Engine {
                 result.outcome = Outcome::Cancelled;
                 return Ok(result);
             }
-            if start.is_none() {
-                api.take_steering(&scope)?;
-                self.record(
-                    api,
-                    &scope,
-                    "step.start",
-                    false,
-                    json!({"index":index}),
-                    vec![],
-                )?;
-                api.emit(Event::new(&scope, "step.start", json!({"index":index})))
-                    .await?;
-            }
-            let mut capacity_limit = false;
-            let (response_entry, response) = if let Some(entry) = entries
-                .iter()
-                .find(|e| e.kind == "model.response" && e.scope.step == scope.step)
-            {
-                (
-                    entry.clone(),
-                    serde_json::from_value(
-                        entry
-                            .content
-                            .clone()
-                            .ok_or_else(|| anyhow!("erased response"))?,
-                    )?,
-                )
-            } else {
-                result.usage = self.usage(&entries)?;
-                let generated = self.request(api, input, &scope, &result.usage).await;
-                if let Err(e) = &generated
-                    && let Some(limit) = e.downcast_ref::<ModelAttemptLimit>()
-                {
-                    result.outcome = Outcome::Limit;
-                    result.limit = Some(limit.0.into());
-                    return Ok(result);
-                }
-                let mut response = match generated? {
-                    Ok((step, response)) => {
-                        scope = step;
-                        response
-                    }
-                    Err(error) => {
-                        result.outcome = if error.kind == FailureKind::Cancelled
-                            || input.cancel.is_cancelled()
-                        {
-                            Outcome::Cancelled
-                        } else {
-                            Outcome::Failed
-                        };
-                        result.error = Some(error.to_string());
-                        return Ok(result);
-                    }
-                };
-                capacity_limit = bound_model_response(api.as_ref(), &scope, &mut response)?;
-                let copies = self
-                    .turn_entries(api, &scope)?
-                    .into_iter()
-                    .filter(|e| e.kind == "model.request" && e.scope.step == scope.step)
-                    .map(|e| e.id)
-                    .collect();
-                let entry =
-                    self.record(api, &scope, "model.response", true, json!(response), copies)?;
-                (entry, response)
-            };
-            result.steps = index + 1;
-            result.usage = self.usage(&self.turn_entries(api, &scope)?)?;
-            result.open_calls = self
-                .tools(api, input, &scope, &response_entry, &response)
-                .await?;
-            api.emit(Event::new(
-                &scope,
-                "step.end",
-                json!({"usage":response.usage}),
-            ))
-            .await?;
-            let refusal = self.step_after(api, &scope, &response).await?;
-            result.text = response.text_content();
-            result.value = None;
-            let mut carry_on = false;
-            if input.cancel.is_cancelled() {
-                result.outcome = Outcome::Cancelled;
-            } else if capacity_limit {
-                result.outcome = Outcome::Limit;
-                result.limit = Some("capacity".into());
-            } else if api.tenant_budget_reached(&scope.session)? {
-                result.outcome = Outcome::Limit;
-                result.limit = Some("tenantTokens".into());
-            } else if response.stop == "limit" {
-                result.outcome = Outcome::Limit;
-                result.limit = Some("output".into());
-            } else if let Some(reason) = refusal.as_ref() {
-                result.outcome = Outcome::Failed;
-                result.error = Some(reason.clone());
-            } else if !result.open_calls.is_empty() {
-                if input.settings.get("result_shape").is_some() {
-                    result.outcome = Outcome::Failed;
-                    result.error =
-                        Some("The turn left calls open without a structured result.".into());
-                } else {
-                    result.outcome = Outcome::Completed;
-                }
-            } else {
-                if !response.tool_calls().is_empty() || !api.take_steering(&scope)?.is_empty() {
-                    carry_on = true;
-                } else {
-                    let mut payload = json!(result);
-                    let mut reason = None;
-                    if let Some(shape) = input.settings.get("result_shape") {
-                        let value = wire::decode_json(result.text.as_bytes());
-                        reason = match value {
-                            Ok(value) => match schema::check(shape, Some(&value)) {
-                                Ok(()) => {
-                                    payload["value"] = value.clone();
-                                    result.value = Some(value);
-                                    None
-                                }
-                                Err(error) => Some(format!(
-                                    "The result shape does not accept this value: {error}"
-                                )),
-                            },
-                            Err(_) => Some("The final answer must be a JSON value.".into()),
-                        };
-                        payload["shape"] = shape.clone();
-                    }
-                    if reason.is_none() {
-                        let checked = self.hook(api, "result.ready", &scope, payload).await?;
-                        reason = checked
-                            .refused
-                            .or_else(|| checked.value["retry_reason"].as_str().map(str::to_owned));
-                    }
-                    if let Some(reason) = reason {
-                        result.value = None;
+            let step = telemetry::Operation::internal("modular_agent.step", &scope);
+            let carry_on: Result<bool> = step
+                .run(async {
+                    if start.is_none() {
+                        api.take_steering(&scope)?;
                         self.record(
                             api,
                             &scope,
-                            "resultFeedback",
-                            true,
-                            json!({"reason":reason}),
+                            "step.start",
+                            false,
+                            json!({"index":index}),
                             vec![],
                         )?;
-                        carry_on = true;
+                        api.emit(Event::new(&scope, "step.start", json!({"index":index})))
+                            .await?;
                     }
-                }
-            }
-            let copies = self
-                .turn_entries(api, &scope)?
-                .iter()
-                .map(|e| e.id.clone())
-                .collect();
-            self.record(
-                api,
-                &scope,
-                "step.end",
-                false,
-                json!({"continue":carry_on,"result":result}),
-                copies,
-            )?;
-            if !carry_on {
+                    let mut capacity_limit = false;
+                    let (response_entry, response) = if let Some(entry) = entries
+                        .iter()
+                        .find(|e| e.kind == "model.response" && e.scope.step == scope.step)
+                    {
+                        (
+                            entry.clone(),
+                            serde_json::from_value(
+                                entry
+                                    .content
+                                    .clone()
+                                    .ok_or_else(|| anyhow!("erased response"))?,
+                            )?,
+                        )
+                    } else {
+                        result.usage = self.usage(&entries)?;
+                        let generated = self.request(api, input, &scope, &result.usage).await;
+                        if let Err(e) = &generated
+                            && let Some(limit) = e.downcast_ref::<ModelAttemptLimit>()
+                        {
+                            result.outcome = Outcome::Limit;
+                            result.limit = Some(limit.0.into());
+                            return Ok(false);
+                        }
+                        let mut response = match generated? {
+                            Ok((step, response)) => {
+                                scope = step;
+                                response
+                            }
+                            Err(error) => {
+                                result.outcome = if error.kind == FailureKind::Cancelled
+                                    || input.cancel.is_cancelled()
+                                {
+                                    Outcome::Cancelled
+                                } else {
+                                    Outcome::Failed
+                                };
+                                result.error = Some(error.to_string());
+                                return Ok(false);
+                            }
+                        };
+                        capacity_limit = bound_model_response(api.as_ref(), &scope, &mut response)?;
+                        let copies = self
+                            .turn_entries(api, &scope)?
+                            .into_iter()
+                            .filter(|e| e.kind == "model.request" && e.scope.step == scope.step)
+                            .map(|e| e.id)
+                            .collect();
+                        let entry = self.record(
+                            api,
+                            &scope,
+                            "model.response",
+                            true,
+                            json!(response),
+                            copies,
+                        )?;
+                        (entry, response)
+                    };
+                    result.steps = index + 1;
+                    result.usage = self.usage(&self.turn_entries(api, &scope)?)?;
+                    result.open_calls = self
+                        .tools(api, input, &scope, &response_entry, &response)
+                        .await?;
+                    api.emit(Event::new(
+                        &scope,
+                        "step.end",
+                        json!({"usage":response.usage}),
+                    ))
+                    .await?;
+                    let refusal = self.step_after(api, &scope, &response).await?;
+                    result.text = response.text_content();
+                    result.value = None;
+                    let mut carry_on = false;
+                    if input.cancel.is_cancelled() {
+                        result.outcome = Outcome::Cancelled;
+                    } else if capacity_limit {
+                        result.outcome = Outcome::Limit;
+                        result.limit = Some("capacity".into());
+                    } else if api.tenant_budget_reached(&scope.session)? {
+                        result.outcome = Outcome::Limit;
+                        result.limit = Some("tenantTokens".into());
+                    } else if response.stop == "limit" {
+                        result.outcome = Outcome::Limit;
+                        result.limit = Some("output".into());
+                    } else if let Some(reason) = refusal.as_ref() {
+                        result.outcome = Outcome::Failed;
+                        result.error = Some(reason.clone());
+                    } else if !result.open_calls.is_empty() {
+                        if input.settings.get("result_shape").is_some() {
+                            result.outcome = Outcome::Failed;
+                            result.error = Some(
+                                "The turn left calls open without a structured result.".into(),
+                            );
+                        } else {
+                            result.outcome = Outcome::Completed;
+                        }
+                    } else {
+                        if !response.tool_calls().is_empty()
+                            || !api.take_steering(&scope)?.is_empty()
+                        {
+                            carry_on = true;
+                        } else {
+                            let mut payload = json!(result);
+                            let mut reason = None;
+                            if let Some(shape) = input.settings.get("result_shape") {
+                                let value = wire::decode_json(result.text.as_bytes());
+                                reason = match value {
+                                    Ok(value) => match schema::check(shape, Some(&value)) {
+                                        Ok(()) => {
+                                            payload["value"] = value.clone();
+                                            result.value = Some(value);
+                                            None
+                                        }
+                                        Err(error) => Some(format!(
+                                            "The result shape does not accept this value: {error}"
+                                        )),
+                                    },
+                                    Err(_) => Some("The final answer must be a JSON value.".into()),
+                                };
+                                payload["shape"] = shape.clone();
+                            }
+                            if reason.is_none() {
+                                let checked =
+                                    self.hook(api, "result.ready", &scope, payload).await?;
+                                reason = checked.refused.or_else(|| {
+                                    checked.value["retry_reason"].as_str().map(str::to_owned)
+                                });
+                            }
+                            if let Some(reason) = reason {
+                                result.value = None;
+                                self.record(
+                                    api,
+                                    &scope,
+                                    "resultFeedback",
+                                    true,
+                                    json!({"reason":reason}),
+                                    vec![],
+                                )?;
+                                carry_on = true;
+                            }
+                        }
+                    }
+                    let copies = self
+                        .turn_entries(api, &scope)?
+                        .iter()
+                        .map(|e| e.id.clone())
+                        .collect();
+                    self.record(
+                        api,
+                        &scope,
+                        "step.end",
+                        false,
+                        json!({"continue":carry_on,"result":result}),
+                        copies,
+                    )?;
+                    Ok(carry_on)
+                })
+                .await;
+            if !carry_on? {
                 return Ok(result);
             }
         }

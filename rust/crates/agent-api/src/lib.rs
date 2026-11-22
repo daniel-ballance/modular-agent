@@ -3,6 +3,7 @@ pub mod portable;
 pub mod recovery;
 pub mod schema;
 mod secrets;
+pub mod telemetry;
 pub mod wire;
 mod work;
 pub use secrets::*;

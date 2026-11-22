@@ -528,10 +528,11 @@ impl State {
                     break;
                 }
                 let path = ["v1", "sessions", &session, "lease", &lease_id, "renew"];
-                let renew = tokio::time::timeout(
+                let span = agent_api::telemetry::Operation::internal("modular_agent.history.lease.renew", &Scope::session(&session));
+                let renew = span.run(tokio::time::timeout(
                     old - sent,
                     service.send(Method::POST, &path, None, None, None, None),
-                );
+                ));
                 let reply = tokio::select! {
                     _ = stop.cancelled() => return,
                     _ = lost.cancelled() => return,
@@ -542,6 +543,7 @@ impl State {
                     }
                 };
                 let Some(ms) = reply.and_then(|v| positive_ms(&v, "ttlMs").ok()) else {
+                    span.error("renewal_failed");
                     break;
                 };
                 ttl = Duration::from_millis(ms);

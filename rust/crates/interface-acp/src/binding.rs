@@ -74,6 +74,9 @@ pub fn declaration(api: &dyn AgentApi, session: Option<&str>) -> Result<Value> {
         "confinesFiles":d["environment"]["confines_files"] == true,
         "commandContainment":if d["environment"]["stops_commands_after_sigkill"] == true {"strong"} else if d["environment"]["containment"] == "processGroup" {"processGroup"} else {"none"}
     });
+    if d["telemetry"] == 1 {
+        declaration["telemetry"] = json!(1);
+    }
     if d["resource_reservations"].is_object() {
         declaration["resourceReservations"] = d["resource_reservations"].clone();
     }

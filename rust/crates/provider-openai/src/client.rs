@@ -294,6 +294,13 @@ impl OpenAi {
 }
 #[async_trait]
 impl ModelAccess for OpenAi {
+    fn inference_kind(&self) -> agent_api::telemetry::SpanKind {
+        agent_api::telemetry::SpanKind::Client
+    }
+    fn streaming(&self) -> bool {
+        true
+    }
+
     fn info(&self) -> ModelInfo {
         info(self.mode)
     }

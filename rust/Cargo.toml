@@ -22,3 +22,4 @@ fs2 = "0.4"
 libc = "0.2"
 reqwest = { version = "0.13.5", features = ["json", "stream"] }
 futures-util = "0.3"
+opentelemetry = { version = "0.33.1", default-features = false, features = ["trace", "metrics"] }

@@ -70,7 +70,12 @@ impl Jobs {
         let cancel = CancellationToken::new();
         live.insert(job.id.clone(), cancel.clone());
         let service = self.clone();
+        let mut span = telemetry::Operation::internal("modular_agent.job", &job.scope)
+            .interrupted("modular_agent.job.outcome");
+        span.attr("modular_agent.job.id", job.id.clone());
         tokio::spawn(async move {
+            let cx = span.context();
+            telemetry::within(cx, async {
             let unknown = recovering && !runner.durable();
             let result = if unknown {
                 let _ = runner.stop(api.clone(), &job).await;
@@ -128,12 +133,18 @@ impl Jobs {
                     ))
                     .await;
             } else {
+                span.outcome("modular_agent.job.outcome", match ended.state {
+                    JobState::Completed => "completed", JobState::Failed => "failed",
+                    JobState::Cancelled => "cancelled", _ => "interrupted",
+                });
+                if ended.state == JobState::Failed { span.error("job_failed"); }
                 let _ = api
                     .emit(Event::new(&ended.scope, "job.ended", json!(ended)))
                     .await;
             }
             service.live.lock().unwrap().remove(&job.id);
             service.notify.notify_waiters();
+            }).await;
         });
         Ok(())
     }

@@ -361,13 +361,25 @@ pub trait ModelAccess: Send + Sync {
             api.provider_request(&scope, &info, request).await?
         };
         attempt.authorize(api.as_ref(), &scope, &info, &request, &cancel)?;
-        let response = self
-            .generate(api.clone(), scope.clone(), request, cancel)
-            .await?;
+        let response = telemetry::inference(
+            &scope,
+            &info,
+            self.inference_kind(),
+            self.streaming(),
+            telemetry::model_failure,
+            self.generate(api.clone(), scope.clone(), request, cancel),
+        )
+        .await?;
         api.provider_response(&scope, &info, &response).await?;
         Ok(response)
     }
     fn info(&self) -> ModelInfo;
+    fn inference_kind(&self) -> telemetry::SpanKind {
+        telemetry::SpanKind::Internal
+    }
+    fn streaming(&self) -> bool {
+        false
+    }
     async fn generate(
         &self,
         api: Api,

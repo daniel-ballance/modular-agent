@@ -153,6 +153,7 @@ pub struct AgentBuilder {
     runtime: Option<crate::Runtime>,
     plugin_host: Option<bool>,
     model: Option<String>,
+    agent_name: Option<String>,
     settings: serde_json::Map<String, Value>,
     model_provider_aliases: &'static [(&'static str, &'static str)],
     approval: Option<Approval>,
@@ -536,6 +537,12 @@ impl AgentBuilder {
         self
     }
     /// The model new sessions use, as `provider/id`.
+    /// Name the agent on telemetry spans. Use a fixed, non-sensitive name.
+    pub fn agent_name(mut self, name: impl Into<String>) -> Self {
+        self.agent_name = Some(name.into());
+        self
+    }
+
     pub fn model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
         self
@@ -710,6 +717,9 @@ impl AgentBuilder {
             own.push((Arc::new(InProcess::new(&plugin)?), vec![]));
         }
         let harness = Harness::for_project(project.clone());
+        if let Some(name) = self.agent_name {
+            harness.configure_agent_name(name);
+        }
         harness.configure_model_provider_aliases(self.model_provider_aliases);
         harness.configure_reservations(Arc::new(agent_harness::ReservationPool::with_bytes(
             self.resource_limits,

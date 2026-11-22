@@ -1167,34 +1167,47 @@ impl ModelAccess for RemoteModel {
             failure: Mutex::default(),
             response: Mutex::default(),
         });
-        let answer = self
-            .peer
-            .call("provider/request", payload, Some(work.clone()), cancel)
-            .await;
+        let result = telemetry::inference(
+            &scope,
+            &self.info,
+            telemetry::SpanKind::Client,
+            true,
+            |error: &anyhow::Error| {
+                (!error.is::<ModelAttemptLimit>()).then_some("provider_request_failed")
+            },
+            async {
+                let answer = self
+                    .peer
+                    .call("provider/request", payload, Some(work.clone()), cancel)
+                    .await;
+                let provider = work.provider.as_ref().unwrap();
+                if let Some(fault) = provider.failure.lock().unwrap().take() {
+                    return Err(fault.into());
+                }
+                let answer = answer?;
+                ensure!(
+                    provider.phase.load(Ordering::Acquire) == 2,
+                    "Provider answered without an authorized request callback"
+                );
+                ensure!(
+                    provider
+                        .response
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|message| same_json(message, &answer)),
+                    "Provider answer differs from its response callback"
+                );
+                wire::parse_response(answer)
+            },
+        )
+        .await;
         let mut end = Event::new(&scope, "model.end", Value::Null);
         end.stream = Some(work.stream.clone());
         end.end = true;
         api.emit(end).await?;
         refresh_changed(&self.shared, &api, &scope, &work).await;
-        let provider = work.provider.as_ref().unwrap();
-        if let Some(fault) = provider.failure.lock().unwrap().take() {
-            return Err(fault.into());
-        }
-        let answer = answer?;
-        ensure!(
-            provider.phase.load(Ordering::Acquire) == 2,
-            "Provider answered without an authorized request callback"
-        );
-        ensure!(
-            provider
-                .response
-                .lock()
-                .unwrap()
-                .as_ref()
-                .is_some_and(|message| same_json(message, &answer)),
-            "Provider answer differs from its response callback"
-        );
-        wire::parse_response(answer)
+        result
     }
     async fn generate(
         &self,
