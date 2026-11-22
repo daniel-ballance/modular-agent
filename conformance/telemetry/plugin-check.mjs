@@ -28,10 +28,12 @@ export function inspectWire(connections, handshake) {
       assert(side >= 0 && msg?.jsonrpc === "2.0", "Invalid plugin frame");
       const { method, params, id } = msg;
       if (method === undefined) {
-        assert(!field(msg, "traceContext") && !field(params, "traceContext") && !field(msg.result, "traceContext") &&
-          !field(msg.error, "traceContext") && !field(msg.error?.data, "traceContext"), "traceContext on a response");
         const request = open[1 - side].get(id);
         assert(request, "Plugin response without a live request");
+        // The registration's numeric acceptance is not work context.
+        assert(!field(msg, "traceContext") && !field(params, "traceContext") &&
+          (request.method === "plugin/initialize" || !field(msg.result, "traceContext")) &&
+          !field(msg.error, "traceContext") && !field(msg.error?.data, "traceContext"), "traceContext on a response");
         open[1 - side].delete(id);
         request.response = msg;
         if (request.method === "plugin/initialize") {

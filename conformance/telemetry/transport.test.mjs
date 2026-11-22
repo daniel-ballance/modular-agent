@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +22,36 @@ test("receiver waits for an export and keeps duplicate observations", async t =>
   assert.deepEqual(await response.json(), {});
   assert.deepEqual((await waiting).spans, [span, span]);
 });
+
+for (const encoding of ["protobuf", "json"]) {
+  test(`decodes official OTLP/HTTP ${encoding} exporter`, async t => {
+    const receiver = await startReceiver();
+    t.after(() => receiver.close());
+    const program = fileURLToPath(new URL("./export-fixture.mjs", import.meta.url));
+    const [snapshot] = await Promise.all([
+      receiver.waitFor(spans => spans.some(span => span.name === "fixture span")),
+      promisify(execFile)(process.execPath, [program, encoding, receiver.endpoint], { env: {} }),
+    ]);
+    assert.equal(snapshot.spans.length, 1);
+    const [span] = snapshot.spans;
+    const traceId = "1234567890abcdef1234567890abcdef";
+    const parentSpanId = "1234567890abcdef";
+    assert.equal(span.traceId, traceId);
+    assert.equal(span.parentSpanId, parentSpanId);
+    assert.match(span.spanId, /^[a-f0-9]{16}$/);
+    assert.equal(span.kind, 3);
+    assert.equal(span.links[0].traceId, traceId);
+    assert.equal(span.links[0].spanId, parentSpanId);
+    assert.equal(span.links[0].attributes[0].value.stringValue, "saved");
+    assert.equal(span.events[0].name, "fixture event");
+    assert.equal(span.events[0].attributes[0].value.stringValue, "synthetic");
+    assert.equal(String(span.attributes.find(a => a.key === "fixture.count").value.intValue), "7");
+    assert.equal(span.attributes.find(a => a.key === "fixture.present").value.boolValue, true);
+    const exported = snapshot.payloads[0].resourceSpans[0];
+    assert.equal(exported.resource.attributes[0].value.stringValue, `fixture-${encoding}`);
+    assert.equal(exported.scopeSpans[0].scope.name, "receiver-test");
+  });
+}
 
 test("wire tap saves complete frames in both directions without changing bytes", async t => {
   const dir = await mkdtemp(join(tmpdir(), "telemetry-wire-"));
