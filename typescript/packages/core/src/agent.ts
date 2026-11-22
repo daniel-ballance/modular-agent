@@ -129,8 +129,12 @@ export const httpHistory = (url: string, tokenFile: string): HttpHistory => new 
 const historyMethods = ["create", "list", "read", "acquire", "renew", "release", "append", "erase"] as const;
 
 export async function serveHistory(store: FileHistory | MemoryHistory | HttpHistory | HistoryServiceStore,
-  options: { address: string; tokenFile: string; testOnly?: boolean }) {
+  options: { address: string; tokenFile: string; leaseTtl?: number; testOnly?: boolean }) {
   return checked(async () => {
+    const { leaseTtl } = options;
+    if (leaseTtl !== undefined && (!Number.isSafeInteger(leaseTtl) || leaseTtl < 1)) {
+      throw new AgentError("invalid_params", "leaseTtl must be a whole number of milliseconds, at least 1");
+    }
     const builtIn = store instanceof FileHistory || store instanceof MemoryHistory || store instanceof HttpHistory;
     if (!builtIn && (!store || !historyMethods.every(name => typeof store[name] === "function"))) {
       const name = (store as object | null)?.constructor?.name ?? typeof store;
@@ -148,7 +152,7 @@ export async function serveHistory(store: FileHistory | MemoryHistory | HttpHist
     const binding = { port: Number(match[1]), token: await tokenFrom(options.tokenFile) };
     const service = store instanceof HttpHistory
       ? await historyRelay({ ...binding, upstream: await httpUpstream(store) })
-      : await historyService({ ...binding, ...(store instanceof FileHistory ? { archive: fileArchive(store) }
+      : await historyService({ ...binding, leaseTtl, ...(store instanceof FileHistory ? { archive: fileArchive(store) }
         : store instanceof MemoryHistory ? { archive: memoryArchive(store) } : { store }) });
     return { url: service.url, close: () => new Promise<void>((resolve, reject) =>
       service.server.close(error => error ? reject(error) : resolve())) };

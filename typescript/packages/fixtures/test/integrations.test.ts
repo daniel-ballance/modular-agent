@@ -259,7 +259,8 @@ for (const placement of ["file", "memory", "relay", "custom"] as const) {
     await writeFile(tokenFile, token + "\n", { mode: 0o600 });
     const options = { address: "127.0.0.1:0", tokenFile };
     const store = placement === "memory" ? memoryHistory() : fileHistory(join(dir, "archive"));
-    const direct = await serveHistory(store, { ...options, testOnly: placement === "memory" });
+    // The kit waits for a lease to expire and also appends a large batch.
+    const direct = await serveHistory(store, { ...options, leaseTtl: 5_000, testOnly: placement === "memory" });
     let relay: Awaited<ReturnType<typeof serveHistory>> | undefined;
     t.after(async () => { await relay?.close(); await direct.close(); await rm(dir, { recursive: true, force: true }); });
     if (placement === "relay") relay = await serveHistory(httpHistory(direct.url, tokenFile), options);

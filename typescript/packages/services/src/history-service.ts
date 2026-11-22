@@ -550,7 +550,7 @@ function validateMetadata(sid: string, initial: JsonObject) {
 }
 
 export interface HistoryServiceOptions {
-	dir?: string; archive?: HistoryArchive; store?: HistoryServiceStore; token: string; port?: number; leaseMs?: number; retention?: number | null;
+	dir?: string; archive?: HistoryArchive; store?: HistoryServiceStore; token: string; port?: number; leaseTtl?: number; retention?: number | null;
 	/** Permanent ID reservations count toward this operator-supplied limit. */
 	maxSessions?: number;
 	/** Fault injection for the history client tests. */
@@ -560,7 +560,11 @@ export interface HistoryServiceOptions {
 /** A single loopback HTTP listener. The operator must trust every local account,
  * provision a random bearer token, and keep this directory on durable local storage. */
 export async function historyService(options: HistoryServiceOptions) {
-	const ttlMs = options.store?.ttlMs ?? options.leaseMs ?? 15_000;
+	const { leaseTtl } = options;
+	if (leaseTtl !== undefined && (!Number.isSafeInteger(leaseTtl) || leaseTtl < 1)) {
+		throw new RangeError("leaseTtl must be a whole number of milliseconds, at least 1");
+	}
+	const ttlMs = options.store?.ttlMs ?? leaseTtl ?? 15_000;
 	const retention = (options.store ? options.store.retention : options.retention) ?? null;
 	const quota = options.maxSessions ?? 100_000;
 	for (const n of [ttlMs, quota, ...(retention === null ? [] : [retention])]) if (!Number.isSafeInteger(n) || n < 1) throw new Error("Invalid history service limit");
