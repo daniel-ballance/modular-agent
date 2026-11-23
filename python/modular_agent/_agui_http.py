@@ -1,20 +1,27 @@
-"""One authenticated aiohttp listener for AG-UI and the optional ACP upgrade."""
+"""AG-UI HTTP and ACP upgrades on one ASGI listener (HTTP/1.1, no proxy trust)."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import hmac
+import socket
 import ssl
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import suppress
 from os import PathLike
 from typing import TYPE_CHECKING, Any, NotRequired
 from urllib.parse import urlsplit
 
-from aiohttp import WSMsgType, web
+import uvicorn
 from ma_plugin.websocket import ACP_PROTOCOL, WebSocketTLS, _loopback, read_token
+from starlette.datastructures import Headers
+from starlette.requests import Request
+from starlette.responses import Response
+from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.websockets import WebSocket
 
-from ._agui_wire import MAX, STATUS, Failure, decode, encode, require
+from ._agui_wire import MAX, STATUS, encode, decode, require
 from ._types import AgentError, ErrorCode
 
 if TYPE_CHECKING:
@@ -26,34 +33,98 @@ class AguiTLS(WebSocketTLS):
     client_ca_file: NotRequired[str | PathLike[str]]
 
 
+class Stream:
+    def __init__(self, send: Send, headers: dict[str, str]) -> None:
+        self._send = send
+        self._headers = headers
+
+    async def start(self) -> None:
+        headers = Headers({**self._headers, "Content-Type": "text/event-stream"})
+        await self._send({"type": "http.response.start", "status": 200, "headers": headers.raw})
+
+    async def write(self, data: bytes) -> None:
+        await self._send({"type": "http.response.body", "body": data, "more_body": True})
+
+
 class AguiServer:
-    def __init__(self, runner: web.AppRunner, url: str, binding: Binding) -> None:
-        self._runner = runner
+    def __init__(
+        self, server: uvicorn.Server, url: str, shutdown: Callable[[], Awaitable[None]]
+    ) -> None:
+        self._server = server
         self.url = url
-        self._binding = binding
+        self._shutdown = shutdown
+        self._closed = False
 
     async def close(self) -> None:
-        await self._runner.cleanup()
-        self._binding.close()
+        if not self._closed:
+            self._closed = True
+            for listener in self._server.servers:
+                listener.close()
+            await self._shutdown()
+            await self._server.shutdown()
+
+
+async def listen_asgi(
+    host: str,
+    port: int,
+    app: ASGIApp,
+    shutdown: Callable[[], Awaitable[None]],
+    tls: AguiTLS | None = None,
+) -> AguiServer:
+    # Start in the application's event loop, without installing signal handlers
+    # or changing its logging configuration. Hand a bound socket to Uvicorn so
+    # bind failures are exceptions, not process exits. See uvicorn.org/deployment/.
+    config = uvicorn.Config(
+        app,
+        http="h11",
+        ws="websockets-sansio",
+        ws_per_message_deflate=False,
+        ws_max_size=MAX,
+        access_log=False,
+        log_config=None,
+        proxy_headers=False,
+        lifespan="off",
+        interface="asgi3",
+        ssl_certfile=tls["cert_file"] if tls else None,
+        ssl_keyfile=tls["key_file"] if tls else None,
+        ssl_ca_certs=str(tls["client_ca_file"]) if tls and "client_ca_file" in tls else None,
+        ssl_cert_reqs=ssl.CERT_REQUIRED if tls and "client_ca_file" in tls else ssl.CERT_NONE,
+    )
+    config.load()
+    server = uvicorn.Server(config)
+    server.lifespan = config.lifespan_class(config)
+    info = (await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM))[0]
+    sock = socket.socket(*info[:3])
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(info[4])
+        port = sock.getsockname()[1]
+        await server.startup(sockets=[sock])
+    except BaseException:
+        sock.close()
+        raise
+    authority = f"[{host}]" if ":" in host else host
+    return AguiServer(server, f"{'https' if tls else 'http'}://{authority}:{port}", shutdown)
 
 
 class _Frames:
-    def __init__(self, ws: web.WebSocketResponse) -> None:
+    def __init__(self, ws: WebSocket) -> None:
         self.ws = ws
 
     async def receive(self) -> bytes | None:
         msg = await self.ws.receive()
-        if msg.type == WSMsgType.TEXT:
-            return str(msg.data).encode()
-        if msg.type == WSMsgType.BINARY:
+        if msg.get("text") is not None:
+            return str(msg["text"]).encode()
+        if msg.get("bytes") is not None:
             await self.ws.close(code=1003)
         return None
 
     async def send(self, raw: bytes) -> None:
-        await self.ws.send_str(raw.decode())
+        await self.ws.send_text(raw.decode())
 
     async def close(self) -> None:
-        await self.ws.close(code=1000)
+        with suppress(RuntimeError, OSError):
+            await self.ws.close(code=1000)
 
 
 def problem(exc: Exception) -> str:
@@ -92,13 +163,6 @@ async def listen_agui(
     ):
         raise AgentError(ErrorCode.INVALID_COMPOSITION, "Expected HOST:PORT matching TLS options")
     host = addr.hostname if tls else _loopback(addr.hostname)
-    context = None
-    if tls:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(tls["cert_file"], tls["key_file"])
-        if "client_ca_file" in tls:
-            context.load_verify_locations(tls["client_ca_file"])
-            context.verify_mode = ssl.CERT_REQUIRED
     allowed = frozenset(origins)
     for origin in allowed:
         url = urlsplit(origin)
@@ -115,33 +179,34 @@ async def listen_agui(
     ]
     if len({d for d, _ in principals}) != len(principals):
         raise AgentError(ErrorCode.INVALID_COMPOSITION, "Duplicate bearer token")
-
     active: set[asyncio.Task[Any]] = set()
 
-    async def handle(req: web.Request) -> web.StreamResponse:
+    async def handle(scope: Scope, receive: Receive, send: Send) -> None:
         headers = {"Cache-Control": "no-store", "X-Accel-Buffering": "no", "Vary": "Origin"}
         entry: AguiActor | None = None
-        counted = False
         task = asyncio.current_task()
         assert task is not None
+        ws = WebSocket(scope, receive, send) if scope["type"] == "websocket" else None
+        fields = Headers(scope=scope)
         try:
-            origin = req.headers.get("Origin")
-            same = f"{scheme}://{req.host}"
+            origin = fields.get("Origin")
+            same = f"{scheme}://{fields.get('Host', '')}"
             origin_ok = origin is None or (
-                len(req.headers.getall("Origin")) == 1 and (origin in allowed or origin == same)
+                len(fields.getlist("Origin")) == 1 and (origin in allowed or origin == same)
             )
             if origin and origin_ok:
                 headers["Access-Control-Allow-Origin"] = origin
-            if req.method == "OPTIONS" and origin_ok and origin:
-                return web.Response(
-                    status=204,
+            if scope.get("method") == "OPTIONS" and origin_ok and origin:
+                await Response(
+                    status_code=204,
                     headers={
                         **headers,
                         "Access-Control-Allow-Methods": "GET, POST",
                         "Access-Control-Allow-Headers": "Authorization, Content-Type, MA-History-Cursor",
                     },
-                )
-            auth = req.headers.getall("Authorization", [])
+                )(scope, receive, send)
+                return
+            auth = fields.getlist("Authorization")
             supplied = hashlib.sha256((auth[0] if len(auth) == 1 else "").encode()).digest()
             for digest, actor in principals:
                 if hmac.compare_digest(digest, supplied):
@@ -149,62 +214,75 @@ async def listen_agui(
             require(entry is not None, "unauthenticated")
             assert entry is not None
             require(origin_ok, "refused")
-            require(not req.query_string)
+            require(not scope["query_string"])
             require(len(active) < 128, "busy")
             active.add(task)
-            counted = True
-            if req.path == "/" and upgrade and req.method == "GET":
-                ws = web.WebSocketResponse(
-                    protocols=[ACP_PROTOCOL], max_msg_size=MAX, compress=False
-                )
-                require(ws.can_prepare(req).protocol == ACP_PROTOCOL)
-                await ws.prepare(req)
+            if ws is not None:
+                require(upgrade and scope["path"] == "/", "not_found")
+                assert upgrade is not None
+                require(ACP_PROTOCOL in scope["subprotocols"])
+                await ws.accept(subprotocol=ACP_PROTOCOL)
                 await upgrade(_Frames(ws), entry)
-                return ws
+                return
+            req = Request(scope, receive)
             raw = {}
             if req.method == "POST":
                 require(
-                    req.content_type == "application/json"
-                    and req.charset in (None, "utf-8", "UTF-8")
-                    and not req.headers.get("Content-Encoding")
+                    fields.get("content-type", "").lower().replace(" ", "")
+                    in ("application/json", "application/json;charset=utf-8")
+                    and not fields.get("content-encoding")
                 )
-                require(req.content_length is None or req.content_length <= MAX, "result_too_large")
-                try:
-                    raw = decode(await req.read())
-                except web.HTTPRequestEntityTooLarge:
-                    raise Failure("result_too_large") from None
-            return await binding.request(req, entry, raw, headers)
-        except (ConnectionError, asyncio.CancelledError):
-            raise
+                require(int(fields.get("content-length", "0")) <= MAX, "result_too_large")
+                body = bytearray()
+                async for part in req.stream():
+                    require(len(body) + len(part) <= MAX, "result_too_large")
+                    body.extend(part)
+                raw = decode(body)
+
+            async def disconnected() -> None:
+                while (await receive())["type"] != "http.disconnect":
+                    pass
+
+            watch = asyncio.create_task(disconnected())
+            operation = asyncio.create_task(binding.request(req, entry, raw, headers, send))
+            try:
+                done, _ = await asyncio.wait(
+                    (watch, operation), return_when=asyncio.FIRST_COMPLETED
+                )
+                if operation in done:
+                    reply = operation.result()
+                    if reply is None:
+                        await send({"type": "http.response.body", "body": b""})
+                    else:
+                        await reply(scope, receive, send)
+            finally:
+                operation.cancel()
+                watch.cancel()
+                await asyncio.gather(watch, operation, return_exceptions=True)
+        except (OSError, asyncio.CancelledError):
+            pass
         except Exception as exc:
             code = problem(exc)
             if entry is not None and not await binding.error_allowed(entry, code):
                 code = "output_withheld"
-            return web.Response(
-                body=encode({"code": code}),
-                status=STATUS[code],
-                content_type="application/json",
+            error = Response(
+                encode({"code": code}),
+                status_code=STATUS[code],
+                media_type="application/json",
                 headers=headers,
             )
+            if ws:
+                await ws.send_denial_response(error)
+            else:
+                await error(scope, receive, send)
         finally:
-            if counted:
-                active.discard(task)
+            active.discard(task)
 
-    async def shutdown(_: web.Application) -> None:
+    async def shutdown() -> None:
         running = tuple(active)
         for task in running:
             task.cancel()
         await asyncio.gather(*running, return_exceptions=True)
+        binding.close()
 
-    app = web.Application(client_max_size=MAX + 1)
-    app.on_shutdown.append(shutdown)
-    app.router.add_route("*", "/{path:.*}", handle)
-    runner = web.AppRunner(app, access_log=None, handler_cancellation=True, auto_decompress=False)
-    await runner.setup()
-    try:
-        await web.TCPSite(runner, host, addr.port, ssl_context=context).start()
-    except BaseException:
-        await runner.cleanup()
-        raise
-    authority = f"[{host}]" if ":" in host else host
-    return AguiServer(runner, f"{scheme}://{authority}:{runner.addresses[0][1]}", binding)
+    return await listen_asgi(host, addr.port, handle, shutdown, tls)

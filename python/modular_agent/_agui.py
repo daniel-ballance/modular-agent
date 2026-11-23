@@ -5,22 +5,26 @@ from __future__ import annotations
 import asyncio
 import re
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
-from aiohttp import web
+from starlette.requests import Request
+from starlette.responses import Response
+from starlette.types import Send
+from ._agui_http import Stream
 from ma_core import telemetry as ot
+from ma_core.wire import provider_projection
 from ma_harness.authority import CONNECTION_AUTHORITY
 from ma_harness.interface_tools import branch_entries, clock, handoff_fold, same_json
 from opentelemetry.context import Context
 
 from ._agui_wire import Obj, Failure, content, encode, event, fingerprint, iso, parse_run, require
 from ._interface_tools import InterfaceToolConnection
-from ._types import AgentError, ErrorCode
+from ._types import AgentError, ErrorCode, JsonObject
 
 if TYPE_CHECKING:
     from ._agent import Agent, AguiActor
@@ -41,6 +45,7 @@ class Presence:
     route: str = field(default_factory=lambda: uuid4().hex)
     delivered: dict[str, Obj] = field(default_factory=dict)
     executor: InterfaceToolConnection | None = None
+    blocked: set[str] = field(default_factory=set)
 
 
 class Binding:
@@ -50,6 +55,7 @@ class Binding:
         actors: Sequence[AguiActor],
         tenant: str | None,
         state_plugin: str | None,
+        state_snapshot: Callable[[str], Awaitable[JsonObject | None]] | None,
         raw_sources: Mapping[str, str],
         trace_keys: Sequence[str],
     ) -> None:
@@ -58,13 +64,17 @@ class Binding:
         self.agent = agent
         self.actors = deepcopy(list(actors))
         self.tenant = tenant
+        if state_snapshot and not state_plugin:
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, "Select the plugin that owns the state")
         self.state_plugin = state_plugin
+        self.state_snapshot = state_snapshot
         self.raw_sources = dict(raw_sources)
         self.trace_keys = frozenset(trace_keys)
         self.active: set[tuple[str, str]] = set()
         self.presence: dict[tuple[str, str], Presence] = {}
         self.cursors: OrderedDict[tuple[str, str], Cursor] = OrderedDict()
         self.admission = asyncio.Lock()
+        self.decision_runs: OrderedDict[tuple[str, str, str], None] = OrderedDict()
         self.scopes: dict[str, Obj] = {}
         clients: dict[str, Any] = {}
         kinds: dict[str, str] = {}
@@ -103,8 +113,10 @@ class Binding:
         for p in self.presence.values():
             if p.executor:
                 p.executor.close()
+        self.decision_runs.clear()
         self.presence.clear()
         self.cursors.clear()
+        self.agent._acp_server = None
 
     async def error_allowed(self, actor: AguiActor, code: str) -> bool:
         try:
@@ -114,15 +126,15 @@ class Binding:
             return False
 
     async def request(
-        self, req: web.Request, actor: AguiActor, raw: Obj, headers: dict[str, str]
-    ) -> web.StreamResponse:
+        self, req: Request, actor: AguiActor, raw: Obj, headers: dict[str, str], send: Send
+    ) -> Response | None:
         from ._agui_run import Exchange
 
         view = View(self, actor)
         token = CONNECTION_AUTHORITY.set((view.actor, view.rights, view.grants, view.in_scope))
         try:
-            path = req.path.removeprefix("/agui/v1")
-            require(path != req.path, "not_found")
+            path = req.url.path.removeprefix("/agui/v1")
+            require(path != req.url.path, "not_found")
             status = 200
             if req.method == "GET" and not path:
                 reply = await view.required(
@@ -163,11 +175,11 @@ class Binding:
             ):
                 await view.attach(match[1])
                 if match[2]:
-                    return await view.keep_present(req, headers)
+                    await view.keep_present(Stream(send, headers))
+                    return None
+                self.cursors.pop(view.key, None)
                 reply, cursor = await view.snapshot(http=True)
-                response = web.Response(
-                    body=encode(reply), content_type="application/json", headers=headers
-                )
+                response = Response(encode(reply), media_type="application/json", headers=headers)
                 view.remember(cursor)
                 return response
             elif req.method == "POST" and path == "/run":
@@ -187,13 +199,14 @@ class Binding:
                         if vendor:
                             carrier["tracestate"] = ",".join(vendor)
                     with ot.use(ot.TRACE.extract(carrier, context=Context())):
-                        return await Exchange(view, req, d, headers).serve()
+                        await Exchange(view, req, d, Stream(send, headers)).serve()
+                        return None
                 finally:
                     self.active.remove(view.key)
             else:
                 raise Failure("not_found")
-            return web.Response(
-                body=encode(reply), status=status, content_type="application/json", headers=headers
+            return Response(
+                encode(reply), status_code=status, media_type="application/json", headers=headers
             )
         finally:
             CONNECTION_AUTHORITY.reset(token)
@@ -244,7 +257,8 @@ class View:
             )
             if reopen:
                 await self.agent._session("open", session=sid, actor=self.actor)
-                await self.agent._call("runtime", "wait", session=sid)
+        if reopen:
+            await self.agent._call("runtime", "wait", session=sid)
         await self.check()
 
     def rights_now(self) -> set[str]:
@@ -286,6 +300,23 @@ class View:
         return gated
 
     async def entry(self, raw: Obj) -> Obj | None:
+        if raw["kind"] in ("tool_result", "tool_started"):
+            # Replay must pass the same toolCall/toolResult gates as live delivery.
+            gated = await self.h.output(
+                self.sid,
+                self.actor,
+                [
+                    {
+                        "type": "history_entry",
+                        "data": {
+                            "kind": "history_entry",
+                            "session": self.sid,
+                            "entry": provider_projection(raw),
+                        },
+                    }
+                ],
+            )
+            return cast(Obj, gated[0]["data"]["entry"]) if gated else None
         return cast(
             Obj | None,
             await self.agent._api.session(
@@ -326,6 +357,7 @@ class View:
                     {"id": "ma:u:" + d.get("input", mid), "role": "user", "content": body}
                 )
             elif kind == "response" and e.get("step"):
+                body = await self.assistant_text(e["step"], projected.get("content", []))
                 calls = []
                 for c in d.get("calls", []):
                     cid = c["id"]
@@ -370,6 +402,34 @@ class View:
                     }
                 )
         return messages
+
+    async def assistant_text(self, step: str, parts: list[Obj]) -> str:
+        text = "".join(p["text"] for p in parts if p["type"] == "text")
+        if text and self.h.holds_output():
+            pieces = await self.h.output(
+                self.sid,
+                self.actor,
+                [
+                    {
+                        "type": "model_output",
+                        "data": {
+                            "step": step,
+                            "stream_type": "text",
+                            "text": text,
+                            "final": True,
+                        },
+                    }
+                ],
+            )
+            if not pieces:
+                return ""
+            text = pieces[0]["data"]["text"]
+            # A withheld protocol-specific piece may not return via replay either.
+            piece = await self.gate(
+                "event", event("TEXT_MESSAGE_CONTENT", messageId="ma:a:" + step, delta=text)
+            )
+            return str(piece["delta"]) if piece else ""
+        return text
 
     def open_calls(self, branch: list[Obj]) -> dict[str, Obj]:
         calls = {}
@@ -431,7 +491,7 @@ class View:
             i["responseSchema"] = {"type": "string", "enum": q["options"]}
         else:
             i["responseSchema"] = {"type": "string"}
-            if kind == "link" and (uri := (q.get("details") or {}).get("uri")):
+            if kind == "link" and isinstance(uri := q.get("details"), str):
                 i["metadata"] = {"modular-agent.link": uri}
         gated = await self.gate("interrupt", i)
         return gated if same_json(i, gated) else None
@@ -471,6 +531,32 @@ class View:
             )
         else:
             reply = await self.required("event", event("MESSAGES_SNAPSHOT", messages=messages))
+        # Redactions may edit display content, not a cursor or answer route.
+        require(
+            not http
+            or (
+                reply["cursor"] == cursor
+                and same_json(
+                    reply["waiting"],
+                    {
+                        "questions": [i for _, i in qs.values()],
+                        "toolCalls": [
+                            {"toolCallId": cid, "expiresAt": iso(c["deadline"])}
+                            for cid, c in calls.items()
+                        ],
+                    },
+                )
+            ),
+            "output_withheld",
+        )
+        for before, after in zip(messages, reply["messages"], strict=True):
+            require(
+                same_json(
+                    {k: v for k, v in before.items() if k not in ("content", "error")},
+                    {k: v for k, v in after.items() if k not in ("content", "error")},
+                ),
+                "output_withheld",
+            )
         require(rev == await self.h.erasure_revision(self.sid), "conflict")
         return reply, Cursor(cursor, len(messages), fingerprint(reply["messages"]), pos, rev, http)
 
@@ -498,17 +584,45 @@ class View:
         )
         return messages[old.size :]
 
-    async def keep_present(self, req: web.Request, headers: Obj) -> web.StreamResponse:
+    async def mark_present(self, route: str, presence: Presence | None) -> None:
+        questions = self.h.capabilities["questions"][1]
+
+        def eligible(q: Obj) -> bool:
+            return bool(
+                presence
+                and q["kind"] != "secret"
+                and q["id"] not in presence.blocked
+                and (self.key in self.binding.active or q["id"] in presence.delivered)
+                and ("approve" if q["kind"] == "approval" else "answer") in self.rights_now()
+            )
+
+        questions.route_eligibility[route] = eligible
+        try:
+            await self.agent._call(
+                "questions", "connect", session=self.sid, actor=self.actor, route=route
+            )
+        except BaseException:
+            questions.route_eligibility.pop(route, None)
+            raise
+
+    async def detach(self, route: str) -> None:
+        try:
+            if self.sid in self.h.sessions:
+                await self.agent._api.call(
+                    "questions",
+                    "disconnect",
+                    {"session": self.sid, "actor": self.actor, "route": route},
+                )
+        finally:
+            self.h.capabilities["questions"][1].route_eligibility.pop(route, None)
+
+    async def keep_present(self, response: Stream) -> None:
         active = self.binding.presence
         require(self.key not in active, "conflict")
         p = active[self.key] = Presence()
         try:
-            if self.rights_now() & {"answer", "approve"}:
-                await self.agent._call(
-                    "questions", "connect", session=self.sid, actor=self.actor, route=p.route
-                )
-            response = web.StreamResponse(headers={**headers, "Content-Type": "text/event-stream"})
-            await response.prepare(req)
+            await self.mark_present(p.route, p)
+            await response.start()
             while True:
                 await self.check()
                 await response.write(b": present\n\n")
@@ -517,9 +631,4 @@ class View:
             active.pop(self.key, None)
             if p.executor:
                 p.executor.close()
-            if self.sid in self.h.sessions:
-                await self.agent._api.call(
-                    "questions",
-                    "disconnect",
-                    {"session": self.sid, "actor": self.actor, "route": p.route},
-                )
+            await self.detach(p.route)

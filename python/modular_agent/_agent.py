@@ -563,7 +563,11 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
                             await self.set_presence(sid, actor, False)
                     self._unbind(sid)
                     self.sessions.discard(sid)
-                    if sid not in connections.sessions and sid in agent._h.sessions:
+                    if (
+                        sid not in connections.sessions
+                        and sid in agent._h.sessions
+                        and not isinstance(agent._acp_server, AguiServer)
+                    ):
                         await agent._h.suspend_session(sid)
                 finally:
                     self._scope.reset(scope)
@@ -969,6 +973,7 @@ class Agent:
         acp: bool = False,
         origins: Sequence[str] = (),
         state_plugin: str | None = None,
+        state_snapshot: Callable[[str], Awaitable[JsonObject | None]] | None = None,
         raw_sources: Mapping[str, str] | None = None,
         trace_state_keys: Sequence[str] = (),
     ) -> AguiServer:
@@ -982,7 +987,13 @@ class Agent:
             if self._acp_server is not None or (acp and self._h.sessions):
                 raise AgentError(ErrorCode.BUSY, "Service is already in use")
             binding = Binding(
-                self, actors, tenant, state_plugin, raw_sources or {}, trace_state_keys
+                self,
+                actors,
+                tenant,
+                state_plugin,
+                state_snapshot,
+                raw_sources or {},
+                trace_state_keys,
             )
             if acp and not self._plugin_host and self._enable_plugin_host is not None:
                 await self._enable_plugin_host()

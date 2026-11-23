@@ -5,13 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any, cast
+from uuid import uuid4
 
-from aiohttp import web
+from starlette.requests import Request
+from ma_harness.reservations import size
 from ma_harness.interface_tools import continuation_origin, same_json
 
 from ._agui import Cursor, View
-from ._agui_http import problem
-from ._agui_wire import Obj, Failure, encode, event, require, to_shared, triad, warn
+from ._agui_http import Stream, problem
+from ._agui_wire import Obj, Failure, encode, event, require, to_shared, triad, valid_patch, warn
 from ._interface_tools import InterfaceToolConnection, InterfaceToolHandoff, InterfaceToolReport
 
 
@@ -19,11 +21,11 @@ from ._types import Content
 
 
 class Exchange:
-    def __init__(self, view: View, req: web.Request, data: Obj, headers: Obj) -> None:
+    def __init__(self, view: View, req: Request, data: Obj, stream: Stream) -> None:
         self.v, self.req, self.data = view, req, data
-        self.response = web.StreamResponse(headers={**headers, "Content-Type": "text/event-stream"})
+        self.response = stream
         self.bounds = {"threadId": view.sid, "runId": data["runId"]}
-        self.queue: asyncio.Queue[Obj] = asyncio.Queue(256)
+        self.queue: asyncio.Queue[tuple[Obj, Any]] = asyncio.Queue(256)
         self.lost = False
         self.turn: str | None = None
         self.origin: str | None = None
@@ -38,10 +40,11 @@ class Exchange:
         self.revision = 0
         self.finished = False
         self.p = view.binding.presence.get(view.key)
+        self.route = uuid4().hex
 
-    async def receive(self, d: Obj) -> None:
-        if self.lost or d.get("session") != self.v.sid:
-            return
+    def includes(self, d: Obj) -> bool:
+        if self.lost or self.finished or d.get("session") != self.v.sid:
+            return False
         # Internal entries, including checkpoints, are never event payloads.
         if d["kind"] == "history_entry":
             e = d["entry"]
@@ -55,11 +58,49 @@ class Exchange:
             ) and not (
                 "." in e["kind"] and e.get("visible") and not e["kind"].startswith("modular-agent.")
             ):
+                return False
+        return True
+
+    async def receive(self, original: Obj, gated: Obj | None) -> None:
+        kind = original["kind"]
+        if not self.includes(original):
+            return
+        if kind in ("modular-agent.agui.stateSnapshot", "modular-agent.agui.stateDelta"):
+            if original.get("plugin") != self.v.binding.state_plugin:
                 return
+            changed = not same_json(original, gated)
+            if gated is None or changed and kind.endswith("Delta"):
+                gated = {"kind": "state_invalidated"}
+            elif changed:
+                gated = {**gated, "_changed": True}
+        if gated is None:
+            if kind in ("turn_ended", "session_interrupted"):
+                gated = {"kind": "terminal_withheld", "turn": original.get("turn")}
+            elif kind == "input_request_opened":
+                gated = {
+                    "kind": kind,
+                    "request": {"id": original["request"]["id"]},
+                    "_changed": True,
+                }
+            else:
+                return
+        if kind == "input_request_opened" and not same_json(original["request"], gated["request"]):
+            gated = {**gated, "_changed": True}
+        if gated.get("plugin") != original.get("plugin") and gated["kind"] != "state_invalidated":
+            return
+        d = gated
         if self.queue.full():
             self.lost = True
         else:
-            self.queue.put_nowait(d)
+            try:
+                reservation = self.v.h.capacity.hold(
+                    self.v.h.sessions[self.v.sid], bufferedBytes=size(d)
+                )
+            except Exception:
+                if not (d.get("plugin") or d["kind"] in ("model_output", "tool_progress")):
+                    self.lost = True
+                return
+            self.queue.put_nowait((d, reservation))
 
     async def frame(self, value: Obj, *, optional: bool = False, exact: bool = False) -> bytes:
         allowed = await self.v.gate("event", value)
@@ -91,19 +132,22 @@ class Exchange:
         )
         return b"data: " + encode(snap) + b"\n\n" + await self.frame(cursor, exact=True), stamp
 
-    async def serve(self) -> web.StreamResponse:
+    async def serve(self) -> None:
         h = self.v.h
-        follower = ("agui:" + self.v.client + ":" + self.v.sid, self.v.actor, self.receive)
-        h.follow(*follower)
+        detach = h.observe_delivery(
+            "agui:" + uuid4().hex, self.v.actor, self.includes, self.receive
+        )
         try:
             async with self.v.binding.admission:
                 await self.prepare()
             start = await self.frame(
                 event("RUN_STARTED", **self.bounds, protocolVersion="1.0"), exact=True
             )
-            await self.response.prepare(self.req)
+            await self.v.mark_present(self.route, None)
+            await self.response.start()
             try:
                 await self.write(start)
+                await self.refresh_state()
                 # Snapshot the prefix sampled before admission. A fast Provider can
                 # already have produced live output by the time the socket opens.
                 await self.write(self.initial)
@@ -117,7 +161,8 @@ class Exchange:
                     require(not self.lost, "unavailable")
                     try:
                         async with asyncio.timeout(10):
-                            d = await self.queue.get()
+                            d, reservation = await self.queue.get()
+                            h.capacity.release(reservation)
                     except TimeoutError:
                         await self.write(b": waiting\n\n")
                         # Do not wait forever if a required boundary was withheld.
@@ -148,10 +193,12 @@ class Exchange:
                 if not same_json(data, err):
                     err = event("RUN_ERROR", code="output_withheld", message="Output withheld.")
                 await self.response.write(b"data: " + encode(err) + b"\n\n")
-            return self.response
         finally:
-            if follower in h.followers:
-                h.followers.remove(follower)
+            detach()
+            while not self.queue.empty():
+                h.capacity.release(self.queue.get_nowait()[1])
+            if self.route in h.capabilities["questions"][1].route_eligibility:
+                await self.v.detach(self.route)
             if self.cx and not (self.p and self.p.executor is self.cx):
                 self.cx.close()
 
@@ -261,7 +308,7 @@ class Exchange:
             registered = getattr(v.h, "interface_advertisements", {}).get(offer["name"])
             require(
                 registered
-                and not registered.get("returns")
+                and "returns" not in registered
                 and same_json(
                     offer,
                     {
@@ -275,6 +322,19 @@ class Exchange:
             )
             assert registered is not None
             definitions.append(registered)
+        key = "agui:" + json.dumps([v.client, d["runId"]], separators=(",", ":"))
+        run_key = (*v.key, d["runId"])
+        require(run_key not in v.binding.decision_runs, "conflict")
+        if not users:
+            require(
+                not any(
+                    e["kind"] == "input_queued"
+                    and e["data"].get("key") == key
+                    and e.get("actor") == v.actor
+                    for e in v.h.sessions[v.sid]["entries"]
+                ),
+                "conflict",
+            )
         self.initial, self.initial_stamp = await self.snapshot()
         if self.p and self.p.executor is not None and self.turn:
             self.cx = self.p.executor
@@ -287,6 +347,7 @@ class Exchange:
                 on_handoff=self.released.append,
                 defer=True,
             )
+            self.cx._for_work(v.sid, key=key if users else None, continuation=self.origin)
         require(not (definitions or converted) or self.cx, "refused")
         if definitions and self.cx:
             try:
@@ -294,7 +355,6 @@ class Exchange:
             except Exception:
                 raise Failure("refused") from None
         if users:
-            key = "agui:" + json.dumps([v.client, d["runId"]], separators=(",", ":"))
             result = await v.agent._call(
                 "runtime",
                 "submit",
@@ -323,6 +383,9 @@ class Exchange:
             for report in converted:
                 assert self.cx is not None
                 require(await self.cx.report_tool_result(v.sid, report) == "accepted", "conflict")
+            v.binding.decision_runs[run_key] = None
+            if len(v.binding.decision_runs) > 8192:
+                v.binding.decision_runs.popitem(last=False)
             if self.p and self.cx is self.p.executor:
                 self.p.executor = None
 
@@ -364,6 +427,13 @@ class Exchange:
         v = self.v
         kind = d["kind"]
         e = d.get("entry", {})
+        if kind == "state_invalidated":
+            await self.refresh_state()
+            return
+        if kind == "terminal_withheld" and (not d.get("turn") or d["turn"] == self.turn):
+            raise Failure("output_withheld")
+        if kind == "input_returned" and self.input_id and d.get("input") == self.input_id:
+            raise Failure("conflict")
         if kind == "session_interrupted":
             raise Failure("unavailable")
         if (
@@ -407,18 +477,14 @@ class Exchange:
             if not q:
                 return
             i = await v.interrupt(q)
-            if i is None or q["question"] != d["request"]["question"]:
+            if i is None or d.get("_changed"):
                 if q["kind"] == "approval":
-                    await v.agent._call(
-                        "questions",
-                        "answer",
-                        session=v.sid,
-                        actor=v.actor,
-                        request=qid,
-                        declined=True,
-                        value="declined",
-                        reason="refused",
-                    )
+                    self.p.blocked.add(qid)
+                    # Remove only this route. Disconnect reconciles an approval
+                    # against the other Interfaces before closing it.
+                    await v.detach(self.p.route)
+                    if v.binding.presence.get(v.key) is self.p:
+                        await v.mark_present(self.p.route, self.p)
                 return
             self.p.delivered[qid] = i
             await self.finish({"type": "interrupt", "interrupts": [i]})
@@ -443,7 +509,7 @@ class Exchange:
                 await self.append_text(mid, d["text"])
         elif kind == "history_entry":
             if e["kind"] == "response":
-                text = "".join(p["text"] for p in e.get("content", []) if p["type"] == "text")
+                text = await v.assistant_text(step, e.get("content", []))
                 prior = self.text.get(mid, "")
                 if text.startswith(prior) and text != prior:
                     await self.append_text(mid, text[len(prior) :])
@@ -496,9 +562,25 @@ class Exchange:
                 {"type": "success" if success else "cancelled"},
                 d.get("open_calls", []) if success else [],
             )
+        elif kind in ("job_started", "job_progress", "job_ended", "child_started", "child_ended"):
+            name = {
+                "job_started": "jobStarted",
+                "job_progress": "jobProgress",
+                "job_ended": "jobEnded",
+                "child_started": "childStarted",
+                "child_ended": "childEnded",
+            }[kind]
+            await self.custom(
+                name, {k: d[k] for k in ("job", "child", "state", "content") if k in d}
+            )
         elif kind == "tool_progress":
             await self.custom(
-                "toolOutput", {"toolCallId": d["call"], "content": d.get("content", [])}
+                "toolOutput",
+                {
+                    "toolCallId": d["call"],
+                    "chunk": d.get("text", ""),
+                    "content": d.get("content", []),
+                },
             )
         elif d.get("plugin") and "." in kind:
             await self.plugin(d)
@@ -538,6 +620,28 @@ class Exchange:
             )
         )
 
+    async def refresh_state(self) -> None:
+        self.state_revision = None
+        get = self.v.binding.state_snapshot
+        if get is None:
+            return
+        await self.v.check()
+        data = await get(self.v.sid)
+        if data is None:
+            return
+        original = {
+            "kind": "modular-agent.agui.stateSnapshot",
+            "session": self.v.sid,
+            "plugin": self.v.binding.state_plugin,
+            "data": data,
+        }
+        values = await self.v.h.output(
+            self.v.sid, self.v.actor, [{"type": original["kind"], "data": original}]
+        )
+        if values:
+            gated = values[0]["data"]
+            await self.plugin({**gated, "_changed": not same_json(original, gated)})
+
     async def plugin(self, d: Obj) -> None:
         name, data = d["kind"], d.get("data")
         if name in ("modular-agent.agui.stateSnapshot", "modular-agent.agui.stateDelta"):
@@ -549,18 +653,23 @@ class Exchange:
             if name.endswith("Snapshot") and "snapshot" in data:
                 frame = event("STATE_SNAPSHOT", snapshot=data["snapshot"])
             elif (
-                "delta" in data
+                valid_patch(data.get("delta"))
                 and self.state_revision is not None
                 and self.state_revision == data.get("baseRevisionId")
             ):
                 frame = event("STATE_DELTA", delta=data["delta"])
             else:
-                self.state_revision = None
+                if name.endswith("Delta"):
+                    await self.refresh_state()
                 return
             gated = await self.v.gate("event", frame)
-            self.state_revision = revision if same_json(frame, gated) else None
+            self.state_revision = (
+                revision if same_json(frame, gated) and not d.get("_changed") else None
+            )
             if gated and (self.state_revision or name.endswith("Snapshot")):
                 await self.write(b"data: " + encode(gated) + b"\n\n")
+            elif name.endswith("Delta"):
+                await self.refresh_state()
         elif name == "modular-agent.agui.raw":
             source = self.v.binding.raw_sources.get(d["plugin"])
             if source:

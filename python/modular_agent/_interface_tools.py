@@ -95,6 +95,24 @@ class InterfaceToolConnection:
             names.add(name)
         cx["offers"][session_id] = frozenset(names)
 
+    def _for_work(self, session_id: str, *, key: str | None, continuation: str | None) -> None:
+        cx = self._agent._h.interface_connections[self._id]
+
+        def includes(work: tuple[str, str, str, str | None] | None) -> bool:
+            return bool(
+                work
+                and work[0] == session_id
+                and (
+                    key is not None
+                    and work[1] == cx["actor"]
+                    and work[3] == key
+                    or continuation is not None
+                    and work[2] == "continue:" + continuation
+                )
+            )
+
+        cx["work"] = includes
+
     def _staged(self, session_id: str, call_id: str) -> InterfaceToolHandoff | None:
         # Only the binding preparing its final output gate may inspect this.
         cx = self._agent._h.interface_connections.get(self._id)

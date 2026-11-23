@@ -682,7 +682,10 @@ class Runtime(Turns, Plugin):
                         await self.api.session("busy", session=sid, value=False)
                         return results
                     self._turn_boundary(sid)
-                results.append(await self._turn(sid, queued[0]))
+                from ma_core import taking_input
+
+                with taking_input(sid, queued[0]):
+                    results.append(await self._turn(sid, queued[0]))
         except BaseException:
             await self.api.session("busy", session=sid, value=False)
             raise

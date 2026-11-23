@@ -11,13 +11,17 @@ import json
 import logging
 import os
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+import ma_questions
 from pathlib import Path
 import subprocess
 import sys
 from unittest.mock import patch
 
-from aiohttp import web
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from modular_agent._agui_http import listen_asgi
 from ma_core.wire import entry_out
 from ma_harness import interface_tools
 from ma_questions import Questions
@@ -48,6 +52,44 @@ def rows(path):
     return [json.loads(row) for row in path.read_text().splitlines()] if path.exists() else []
 
 
+class Timers:
+    """Advance just work deadlines, not HTTP keepalive or the clients' sockets."""
+
+    def __init__(self):
+        self.elapsed = 0
+        self.waiters = {}
+
+    def __getattr__(self, name):
+        return getattr(asyncio, name)
+
+    async def sleep(self, delay):
+        done = asyncio.get_running_loop().create_future()
+        self.waiters[done] = self.elapsed + delay, lambda: done.set_result(None)
+        try:
+            await done
+        finally:
+            self.waiters.pop(done, None)
+
+    @asynccontextmanager
+    async def timeout(self, delay):
+        async with asyncio.timeout(None) as timer:
+            if delay is not None:
+                self.waiters[timer] = (
+                    self.elapsed + delay,
+                    lambda: timer.reschedule(asyncio.get_running_loop().time()),
+                )
+            try:
+                yield
+            finally:
+                self.waiters.pop(timer, None)
+
+    def advance(self, seconds):
+        self.elapsed += seconds
+        for deadline, notify in list(self.waiters.values()):
+            if deadline <= self.elapsed:
+                notify()
+
+
 class Fixture:
     def __init__(self, config):
         self.name = config["name"]
@@ -58,7 +100,7 @@ class Fixture:
         self.dispatches = self.root / "dispatches.jsonl"
         self.latch = defaultdict(asyncio.Event)
         self.warnings = Warnings()
-        self.offset = 0
+        self.timers = Timers()
         self.erasure = {}
         self.script = Script(json.loads(Path(os.environ["MODULAR_AGENT_SCRIPT"]).read_text()))
         self.control_tls = {}
@@ -235,16 +277,25 @@ class Fixture:
             raw_sources={"kit": "kit"},
             trace_state_keys=["kit"],
         )
-        app = web.Application()
-        app.router.add_post("/fixture", self.control)
-        self.runner = web.AppRunner(app, access_log=None)
-        await self.runner.setup()
-        await web.TCPSite(self.runner, "127.0.0.1", 0).start()
+
+        async def control(scope, receive, send):
+            req = Request(scope, receive)
+            reply = (
+                await self.control(req)
+                if req.method == "POST" and req.url.path == "/fixture"
+                else JSONResponse({}, status_code=404)
+            )
+            await reply(scope, receive, send)
+
+        async def shutdown():
+            pass
+
+        self.runner = await listen_asgi("127.0.0.1", 0, control, shutdown)
         print(
             json.dumps(
                 {
                     "url": self.service.url,
-                    "control": f"http://127.0.0.1:{self.runner.addresses[0][1]}/fixture",
+                    "control": self.runner.url + "/fixture",
                 }
             ),
             flush=True,
@@ -383,18 +434,18 @@ class Fixture:
 
     async def control(self, req):
         if not hmac.compare_digest(self.token, req.headers.get("Authorization", "")):
-            raise web.HTTPUnauthorized()
+            return JSONResponse({}, status_code=401)
         d = await req.json()
         sid = d.get("threadId")
         h = self.agent._h
         match d["operation"]:
             case "tls":
-                return web.json_response(self.control_tls)
+                return JSONResponse(self.control_tls)
             case "inspect":
                 saved = await self.agent._call("history", "read", session=sid)
                 records = {e["id"]: entry_out(e) for e in (saved or {}).get("entries", [])}
                 self.telemetry.force_flush()
-                return web.json_response(
+                return JSONResponse(
                     {
                         "batches": [
                             [records[i] for i in group if i in records]
@@ -438,7 +489,7 @@ class Fixture:
                     rights=sorted(set(ACP_RIGHTS) - {"tools"}),
                 )
             case "advance":
-                self.offset += d["milliseconds"]
+                self.timers.advance(d["milliseconds"] / 1000)
                 # Yield to the timer queue at the new instant, then wait for its
                 # recorded settlement and all runnable work, not a real timeout.
                 for (s, _), task in list(h.interface_timers.items()):
@@ -459,8 +510,8 @@ class Fixture:
                     )
                     self.erasure[sid] = {"outOfReach": report.get("out_of_reach", [])}
             case _:
-                raise web.HTTPBadRequest()
-        return web.json_response({})
+                return JSONResponse({}, status_code=400)
+        return JSONResponse({})
 
 
 async def main():
@@ -468,24 +519,26 @@ async def main():
     if config["name"] in {"history", "stock-conversation", "encoding"}:
         os.execv(sys.executable, [sys.executable, str(Path(__file__).with_name("agui_ma.py"))])
     fixture = Fixture(config)
-    loop = asyncio.get_running_loop()
-    monotonic, clock = loop.time, interface_tools.clock
+    clock = interface_tools.clock
 
     def remaining(q):
         deadline = q.get("deadline")
-        now = datetime.now(UTC) + timedelta(milliseconds=fixture.offset)
+        now = datetime.now(UTC) + timedelta(seconds=fixture.timers.elapsed)
         return (datetime.fromisoformat(deadline) - now).total_seconds() if deadline else None
 
     with (
-        patch.object(loop, "time", lambda: monotonic() + fixture.offset / 1000),
-        patch.object(interface_tools, "clock", lambda: clock() + fixture.offset),
+        patch.object(ma_questions, "asyncio", fixture.timers),
+        patch.object(interface_tools, "asyncio", fixture.timers),
+        patch.object(
+            interface_tools, "clock", lambda: clock() + round(fixture.timers.elapsed * 1000)
+        ),
         patch.object(Questions, "_remaining", staticmethod(remaining)),
     ):
         await fixture.start()
         try:
             await asyncio.Event().wait()
         finally:
-            await fixture.runner.cleanup()
+            await fixture.runner.close()
             await fixture.service.close()
             await fixture.agent.close()
 

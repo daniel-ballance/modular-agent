@@ -6,7 +6,7 @@ import time
 from contextvars import Context
 
 from jsonschema import Draft202012Validator, ValidationError
-from ma_core import AgentError, clone, content
+from ma_core import AgentError, WORK_INPUT, clone, content
 from ma_core import telemetry as ot
 from ma_core.recovery import HANDOFF
 from ma_core.wire import call_out, recorded_as, tool_in, tool_out
@@ -166,6 +166,7 @@ class InterfaceTools:
                 cx["actor"] == actor
                 and cx["route"] == route
                 and cx["deliver"] is not None
+                and (not cx.get("work") or cx["work"](WORK_INPUT.get()))
                 and name in cx["offers"].get(sid, ())
                 and cx["scope"][-1](s)
             ):

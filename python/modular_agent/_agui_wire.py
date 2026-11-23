@@ -46,7 +46,7 @@ def require(value: object, code: str = "invalid_request") -> None:
         raise Failure(code)
 
 
-def decode(raw: bytes) -> Obj:
+def decode(raw: bytes | bytearray) -> Obj:
     try:
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=json_object)
         check_json(value)
@@ -84,6 +84,8 @@ def shape(value: Any, *, strings: str = "", optional: str = "", extra: str = "")
     for key in optional.split():
         require(key not in value or isinstance(value[key], str))
     allowed = set((strings + " " + optional + " " + extra).split())
+    if "metadata" in allowed and "metadata" in value and "role" in value:
+        require(isinstance(value["metadata"], dict))
     if value.keys() - allowed:
         warn("unknown field")  # Do not log a client-supplied string.
     return {k: v for k, v in value.items() if k in allowed}
@@ -117,6 +119,7 @@ def parts(value: Any) -> list[Obj]:
 def message(value: Any) -> Obj:
     require(isinstance(value, dict))
     role = value.get("role")
+    require(isinstance(role, str))
     allowed = {"assistant": "toolCalls", "tool": "toolCallId error", "activity": "activityType"}
     m = shape(
         value,
@@ -168,8 +171,10 @@ def parse_run(raw: Obj) -> Obj:
     ]
     offers = []
     for t in array(d, "tools"):
-        t = shape(t, strings="name description", extra="parameters")
+        t = shape(t, strings="name description", extra="parameters metadata")
         require(isinstance(t.setdefault("parameters", {}), dict))
+        if "metadata" in t:
+            require(isinstance(t.pop("metadata"), dict))
         offers.append(t)
     d["tools"] = offers
     for c in array(d, "context"):
@@ -179,6 +184,7 @@ def parse_run(raw: Obj) -> Obj:
     for a in array(d, "resume"):
         a = shape(a, strings="interruptId status", extra="payload metadata")
         require(a["status"] in ("resolved", "cancelled"))
+        require(isinstance(a.get("metadata", {}), dict))
         answers.append(a)
     d["resume"] = answers
     return d
@@ -222,6 +228,22 @@ def content(parts: list[Obj]) -> str | list[Obj]:
 
 def event(kind: str, **fields: Any) -> Obj:
     return {"type": kind, **fields}
+
+
+def valid_patch(value: Any) -> bool:
+    def pointer(p: Any) -> bool:
+        return (
+            isinstance(p, str) and (not p or p.startswith("/")) and not re.search(r"~(?![01])", p)
+        )
+
+    return isinstance(value, list) and all(
+        isinstance(op, dict)
+        and op.get("op") in ("add", "remove", "replace", "move", "copy", "test")
+        and pointer(op.get("path"))
+        and (op["op"] not in ("add", "replace", "test") or "value" in op)
+        and (op["op"] not in ("move", "copy") or pointer(op.get("from")))
+        for op in value
+    )
 
 
 def triad(cid: str, name: str, args: Obj, parent: str | None = None) -> list[Obj]:
