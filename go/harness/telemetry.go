@@ -160,6 +160,24 @@ func firstContext(contexts []context.Context) context.Context {
 	return context.Background()
 }
 
+func acquireHistory(ctx context.Context, store api.Store, id string) (api.Lease, error) {
+	if s, ok := store.(interface {
+		AcquireContext(context.Context, string) (api.Lease, error)
+	}); ok {
+		return s.AcquireContext(ctx, id)
+	}
+	return store.Acquire(id)
+}
+
+func loadHistory(ctx context.Context, lease api.Lease) (api.Session, error) {
+	if l, ok := lease.(interface {
+		LoadContext(context.Context) (api.Session, error)
+	}); ok {
+		return l.LoadContext(ctx)
+	}
+	return lease.Load()
+}
+
 func saveHistory(ctx context.Context, lease api.Lease, next api.Session) error {
 	if l, ok := lease.(interface {
 		SaveContext(context.Context, api.Session) error

@@ -111,6 +111,7 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 	var workers sync.WaitGroup
 	var errorsMu sync.Mutex
 	var settleErrors error
+	settleCtx := context.WithoutCancel(ctx)
 	settle := func(p *pending) (saveErr error) {
 		if errors.Is(context.Cause(ctx), api.ErrProcessStopped) {
 			return nil
@@ -124,13 +125,23 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 			p.open = false
 			p.result = &api.ToolResult{Status: "unknown", Content: api.Text(interrupted)}
 		}
+		if !repair && !p.ran {
+			status := "not_started"
+			if p.result != nil {
+				status = p.result.Status
+			}
+			if p.open {
+				status = "open"
+			}
+			api.ObserveToolDisposition(ctx, p.call, status)
+		}
 		if p.open || (p.result != nil && p.result.Status == "open") {
 			p.open = true
 			if isBound {
 				p.settled = true
 				return nil
 			}
-			_, e := t.IO.Record(context.Background(), api.Entry{Kind: "tool.open", Step: step, Call: p.call.ID})
+			_, e := t.IO.Record(settleCtx, api.Entry{Kind: "tool.open", Step: step, Call: p.call.ID})
 			p.settled = e == nil
 			return e
 		}
@@ -153,7 +164,7 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 						saveErr = fmt.Errorf("after-tool panic: %v", v)
 					}
 				}()
-				changed, hookErr := t.IO.Hook(context.Background(), "runtime.tool.after", api.AfterTool{Call: p.call, Result: result})
+				changed, hookErr := t.IO.Hook(settleCtx, "runtime.tool.after", api.AfterTool{Call: p.call, Result: result})
 				if hookErr != nil {
 					saveErr = hookErr
 				} else {
@@ -170,7 +181,7 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 		} else if model != "" {
 			sources = append(sources, model)
 		}
-		_, e := t.IO.Record(context.Background(), api.Entry{Kind: "tool.result", Step: p.call.Step, Call: p.call.ID, Visible: true, Content: result.Content, Data: api.JSON(result), Copies: sources})
+		_, e := t.IO.Record(settleCtx, api.Entry{Kind: "tool.result", Step: p.call.Step, Call: p.call.ID, Visible: true, Content: result.Content, Data: api.JSON(result), Copies: sources})
 		if e == nil {
 			p.settled = true
 			t.IO.Emit(context.Background(), api.Event{Kind: "tool.end", Step: p.call.Step, Call: p.call.ID, Data: api.JSON(result)})

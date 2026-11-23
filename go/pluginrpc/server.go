@@ -198,7 +198,7 @@ func (s *Server) Notify(ctx context.Context, method string, params Object) error
 		return fault("invalid_request", "no active request")
 	}
 	params["parentRequestId"] = id
-	return s.peer.Send(method, params)
+	return s.peer.sendWork(ctx, method, params)
 }
 
 // Project is the canonical project supplied during initialization.
@@ -219,7 +219,7 @@ func (s *Server) ToolsChanged(ctx context.Context, id string) error {
 		}
 		params["parentRequestId"] = request
 	}
-	return s.peer.Send("tools/changed", params)
+	return s.peer.sendWork(ctx, "tools/changed", params)
 }
 
 func (s *Server) ownEnvironment(env api.WorkingEnvironment) {

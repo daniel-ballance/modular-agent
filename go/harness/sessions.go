@@ -255,11 +255,11 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) (errOut e
 	if err != nil {
 		return err
 	}
-	lease, err := v.(api.Store).Acquire(id)
+	lease, err := acquireHistory(ctx, v.(api.Store), id)
 	if err != nil {
 		return err
 	}
-	snap, err := lease.Load()
+	snap, err := loadHistory(ctx, lease)
 	if err != nil {
 		_ = lease.Close()
 		return err
@@ -646,7 +646,7 @@ func (c *client) Record(ctx context.Context, id string, e api.Entry) (api.Entry,
 	s.mu.Lock()
 	var admission api.Entry
 	if e.Kind == "job.end" && c.owner == "jobs" {
-		e, admission, err = c.finishJobLocked(s, e)
+		e, admission, err = c.finishJobLocked(s, e, ctx)
 		if err == nil {
 			s.endJobSpan(e.Job, api.Decode[api.Job](e.Data).Outcome.Status)
 		}
@@ -1405,11 +1405,14 @@ func (c *client) stopSessionAs(ctx context.Context, id string, closing bool, who
 	if closing && !interrupted {
 		hook = "session.end"
 	}
-	_, err = c.h.API().Invoke(context.Background(), hook, id)
+	_, err = c.h.API().Invoke(context.WithoutCancel(ctx), hook, id)
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
+	for id := range s.jobSpans {
+		s.endJobSpan(id, "interrupted")
+	}
 	close(s.writerWatchDone)
 	if s.lease != nil {
 		err = s.lease.Close()

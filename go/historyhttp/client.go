@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 	"github.com/daniel-ballance/modular-agent/go/servicehttp"
 	"go.opentelemetry.io/otel/trace"
@@ -111,12 +112,13 @@ func (c *Client) Verify() error {
 	return nil
 }
 
-func (c *Client) read(id string) (document, error) {
+func (c *Client) read(id string, contexts ...context.Context) (document, error) {
+	ctx := operationContext(c.ctx, contexts)
 	var d document
 	after := ""
 	seen := map[string]bool{}
 	for {
-		page, err := c.backend.Read(c.ctx, id, after, defaultPageLimit)
+		page, err := c.backend.Read(ctx, id, after, defaultPageLimit)
 		if err != nil {
 			return document{}, err
 		}
@@ -132,17 +134,19 @@ func (c *Client) read(id string) (document, error) {
 		after = page.Next
 	}
 }
-func (c *Client) Acquire(id string) (api.Lease, error) {
-	return c.acquire(id, true)
+func (c *Client) Acquire(id string) (api.Lease, error) { return c.AcquireContext(c.ctx, id) }
+
+func (c *Client) AcquireContext(ctx context.Context, id string) (api.Lease, error) {
+	return c.acquire(id, true, ctx)
 }
 
 func (c *Client) TryAcquire(id string) (api.Lease, error) {
 	return c.acquire(id, false)
 }
 
-func (c *Client) acquire(id string, wait bool) (api.Lease, error) {
+func (c *Client) acquire(id string, wait bool, contexts ...context.Context) (api.Lease, error) {
 	l := &lease{c: c, id: id, lost: make(chan struct{})}
-	if err := l.acquire(wait); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := l.acquire(wait, contexts...); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 	return c.track(l)
@@ -171,13 +175,20 @@ type leaseReply struct {
 	sent int64
 }
 
-func (c *Client) takeLease(id string, wait bool) (leaseReply, error) {
+func (c *Client) takeLease(id string, wait bool, contexts ...context.Context) (_ leaseReply, errOut error) {
+	operation := telemetry.Session(operationContext(c.ctx, contexts), id)
+	var waitSpan trace.Span
+	defer func() {
+		if waitSpan != nil {
+			telemetry.Finish(waitSpan, errOut)
+		}
+	}()
 	var deadline time.Time
 	var lastHeld error
 	ambiguous := false
 	for {
 		out := leaseReply{sent: leaseClock()}
-		ctx := c.ctx
+		ctx := operation
 		cancel := func() {}
 		if !deadline.IsZero() {
 			ctx, cancel = context.WithDeadline(ctx, deadline)
@@ -194,7 +205,7 @@ func (c *Client) takeLease(id string, wait bool) (leaseReply, error) {
 			}
 			if ambiguous {
 				sent := leaseClock()
-				ctx, cancel := context.WithTimeout(c.ctx, time.Duration(out.sent+half-sent))
+				ctx, cancel := context.WithTimeout(operation, time.Duration(out.sent+half-sent))
 				renewedTTL, err := c.backend.Renew(ctx, id, out.Lease)
 				cancel()
 				if err != nil || renewedTTL != out.TTLMS || leaseClock() >= min(out.sent+half, sent+half) {
@@ -243,6 +254,9 @@ func (c *Client) takeLease(id string, wait bool) (leaseReply, error) {
 		if next.After(deadline) {
 			return leaseReply{}, err
 		}
+		if waitSpan == nil {
+			operation, waitSpan = telemetry.Start(operation, "modular_agent.capacity.wait", trace.WithAttributes(telemetry.String("modular_agent.capacity.scope", "session")))
+		}
 		timer := time.NewTimer(time.Until(next))
 		select {
 		case <-timer.C:
@@ -253,8 +267,8 @@ func (c *Client) takeLease(id string, wait bool) (leaseReply, error) {
 	}
 }
 
-func (l *lease) acquire(wait bool) error {
-	out, err := l.c.takeLease(l.id, wait)
+func (l *lease) acquire(wait bool, contexts ...context.Context) error {
+	out, err := l.c.takeLease(l.id, wait, contexts...)
 	if err != nil {
 		return err
 	}
@@ -376,18 +390,20 @@ func decodeHistory(d document, physical bool) (api.Session, error) {
 	}
 	return snap, nil
 }
-func (l *lease) Load() (api.Session, error) {
+func (l *lease) Load() (api.Session, error) { return l.LoadContext(l.c.ctx) }
+
+func (l *lease) LoadContext(ctx context.Context) (api.Session, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.usable(); err != nil {
 		return api.Session{}, err
 	}
 	if l.token == "" {
-		if err := l.acquire(true); err != nil {
+		if err := l.acquire(true, ctx); err != nil {
 			return api.Session{}, err
 		}
 	}
-	return l.loadSnapshot(false)
+	return l.loadSnapshot(false, ctx)
 }
 
 // LoadErasure preserves physical records even when bookkeeping already masks
@@ -404,8 +420,8 @@ func (l *lease) LoadErasure() (api.Session, error) {
 	return l.loadSnapshot(true)
 }
 
-func (l *lease) loadSnapshot(physical bool) (api.Session, error) {
-	d, err := l.c.read(l.id)
+func (l *lease) loadSnapshot(physical bool, contexts ...context.Context) (api.Session, error) {
+	d, err := l.c.read(l.id, contexts...)
 	if err != nil {
 		return api.Session{}, err
 	}
@@ -421,6 +437,13 @@ func (l *lease) loadSnapshot(physical bool) (api.Session, error) {
 	}
 	return snap, nil
 }
+func operationContext(base context.Context, parents []context.Context) context.Context {
+	if len(parents) == 0 {
+		return base
+	}
+	return trace.ContextWithSpanContext(base, trace.SpanContextFromContext(parents[0]))
+}
+
 func (l *lease) Save(s api.Session) error { return l.SaveContext(l.c.ctx, s) }
 
 func (l *lease) SaveContext(ctx context.Context, s api.Session) error { return l.save(ctx, s, false) }
@@ -484,12 +507,12 @@ func (l *lease) save(parent context.Context, s api.Session, settling bool) error
 		if err := l.c.backend.Create(ctx, l.id, session); err != nil {
 			return err
 		}
-		if err := l.acquire(false); err != nil {
+		if err := l.acquire(false, ctx); err != nil {
 			return err
 		}
 	}
 	if l.known == nil {
-		if _, err := l.loadSnapshot(false); err != nil {
+		if _, err := l.loadSnapshot(false, ctx); err != nil {
 			return err
 		}
 	}
