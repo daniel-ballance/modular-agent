@@ -32,6 +32,12 @@ ma --agui --acp --listen 127.0.0.1:7400 --token-file /path/to/operator.token
 
 Use one command at a time. Each prints the HTTP origin when ready. Send the token in the Authorization header, not in the URL. Use a random token with at least 128 bits of entropy, in an owner-only regular file. AG-UI uses `/agui/v1`; ACP upgrades use `/`. Both serve the selected project. To distinguish clients, supply operator policy actors with a `clientId` per client instead of the shorthand. TLS is available through the SDK, not the command.
 
+## Find and resume interrupted work
+
+An authenticated `GET /agui/v1/threads` lists only the kept threads the client may watch. Each row has a timestamp, the turn state and the number of questions and Interface calls for that client. Listing does not open a thread. ACP includes the same counts and state in `session/list`.
+
+By default, restarting a service leaves an interrupted turn alone until a client opens its session. To start recovery before accepting clients, pass `--resume-open` with `--acp` or `--agui`, or set `"resume_open": true` in the global `settings.json`. Project settings cannot turn this on or off. The service checks its configured project as the local operator. Each resumed session or held writer skipped gets one stderr line with its ID and no content. Durable recovery uses its normal repeat-safety rules. With `--runtime transient`, the interrupted turn ends as failed. A closed turn with an open question or Interface call is left for a client. The option has no effect in print or interactive mode.
+
 ## Client identity
 
 By default, ChatGPT requests and browser sign-in use `modular-agent` as the `originator`. Grok device sign-in uses it as the `referrer`. The identity is a label, not a credential. It does not change the services' sign-in client IDs.
@@ -56,11 +62,12 @@ By default `ma` sends no telemetry. Set `OTEL_EXPORTER_OTLP_ENDPOINT` or a per-s
 
 ## What is checked
 
-- **Reference:** 25/25, including `telemetry-export`, including client identity validation, sandbox limits, ambient access, tool calls and result rendering.
+- **Reference:** 26/26 with the shared `resume-open` check. Startup recovery completed the interrupted turn without a client connecting and without repeating its tool effect.
+- **AG-UI:** 26/26 with the shared thread listing and wait counts.
 - **Telemetry:** seven offline checks cover no endpoint, SDK disabled, per-signal overrides, sampling, headers, metadata privacy and the OTLP resource. A scripted turn reached local Phoenix as `invoke_agent ma`, `chat script` and `execute_tool codemode`. The OTLP resource for that trace carried `service.name=ma-python`.
 - **ACP:** 188/188 with `--crash-checks --probe-checks --job-checks`. The standard composition does not declare several actors, tenants or session limits.
-- **WebSocket kits:** 153/153 for the plugin binding and 14/14 for separate-listener isolation. The final ACP run passed 192/193; the connection closed during the remote-point preflight. A verbose probe run passed 166/166 and did not establish the cause.
-- **Python suites:** 652 passed and five live checks skipped in each Runtime and binding combination (transient/local, transient/process, durable/local and durable/process). The sandbox tests cover memory and active time, waiting on the host, worker death, cancellation, the recursion and nested-call limits, ambient access, UTF-8 output and result rendering.
+- **WebSocket kits:** 153/153 for the plugin binding, 14/14 for separate-listener isolation and 193/193 for ACP.
+- **Python suites:** 722 passed and five live checks skipped in each Runtime and binding combination (transient/local, transient/process, durable/local and durable/process). The sandbox tests cover memory and active time, waiting on the host, worker death, cancellation, the recursion and nested-call limits, ambient access, UTF-8 output and result rendering.
 - **Subscriptions:** offline SDK checks cover ChatGPT and Grok sign-in, model requests, refresh and reasoning replay, and Claude tool dispatch. Product checks cover client identity and former Provider ids in sign-in, settings, catalog overrides and saved sessions.
 - **Python static checks:** Ruff lint and format checks passed; strict mypy passed.
 

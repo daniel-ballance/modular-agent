@@ -8,6 +8,8 @@ The base build's notes are in [docs/clean-room](docs/clean-room/README.md). Path
 
 Serve [AG-UI](../docs/bindings/agui.md) with `await agent.serve_agui(listen=..., actors=...)`. Set `acp=True` to accept ACP WebSocket upgrades on the same port. See [the listener example and scope rules](SDK.md#serve-ag-ui).
 
+Find kept threads without opening them with `GET /agui/v1/threads`. To recover interrupted turns before the service accepts clients, use [`ma --resume-open`](packages/ma/README.md#find-and-resume-interrupted-work). Recovery at startup is off by default.
+
 ## Install and check
 
 Python is pinned with mise; dependencies are managed by uv. The kit tests need the ACP kit's dependencies: run `npm ci` in `../conformance/acp` first.
