@@ -82,6 +82,10 @@ type agRequest struct {
 
 // ServeAGUI starts the HTTP/SSE listener. Set ACP to serve ACP upgrades on its root path.
 func (a *Agent) ServeAGUI(ctx context.Context, opt ServeAGUIOptions) (*Service, error) {
+	return a.serveAGUI(ctx, opt, nil)
+}
+
+func (a *Agent) serveAGUI(ctx context.Context, opt ServeAGUIOptions, wrap func(http.ResponseWriter) http.ResponseWriter) (*Service, error) {
 	bad := func(s string) (*Service, error) { return nil, &Error{Code: InvalidComposition, Message: s} }
 	if opt.Listen == "" || len(opt.Actors) == 0 {
 		return bad("AG-UI requires Listen and Actors")
@@ -150,7 +154,11 @@ func (a *Agent) ServeAGUI(ctx context.Context, opt ServeAGUIOptions) (*Service, 
 			_ = iface.ServePrincipal(ctx, c, c, decl, projects, p.Principal)
 		}
 	}
-	service, err := wswire.ListenAgent(ctx, opt.Listen, opt.TLS, wswire.ACP, tokens, ws, srv.http)
+	routes := srv.http
+	if wrap != nil {
+		routes = func(w http.ResponseWriter, r *http.Request, p *agPrincipal) { srv.http(wrap(w), r, p) }
+	}
+	service, err := wswire.ListenAgent(ctx, opt.Listen, opt.TLS, wswire.ACP, tokens, ws, routes)
 	return service, appError(err, InvalidParams)
 }
 func (s *agServer) warn(field string) {

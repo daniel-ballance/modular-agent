@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
+	"github.com/daniel-ballance/modular-agent/go/internal/worktime"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 	"go.opentelemetry.io/otel/trace"
 	"os"
@@ -24,7 +25,7 @@ type session struct {
 	interfaceSpans       map[string]trace.SpanContext
 	interfaceParents     map[string]*telemetry.Wire
 	interfaceUnreleased  map[string]bool
-	interfaceTimer       *time.Timer
+	interfaceTimer       worktime.Timer
 	interfaceReports     sync.Mutex
 	queuedContinuations  map[string]bool
 	jobSpans             map[string]context.Context
@@ -637,7 +638,7 @@ func appendEntry(next *api.Session, e api.Entry, writer string, advance bool) ap
 	}
 	e.Parent = next.Position
 	e.Session = next.ID
-	e.Time = time.Now().UTC()
+	e.Time = worktime.Now().UTC()
 	if (e.Kind != "job.start" && e.Kind != "job.end") || e.Writer == "" {
 		e.Writer = writer
 	}

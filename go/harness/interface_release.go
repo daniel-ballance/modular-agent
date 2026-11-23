@@ -3,9 +3,9 @@ package harness
 import (
 	"context"
 	"slices"
-	"time"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/worktime"
 )
 
 // PendingInterfaceCall is status for this route, not an executable delivery.
@@ -31,7 +31,7 @@ func (i *InterfaceConnection) Pending() ([]PendingInterfaceCall, error) {
 			continue
 		}
 		_, saved, ok := i.c.h.restoreInterface(s.data, cp)
-		if !ok || saved.Actor != i.actor || saved.Route != i.route || !i.allowedLocked("watch", saved.Rights) || !i.allowedLocked("tools", saved.Rights) || saved.Deadline <= time.Now().UnixMilli() {
+		if !ok || saved.Actor != i.actor || saved.Route != i.route || !i.allowedLocked("watch", saved.Rights) || !i.allowedLocked("tools", saved.Rights) || saved.Deadline <= worktime.Now().UnixMilli() {
 			continue
 		}
 		ended := slices.ContainsFunc(s.data.Branch(), func(e api.Entry) bool {
@@ -81,7 +81,7 @@ func (i *InterfaceConnection) ReleaseGroup(ctx context.Context, turn string, cal
 	}
 	for n, t := range tickets {
 		c, saved, ok := i.c.h.restoreInterface(s.data, t.entry)
-		if !ok || i.staged[t.entry.ID].entry.ID == "" || saved.Deadline <= time.Now().UnixMilli() || !i.canReceiveLocked(i.c.h.interfaceTools[c.Name], c.Name) || !t.ports.canRunToolsLocked(c.Actor) || interfaceTerminal(s.data, c.ID).ID != "" || c.ID != callers[n].ID || c.Name != callers[n].Name || string(c.Input) != string(callers[n].Input) {
+		if !ok || i.staged[t.entry.ID].entry.ID == "" || saved.Deadline <= worktime.Now().UnixMilli() || !i.canReceiveLocked(i.c.h.interfaceTools[c.Name], c.Name) || !t.ports.canRunToolsLocked(c.Actor) || interfaceTerminal(s.data, c.ID).ID != "" || c.ID != callers[n].ID || c.Name != callers[n].Name || string(c.Input) != string(callers[n].Input) {
 			return api.ErrAuthority
 		}
 	}

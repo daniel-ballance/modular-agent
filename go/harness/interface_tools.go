@@ -10,6 +10,7 @@ import (
 
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
+	"github.com/daniel-ballance/modular-agent/go/internal/worktime"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -45,7 +46,7 @@ func (h *Harness) RegisterInterfaceTools(sources []InterfaceSource) error {
 	routes, ids := map[string]string{}, map[string]bool{}
 	byName := map[string]*interfaceSource{}
 	for _, spec := range sources {
-		if spec.ID == "" || ids[spec.ID] || spec.Actor == "" || spec.Route == "" || spec.TimeoutMS <= 0 || spec.TimeoutMS > api.MaxSharedTime-time.Now().UnixMilli() || len(spec.Definitions) == 0 {
+		if spec.ID == "" || ids[spec.ID] || spec.Actor == "" || spec.Route == "" || spec.TimeoutMS <= 0 || spec.TimeoutMS > api.MaxSharedTime-worktime.Now().UnixMilli() || len(spec.Definitions) == 0 {
 			return errors.New("invalid Interface tool source")
 		}
 		if actor := routes[spec.Route]; actor != "" && actor != spec.Actor {
@@ -245,7 +246,7 @@ func (p *turnPorts) DispatchInterface(ctx context.Context, call api.Call, lineag
 	if api.InterfaceHandoffs(s.data)[call.ID].ID != "" || interfaceTerminal(s.data, call.ID).ID != "" {
 		return refuse("Interface tool call already started or settled.")
 	}
-	deadline := time.Now().UnixMilli() + src.TimeoutMS
+	deadline := worktime.Now().UnixMilli() + src.TimeoutMS
 	if deadline > api.MaxSharedTime {
 		return refuse("Interface deadline cannot be represented.")
 	}
@@ -331,7 +332,7 @@ func (i *InterfaceConnection) NextHandoff(ctx context.Context) (api.Call, error)
 		s.mu.Lock()
 		err := s.reconcileErasureLocked()
 		current, handoff, valid := i.c.h.restoreInterface(s.data, ticket.entry)
-		valid = valid && ctx.Err() == nil && s.checkWriterLocked() == nil && i.canReceiveLocked(i.c.h.interfaceTools[call.Name], call.Name) && interfaceTerminal(s.data, call.ID).ID == "" && handoff.Deadline > time.Now().UnixMilli() && ticket.ports.canRunToolsLocked(call.Actor) && !interfaceTurnFailed(s.data, ticket.entry.Turn)
+		valid = valid && ctx.Err() == nil && s.checkWriterLocked() == nil && i.canReceiveLocked(i.c.h.interfaceTools[call.Name], call.Name) && interfaceTerminal(s.data, call.ID).ID == "" && handoff.Deadline > worktime.Now().UnixMilli() && ticket.ports.canRunToolsLocked(call.Actor) && !interfaceTurnFailed(s.data, ticket.entry.Turn)
 		if err == nil && valid {
 			err = s.withErasureCheck(s.data, func() error { delete(s.interfaceUnreleased, call.ID); return nil })
 		}
@@ -478,7 +479,7 @@ func (h *Harness) recoverInterfaceLocked(s *session) error {
 			continue
 		}
 		_, saved, valid := h.restoreInterface(s.data, cp)
-		if !valid || saved.Deadline <= time.Now().UnixMilli() || interfaceTurnFailed(s.data, cp.Turn) {
+		if !valid || saved.Deadline <= worktime.Now().UnixMilli() || interfaceTurnFailed(s.data, cp.Turn) {
 			if err := h.settleInterfaceUnknownLocked(s, cp, "Interface call expired or its handoff could not be restored; outcome unknown."); err != nil {
 				return err
 			}
@@ -509,8 +510,8 @@ func (h *Harness) armInterfaceTimerLocked(s *session) {
 	if next == 0 {
 		return
 	}
-	var timer *time.Timer
-	timer = time.AfterFunc(time.Until(time.UnixMilli(next)), func() {
+	var timer worktime.Timer
+	timer = worktime.At(time.UnixMilli(next), func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.interfaceTimer != timer || s.closing || s.writerFailure != nil {
@@ -537,7 +538,7 @@ func (p *turnPorts) recordInterfaceTurnEnd(ctx context.Context, e api.Entry) (ap
 			continue
 		}
 		_, saved, valid := p.c.h.restoreInterface(s.data, cp)
-		if out.Status != "completed" || !valid || saved.Deadline <= time.Now().UnixMilli() {
+		if out.Status != "completed" || !valid || saved.Deadline <= worktime.Now().UnixMilli() {
 			if err := p.c.h.settleInterfaceUnknownLocked(s, cp, "Turn ended without a confirmed Interface tool outcome."); err != nil {
 				s.mu.Unlock()
 				return e, err

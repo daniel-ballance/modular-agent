@@ -6,10 +6,10 @@ import (
 	"errors"
 	"slices"
 	"sort"
-	"time"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
+	"github.com/daniel-ballance/modular-agent/go/internal/worktime"
 )
 
 const interfaceCopyNotice = "A copy may remain with the Interface executor."
@@ -156,7 +156,7 @@ func (i *InterfaceConnection) checkReportLocked(ctx context.Context, id string) 
 		}
 		return refuse()
 	}
-	if saved.Deadline <= time.Now().UnixMilli() {
+	if saved.Deadline <= worktime.Now().UnixMilli() {
 		if err := i.c.h.settleInterfaceUnknownLocked(s, cp, "Interface result deadline expired; outcome unknown."); err != nil {
 			return api.Entry{}, api.Call{}, InterfaceRefused, err
 		}
