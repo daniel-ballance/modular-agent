@@ -94,6 +94,7 @@ else
   echo "(cross-language steps skipped: they need all four languages)"
 fi
 
+! $quick && want python && step "telemetry: Python runner, every placement" bash -c 'npm ci --silent --prefix conformance/telemetry && node conformance/telemetry/run.mjs python -- "$PWD/python/.venv/bin/python" -m modular_agent._scenarios'
 # ---------- binding kits against each selected language ----------
 if ! $quick; then
   want rust && step "rust: build history service example" bash -c "cd rust && mise exec -- cargo build -q -p modular-agent --example history_service"
