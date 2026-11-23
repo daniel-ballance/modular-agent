@@ -130,9 +130,9 @@ export function fakeFixture(name, fault, script) {
     record(s, 'inputRequest', { id: s.question.id }, { turnId: s.originTurn });
     return s.question;
   }
-  function closeQuestion(s, { reason, declined, system = false }) {
+  function closeQuestion(s, { reason, declined, value, system = false }) {
     if (!s.question) return;
-    record(s, 'inputAnswer', { requestId: s.question.id, declined, ...(reason ? { reason } : {}) }, { turnId: s.originTurn, ...(system ? {} : { actorId: 'kit-owner' }) });
+    record(s, 'inputAnswer', { requestId: s.question.id, ...(declined ? { declined } : { value }), ...(reason ? { reason } : {}) }, { turnId: s.originTurn, ...(system ? {} : { actorId: 'kit-owner' }) });
     if (s.question.reason === 'approval' && declined) record(s, 'toolResult', { status: 'refused' }, { toolCallId: s.question.toolCallId, turnId: s.originTurn });
     s.question = undefined;
   }
@@ -155,7 +155,7 @@ export function fakeFixture(name, fault, script) {
       if (!['resolved', 'cancelled'].includes(status) || (status === 'resolved' && (approval ? typeof value?.allow !== 'boolean' : !['yes', 'no'].includes(value)))) return [400, 'invalid_request'];
       const id = s.question.toolCallId;
       const declined = status === 'cancelled' || (approval && !value.allow);
-      closeQuestion(s, { declined });
+      closeQuestion(s, { declined, value: approval && !declined ? 'allow' : value });
       emit();
       if (approval && !declined) stage(s, id, s.stepId);
       if (s.call) {

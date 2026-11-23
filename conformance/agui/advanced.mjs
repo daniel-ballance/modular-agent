@@ -66,7 +66,7 @@ function settled(evidence, callId, status, { continuation = true, report = statu
   assert.equal(result.turnId, start.turnId, 'result belongs to origin');
   assert.equal(result.stepId, start.stepId);
   assert.ok(result.sources.includes(start.id) && result.sources.includes(checkpoint.id), 'result preserves handoff erasure lineage');
-  const continuations = entries(evidence, 'turnStart').filter(e => e.data.continuesTurnId === start.turnId);
+  const continuations = entries(evidence, 'turnStart').filter(e => (e.continuesTurnId ?? e.data?.continuesTurnId) === start.turnId);
   assert.equal(continuations.length, Number(continuation), 'one continuation iff origin is ready and remains eligible');
   if (!continuation) return;
   const [next] = continuations;
@@ -176,7 +176,10 @@ export const advanced = {
         assert.equal(entries(evidence, 'turnStart').length, 1, 'resumed question uses original turn');
         const answers = entries(evidence, 'inputAnswer');
         assert.equal(answers.length, 1, 'question decision commits once');
-        assert.equal(answers[0].data.declined, status !== 'resolved');
+        if (status === 'resolved') {
+          assert.equal(answers[0].data.declined ?? false, false);
+          assert.equal(answers[0].data.value, value);
+        } else assert.equal(answers[0].data.declined, true);
         if (status === 'expired') assert.equal(answers[0].data.reason, 'timeLimit');
       } finally { await presence.close(); }
     }
@@ -243,7 +246,7 @@ export const advanced = {
         const evidence = await evidenceFor(control, view.threadId);
         if (operation === 'timeout') settled(evidence, id, 'outcomeUnknown');
         else if (operation === 'erase') {
-          assert.equal(entries(evidence, 'turnStart').filter(e => e.data.continuesTurnId).length, 0, 'erased call cannot authorize a continuation');
+          assert.equal(entries(evidence, 'turnStart').filter(e => e.continuesTurnId ?? e.data?.continuesTurnId).length, 0, 'erased call cannot authorize a continuation');
           assert.ok(evidence.erasure.outOfReach.length, 'possibly handed-off copy is out of reach');
           clean(current, dispatch.color, rawReport);
         } else assert.equal(entries(evidence, 'toolResult').some(e => e.actorId), false, 'changed tool authority refuses the report');
