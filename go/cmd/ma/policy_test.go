@@ -15,7 +15,7 @@ func TestTraceTrustOnWorkRequests(t *testing.T) {
 	if output, err := exec.Command("go", "build", "-o", ma, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build ma: %v\n%s", err, output)
 	}
-	if output, err := exec.Command("node", "../../../conformance/reference/trace-trust.mjs", ma).CombinedOutput(); err != nil {
+	if output, err := exec.Command("node", "../../../conformance/reference/run.mjs", "--only", "trace-trust", "--", ma).CombinedOutput(); err != nil {
 		t.Fatalf("trace trust: %v\n%s", err, output)
 	}
 }

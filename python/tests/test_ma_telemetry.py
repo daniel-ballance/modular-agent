@@ -18,8 +18,11 @@ from ma_standard import telemetry
 
 @pytest.mark.loopback
 def test_trace_trust_on_work_requests():
-    driver = Path(__file__).resolve().parents[2] / "conformance/reference/trace-trust.mjs"
-    subprocess.run(["node", driver, Path(sys.executable).with_name("ma")], check=True)
+    driver = Path(__file__).resolve().parents[2] / "conformance/reference/run.mjs"
+    subprocess.run(
+        ["node", driver, "--only", "trace-trust", "--", Path(sys.executable).with_name("ma")],
+        check=True,
+    )
 
 
 @pytest.mark.parametrize("disabled", [False, True])

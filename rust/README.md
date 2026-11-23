@@ -150,7 +150,7 @@ node ../conformance/telemetry/run.mjs rust -- "$PWD/target/debug/scenario-agent"
 
 Build the other three fixture programs before running the full Rust telemetry matrix. Their build commands are in the [fixture registry](../conformance/sdk/fixtures/).
 
-- **Standard reference checks:** 26/26, including `resume-open` and `telemetry-export`. The startup check kills `ma` mid-call and observes recovery without connecting to the restarted writer.
+- **Standard reference checks:** 27/27, including `trace-trust`, `resume-open` and `telemetry-export`. The startup check kills `ma` mid-call and observes recovery without connecting to the restarted writer.
 - **ACP with `--crash-checks --probe-checks --job-checks`:** `ma` passed 188/188 on stdio and 193/193 on its built-in loopback WebSocket listener. The base build passes 214/214 on stdio. The expanded run covers late answers and job report turns, including after a crash.
 - **Plugin binding:** The Rust conformance plugin passed 146/146 on stdio and 153/153 on WebSocket, including the transient and durable Runtime services. The separate-listener WebSocket isolation run passed 14/14. Neither WebSocket run used a bridge.
 - **Standard and codemode:** `ma` includes the five alias checks. The six `tools-code` tests are separate. These cover startup validation, tool results, sandbox limits, OS policy, worker death and cancellation, crash recovery, and the dependency boundary.

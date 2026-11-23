@@ -105,7 +105,7 @@ for (const runtime of ["durable", "transient"] as const) {
 }
 
 test("trace trust on work requests", async () => {
-  await exec(process.execPath, [join(root, "conformance/reference/trace-trust.mjs"), process.execPath, cli]);
+  await exec(process.execPath, [join(root, "conformance/reference/run.mjs"), "--only", "trace-trust", "--", process.execPath, cli]);
 });
 
 test("ma rejects a non-boolean traceTrusted in the policy", async t => {

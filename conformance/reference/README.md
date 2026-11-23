@@ -1,6 +1,6 @@
 # Reference checks
 
-The 26 checks test whether an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs, its AG-UI responses and the telemetry it exports. So one set of checks covers all four implementations.
+The 27 checks test whether an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs, its ACP and AG-UI responses and the telemetry it exports. So one set of checks covers all four implementations.
 
 Install the shared OTLP receiver's dependencies from this directory: `npm ci --prefix ../telemetry`.
 
@@ -42,20 +42,21 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 | `json-events` | `--json` prints SDK-shaped events, ending with `turnEnded` |
 | `models` | `ma models` lists the scripted model |
 | `telemetry-export` | Export is off without an endpoint. With one, invocation and inference spans carry metadata only. Disabling the SDK stops export but leaves `telemetry: 1` in the declaration. |
+| `trace-trust` | An AG-UI or ACP work request continues the supplied trace only for an opted-in network token. The single-token shorthand starts a new trace. Stdio trusts the launcher unless disabled. A non-boolean policy value fails startup. |
 | `version` | `ma --version` names the implementation's language |
 
 The default endpoint assertion listens on `127.0.0.1:4318` inside a private Linux network namespace. It needs unprivileged `unshare -rn` and `ip` to bring up loopback. The runner reports a reason if it skips this assertion and still runs the rest of `telemetry-export`.
 
 ## Results
 
-The previous four-language run used `MODULAR_AGENT_REF_REQUIRE=all`. The TypeScript count includes the new `resume-open` check. The ACP kit ran against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` with `--crash-checks --probe-checks --job-checks`:
+All four builds passed the same 27 checks with `MODULAR_AGENT_REF_REQUIRE=all`. The ACP column records the earlier kit run against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` with `--crash-checks --probe-checks --job-checks`:
 
 | Implementation | Reference checks | ACP kit |
 |---|---|---|
-| Rust | 25 passed before `resume-open`; 26 required | 188/188 |
-| TypeScript | 26/26 | 188/188 |
-| Go | 25 passed before `resume-open`; 26 required | 188/188 |
-| Python | 25 passed before `resume-open`; 26 required | 188/188 |
+| Rust | 27/27 | 188/188 |
+| TypeScript | 27/27 | 188/188 |
+| Go | 27/27 | 188/188 |
+| Python | 27/27 | 188/188 |
 
 All four run the identical set of 188 ACP checks, including the four that check an undeclared feature is refused, so they present the same agent over ACP.
 

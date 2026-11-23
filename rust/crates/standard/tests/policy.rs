@@ -13,11 +13,11 @@ fn ma(dir: &Path) -> Command {
 
 #[test]
 fn trace_trust_on_work_requests() {
-    let test = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../conformance/reference/trace-trust.mjs");
+    let test = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../conformance/reference/run.mjs");
     assert!(
         Command::new("node")
             .arg(test)
+            .args(["--only", "trace-trust", "--"])
             .arg(env!("CARGO_BIN_EXE_ma"))
             .status()
             .unwrap()
