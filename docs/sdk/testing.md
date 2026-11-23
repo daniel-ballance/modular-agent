@@ -16,7 +16,7 @@ The [AG-UI kit](../../conformance/agui/README.md) uses a scripted Provider, a co
 
 ## Planned checks for approvals that wait
 
-[ADR 0034](../adr/0034-approvals-that-wait.md) is proposed for 0.2.0. The following are test plans, not scenarios that pass today. Use a scripted model and the `bump` counter. Observe its file as well as the committed records: an open question alone does not show that the tool never ran.
+[ADR 0034](../adr/0034-approvals-that-wait.md) is accepted; implementations follow in 0.3.0. The following are test plans, not scenarios that pass today. Use a scripted model and the `bump` counter. Observe its file as well as the committed records: an open question alone does not show that the tool never ran.
 
 | Proposed shared scenario | What to observe |
 |---|---|

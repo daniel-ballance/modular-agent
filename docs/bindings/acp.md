@@ -77,7 +77,7 @@ An agent MUST send every non-optional key and use only the values below. The ses
 | `erasure` | boolean | Implies `erase` is offered and the Harness and deployment can enforce [pending erasure](../contracts.md#cross-session-coordination). |
 | `inputKeys` | `true` | Fixed in this edition. |
 | `questionsOutlastTurns` | boolean | An eligible non-approval question can stay open past its turn. Requires `lateAnswersStartTurns: true`. |
-| `approvalsOutlastTurns` (optional, proposed) | boolean | Supports [approvals that wait](../contracts.md#approvals-that-wait); not the session opt-in. Default `false`. |
+| `approvalsOutlastTurns` (optional; accepted, not yet implemented) | boolean | Supports [approvals that wait](../contracts.md#approvals-that-wait); not the session opt-in. Default `false`. |
 | `startsTurnsUnasked` | `never`, `jobReports` | Whether job reports start turns. Late answers are separate. |
 | `queuedInputAfterRestart` | `handedBack`, `run` | Recovery policy for queued input. |
 | `movingWithUnfinishedWork` | `cancels`, `refused` | Behavior when moving away from unfinished work. |
@@ -197,7 +197,7 @@ The agent MUST use ACP `select` options with `id`, `currentValue` and `options` 
 | `model` | `provider/model`, with `%` and `/` in each component encoded as `%25` and `%2F` before joining. |
 | `thinking` | Supported levels in order: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`. |
 | `approval` | `off`, `ask`, `all`, `never`. |
-| `approvalWait` (proposed) | `live` (default), `untilDeadline`. Offer only with `approvalsOutlastTurns: true`. Requires `settings` to change. |
+| `approvalWait` (accepted, not yet implemented) | `live` (default), `untilDeadline`. Offer only with `approvalsOutlastTurns: true`. Requires `settings` to change. |
 
 An agent MUST omit `thinking` if the model declares no levels. On model switch it MUST apply the [portable reasoning fallback](data.md#context-and-interrupted-work), even for a non-portable session. For an unset reasoning level the agent MUST show `off` as `currentValue` if offered without setting reasoning on the request. The agent MUST omit `thinking` when reasoning is unset and `off` is unavailable, or when no supported level is at or below the prior selection. A recorded model no longer offered MUST stay selected, but not selectable, until changed. Hosts MUST accept `currentValue` absent from `options`, including `options: []`. An implementation decoding the value MUST split on the literal slash and decode only `%25` and `%2F` once. The agent MUST NOT substitute another model. Without any selected or offered model the agent MUST omit `model`. The agent MUST refuse unadvertised option ids or values with `invalid_params`, except that an explicit supported thinking level for the selected model can be set when the selector is omitted because there is no current level.
 
@@ -439,7 +439,7 @@ The [conformance kit](../../conformance/acp/README.md) exercises this mode. See 
 
 ## Changes
 
-- **Proposed for 0.2.0 ([ADR 0034](../adr/0034-approvals-that-wait.md)).** Add `approvalsOutlastTurns`, its `approvalWait` session option and expiry in the waiting request projection. Late decisions use `requests` and `answer`, not a permission RPC. No new method in either version.
+- **Accepted 2026-11-23, not yet implemented ([ADR 0034](../adr/0034-approvals-that-wait.md)).** Add `approvalsOutlastTurns`, its `approvalWait` session option and expiry in the waiting request projection. Late decisions use `requests` and `answer`, not a permission RPC. No new method in either version.
 
 - **2026-11-23.** Allow an optional waiting summary on each `session/list` entry.
 

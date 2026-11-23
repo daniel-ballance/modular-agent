@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-11-23
 ---
 
@@ -7,7 +7,7 @@ date: 2026-11-23
 
 The [ops desk](../../demos/ops-desk/DESIGN.md#findings) uses three-minute deadlines. When someone opens the inbox hours later, the call has already been refused. Keeping the inbox row does not keep the approval open. [ADR 0033](0033-interface-tools-and-ag-ui.md) lets an Interface report a result after its turn. Here the call has **not started**. The missing fact is consent, not a result.
 
-## Decision proposed for 0.2.0
+## Decision
 
 1. **Make waiting a session choice.** Declare `approvalsOutlastTurns: true` only with kept history, an approval gate, a finite operator maximum and support for `portableSessions`, `questionsOutlastTurns` and `lateAnswersStartTurns`. The declaration reports support, not permission. Record a separate session setting, `approvalWait: "untilDeadline"`; the default is `"live"`. This does not change which calls the [approval policy](../contracts.md#approval-policy) allows, asks about or refuses. Start with its pre-dispatch gate on top-level model calls to server tools. An approval asked *inside* a running tool, including the desk's change tool, cannot undo that start.
 2. **End the turn, not the call.** The Harness commits the bound `inputRequest` and a gate `toolPending` together. There is no allowance, `toolStarted`, executor handoff or effect from this call. The gate returns pending immediately, even if someone is online. Siblings follow the usual ordering. A normally completed turn lists the call in `openToolCalls`. Only then is this request answerable. An idle session can release its writer and the process can stop. Keep the call and settlement reservations, not a waiting thread or RPC.
@@ -30,8 +30,6 @@ The [ops desk](../../demos/ops-desk/DESIGN.md#findings) uses three-minute deadli
 
 ## Owner decisions
 
-- **Scope for 0.2.0?** Recommend the declared, per-session opt-in above. Leave direct, nested, Provider-run, Interface-run and already started calls out. To use it, the desk would move its check to the gate on the model call, not park a running edit.
-- **For how long?** Require an explicit finite operator maximum. Have no universal timeout. Apply the saved deadline through dispatch, not just until the click.
-- **What counts as consent after reconnect?** Require fresh unchanged delivery on the answering route. Refuse stale work rather than refreshing permission in place. This authorizes one invocation, not a snapshot of the outside world: if the edit depends on a file revision, show that revision in the input and have the tool check it.
+Accepted as recommended on 2026-11-23: the per-session opt-in for the pre-dispatch gate on top-level model calls to server tools; an explicit finite operator maximum, applied through dispatch; and consent only from fresh, unchanged delivery on the answering route. The specification is accepted in 0.2.0; implementations follow in 0.3.0.
 
-This proposal changes no edition to pin and claims no implementation or kit result.
+This changes no edition to pin. No build implements it yet.

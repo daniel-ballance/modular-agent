@@ -426,7 +426,7 @@ The operation owner defines its hook points, including points owned by plugins. 
 
 #### Approvals that wait
 
-Proposed for 0.2.0 in [ADR 0034](adr/0034-approvals-that-wait.md). These rules apply only with `approvalsOutlastTurns: true` and the recorded session setting `approvalWait: "untilDeadline"`. The default is `"live"`. The setting requires `settings`; it does not change the approval policy.
+Accepted in [ADR 0034](adr/0034-approvals-that-wait.md). These rules apply only with `approvalsOutlastTurns: true` and the recorded session setting `approvalWait: "untilDeadline"`. The default is `"live"`. The setting requires `settings`; it does not change the approval policy.
 
 - **Which calls.** When the approval policy requires its `tool.before` gate to ask, the Harness MUST use this wait only for an unstarted, top-level call from a committed model response to a tool source other than an Interface. It MUST NOT convert a direct, nested, Provider-run or already started call, a question from inside a tool, or a relayed question into such a wait. Those paths keep their existing rules.
 - **At the gate.** The Harness MUST bind the request to the exact call as it stands at the gate and its registration. It MUST reserve the open call, closing records and settlement. It MUST commit the [request and pending checkpoint](bindings/data.md#waiting-approval-records) together, then return pending immediately. There is no dispatch allowance, `toolStarted` or handoff, including to an Interface. At least one session member MUST qualify under the answerer restriction and current grants for `watch` and `approve`; otherwise refuse. No one need be present or have received the request at ask time.
