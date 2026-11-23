@@ -177,7 +177,7 @@ class Turns:
         return settings
 
     async def _turn_snapshot(self, sid, turn, queued):
-        settings = (await self.api.session("get", session=sid))["settings"]
+        settings = (await self.api.session("get", session=sid, include_entries=False))["settings"]
         problem = None
         try:
             access = await self.api.call("selection", "access", {"session": sid})
@@ -211,7 +211,7 @@ class Turns:
         )
 
     async def _turn_access(self, sid, start):
-        settings = (await self.api.session("get", session=sid))["settings"]
+        settings = (await self.api.session("get", session=sid, include_entries=False))["settings"]
         snapshot = start.get("data", {})
         model = snapshot.get("model")
         model_id = settings_in({"model": model})["model"] if model else None
@@ -267,24 +267,19 @@ class Turns:
             )
         result, usage, structured = [], {}, {}
         tenant_limit = capacity_limit = False
-        start = next(
-            e
-            for e in await self._entries(sid)
-            if e.get("turn") == turn and e["kind"] == "turn_start"
-        )
+        es = await self._entries(sid, turn=turn)
+        start = next(e for e in es if e["kind"] == "turn_start")
         actor = start["actor"]
         schema = start["data"].get("result_schema")
         try:
-            es = [e for e in await self._entries(sid) if e.get("turn") == turn]
             if start["data"].get("input") and not any(e["kind"] == "input" for e in es):
                 raise AgentError("Interrupted turn has no committed first input", "lost")
             if await self.api.session("tenant_exhausted", session=sid):
                 raise AgentError("Tenant token budget reached", "tenantTokens")
             if problem is not None:
                 raise problem
-            queued = next(
-                (e for e in await self._entries(sid) if e["id"] == start["data"].get("input")), None
-            )
+            input_id = start["data"].get("input")
+            queued = next(iter(await self._entries(sid, id=input_id)), None) if input_id else None
             actor = queued["actor"] if queued else start["actor"]
             access, settings = await self._turn_access(sid, start)
             tools = await self._definitions(sid, turn)
@@ -339,7 +334,7 @@ class Turns:
             # Replay journal decisions, not model requests or completed effects.
             while not open_calls:
                 tools = await self._definitions(sid, turn)
-                es = [e for e in await self._entries(sid) if e.get("turn") == turn]
+                es = await self._entries(sid, turn=turn)
                 responses = [e for e in es if e["kind"] == "response"]
                 usage = {}
                 for response in responses:
@@ -366,15 +361,16 @@ class Turns:
                 if not pending:
                     if await self.api.session("tenant_exhausted", session=sid):
                         raise AgentError("Tenant token budget reached", "tenantTokens")
-                    tokens = sum(
-                        e.get("data", {}).get("usage", {}).get(k, 0)
-                        for e in await self.api.session("branch", session=sid)
-                        if e["kind"] in {"response", "job_end"}
-                        for k in ("input_tokens", "output_tokens")
-                    )
-                    if settings.get("max_tokens") is not None and tokens >= settings["max_tokens"]:
-                        outcome, error = "limit", "session token limit"
-                        break
+                    if (limit := settings.get("max_tokens")) is not None:
+                        tokens = sum(
+                            e.get("data", {}).get("usage", {}).get(k, 0)
+                            for e in await self.api.session("branch", session=sid)
+                            if e["kind"] in {"response", "job_end"}
+                            for k in ("input_tokens", "output_tokens")
+                        )
+                        if tokens >= limit:
+                            outcome, error = "limit", "session token limit"
+                            break
                     if len(starts) >= settings.get("max_steps", 16):
                         outcome, error = "limit", "step limit"
                         break
@@ -404,7 +400,7 @@ class Turns:
                 calls = response.get("calls", [])
                 # Response plus full call list is a single history-store transaction.
                 # A crash during call admission is repaired from that immutable list.
-                existing = {e["call"] for e in await self._entries(sid) if e["kind"] == "tool_call"}
+                existing = {e["call"] for e in await self._entries(sid, kind="tool_call")}
                 for c in calls:
                     if c["id"] not in existing:
                         definition = next((t for t in tools if t["name"] == c["name"]), None)
@@ -628,17 +624,14 @@ class Turns:
         return value
 
     async def _turn_authority(self, sid, turn, actor):
-        entries = await self._entries(sid)
-        if any(
-            e.get("turn") == turn and e["kind"] == "turn_start" and "continuationCalls" in e["data"]
-            for e in entries
-        ):
+        entries = await self._entries(sid, turn=turn)
+        if any(e["kind"] == "turn_start" and "continuationCalls" in e["data"] for e in entries):
             return await self.api.session(
                 "interface_work_rights", session=sid, turn=turn, actor=actor
             )
         authority = set(await self.api.session("authority", session=sid, actor=actor))
         for e in entries:
-            if e.get("turn") == turn and e["kind"] == "input":
+            if e["kind"] == "input":
                 authority &= set(
                     await self.api.session(
                         "authority",
@@ -673,7 +666,7 @@ class Turns:
         model_tools = settings.get("modelTools")
         if model_tools is not None:
             tools = [t for t in tools if t["name"] in model_tools]
-        es = [e for e in await self._entries(sid) if e.get("step") == step]
+        es = await self._entries(sid, step=step)
         outstanding = next(
             (e for e in reversed(es) if e["kind"] in {"model_started", "response", "model_error"}),
             None,
@@ -763,7 +756,7 @@ class Turns:
             try:
                 response = await self.api.call(access["target"], "generate", request, stream)
             except AgentError as exc:
-                if wire_provider and not any(e["id"] == attempt for e in await self._entries(sid)):
+                if wire_provider and not await self._entries(sid, id=attempt):
                     raise
                 error = {"kind": "other", "message": str(exc)}
                 code = exc.code
@@ -818,7 +811,7 @@ class Turns:
         )
         calls = response.get("calls", [])
         ids = [c["id"] for c in calls]
-        existing = {e["call"] for e in await self._entries(sid) if e["kind"] == "tool_call"}
+        existing = {e["call"] for e in await self._entries(sid, kind="tool_call")}
         if len(ids) != len(set(ids)) or existing.intersection(ids):
             raise AgentError("Provider returned duplicate tool call IDs")
         return await self._record(
@@ -854,25 +847,20 @@ class Turns:
     async def _result(self, sid, turn, step, call, answer):
         if answer.get("interface"):
             return  # The Harness owns the checkpoint and terminal result.
-        es = await self._entries(sid)
         if answer.get("open"):
             pending = answer
             if not pending.get("requestIds") and pending.get("request"):
                 pending = {**answer, "requestIds": [answer["request"]]}
             await self._record(sid, turn, "tool_deferred", step=step, call=call["id"], data=pending)
             return
-        if any(e["kind"] == "tool_result" and e.get("call") == call["id"] for e in es):
+        es = await self._entries(sid, call=call["id"])
+        if any(e["kind"] == "tool_result" for e in es):
             return
         # An invocation settled without dispatch cannot consume another answer.
-        if answer["status"] == "outcome_unknown" and any(
-            e["kind"] == "question_open" and e.get("call") == call["id"] for e in es
-        ):
+        if answer["status"] == "outcome_unknown" and any(e["kind"] == "question_open" for e in es):
             await self.api.call("questions", "close_call", {"session": sid, "call": call["id"]})
         sources = [
-            e["id"]
-            for e in es
-            if e.get("call") == call["id"]
-            and e["kind"] in {"tool_call", "tool_started", "tool_finished"}
+            e["id"] for e in es if e["kind"] in {"tool_call", "tool_started", "tool_finished"}
         ]
         await self._record(
             sid,
@@ -889,19 +877,10 @@ class Turns:
                 },
                 "toolName": call.get("name")
                 or next(
-                    (
-                        e["data"]["name"]
-                        for e in es
-                        if e["kind"] == "tool_call" and e.get("call") == call["id"]
-                    ),
+                    (e["data"]["name"] for e in es if e["kind"] == "tool_call"),
                     "unknown",
                 ),
-                "late": any(
-                    e["kind"] == "tool_call"
-                    and e.get("call") == call["id"]
-                    and e.get("turn") != turn
-                    for e in es
-                ),
+                "late": any(e["kind"] == "tool_call" and e.get("turn") != turn for e in es),
             },
         )
         await self.api.event(
@@ -937,7 +916,7 @@ class Turns:
             recorded = next(
                 (e["data"] for e in es if e["kind"] == "tool_call" and e["call"] == c["id"]), {}
             )
-            session = await self.api.session("get", session=sid)
+            session = await self.api.session("get", session=sid, include_entries=False)
             c = {**recorded, **c}
             c.setdefault("actor", session["actor"])
             c.setdefault("initiator", "model")
@@ -1117,9 +1096,7 @@ class Turns:
                         **(await self._save_point(sid) if turn is None else {}),
                     },
                     copies=[
-                        e["id"]
-                        for e in await self._entries(sid)
-                        if e["kind"] == "tool_call" and e["call"] == call["id"]
+                        e["id"] for e in await self._entries(sid, call=call["id"], kind="tool_call")
                     ],
                 )
 

@@ -303,9 +303,11 @@ class ACP(Plugin):
         # cancellation does not require watch.
         await self.rights(sid)
 
-    async def get(self, sid):
+    async def get(self, sid, *, include_entries=True):
         await self.check_session(sid)
-        return await self.api.session("get", session=sid, actor=self.actor)
+        return await self.api.session(
+            "get", session=sid, actor=self.actor, include_entries=include_entries
+        )
 
     async def rights(self, sid):
         return await self.api.session("authority", session=sid, actor=self.actor)
@@ -692,7 +694,7 @@ class ACP(Plugin):
 
     @rpc
     async def prompt(self, session_id, prompt, **kwargs):
-        await self.get(session_id)
+        await self.get(session_id, include_entries=False)
         if session_id in self.prompts:
             raise AgentError("One ACP prompt at a time; use the declared submit extension to steer")
         if any(p.type != "text" for p in prompt):
@@ -728,11 +730,10 @@ class ACP(Plugin):
                 )
             # A duplicate describes its original turn, even if another turn is
             # now running. A closing session may disappear before wait returns.
-            records = (await self.get(session_id))["entries"]
             if receipt.get("duplicate") and any(
                 e["kind"] == "input_withdrawn"
                 and receipt["input"] in (e["data"].get("inputIds") or [e["data"].get("input")])
-                for e in records
+                for e in (await self.get(session_id))["entries"]
             ):
                 raise protocol_error("conflict", "Input was handed back")
             results = await self.api.call(
@@ -766,7 +767,7 @@ class ACP(Plugin):
 
     @rpc
     async def cancel(self, session_id, **kwargs):
-        await self.get(session_id)
+        await self.get(session_id, include_entries=False)
         await self.api.call("runtime", "cancel", {"session": session_id, "actor": self.actor})
         await self._cancel_requests(session_id)
 

@@ -7,7 +7,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from ma_core import AgentError, Plugin, clone
+from ma_core import AgentError, Plugin
 from ma_core.wire import entry_out
 
 from . import pending
@@ -85,9 +85,8 @@ class History(Plugin):
         return {}
 
     async def keep(self, d, emit):
-        s = clone(d["session"])
+        s = {k: v for k, v in d["session"].items() if k != "entries"}
         self._lock(s["id"])
-        s.pop("entries")
         for flag in ("busy", "suspending", "closing", "moving", "writer_lost"):
             s.pop(flag, None)
         with self._connect() as db:

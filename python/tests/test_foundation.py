@@ -145,6 +145,22 @@ async def test_history_tree_move_fork_restart_list_and_unknown_content(base):
     assert (await a.session("get", session=sid))["position"] == reopened["position"]
 
 
+async def test_session_reads_can_leave_unrelated_history_in_the_harness(base):
+    _, api, root = base
+    sid = (await api.session("create", project=str(root)))["id"]
+    for turn in ("earlier", "current"):
+        await api.session("append", session=sid, kind="input", turn=turn, content=content(turn))
+
+    metadata = await api.session("get", session=sid, include_entries=False)
+    assert metadata["id"] == sid and "entries" not in metadata
+    (entry,) = await api.session("entries", session=sid, turn="current")
+    assert entry["content"] == content("current")
+    entry["content"].clear()
+    # The shorter read still returns an isolated value, not a live log entry.
+    (again,) = await api.session("entries", session=sid, id=entry["id"])
+    assert again["content"] == content("current")
+
+
 async def test_history_idempotent_and_lock_in_second_process(base):
     h, a, root = base
     s = await a.session("create", project=str(root))
