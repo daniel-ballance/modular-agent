@@ -32,6 +32,7 @@ class Runtime(Turns, Plugin):
         self.scheduling = {}
         self.turn_boundaries = {}
         self.unsettled_turns = {}
+        self.closing_history = {}
         self.steering_closed = set()
         self.cancelled = set()
         self.suspending = set()
@@ -381,12 +382,30 @@ class Runtime(Turns, Plugin):
     async def _wait_input(self, sid, input_id):
         # A worker can drain several turns. An ACP prompt only waits for the
         # one that took its input, including input steered into that turn.
+        closing = self.closing_history.get(sid)
+        if closing is None:
+            closing = self.closing_history[sid] = asyncio.get_running_loop().create_future()
         while True:
-            task = self.tasks.get(sid)
-            boundary = self.turn_boundaries.setdefault(sid, asyncio.Event())
-            entries = await self._entries(sid)
             if sid in self.suspending:
                 raise AgentError("Session suspended", "lost")
+            task = self.tasks.get(sid)
+            boundary = (
+                self.turn_boundaries.setdefault(sid, asyncio.Event())
+                if not closing.done()
+                else None
+            )
+            if boundary is not None:
+                try:
+                    entries = await self._entries(sid)
+                except AgentError:
+                    if sid in self.suspending:
+                        raise AgentError("Session suspended", "lost") from None
+                    if not closing.done():
+                        raise
+                if sid in self.suspending:
+                    raise AgentError("Session suspended", "lost")
+            if closing.done():
+                entries = closing.result()
             taken = next(
                 (
                     e
@@ -401,6 +420,8 @@ class Runtime(Turns, Plugin):
                 for e in entries:
                     if e["kind"] == "turn_end" and e["turn"] == taken["turn"]:
                         return [e["data"]]
+            if closing.done() or boundary is None:
+                return []
             if task is not self.tasks.get(sid) or boundary.is_set():
                 continue
             if task is None or task.done():
@@ -598,6 +619,7 @@ class Runtime(Turns, Plugin):
     async def _suspend(self, d):
         sid = d["session"]
         self.suspending.add(sid)
+        self.closing_history.pop(sid, None)
         task = self.tasks.pop(sid, None)
         if task and not task.done() and not task.cancelling():
             task.cancel()
@@ -605,12 +627,17 @@ class Runtime(Turns, Plugin):
             await asyncio.gather(task, return_exceptions=True)
 
     async def _close(self, d):
+        sid = d["session"]
         await self.cancel(d, None)
-        self.tasks.pop(d["session"], None)
-        self._turn_boundary(d["session"])
-        self.cancelled.discard(d["session"])
+        if closing := self.closing_history.get(sid):
+            # Waiting prompts may wake after the Harness removes the session.
+            closing.set_result(await self._entries(sid))
+            self.closing_history.pop(sid)
+        self.tasks.pop(sid, None)
+        self._turn_boundary(sid)
+        self.cancelled.discard(sid)
         for key in list(self.input_traces):
-            if key[0] == d["session"]:
+            if key[0] == sid:
                 del self.input_traces[key]
 
     async def _drain(self, sid):

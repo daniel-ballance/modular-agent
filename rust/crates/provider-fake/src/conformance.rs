@@ -132,7 +132,9 @@ impl ModelAccess for Echo {
             Ok(ModelResponse::text(&format!("echo: {text}")))
         })();
         let result = async {
-            let response = result?;
+            let mut response = result?;
+            // The conformance model meters zero tokens.
+            response.usage_reported = true;
             let text = response.text_content();
             if !text.is_empty() && !cancel.is_cancelled() {
                 let stream = wire::stream_id();

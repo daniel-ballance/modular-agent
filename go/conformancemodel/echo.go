@@ -44,8 +44,9 @@ func (provider) Generate(ctx context.Context, r api.Request, emit func(api.Part)
 			text = m.Content.Text()
 		}
 	}
+	// The fixture meters zero tokens rather than leaving usage unreported.
 	if message, failed := strings.CutPrefix(text, "fail:"); failed {
-		return api.Response{Stop: "failed"}, &api.ModelError{Kind: "other", Message: message}
+		return api.Response{Stop: "failed", UsageReported: true}, &api.ModelError{Kind: "other", Message: message}
 	}
 	reply := "echo: " + text
 	if directive, yes := strings.CutPrefix(text, "tool:"); yes {
@@ -53,7 +54,7 @@ func (provider) Generate(ctx context.Context, r api.Request, emit func(api.Part)
 		var input map[string]json.RawMessage
 		if !found || name == "" || json.Unmarshal([]byte(raw), &input) != nil || input == nil ||
 			!slices.ContainsFunc(r.Tools, func(tool api.Tool) bool { return tool.Name == name }) {
-			return api.Response{Stop: "failed"}, &api.ModelError{Kind: "other", Message: "Invalid tool directive"}
+			return api.Response{Stop: "failed", UsageReported: true}, &api.ModelError{Kind: "other", Message: "Invalid tool directive"}
 		}
 		for _, m := range r.Messages[latest+1:] {
 			if m.Result != nil {
@@ -63,11 +64,11 @@ func (provider) Generate(ctx context.Context, r api.Request, emit func(api.Part)
 				}
 				reply = "done: " + string(result)
 				emit(api.Part{Type: "text", Text: reply})
-				return api.Response{Content: api.Text(reply), Stop: "finished"}, nil
+				return api.Response{Content: api.Text(reply), Stop: "finished", UsageReported: true}, nil
 			}
 		}
-		return api.Response{Content: api.Content{{Type: "tool_call", Call: &api.Call{ID: api.ID(), Name: name, Input: json.RawMessage(raw)}}}, Stop: "tools"}, nil
+		return api.Response{Content: api.Content{{Type: "tool_call", Call: &api.Call{ID: api.ID(), Name: name, Input: json.RawMessage(raw)}}}, Stop: "tools", UsageReported: true}, nil
 	}
 	emit(api.Part{Type: "text", Text: reply})
-	return api.Response{Content: api.Text(reply), Stop: "finished"}, nil
+	return api.Response{Content: api.Text(reply), Stop: "finished", UsageReported: true}, nil
 }

@@ -36,7 +36,7 @@ func TestEchoBinding(t *testing.T) {
 			}
 			var streamed strings.Builder
 			out, err := a.Generate(context.Background(), api.Request{Messages: messages, Tools: []api.Tool{{Name: "read"}}}, func(p api.Part) { streamed.WriteString(p.Text) })
-			if err != nil || out.Usage != (api.Usage{}) {
+			if err != nil || !out.UsageReported || out.Usage != (api.Usage{}) {
 				t.Fatal(out, err)
 			}
 			if q.name == "tool" {
@@ -53,7 +53,7 @@ func TestEchoBinding(t *testing.T) {
 			{Role: "user", Content: api.Text(`tool:read {"path":"fact"}`)},
 		}}, func(api.Part) { t.Fatal("invalid directive streamed content") })
 		var failure *api.ModelError
-		if !errors.As(err, &failure) || failure.Kind != "other" || failure.Message != "Invalid tool directive" || r.Stop != "failed" || r.Usage != (api.Usage{}) {
+		if !errors.As(err, &failure) || failure.Kind != "other" || failure.Message != "Invalid tool directive" || r.Stop != "failed" || !r.UsageReported || r.Usage != (api.Usage{}) {
 			t.Fatal(r, err)
 		}
 	})
