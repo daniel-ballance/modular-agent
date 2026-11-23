@@ -34,6 +34,10 @@ The WebSocket listener requires a loopback address and an owner-only bearer toke
 
 Configuration is shared in `$XDG_CONFIG_HOME/modular-agent`, or `~/.config/modular-agent`. State is kept in `$XDG_STATE_HOME/modular-agent/typescript`, or `~/.local/state/modular-agent/typescript`. `MODULAR_AGENT_DATA_DIR` sets the configuration directory and puts state under its `state/` subdirectory. Use `--runtime transient` to keep history without resuming a turn cut off by a crash.
 
+## Built so far
+
+`ma` names the agent `ma` on GenAI spans and defaults the OTLP resource `service.name` to `ma`. [Standard `OTEL_*` settings](../../../docs/reference/standard-configuration.md#telemetry) control export from the launch environment. A signal with no endpoint does not export. HTTP uses binary protobuf by default; `grpc` is also supported. `OTEL_SDK_DISABLED=true` leaves recording and export off. No prompts, tool content, secrets, baggage or logs go through this profile. The agent and session still declare `telemetry: 1` with export off.
+
 ## Client identity
 
 `ma` sends `modular-agent` as the ChatGPT request and browser sign-in `originator`, and as the Grok device sign-in `referrer`. To use another name, set `MA_CLIENT_IDENTITY` when running `ma`, including when signing in. For example:
@@ -59,6 +63,8 @@ A memory or time limit ends the run with `MemoryError` or `TimeoutError`. If the
 
 ## What is checked
 
+The loopback OTLP test checks that `ma` sends nothing without endpoints or with `OTEL_SDK_DISABLED=true`. It checks protobuf traces and metrics, endpoint and header overrides, the service and agent names, and prompt omission. A scripted run also sent `invoke_agent ma`, `chat script` and `execute_tool codemode` to local Phoenix. Phoenix’s span query does not return OTLP resource attributes. The trace and span IDs in that response matched the outbound protobuf carrying `service.name=ma-typescript`.
+
 From the repository root:
 
 ```sh
@@ -74,9 +80,9 @@ git diff --check
 ```
 
 - Reference checks: **24/24**, including `client-identity`, all four codemode profile checks, `sandbox-memory` and both crash-recovery modes.
-- ACP with crash, probe and job checks: **188/188** on stdio. In the earlier WebSocket run, ACP passed **193/193**, the plugin kit passed **153/153**, and listener isolation passed **14/14**.
-- TypeScript workspace: **431 offline tests passed** in both normal and `MA_REMOTE` configurations. Five live tests skipped. That includes **51/51** shared scenario runs across embedded, TypeScript stdio and TypeScript WebSocket placements. The other SDK fixtures were not built for these runs. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
-- Claude sidecar: **47 offline tests passed** and one live check skipped. No real sign-ins or model requests ran, and no real credentials were read.
+- ACP with crash, probe and job checks: **188/188** on stdio. Over WebSocket, ACP passed **193/193**, the plugin kit passed **153/153**, and listener isolation passed **14/14**.
+- TypeScript workspace: **447 offline tests passed** in both normal and `MA_REMOTE` configurations. Five live tests skipped. That includes **51/51** shared scenario runs across embedded, TypeScript stdio and TypeScript WebSocket placements. The other SDK fixtures were not built for these runs. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
+- Claude sidecar: **51 offline tests passed** and one live check skipped. No real sign-ins or model requests ran, and no real credentials were read.
 - `tsc -b` and `git diff --check` pass. The workspace has no separate lint or formatting command.
 
 ## Known gaps
