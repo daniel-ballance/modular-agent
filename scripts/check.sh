@@ -35,6 +35,13 @@ logs="$(mktemp -d "$TMPDIR/check-XXXXXX")" || exit 1
 printf 'Step logs: %s\n' "$logs"
 start_run=$SECONDS
 
+step_limit=${MA_CHECK_STEP_LIMIT:-1800}
+kill_tree() { # pid: stop it and every process below it, deepest first
+  local child
+  for child in $(pgrep -P "$1"); do kill_tree "$child"; done
+  kill -TERM "$1" 2>/dev/null || true
+}
+
 step() { # lane, name, command...
   local lane="$1" name="$2"; shift 2
   case "$lane" in
@@ -42,8 +49,18 @@ step() { # lane, name, command...
     *) want "$lane" || return 0 ;;
   esac
   [[ "$selection" == serial || "$selection" == "$lane" ]] || return 0
-  local log="$logs/${name//[^A-Za-z0-9]/_}.log" start=$SECONDS
-  if "$@" >"$log" 2>&1; then
+  local log="$logs/${name//[^A-Za-z0-9]/_}.log" start=$SECONDS pid guard status
+  # Hang guard only: the longest step takes about 17 minutes on a normal run.
+  # A step that hangs is stopped, so one stuck test cannot hold its lane.
+  ( "$@" ) >"$log" 2>&1 &
+  pid=$!
+  ( sleep "$step_limit"
+    printf '\nhang guard: stopped after %ss\n' "$step_limit" >>"$log"
+    kill_tree "$pid" ) &
+  guard=$!
+  wait "$pid"; status=$?
+  kill_tree "$guard"
+  if (( status == 0 )); then
     printf '[%s] %-58s ok    %4ss\n' "$lane" "$name" $((SECONDS - start))
   else
     printf '[%s] %-58s FAIL  %4ss  %s\n' "$lane" "$name" $((SECONDS - start)) "$log"
