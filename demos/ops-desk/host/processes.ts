@@ -71,5 +71,10 @@ export function launch(projects: Projects, agent: Agent, pluginUrl: string, appr
     lines.once('line',line=>{ try { res(new Agui(line.trim(),auth.value,abort.signal)); } catch (e) { rej(e); } });
     void exited.then(()=>rej(Error(`${agent} exited; see ${agent}.log`)));
   });
-  return {pid:proc.pid,abort,ready,exited,stop:async()=>{ if (!abort.signal.aborted) kill('SIGTERM'); await exited; }};
+  return {pid:proc.pid,abort,ready,exited,stop:async()=>{
+    // ma handles Ctrl-C by closing the listener, agent and exporters. Keep its
+    // plugin alive until then. Clean up remaining descendants after leader exit.
+    if (!abort.signal.aborted) proc.kill(agent === 'coder' ? 'SIGINT' : 'SIGTERM');
+    await exited;
+  }};
 }

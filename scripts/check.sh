@@ -160,6 +160,7 @@ plan() {
     step shared "scenarios: Python runner, every placement" bash -c "cd python && MODULAR_AGENT_SDK_REQUIRE=all uv run --offline python -m modular_agent._scenarios"
     step shared "reference checks: all four ma" env MODULAR_AGENT_REF_REQUIRE=all node conformance/reference/run.mjs --all
     step shared "demo: project notes, including crash recovery" bash -c 'demos/project-notes/build.sh --sdk-built && demos/project-notes/run.py'
+    step shared "demo: ops desk, three scripted agents" bash -c 'demos/ops-desk/build.sh --sdk-built && python3 demos/ops-desk/run.py'
   fi
 
   if ! $quick; then

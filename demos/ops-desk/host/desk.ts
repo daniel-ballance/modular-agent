@@ -101,12 +101,17 @@ export class Desk {
       const api=await this.connect(a); await api.discover(r.parent);
       if (!r.thread) { this.projects.prepare(r); this.db.thread(r,await api.create(r)); }
       const view=await api.snapshot(r); // GET reopens the same session and runs recovery.
-      if (view.messages.some(m=>m.role==='user')) {
-        this.db.admitted(r);
-        this.finish(a,'reopened',`${a} reopened the interrupted session. No new input was sent.`); return;
-      }
       s.presence=new AbortController();
       await api.presence(r,s.presence,()=>{ void s.process?.stop(); });
+      if (view.messages.some(m=>m.role==='user')) {
+        // Each thread belongs to one input route. A committed user message is
+        // evidence of admission, even if this host died before saving its cursor.
+        this.db.admitted(r);
+        const current=await api.snapshot(r);
+        if (current.waiting.questions.length) this.outcome(a,{type:'interrupt',interrupts:current.waiting.questions});
+        else this.finish(a,'reopened',`${a} reopened the interrupted session. No new input was sent.`);
+        return;
+      }
       const outcome=await api.run(r,view,undefined,()=>this.db.admitted(r));
       this.outcome(a,outcome);
     } catch(e) { await this.problem(a,e); }
@@ -164,7 +169,13 @@ export class Desk {
           }
         });
         this.outcome(r.agent,outcome);
-      } catch(e) { if (!(e instanceof HttpError)) await this.problem(r.agent,e); throw e; }
+      } catch(e) {
+        if (!(e instanceof HttpError)) {
+          await this.problem(r.agent,e);
+          throw new HttpError(503,'Answer exchange interrupted. Refresh the desk; do not repeat the answer.');
+        }
+        throw e;
+      }
     });
   }
   async state() {
