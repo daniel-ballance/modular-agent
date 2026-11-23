@@ -83,7 +83,12 @@ func TestAGUIListsEligibleQuestionsAndPagesVisibleThreads(t *testing.T) {
 	owner.Actor.ID = "user"
 	const readerToken = "test-only-agui-reader"
 	clients := []modular.ACPActor{owner, listClient(t, reader, "reader", readerToken)}
-	url := agURL(t, a, modular.ServeAGUIOptions{Actors: clients})
+	listener, err := a.ServeAGUI(ctx, modular.ServeAGUIOptions{Listen: "127.0.0.1:0", Actors: clients})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	url := listener.URL + "/agui/v1"
 	page := listThreads(t, url, testAGToken, "")
 	if len(page.Threads) != 3 {
 		t.Fatal(page)
@@ -113,8 +118,49 @@ func TestAGUIListsEligibleQuestionsAndPagesVisibleThreads(t *testing.T) {
 	}
 	bad(url, testAGToken, "?after="+first.Next)
 	// Listener metadata expires on restart. No clock manipulation or sleep.
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
 	url = agURL(t, a, modular.ServeAGUIOptions{Actors: clients})
 	bad(url, readerToken, "?after="+first.Next)
+}
+
+func TestPublicThreadListReturnsOnlyWatchableMetadata(t *testing.T) {
+	project, dir := t.TempDir(), t.TempDir()
+	opts := []modular.Option{modular.WithProject(project), modular.WithDataDir(dir), modular.WithDurability(modular.Durable)}
+	p := modulartest.ScriptedProvider([]modulartest.Reply{{Text: "done"}})
+	started, release := make(chan struct{}), make(chan struct{})
+	request := p.Request
+	p.Request = func(ctx context.Context, model modular.ModelRef, r modular.ModelRequest, pc *modular.ProviderContext) (modular.AssistantMessage, error) {
+		close(started)
+		select {
+		case <-release:
+			return request(ctx, model, r, pc)
+		case <-ctx.Done():
+			return modular.AssistantMessage{}, ctx.Err()
+		}
+	}
+	writer := modulartest.Agent(t, append(opts, modular.WithProvider(p))...)
+	s, err := writer.Session(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Send(t.Context(), "Start.", modular.Now); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	defer close(release)
+	reader := modulartest.Agent(t, append(opts, modulartest.Script(`[]`))...)
+	opt := modular.ListThreadsOptions{Actor: modular.Actor{ID: "user", Kind: "user", Rights: []string{"watch"}}}
+	rows, more, err := reader.ListThreads(t.Context(), opt)
+	if err != nil || more || len(rows) != 1 || rows[0].ThreadID != s.ID() || rows[0].Waiting.Turn != "running" {
+		t.Fatalf("another writer's live turn: %+v, more=%t, err=%v", rows, more, err)
+	}
+	opt.Actor.Rights = []string{"input"}
+	rows, more, err = reader.ListThreads(t.Context(), opt)
+	if err != nil || more || len(rows) != 0 {
+		t.Fatalf("without watch: %+v, more=%t, err=%v", rows, more, err)
+	}
 }
 
 func TestAGUIListingDoesNotJoinAProspectiveWatcher(t *testing.T) {

@@ -315,14 +315,7 @@ type agHost interface {
 }
 
 func (q *agRequest) member(s api.Session) bool {
-	if !q.scope(s.Project, s.Tenant) {
-		return false
-	}
-	_, recorded := s.Actors[q.Actor.ID]
-	if !recorded && q.Actor.ID != s.Actor && (!*q.opt.JoinOnOpen || !q.a.severalActors) {
-		return false
-	}
-	return q.host().DiscoverForHost(s, q.Actor)
+	return q.scope(s.Project, s.Tenant) && q.a.threadMember(s, q.Actor, *q.opt.JoinOnOpen)
 }
 func (q *agRequest) host() agHost { return q.a.a.(agHost) }
 func (q *agRequest) attach(id string) error {

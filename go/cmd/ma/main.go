@@ -346,7 +346,7 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 		}
 		return nil
 	}
-	candidates, err := d.resumeCandidates(ctx, o, store, stderr)
+	candidates, err := d.resumeCandidates(ctx, o, store)
 	if err != nil {
 		return err
 	}

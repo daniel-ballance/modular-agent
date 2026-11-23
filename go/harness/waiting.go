@@ -10,18 +10,28 @@ import (
 
 // An open writer is not evidence of a turn. First find the committed start
 // that recovery would select, then ask whether this Harness is running it.
-func (c *client) turnState(row api.Session) string {
+func (c *client) turnState(row api.Session) (string, error) {
 	if row.UnfinishedTurn() == nil {
-		return "none"
+		return "none", nil
 	}
 	if s, err := c.find(row.ID); err == nil {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.running && !s.stopping && s.writerFailure == nil {
-			return "running"
+			return "running", nil
+		}
+	} else if store, err := c.Get("history"); err == nil {
+		if probe, ok := store.(interface{ WriterHeld(string) (bool, error) }); ok {
+			held, err := probe.WriterHeld(row.ID)
+			if err != nil {
+				return "", err
+			}
+			if held {
+				return "running", nil
+			}
 		}
 	}
-	return "interrupted"
+	return "interrupted", nil
 }
 
 func (c *client) WaitingForHost(ctx context.Context, row api.Session, host api.Actor, route api.WaitingRoute) (api.WaitingSummary, error) {
@@ -35,7 +45,11 @@ func (c *client) WaitingForHost(ctx context.Context, row api.Session, host api.A
 	if _, err := c.ErasureEpoch(row.ID); err != nil {
 		return api.WaitingSummary{}, err
 	}
-	w := api.WaitingSummary{Turn: c.turnState(row)}
+	turn, err := c.turnState(row)
+	if err != nil {
+		return api.WaitingSummary{}, err
+	}
+	w := api.WaitingSummary{Turn: turn}
 	if part, err := c.Get("questions"); err == nil {
 		for _, q := range part.(api.Questions).Recorded(row) {
 			if !q.Answerable || q.Kind == "secret" || len(q.Allowed) != 0 && !slices.Contains(q.Allowed, host.ID) {

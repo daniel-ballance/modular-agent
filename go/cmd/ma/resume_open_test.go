@@ -69,13 +69,14 @@ func TestResumeOpenToolWriter(t *testing.T) {
 func TestResumeOpenAtStartup(t *testing.T) {
 	for _, tc := range []struct {
 		name, setting, projectSetting, outcome, report string
-		flag, held, transient, stdio                   bool
+		flag, held, transient, stdio, tokenPolicy      bool
 	}{
 		{name: "durable flag", flag: true, outcome: "completed", report: "resumed"},
 		{name: "global setting", setting: "true", projectSetting: "false", outcome: "completed", report: "resumed"},
 		{name: "transient", flag: true, transient: true, outcome: "failed", report: "resumed"},
 		{name: "held", flag: true, held: true, report: "skipped"},
 		{name: "ACP attachment shares startup writer", flag: true, stdio: true, outcome: "completed", report: "resumed"},
+		{name: "operator is not a client token", flag: true, tokenPolicy: true, outcome: "completed", report: "resumed"},
 		{name: "off"},
 		{name: "project setting ignored", projectSetting: "true"},
 	} {
@@ -122,6 +123,11 @@ func TestResumeOpenAtStartup(t *testing.T) {
 				kill()
 			}
 			args := []string{"--agui", "--listen", "127.0.0.1:0", "--token-file", token, "--project", project}
+			if tc.tokenPolicy {
+				policy := filepath.Join(d.config, "client-policy.json")
+				put(t, policy, `{"actors":[{"actor":{"id":"reader","kind":"user","rights":["watch"]},"clientId":"reader","tokenFile":"token"}]}`)
+				args = []string{"--agui", "--listen", "127.0.0.1:0", "--policy", policy, "--project", project}
+			}
 			if tc.stdio {
 				args = []string{"--acp", "--project", project}
 				t.Setenv("MODULAR_AGENT_ACTOR", modular.LocalACPActor().ID)

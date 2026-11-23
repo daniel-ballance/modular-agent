@@ -6,22 +6,15 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"net/url"
-	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
 )
 
-type agThreadInfo struct {
-	ID        string             `json:"threadId"`
-	UpdatedAt time.Time          `json:"updatedAt"`
-	Waiting   api.WaitingSummary `json:"waiting"`
-}
 type agThreadPage struct {
-	Threads []agThreadInfo `json:"threads"`
-	Next    string         `json:"next,omitempty"`
+	Threads []ThreadInfo `json:"threads"`
+	Next    string       `json:"next,omitempty"`
 }
 
 // The cursor stores no session IDs. Authenticate its offset and expiry for
@@ -69,20 +62,17 @@ func (q *agRequest) listParams(raw string) (offset, limit int, err error) {
 	return offset, limit, nil
 }
 
-func (q *agRequest) waitingFor(row api.Session) (api.WaitingSummary, error) {
+func (q *agRequest) inTurnOffer(id, request string) bool {
 	q.mu.Lock()
-	state := q.states[[2]string{row.ID, q.client}]
+	s := q.states[[2]string{id, q.client}]
 	q.mu.Unlock()
-	ended := agEndedTurns(row)
-	route := api.WaitingRoute{Executor: q.client, CanAnswer: func(v api.Question) bool {
-		_, ok := state.questionDelivery(v, ended[v.Turn])
-		return ok
-	}}
-	return q.a.a.WaitingForHost(q.ctx, row, q.Actor, route)
-}
-
-func (q *agRequest) listed(row api.Session) bool {
-	return row.Tenant == q.opt.Tenant && slices.Contains(q.rights, "watch") && q.member(row)
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.delivered[request].presence
+	return p != nil && p == s.presence && p.ctx.Err() == nil
 }
 
 func (q *agRequest) listThreads(raw string) error {
@@ -90,49 +80,15 @@ func (q *agRequest) listThreads(raw string) error {
 	if err != nil {
 		return err
 	}
-	page := agThreadPage{Threads: []agThreadInfo{}}
-	if !q.a.persistent {
-		return q.jsonReply(200, "agui.threads", page)
-	}
-	rows, err := q.a.a.List(q.a.project)
+	opt := ListThreadsOptions{Actor: q.Actor, Tenant: q.opt.Tenant, RouteID: q.client, Scope: q.scope,
+		JoinOnOpen: *q.opt.JoinOnOpen, InTurn: q.inTurnOffer, Offset: offset, Limit: limit}
+	threads, more, err := q.a.ListThreads(q.ctx, opt)
 	if err != nil {
 		return err
 	}
-	records := make(map[string]api.Session)
-	var ordered []agThreadInfo
-	for _, row := range rows {
-		if !q.listed(row) {
-			continue
-		}
-		var updated time.Time
-		for _, e := range row.Entries {
-			if e.Time.After(updated) {
-				updated = e.Time
-			}
-		}
-		ordered = append(ordered, agThreadInfo{ID: row.ID, UpdatedAt: updated.UTC()})
-		records[row.ID] = row
-	}
-	slices.SortFunc(ordered, func(a, b agThreadInfo) int {
-		if c := b.UpdatedAt.Compare(a.UpdatedAt); c != 0 {
-			return c
-		}
-		return strings.Compare(a.ID, b.ID)
-	})
-	end := min(offset+limit, len(ordered))
-	epochs := make(map[string]int)
-	for _, info := range ordered[min(offset, end):end] {
-		if epochs[info.ID], err = q.host().ErasureEpoch(info.ID); err != nil {
-			return err
-		}
-		info.Waiting, err = q.waitingFor(records[info.ID])
-		if err != nil {
-			return err
-		}
-		page.Threads = append(page.Threads, info)
-	}
-	if end < len(ordered) {
-		page.Next = q.nextPage(end)
+	page := agThreadPage{Threads: threads}
+	if more {
+		page.Next = q.nextPage(offset + len(threads))
 	}
 	b, err := q.encode("agui.threads", page)
 	if err != nil {
@@ -145,24 +101,24 @@ func (q *agRequest) listThreads(raw string) error {
 		if err != nil {
 			return err
 		}
-		clear(records)
+		records := make(map[string]api.Session, len(current))
 		for _, row := range current {
 			records[row.ID] = row
 		}
 		for _, info := range page.Threads {
-			row, ok := records[info.ID]
-			if !ok || !q.listed(row) {
+			row, ok := records[info.ThreadID]
+			if !ok || !q.a.listed(q.ctx, row, opt) {
 				return stale
 			}
-			w, err := q.waitingFor(row)
+			w, err := q.a.threadWaiting(q.ctx, row, opt)
 			if err != nil {
 				return err
 			}
-			epoch, err := q.host().ErasureEpoch(info.ID)
+			epoch, err := q.host().ErasureEpoch(info.ThreadID)
 			if err != nil {
 				return err
 			}
-			if epoch != epochs[info.ID] || w.Questions != info.Waiting.Questions || w.ToolCalls != info.Waiting.ToolCalls {
+			if epoch != info.epoch || w.Questions != info.Waiting.Questions || w.ToolCalls != info.Waiting.ToolCalls {
 				return stale
 			}
 		}

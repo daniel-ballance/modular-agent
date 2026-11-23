@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -16,7 +15,7 @@ type resumeCandidate struct {
 	operator modular.ACPActor
 }
 
-func (d layout) resumeCandidates(ctx context.Context, o options, store modular.HistoryStore, stderr io.Writer) ([]resumeCandidate, error) {
+func (d layout) resumeCandidates(ctx context.Context, o options, store modular.HistoryStore) ([]resumeCandidate, error) {
 	if !o.acp && !o.agui {
 		return nil, nil
 	}
@@ -37,23 +36,20 @@ func (d layout) resumeCandidates(ctx context.Context, o options, store modular.H
 	if !o.resumeOpen {
 		return nil, nil
 	}
-	local := modular.ACPActor{Actor: modular.LocalACPActor()}
-	operators := []modular.ACPActor{local}
+	// A listener starts work for the local operator, not for one of its
+	// network clients. Stdio retains its configured local scope.
+	operator := modular.ACPActor{Actor: modular.LocalACPActor()}
 	if o.listen == "" {
 		if p := o.policy.Stdio; p != nil {
-			operators = []modular.ACPActor{*p}
+			operator = *p
 		} else if id, set := os.LookupEnv("MODULAR_AGENT_ACTOR"); set {
-			operators[0].Actor.ID = id
-		}
-	} else if o.policy.Actors != nil {
-		// Never borrow another principal's token rights to start a turn.
-		operators = nil
-		for _, p := range o.policy.Actors {
-			if p.Actor.ID == local.Actor.ID {
-				operators = append(operators, p)
-			}
+			operator.Actor.ID = id
 		}
 	}
+	if !slices.Contains(operator.Actor.Rights, "watch") || operator.Projects != nil && !slices.Contains(operator.Projects, o.project) {
+		return nil, nil
+	}
+	operator.Actor.Rights = []string{"watch"}
 	rows, err := store.Sessions(ctx, o.project)
 	if err != nil {
 		return nil, err
@@ -63,13 +59,8 @@ func (d layout) resumeCandidates(ctx context.Context, o options, store modular.H
 		if !row.UnfinishedTurn {
 			continue
 		}
-		i := slices.IndexFunc(operators, func(p modular.ACPActor) bool {
-			return slices.Contains(p.Actor.Rights, "watch") && (p.Projects == nil || slices.Contains(p.Projects, row.Project)) && (p.Tenants == nil && row.Tenant == "" || slices.Contains(p.Tenants, row.Tenant))
-		})
-		if i >= 0 {
-			out = append(out, resumeCandidate{row, operators[i]})
-		} else {
-			fmt.Fprintf(stderr, "skipped %s\n", row.ID)
+		if operator.Tenants == nil && row.Tenant == "" || slices.Contains(operator.Tenants, row.Tenant) {
+			out = append(out, resumeCandidate{row, operator})
 		}
 	}
 	return out, nil

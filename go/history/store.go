@@ -73,6 +73,35 @@ func (s *Store) guard() (func(), error) {
 	}
 	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); _ = f.Close() }, nil
 }
+
+// WriterHeld probes the existing lock with a shared lock. It neither
+// creates the lock file nor acquires the exclusive writer.
+func (s *Store) WriterHeld(id string) (bool, error) {
+	if !validID.MatchString(id) {
+		return false, errors.New("invalid session identity")
+	}
+	// Serialize with Acquire and Close so this short-lived reader cannot
+	// make a simultaneous writer fail its nonblocking lock attempt.
+	unlock, err := s.guard()
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+	f, err := os.Open(filepath.Join(s.dir, id+".lock"))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
+	if errors.Is(err, syscall.EWOULDBLOCK) {
+		return true, nil
+	}
+	return false, err
+}
+
 func (s *Store) Acquire(id string) (api.Lease, error) {
 	if !validID.MatchString(id) {
 		return nil, errors.New("invalid session identity")
