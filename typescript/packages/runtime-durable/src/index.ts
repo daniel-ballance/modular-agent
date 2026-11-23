@@ -20,7 +20,7 @@ import { TransientRuntime, type TransientRuntimeOptions, type TurnProgress } fro
  */
 export class DurableRuntime extends TransientRuntime {
 	override readonly id = "durable";
-	override readonly supports = { inputDuringTurn: true, waitingThroughRestart: true, continuesAfterRestart: true, nestedToolCalls: true,
+	override readonly supports = { inputDuringTurn: true, waitingThroughRestart: true, continuesAfterRestart: true, nestedToolCalls: true, interfaceTools: true,
 		queuedInputAfterRestart: "handedBack", queuedJobReportsAfterRestart: "run" };
 
 	protected override async recover(input: TurnInput, host: RuntimeHost, signal: AbortSignal, interrupted: InterruptedTurn, progress: TurnProgress, turn: HistoryEntry[], responses: HistoryEntry[]): ReturnType<TransientRuntime["recover"]> {

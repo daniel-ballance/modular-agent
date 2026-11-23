@@ -51,7 +51,7 @@ export interface TransientRuntimeOptions {
  */
 export class TransientRuntime implements Runtime {
 	readonly id: string = "transient";
-	readonly supports: Record<string, boolean | string> = { inputDuringTurn: true, waitingThroughRestart: false, continuesAfterRestart: false, nestedToolCalls: true,
+	readonly supports: Record<string, boolean | string> = { inputDuringTurn: true, waitingThroughRestart: false, continuesAfterRestart: false, nestedToolCalls: true, interfaceTools: true,
 		queuedInputAfterRestart: "handedBack", queuedJobReportsAfterRestart: "run" };
 	constructor(protected options: TransientRuntimeOptions = {}) {}
 

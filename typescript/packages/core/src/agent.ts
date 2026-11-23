@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { ALL_AUTHORITY, Harness, parseModel, type CredentialStore, type Runtime, type PluginApi, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider, type ReservationOptions, type ReservationLimits } from "@modular-agent/harness";
+import { ALL_AUTHORITY, Harness, parseModel, type CredentialStore, type Runtime, type InterfaceToolSource, type InterfaceToolConnection, type InterfaceToolConnectionOptions as HarnessToolConnection, type PluginApi, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider, type ReservationOptions, type ReservationLimits } from "@modular-agent/harness";
 import { JsonlHistoryStore } from "@modular-agent/history-jsonl";
 import { localEnvironment } from "@modular-agent/env-local";
 import { contextCompaction } from "@modular-agent/context-compaction";
@@ -34,6 +34,7 @@ export interface AgentOptions {
   durability?: Durability;
   providers?: readonly Provider[];
   tools?: readonly Tool[];
+  interfaceTools?: readonly InterfaceToolSource[];
   plugins?: readonly Plugin[];
   processPlugins?: readonly ProcessPlugin[];
   servicePlugins?: readonly ServicePlugin[];
@@ -59,6 +60,10 @@ export interface AgentOptions {
   environment?: MemoryEnvironment | WorkingEnvironment;
   runtime?: Runtime;
   credentials?: CredentialStore;
+}
+export interface InterfaceToolConnectionOptions extends Omit<HarnessToolConnection, "actor"> {
+  /** The principal authenticated by the embedding binding, not a claim in a report. */
+  actor: Actor;
 }
 export interface SessionOptions { settings?: Settings; tenant?: string; actors?: Actor[] }
 export interface ServeAcpOptions {
@@ -297,6 +302,7 @@ export class Agent {
       if (options.conformance) await agent.#load(conformanceTools(false, agent.#api.tools().map(t => t.name)));
       agent.#hostEnabled = options.pluginHost ?? configuredHost;
       await agent.#loadRemotes([...options.processPlugins ?? [], ...options.servicePlugins ?? [], ...(agent.#hostEnabled ? pluginSpecsFromEnv() : [])]);
+      await h.registerInterfaceTools(options.interfaceTools ?? []);
       const effectiveRuntime = h.use<Runtime>("runtime");
       // The ACP kit substitutes its own Runtime to exercise the remote bridge.
       if (durability === "durable" && effectiveRuntime?.supports.continuesAfterRestart !== true &&
@@ -469,6 +475,16 @@ export class Agent {
       for (const actor of options.actors ?? []) await session.join(actor);
       return session;
     } catch (error) { await session.close().catch(() => {}); throw error; }
+  }
+  /** Attach an independently authenticated executor to an already open session. */
+  connectInterfaceTools(sessionId: string, options: InterfaceToolConnectionOptions): InterfaceToolConnection {
+    this.#check();
+    const { rights, ...actor } = options.actor;
+    const connection = this.#h.connectInterfaceTools(sessionId, { ...options, actor: { ...actor, authority: [...rights] } });
+    return { ...connection,
+      release: id => checked(() => connection.release(id)),
+      reportInterfaceToolResult: report => checked(() => connection.reportInterfaceToolResult(report)),
+    };
   }
   async openSession(id: string): Promise<Session> {
     this.#check();

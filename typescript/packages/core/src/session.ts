@@ -35,7 +35,7 @@ export interface EventData {
   inputAccepted: { inputId: string; taken: InputReceipt["taken"] };
   inputWithdrawn: { inputId: string; content: Content; reason: string };
   inputHandedBack: { inputId: string; content: Content; reason: string };
-  turnStarted: { startedBy: { kind: "actor" | "job" | "plugin" | "answer"; id: string } };
+  turnStarted: { startedBy: { kind: "actor" | "job" | "plugin" | "answer" | "toolResult"; id: string } };
   turnEnded: { turnId: string; outcome: Outcome; result: TurnResult };
   stepStarted: Empty;
   stepEnded: { usage?: Usage };
