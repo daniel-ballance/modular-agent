@@ -62,7 +62,7 @@ step() {
   rows+=("$(printf '%-52s %-5s %s' "$name" "$status" "$log")")
 }
 
-step 'Kits: install Node dependencies' bash -c 'cd conformance/acp && npm ci --silent && cd ../tools && npm ci --silent'
+step 'Kits: install Node dependencies' bash -c 'for kit in acp tools telemetry; do npm ci --silent --prefix "conformance/$kit" || exit; done'
 step 'Rust: install toolchain and build ma and fixtures' bash -c 'cd rust && mise trust && mise install && mise exec -- cargo build --locked -p standard --bin ma && mise exec -- cargo build --locked -p agent-base -p sdk-scenarios'
 step 'TypeScript: install dependencies and build ma' bash -c 'cd typescript && npm ci --silent && npm run build'
 step 'Go: install toolchain and build ma and Monty' bash -c 'cd go && mise trust && mise install && ./scripts/build-monty.sh && mise exec -- go build -o .bin/ma ./cmd/ma && mise exec -- go build -o .bin/modular ./cmd/modular && mise exec -- go build -o .bin/modular-agent-fixtures ./modular/cmd/fixtures'

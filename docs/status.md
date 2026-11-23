@@ -19,7 +19,7 @@ Recorded on 2026-11-22 for the commit tagged `v0.1.0`, from `scripts/check.sh` o
 | Check | Rust | TypeScript | Go | Python |
 |---|---|---|---|---|
 | Shared SDK scenarios: 17 in 9 placements, in process, in another process and as a service | 153/153 | 153/153 | 153/153 | 153/153 |
-| Reference checks against `ma` | 24/24 | 24/24 | 24/24 | 24/24 |
+| Reference checks against `ma` | 25/25 | 25/25 | 25/25 | 25/25 |
 | ACP kit against `ma`, crash, probe and job checks | 188/188 | 188/188 | 188/188 | 188/188 |
 | Over WebSocket: plugin kit, listener isolation, ACP kit | 153, 14, 193 | 153, 14, 193 | 153, 14, 193 | 153, 14, 193 |
 | [ADR 0030](adr/0030-production-gaps.md) kits: isolation, capacity, erasure, history registry | pass | pass | pass | pass |
