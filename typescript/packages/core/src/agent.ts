@@ -8,7 +8,7 @@ import { contextCompaction } from "@modular-agent/context-compaction";
 import { approval } from "@modular-agent/approval";
 import { transientRuntime } from "@modular-agent/runtime-transient";
 import { durableRuntime } from "@modular-agent/runtime-durable";
-import { startExternalPlugin, startPluginService, pluginSpecsFromEnv, conformanceProvider, conformanceTools, ACP_PROTOCOL, listenWebSocket, receiveMessages, type ListenOptions, type ServiceServer, type PluginSpec, type ServicePluginSpec } from "@modular-agent/plugin-wire";
+import { startExternalPlugin, startPluginService, pluginSpecsFromEnv, conformanceProvider, conformanceTools, ACP_PROTOCOL, listenWebSocket, receiveMessages, type ListenOptions, type ServiceServer, type ExternalPluginSpec, type PluginSpec, type ServicePluginSpec } from "@modular-agent/plugin-wire";
 import { acpInterface, localAcpActor } from "@modular-agent/interface-acp";
 import { HistoryArchive, historyClientOptions, historyRelay, historyService, HttpHistoryStore, type HistoryServiceStore } from "@modular-agent/services";
 import { AgentError, checked, messageOf } from "./errors.js";
@@ -25,7 +25,7 @@ import type { Actor, Declaration, ModelInfo, ModelRef, QuestionHandler, Right, S
 
 export type Durability = "ephemeral" | "kept" | "durable";
 export type Approval = "off" | "ask" | "all" | "never";
-export interface ProcessPlugin { command: string[]; env?: Record<string, string>; config?: Settings }
+export type ProcessPlugin = ExternalPluginSpec;
 export type ServicePlugin = ServicePluginSpec;
 export interface AgentOptions {
   agentName?: string;

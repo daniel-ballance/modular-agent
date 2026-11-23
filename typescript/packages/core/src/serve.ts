@@ -24,23 +24,23 @@ function bindings(plugin: Plugin, failed?: (error: AgentError) => void) {
   };
 }
 
-async function endpoint(plugin: Plugin, input?: NodeJS.ReadableStream, output?: (line: string) => void): Promise<void> {
+async function endpoint(plugin: Plugin, input?: NodeJS.ReadableStream, output?: (line: string) => void, acceptTraceContext?: boolean): Promise<void> {
   let failure: AgentError | undefined;
-  await servePlugins({ ...bindings(plugin, error => { failure = error; }), input, output });
+  await servePlugins({ ...bindings(plugin, error => { failure = error; }), input, output, acceptTraceContext });
   if (failure) throw failure;
 }
 
 /** Serve on stdio or create a WebSocket listener. Setup runs once per connection. */
-export function serve(plugin: Plugin): Promise<void>;
+export function serve(plugin: Plugin, options?: { acceptTraceContext: boolean }): Promise<void>;
 export function serve(plugin: Plugin | (() => Plugin), options: PluginListenOptions): Promise<ServiceServer>;
-export async function serve(plugin: Plugin | (() => Plugin), options?: PluginListenOptions): Promise<void | ServiceServer> {
+export async function serve(plugin: Plugin | (() => Plugin), options?: PluginListenOptions | { acceptTraceContext: boolean }): Promise<void | ServiceServer> {
   if (typeof plugin !== "function") checkServable(plugin);
-  if (options) return servePluginService(() => {
+  if (options && !("acceptTraceContext" in options)) return servePluginService(() => {
     const instance = typeof plugin === "function" ? plugin() : plugin;
     checkServable(instance);
     return bindings(instance);
   }, options);
-  if (typeof plugin !== "function") await endpoint(plugin);
+  if (typeof plugin !== "function") await endpoint(plugin, undefined, undefined, options?.acceptTraceContext);
 }
 
 const onWire = new WeakMap<Plugin, Plugin>();

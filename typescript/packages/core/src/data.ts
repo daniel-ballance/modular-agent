@@ -90,7 +90,7 @@ export interface ToolCall {
 }
 export type ToolStatus = "completed" | "failed" | "refused" | "cancelled" | "notStarted" | "outcomeUnknown";
 
-export type Declaration = Record<string, boolean | string | import("@modular-agent/harness").ReservationDeclaration>;
+export type Declaration = import("@modular-agent/harness").Declaration;
 
 // ---------- Providers and model access ----------
 

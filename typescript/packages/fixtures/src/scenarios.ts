@@ -8,9 +8,10 @@ import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { AgentError, fileHistory, httpHistory, serveHistory, type Actor, type AgentOptions, type Answer, type InputTiming, type PromptResult, type ServicePlugin, type Session } from "@modular-agent/core";
-import { answers, testAgent, type ScriptStep } from "@modular-agent/core/testing";
+import { AgentError, createAgent, fileHistory, httpHistory, serveHistory, type Actor, type AgentOptions, type Answer, type InputTiming, type PromptResult, type ServicePlugin, type Session } from "@modular-agent/core";
+import { answers, memoryEnvironment, scriptedProvider, testAgent, type ScriptStep } from "@modular-agent/core/testing";
 import { count, fixture } from "./index.js";
+import { ScenarioEvidence, type TelemetryRun } from "./telemetry-scenario.js";
 
 const repo = fileURLToPath(new URL("../../../../../", import.meta.url)).replace(/\/$/, "");
 const files = (dir: string) => readdirSync(dir).filter(f => f.endsWith(".json")).sort().map(f => join(dir, f));
@@ -75,17 +76,28 @@ async function fixtureHistory(s: Scenario, dir: string): Promise<{ descriptor?: 
 }
 
 export async function scenarioAgent(s: Scenario, dir: string, p: Placement,
-  handler = s.agent.answers && answers(s.agent.answers), store?: HistoryFixture) {
+  handler = s.agent.answers && answers(s.agent.answers), store?: HistoryFixture, evidence?: ScenarioEvidence) {
   const project = join(dir, "project");
   await mkdir(project, { recursive: true });
   const { plugins = [], answers: _answers, actors: _actors, history: _history, ...options } = s.agent;
   const history = store && ("dir" in store ? fileHistory(store.dir) : httpHistory(store.url, store.tokenFile));
   const config = { path: countFile(dir) };
-  return testAgent({ ...options, script: s.model, project, dataDir: join(dir, "data"),
+  const run = evidence?.run;
+  const composition: AgentOptions = { ...options, project, dataDir: join(dir, "data"),
     onQuestion: handler, history,
     ...(p.servicePlugins ? { servicePlugins: p.servicePlugins }
+      : run && p.name.startsWith("process:") ? { processPlugins: plugins.map(name => {
+        const supplied = run.fixtures.find(f => f.name === name);
+        if (!supplied) throw new Error(`Missing fixture ${name}`);
+        return { command: supplied.command, env: supplied.env, config, offerTraceContext: run.handshake !== "no-offer" };
+      }) }
       : p.command ? { processPlugins: plugins.map(name => ({ command: [...p.command!, name], config })) }
-      : { plugins: plugins.map(name => fixture(name, config)) }),
+      : { plugins: plugins.map(name => fixture(name, config, s.scenario === "question-answered" ? run?.values.answer : undefined)) }),
+  };
+  if (!evidence) return testAgent({ ...composition, script: s.model });
+  return createAgent({ ...composition, agentName: run!.agentName, environment: memoryEnvironment(),
+    providers: [evidence.provider(scriptedProvider(s.model))], model: "scripted/script",
+    plugins: [...composition.plugins ?? [], evidence.historyPlugin()],
   });
 }
 
@@ -173,11 +185,12 @@ async function servicesFor(s: Scenario, dir: string, p: Placement) {
   } catch (error) { await stop(); throw error; }
 }
 
-async function crashRun(path: string, dir: string, p: Placement, i: number, when: Crash, previous?: string, history?: HistoryFixture) {
+async function crashRun(path: string, dir: string, p: Placement, i: number, when: Crash, previous?: string, history?: HistoryFixture, evidence?: ScenarioEvidence) {
   const services = await servicesFor(loadScenario(path), dir, p);
   const child = spawn(process.execPath, [fileURLToPath(new URL("./scenario-agent.js", import.meta.url)),
     path, dir, String(i), JSON.stringify(services.placement), previous ?? "", JSON.stringify(history ?? null)],
-    { detached: true, stdio: ["ignore", "pipe", "inherit"] });
+    { detached: true, stdio: ["ignore", "pipe", "inherit"],
+      env: evidence ? { ...process.env, MODULAR_AGENT_TELEMETRY_OTLP: process.env.MODULAR_AGENT_TELEMETRY_OTLP } : undefined });
   // Node has reaped the direct child by the time it emits close, even if
   // orphaned grandchildren in the group are still awaiting reaping.
   const reaped = new Promise<void>(resolve => child.once("close", () => resolve()));
@@ -197,6 +210,7 @@ async function crashRun(path: string, dir: string, p: Placement, i: number, when
       if (Date.now() > deadline) throw new Error(`Crash condition never held: ${JSON.stringify(when)}`);
       await delay(20);
     }
+    await evidence?.beforeKill(sessionId, count(countFile(dir)));
     return sessionId;
   } finally {
     const pid = child.pid;
@@ -210,9 +224,11 @@ async function crashRun(path: string, dir: string, p: Placement, i: number, when
   }
 }
 
-export async function runScenario(path: string, p: Placement): Promise<string[]> {
+export async function runScenario(path: string, p: Placement, run?: TelemetryRun): Promise<string[]> {
   const s = loadScenario(path);
-  const dir = await mkdtemp(join(tmpdir(), "sdk-scenario-"));
+  const dir = run?.workDir ?? await mkdtemp(join(tmpdir(), "sdk-scenario-"));
+  const evidence = run && new ScenarioEvidence(run, s.steps.some(step => "prompt" in step && !!step.crashWhen));
+  let report: unknown;
   const failures: string[] = [];
   const handler = s.agent.answers && answers(s.agent.answers);
   let id: string | undefined;
@@ -226,7 +242,7 @@ export async function runScenario(path: string, p: Placement): Promise<string[]>
   };
   const start = async () => {
     services = await servicesFor(s, dir, p);
-    try { return await scenarioAgent(s, dir, services.placement, handler, history.descriptor); }
+    try { return await scenarioAgent(s, dir, services.placement, handler, history.descriptor, evidence); }
     catch (error) { await stop(); throw error; }
   };
   try {
@@ -254,7 +270,7 @@ export async function runScenario(path: string, p: Placement): Promise<string[]>
       try {
         if ("prompt" in step && step.crashWhen) {
           await stop();
-          id = await crashRun(path, dir, p, i, step.crashWhen, id, history.descriptor);
+          id = await crashRun(path, dir, p, i, step.crashWhen, id, history.descriptor, evidence);
         } else if ("reopen" in step) {
           await stop();
           if (!id) throw new Error("No session to reopen");
@@ -314,12 +330,17 @@ export async function runScenario(path: string, p: Placement): Promise<string[]>
       try { handler?.assertDone(); }
       catch (error) { failures.push(`${s.scenario} (${p.name}): ${String(error)}`); }
     }
+    if (!failures.length && a && session) report = await evidence?.report(a, session, count(countFile(dir)));
   } finally {
     try { await stop(); }
     finally {
       try { await history.stop?.(); }
-      finally { await rm(dir, { recursive: true, force: true }); }
+      finally { if (!run) await rm(dir, { recursive: true, force: true }); }
     }
+  }
+  if (run && !failures.length) {
+    if (!report) throw new Error("No scenario evidence to report");
+    await writeFile(run.reportPath, JSON.stringify(report));
   }
   return failures;
 }
