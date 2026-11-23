@@ -70,7 +70,7 @@ Omit `tenants` to allow only sessions without a tenant. Include `null` in an exp
 
 ### Serving AG-UI
 
-Proposed; no SDK implements this binding yet.
+All four SDKs implement this binding; the [AG-UI kit](../../conformance/agui/README.md) checks each.
 
 Call `agent.serveAgui({ listen, actors, tls?, tenant?, acp?, origins? })` instead of `serveAcp` when the app speaks AG-UI. Set `acp: true` to serve ACP WebSocket upgrades at the same address. Do not start a second listener on that address. The listener handle has `url` (the HTTP origin) and `close()`. Closing it detaches streams; it does not erase sessions or confirm cancellation of external calls.
 
