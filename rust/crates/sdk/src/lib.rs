@@ -31,6 +31,8 @@ mod events;
 mod grok;
 mod history;
 mod hooks;
+mod interface_tools;
+pub use interface_tools::{InterfaceConnection, InterfaceReportDisposition, InterfaceToolSource};
 mod jobs;
 mod parts;
 mod plugin;

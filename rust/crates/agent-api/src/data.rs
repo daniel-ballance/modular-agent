@@ -204,6 +204,30 @@ pub fn erased_input_keys(data: &SessionData, targets: &[String]) -> Vec<Value> {
         .collect()
 }
 pub fn record_erasure(data: &mut SessionData, entry_ids: Vec<String>, input_keys: Vec<Value>) {
+    for checkpoint in data.branch().into_iter().filter(interface_handoff) {
+        if !entry_ids.contains(&checkpoint.id)
+            && !interface_start(data, &checkpoint).is_some_and(|e| entry_ids.contains(&e.id))
+        {
+            continue;
+        }
+        if let Some((scope, draft)) =
+            interface_unknown(data, &checkpoint, "Interface handoff erased")
+        {
+            let entry = Entry {
+                id: id(),
+                parent: data.position.clone(),
+                scope,
+                writer: "harness".into(),
+                at: now(),
+                kind: draft.kind,
+                visible: draft.visible,
+                copies: draft.copies,
+                content: Some(draft.content),
+            };
+            data.position = Some(entry.id.clone());
+            data.entries.push(entry);
+        }
+    }
     let entry = Entry {
         id: id(),
         parent: data.position.clone(),

@@ -416,6 +416,18 @@ impl Engine {
                     .ok_or_else(|| anyhow!("erased tool result"))?,
             )?);
         }
+        if entries.iter().any(|e| {
+            interface_handoff(e)
+                && e.scope.turn == scope.turn
+                && e.scope.call == scope.call
+                && e.content.is_some()
+        }) {
+            return Ok(ToolResult::new(
+                call,
+                ToolStatus::Waiting,
+                "waiting for Interface tool result",
+            ));
+        }
         if scope.turn.is_some()
             && entries.iter().any(|e| {
                 e.kind == "tool.pending"
@@ -599,6 +611,20 @@ impl Engine {
                     )
                 } else {
                     api.check_writer(&scope.session)?;
+                    if let Some(result) = api
+                        .handoff_interface_tool(
+                            scope,
+                            &changed,
+                            Draft::new("tool.started", false, start.clone())
+                                .copying(vec![call_entry.id.clone()]),
+                        )
+                        .await?
+                    {
+                        if result.status == ToolStatus::Refused {
+                            telemetry::disposition(scope, call, &result.status);
+                        }
+                        return Ok(result);
+                    }
                     let started = self.record(
                         api,
                         scope,
@@ -1223,6 +1249,7 @@ impl Engine {
             result.limit = None;
             result.open_calls.clear();
         }
+        api.finish_interface_calls(scope, &mut result)?;
         self.settle(
             api,
             scope,
@@ -1288,7 +1315,7 @@ impl Engine {
 #[async_trait]
 impl Runtime for Engine {
     fn declaration(&self) -> Value {
-        json!({"transient":!self.durable,"input_during_turn":true,"continues_after_restart":self.durable,"waits_through_restart":self.durable,"cancel_cancels_jobs":false,"parallel_tools":true,"nested_tools":true})
+        json!({"transient":!self.durable,"input_during_turn":true,"continues_after_restart":self.durable,"waits_through_restart":self.durable,"cancel_cancels_jobs":false,"parallel_tools":true,"nested_tools":true,"interface_tools":true})
     }
     async fn run(&self, api: Api, input: TurnInput) -> Result<TurnResult> {
         let run = async {

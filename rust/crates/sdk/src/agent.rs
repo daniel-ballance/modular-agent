@@ -145,6 +145,7 @@ pub struct AgentBuilder {
     job_reports_start_turns: bool,
     providers: Vec<Arc<dyn base::Plugin>>,
     tools: Vec<Tool>,
+    interface_tools: Vec<crate::InterfaceToolSource>,
     plugins: Vec<Plugin>,
     process_plugins: Vec<(ProcessPlugin, Option<plugin_stdio::ProviderReadiness>)>,
     service_plugins: Vec<ServicePlugin>,
@@ -245,7 +246,11 @@ impl Agent {
             let _ = harness.close(id).await;
             return Err(error.into());
         }
-        Ok(Session::new(self.inner.clone(), id.to_string()))
+        let session = Session::new(self.inner.clone(), id.to_string());
+        if harness.has_interface_tools() {
+            session.drive();
+        }
+        Ok(session)
     }
 
     fn check_crashed(&self) -> Result<()> {
@@ -480,6 +485,14 @@ impl AgentBuilder {
         self
     }
     /// A tool, wrapped in a plugin named after it.
+    pub fn interface_tools(
+        mut self,
+        sources: impl IntoIterator<Item = crate::InterfaceToolSource>,
+    ) -> Self {
+        self.interface_tools.extend(sources);
+        self
+    }
+
     pub fn tool(mut self, tool: Tool) -> Self {
         self.tools.push(tool);
         self
@@ -903,6 +916,13 @@ impl AgentBuilder {
                 "the local working environment needs a data_dir for recovery bookkeeping",
             ));
         }
+        if let Err(error) = harness
+            .configure_interface_tools(self.interface_tools)
+            .await
+        {
+            let _ = base::AgentApi::shutdown(harness.as_ref()).await;
+            return Err(Error::new(Code::InvalidComposition, error.to_string()));
+        }
         harness.rebuild_reservations()?;
         hub.harness.set(Arc::downgrade(&harness)).ok();
 
@@ -960,6 +980,14 @@ impl AgentBuilder {
             }),
         };
         agent.inner.hub.inner.set(Arc::downgrade(&agent.inner)).ok();
+        if agent.inner.harness.has_interface_tools() {
+            let inner = Arc::downgrade(&agent.inner);
+            agent.inner.harness.on_interface_work(Arc::new(move |id| {
+                if let Some(inner) = inner.upgrade() {
+                    Session::new(inner, id.to_owned()).drive();
+                }
+            }));
+        }
         for interface in interfaces {
             if let Err(e) = interface.start(agent.clone()).await {
                 let _ = interface.stop().await;

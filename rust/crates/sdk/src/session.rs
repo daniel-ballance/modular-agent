@@ -275,6 +275,25 @@ impl Session {
         }
     }
 
+    /// Connect an authenticated Interface executor to this session. The app
+    /// must check the actual actor's project and tenant scope before calling.
+    /// This method never uses a represented actor or a report's claimed identity.
+    pub fn connect_interface_tools(
+        &self,
+        route_id: &str,
+        authenticated_actor_id: &str,
+        rights: Rights,
+    ) -> Result<crate::InterfaceConnection> {
+        Ok(crate::InterfaceConnection(
+            self.inner.harness.connect_interface_tools(
+                &self.id,
+                route_id,
+                authenticated_actor_id,
+                rights,
+            )?,
+        ))
+    }
+
     /// What the agent supports for this session, as the ACP declaration.
     pub fn declaration(&self) -> Result<Value> {
         crate::Agent {
