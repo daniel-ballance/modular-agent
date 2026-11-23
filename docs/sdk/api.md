@@ -30,6 +30,7 @@ The shape of the API, in language-neutral terms. [Languages](languages.md) says 
 | `model` | ModelRef or `"provider/id"` | the only model offered, if exactly one; otherwise none |
 | `settings` | default settings for new sessions, by [setting key](../bindings/data.md#setting-keys) | none |
 | `approval` | `off`, `ask`, `all` or `never` | absent: no approval plugin. Any value loads the approval plugin and records that policy for new sessions; `off` means the plugin is loaded and its check does not ask ([Approval policy](../contracts.md#approval-policy)). |
+| `maxApprovalWaitMs` (proposed) | positive [Duration](../bindings/data.md#general-rules), set by the operator | absent: no `approvalsOutlastTurns` support. An explicit maximum bounds every waiting approval. It does not opt a session in. |
 | `onQuestion` | a question handler | none; see [Questions](#questions) |
 | `servicePlugins` | ordered list of `{ url, tokenFile, config? }` | none; see [Placement](placement.md#services) |
 | `pluginHost` | boolean | true if either plugin list is nonempty; otherwise false. A plugin host reads `MODULAR_AGENT_PLUGINS` after both lists. See [Placement](placement.md#a-plugin-in-another-process). |
@@ -103,6 +104,7 @@ An Agent is safe to use from several tasks at once. Sessions have separate work 
 | `erasure` | true only if the history store and the agent implement erasure and can enforce [pending erasure](../contracts.md#cross-session-coordination) across the declared scope. An HTTP history client uses the [pending-erasure registry profile](../bindings/history-http.md#pending-erasure-registry-profile-pendingerasure-1) when the service declares a supported version. Without one, the HTTP composition declares false, even if the service can erase. |
 | `inputKeys` | true |
 | `questionsOutlastTurns`, `lateAnswersStartTurns` | false unless the app enables both |
+| `approvalsOutlastTurns` (proposed) | true only with `maxApprovalWaitMs`, the approval plugin, `portableSessions`, `questionsOutlastTurns`, `lateAnswersStartTurns` and a path that enforces the [waiting approval rules](../contracts.md#approvals-that-wait). Omit otherwise. |
 | `startsTurnsUnasked` | `jobReports` if `jobReportsStartTurns`; otherwise `never` |
 | `movingWithUnfinishedWork` | `refused` |
 | `mixedActorInput` | `refused` |
@@ -200,12 +202,19 @@ onQuestion(question: Question, context) -> Answer
 | `question`, `details`, `options` | what to show |
 | `call` | for an approval: the exact tool call, name and input |
 | `deadline` | when it closes, if timed |
+| `approvalWait` (proposed) | `untilDeadline` only for a declared waiting approval, otherwise absent |
 
 An Answer is `allow` (approval), a value (choice, text, link), a secret value (secret) or `decline` with an optional reason. A decline is a tagged answer, not a reserved string: a text answer of `declined` is a value. A handler that raises or returns nothing declines. A secret value goes only to the credential store. The asker receives only the stored name, after activation is confirmed and the terminal answer is committed. Staging alone does not answer the question ([Secrets](../contracts.md#secrets)).
 
 The handler can be set on `createAgent` for every session or on one session with `session.onQuestion`, which takes precedence for that session. `session.questions()` lists open questions and `session.answer(questionId, answer)` answers one later, for apps that show questions in their own UI.
 
-While a handler is registered, the local actor is present to answer. With none, [approvals are refused](concepts.md#the-local-actor).
+While a handler is registered, the local actor is present to answer. With none, [live approvals are refused](concepts.md#the-local-actor) unless another eligible route is present.
+
+**Approvals that wait (proposed for 0.2.0).** Supply `maxApprovalWaitMs` only on a composition that meets the declaration requirements above. An invalid maximum or an incompatible composition raises `invalid_composition`. Project settings cannot supply or raise this maximum. In a supported session record `approvalWait: "untilDeadline"` in the session settings, at creation or with `setSetting`. The default is `"live"`. A request to opt in without support raises `not_supported`. These are lifetime choices, not new `approval` values.
+
+When only parked calls remain, `prompt` returns the completed PromptResult with their IDs in `openToolCalls`. There is no provisional ToolResult. The wait alone does not block `waitIdle`. No handler need be present. Closing an otherwise idle kept session preserves the wait. After reopen, an eligible handler can receive the exact question afresh. For a polling app, `session.questions({ present: true })` marks that open actor handle present for the returned waiting approvals only. Return the same exact call view, marked `approvalWait: "untilDeadline"` with its absolute deadline. Only an unchanged view delivered to that handle can be answered there with `session.answer(questionId, answer)`. A plain listing, event, history read, or a handle opened by another actor does not establish that delivery. Invalidate it on detach, close, restart or loss of eligibility. This option requires `approvalsOutlastTurns`; it does not register a handler for live approvals.
+
+Acceptance closes the question. It is not a result or a promise the call will execute. Follow the session for the one continuation and the terminal status. A decline or changed registration/input gives `refused`; expiry before dispatch gives `notStarted`. No SDK serializes a handler or lets a saved Question object authorize a call. A served Runtime uses the existing pending gate reply and `runtime/continueOpenCalls`. Declare support only for a path that can continue with no calls to dispatch after settlement. No new plugin RPC is needed.
 
 ## Actors and rights
 
@@ -328,7 +337,7 @@ One SDK MUST word a given tool's result identically in process and served; diffe
 | `choice`, `text`, `link` | the answer's value, or a decline |
 | `secret` | the credential name the value was stored under, or a decline. Never the value ([Secrets](../contracts.md#secrets)). |
 
-A decline carries the reason, including a system closure such as `timeLimit` or `noLongerAnswerable`. `ask(question, { wait, then: "leaveOpen" })` lets the call stay open past its turn if no answer comes in time. It is allowed only where the agent declares `questionsOutlastTurns` and `lateAnswersStartTurns`; otherwise it raises `not_supported`. When the wait ends unanswered, `ask` raises a `LeftOpen` signal. A tool that does not catch it ends, and the SDK replies pending. The tool runs again from the top when the answer comes, so it MUST ask the same questions in the same order and cause no effect before them; asking again returns the recorded answer ([Questions](../contracts.md#questions)).
+A decline carries the reason, including a system closure such as `timeLimit` or `noLongerAnswerable`. `ask(question, { wait, then: "leaveOpen" })` on a non-approval question lets the call stay open past its turn if no answer comes in time. It is allowed only where the agent declares `questionsOutlastTurns` and `lateAnswersStartTurns`; otherwise it raises `not_supported`. When the wait ends unanswered, `ask` raises a `LeftOpen` signal. A tool that does not catch it ends, and the SDK replies pending. The tool runs again from the top when the answer comes, so it MUST ask the same questions in the same order and cause no effect before them; asking again returns the recorded answer ([Questions](../contracts.md#questions)).
 
 **Nested calls.** `tools.call(name, input)` asks the agent to run another tool as a nested call. It passes that tool's own gates and approval and returns its ToolResult. A nested call is never left open: if a gate would leave it pending, it is settled `refused`. Each SDK documents its nesting depth and refuses a call beyond it ([Nested calls](../contracts.md#nested-calls)).
 

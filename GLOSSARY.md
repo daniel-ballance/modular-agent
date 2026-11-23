@@ -304,7 +304,7 @@ _Avoid_: Prompt, dialog, interrupt, elicitation
 Whether an open connection acts for an actor in a session and marks that actor present. Presence is not proof of a person's approval.
 
 **Late answer**:
-An answer to a non-approval question left open after its originating turn ended. Not a late batch model response.
+An answer to a question left open after its originating turn ended. Not a late batch model response.
 
 **Continuation**:
 A keyed turn that settles a previous turn's open calls once their questions are answered.
@@ -312,6 +312,9 @@ A keyed turn that settles a previous turn's open calls once their questions are 
 **Approval**:
 An input request about one exact tool call and its tool registration. The recipient's approval view shows the tool name and input for that call.
 _Avoid_: Permission request, confirmation
+
+**Waiting approval**:
+An approval left open past its turn for a call that has not started. The actor is asked for consent, not for a tool result. Proposed in [ADR 0034](docs/adr/0034-approvals-that-wait.md).
 
 **Approval policy**:
 The session setting for the approval check: `off` skips it, `ask` asks except for tools a trusted definition marks read-only, `all` asks for every call, and `never` refuses every call without asking. See [Tool dispatch](docs/contracts.md#tool-dispatch) and the [ACP options](docs/bindings/acp.md#configuration-options).
