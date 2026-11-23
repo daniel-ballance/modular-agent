@@ -12,6 +12,7 @@ A token configuration also names a stable, nonsecret client ID. It identifies th
 |---|---|
 | `GET /agui/v1` | Returns `{ binding: "modular-agent-agui/1", protocolVersion: "1.0", declaration }` for the authenticated client. |
 | `POST /agui/v1/threads` | Takes `{}`. Creates a provisional session and returns HTTP 201 with `{ threadId, declaration }`. The operator chooses the project and tenant for this route. Requires `input` and `watch`. No client-supplied project, tenant, MCP servers or settings. |
+| `GET /agui/v1/threads?after&limit` | Lists the kept threads this client may watch, in the route's project and tenant, most recently changed first. Returns `{ threads: Thread[], next?: string }`; see [Listing threads](#listing-threads). Listing does not open, join or mark presence. |
 | `GET /agui/v1/threads/{threadId}` | Opens or follows an authorized session with `watch`. Returns `{ threadId, declaration, messages, cursor, waiting }`, a fresh snapshot and current wait status. Use this to reconnect. |
 | `GET /agui/v1/threads/{threadId}/presence` | Opens an optional, single presence stream per client and session with `watch`. Returns `text/event-stream` with SSE comments only, not AG-UI events. The client keeps it open to answer in-turn interrupts. The server MUST clear presence on loss or loss of scope; it sends a comment at least every 15 seconds. This route confers no rights. |
 | `POST /agui/v1/run` | Takes one `RunAgentInput` and returns an AG-UI SSE stream. Requires `watch` and the rights for each requested operation. |
@@ -88,6 +89,15 @@ The HTTP adapter stages the executable handoff after `toolStarted` and holds it 
 
 A configured plugin owns the document. Subscribe to its `modular-agent.agui.stateSnapshot` events with `{ revisionId, snapshot }` and its `modular-agent.agui.stateDelta` events with `{ baseRevisionId, revisionId, delta }`. Revision IDs are opaque strings. The operator selects the plugin; events of the same name from another plugin are not state. Gate these events before projection. The binding serves at most one document per session. An input `state` is a client's copy, not an update. The adapter starts each run with the plugin's current snapshot if the plugin is present. It MUST project a gated delta only when its base is the revision last sent unchanged to that recipient. Deltas use RFC 6902. If the base is stale or a gate blocks or changes a patch, suppress it. Send a fresh gated snapshot before any further delta; do not use a redacted snapshot as an unredacted patch base. If the snapshot is withheld, suppress state output. No plugin means no state events. The Harness does not merge, persist or authorize a shared document as a new kind of state. Plugins remain responsible for their controlled copies and erasure.
 
+## Listing threads
+
+A client that lost track of its threads, or a host that was restarted, finds open work with `GET /agui/v1/threads`. Each `Thread` is `{ threadId, updatedAt, waiting: { questions: Count, toolCalls: Count, turn: "none" | "running" | "interrupted" } }`, with `updatedAt` in ISO 8601.
+
+- The server MUST list only kept sessions the authenticated client may discover with `watch`, using the same test as `GET /agui/v1/threads/{threadId}`, and MUST omit the rest without saying they exist. It lists no ephemeral sessions.
+- `questions` counts open questions this client is eligible to answer, and `toolCalls` counts open Interface-run calls on this client's route, both from committed records. `turn` is `running` while a turn runs, `interrupted` when a turn was cut off and waits for the session to be reopened, and `none` otherwise. The counts carry no content; read the thread's snapshot for details under the output gate.
+- `limit` is 1 to 500, default 100. `next` is an opaque cursor for the following page; pass it as `after`. An unknown or expired cursor is `400 invalid_request`. A listing is not a consistent snapshot across pages.
+- The server MAY compute `waiting` lazily but MUST NOT report `none` for a thread whose committed records show an open question, open call or unfinished turn.
+
 ## Output gate, errors and reconnect
 
 Check `watch`, scope and [pending erasure](../contracts.md#cross-session-coordination) at delivery, including after a buffered wait. Gate exact recipient views before projecting events and recheck the outgoing shape and size. Gate initial and final snapshots, errors, declarations, state, custom data and replay. Omit withheld display items and their dependent frames. Do not reopen a withheld stream through a snapshot or extension. If a required end, question or actionable view cannot be delivered, use a content-free error when needed to keep the stream valid. Held streams use [the shared rules](data.md#output-events) and [remote gate limits](plugin.md#held-output). Never store redactions as agent history.
@@ -101,3 +111,7 @@ For example, an approved browser tool can be left open by turn `t1`. Run `r1` fi
 ## Trace context
 
 Use [the telemetry profile](../telemetry.md#context-on-the-wire). Extract W3C HTTP `traceparent` and operator-allowed `tracestate` per authenticated work request and only from a trusted peer. No baggage. A starting input carries its context even if queued. A question answer in a live turn or a result report does not reparent that existing turn; a later continuation has its own operation context and can link to its origin. Use the stored parent for crash recovery. A presence stream, snapshot read or connection upgrade does not determine a turn's trace. SSE responses carry no W3C context fields; do not put context in AG-UI metadata, `CUSTOM`, `RAW`, history projections, errors or tokens.
+
+## Changes
+
+- **2026-11-23.** Add `GET /agui/v1/threads` to list a client's threads with what each is waiting on. Additive.

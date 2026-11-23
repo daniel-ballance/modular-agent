@@ -43,6 +43,7 @@ ma sessions [--all]          list saved sessions
 | `--acp` | serve ACP on stdio, for an editor or host. With no operator project restriction this local mode serves any project the client names, each with its own trust. |
 | `--listen ADDR` | with `--acp`, serve ACP on a WebSocket instead of stdio ([an agent service](../bindings/websocket.md#an-agent-service)); with `--agui`, serve AG-UI over HTTP; with both, both on one listener. `ADDR` is a loopback `HOST:PORT`, or a `ws:` URL for ACP alone; `ma` has no TLS options. `ma` serves until stopped. |
 | `--agui` | serve the AG-UI HTTP and SSE binding on `--listen ADDR`. It requires a listener and never uses stdio. With `--acp`, the same listener accepts ACP WebSocket upgrades at `/`. `ma` prints the HTTP origin when ready. `ma` has no TLS options; bind to loopback. Use `--token-file FILE` for the local user with client ID `ma-local`, or supply policy `actors` with a nonempty `clientId` on every entry. Tokens that share a client ID must bind the same principal and scope. The operator's `--project` selects the AG-UI creation project; the single-user configuration creates sessions without a tenant. See the [AG-UI binding](../bindings/agui.md). |
+| `--resume-open` | with `--acp` or `--agui`, reopen at start-up every kept session in the operator's project that has an interrupted turn, so durable turns carry on without waiting for a client. See [Resuming at start-up](#resuming-at-start-up). Also the setting `resume_open`. |
 | `--token-file FILE` | with `--listen`, shorthand for one token acting as the local user. Do not combine with a policy `actors` list. |
 | `--policy FILE` | read this operator policy instead of `policy.json` in the configuration folder. |
 | `-h`, `--help`; `-V`, `--version` | help; the version, which names the implementation's language |
@@ -59,7 +60,7 @@ With no `--model` and none in settings, `ma` uses the first Provider that is sig
 
 | File, under the configuration folder | Purpose |
 |---|---|
-| `settings.json` | Session defaults: `model`, `thinking`, `step_limit`, `output_limit`, `model_tools` |
+| `settings.json` | Session defaults: `model`, `thinking`, `step_limit`, `output_limit`, `model_tools`; and `resume_open` (boolean, default false), read only from the global file, never from a project |
 | `policy.json` | Operator-owned [connection policy and limits](#connection-policy-and-limits). |
 | `auth.json` | Sign-ins, written by `ma login`. Mode 0600. Format below. |
 | `mcp.json` | `{"mcpServers": {...}}` in the form Pi and other clients use. `${NAME}` takes a value from the environment. |
@@ -231,13 +232,23 @@ Each implementation honors these environment variables, so one set of [checks](.
 | `MODULAR_AGENT_SCRIPT_LOG` | With `MODULAR_AGENT_SCRIPT`: a file to which each model request is appended as one JSON line, `{"system": string, "tools": [name], "messages": [message]}`. A message is `{"role": "user", "text"}`, `{"role": "assistant", "text", "toolCalls": [{"name", "input"}]}` or `{"role": "toolResult", "name", "text"}`; `text` joins the message's text parts. |
 | `MODULAR_AGENT_CONFORMANCE` | `1` adds the conformance parts the [ACP kit](../../conformance/acp/README.md) needs ([conformance mode](../bindings/acp.md#conformance-mode)), so the kit can run against `ma --acp`. |
 
+## Resuming at start-up
+
+Off by default: a restart is not an automatic wake service ([Recovery](../contracts.md#recovery-and-repeating-work)). With `--resume-open` or `resume_open: true`, `ma` serving `--acp` or `--agui` MUST, before it accepts connections:
+
+- list the kept sessions in the operator's configured project, and reopen each one whose committed records show an interrupted turn, as an open by the operator's local actor with `watch`, so the normal recovery rules apply. A durable turn carries on; with `--runtime transient` the interrupted turn ends as failed, as on any reopen.
+- skip a session it cannot open because another writer holds it, and report each session it resumed or skipped on stderr, one line each, without content.
+- not reopen sessions that have only open questions or open Interface-run calls and no interrupted turn: those wait for a client, as without the option.
+
+The option changes when recovery starts, not what it may do: authority, repeat-safety and the output gate are those of an ordinary reopen. It has no effect on interactive or print mode, which open one session already.
+
 ## Checks
 
 Each implementation passes:
 
 - the [reference checks](../../conformance/reference/README.md), which run `ma` with a scripted model and look only at its output and its effects on files;
 - the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp`, and with `--connect` against `ma --acp --listen`;
-- the [AG-UI kit](../../conformance/agui/README.md) against `ma --agui --listen`;
+- the [AG-UI kit](../../conformance/agui/README.md) against `ma --agui --listen`, including the thread listing;
 - its own tests, including that it depends only on its SDK's public API.
 
 The reference check `telemetry-export` runs a scripted turn without endpoints and checks that it sends nothing to the default OTLP endpoint. The check uses a private network namespace for this assertion and skips only this assertion if it cannot create one. With a loopback endpoint and always-on sampler, check the invocation and inference spans, `gen_ai.agent.name=ma` and no content, and check the configured `service.name` on the OTLP resource as the receiver gets it; a backend's span query may not return resource attributes. Repeat with `OTEL_SDK_DISABLED=true`; export stops and the declaration stays the same.
