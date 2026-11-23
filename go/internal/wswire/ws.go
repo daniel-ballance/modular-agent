@@ -174,6 +174,9 @@ func ListenAgent[T any](ctx context.Context, addr string, secure *TLSOptions, pr
 		endpoint.Host = net.JoinHostPort(host, boundPort)
 	}
 	s := &Server{URL: endpoint.String(), connections: map[*Conn]struct{}{}, done: make(chan struct{})}
+	if routes != nil {
+		s.URL = strings.TrimSuffix(s.URL, "/")
+	}
 	u := websocket.Upgrader{Subprotocols: []string{protocol}, HandshakeTimeout: handshakeTimeout}
 	s.http = &http.Server{ReadHeaderTimeout: handshakeTimeout, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var given string

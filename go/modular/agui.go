@@ -31,7 +31,11 @@ type ServeAGUIOptions struct {
 	Tenant  string
 	ACP     bool
 	Origins []string
-	Warn    func(field string)
+	// TraceStateKeys permits these vendor keys from TrustTrace tokens on local work only.
+	TraceStateKeys []string
+	// JoinOnOpen permits first-time admission of an in-scope actor to an existing multi-actor session.
+	JoinOnOpen *bool
+	Warn       func(field string)
 	// StatePlugin owns the single shared document. CurrentState reads its current revision and snapshot.
 	StatePlugin  string
 	CurrentState func(context.Context, string) (string, json.RawMessage, error)
@@ -57,13 +61,18 @@ type agClient struct {
 	cursor    string
 	digest    [sha256.Size]byte
 	active    bool
+	runs      [][32]byte
 	presence  *agPresence
 	tools     *InterfaceToolConnection // retained only across a live in-turn interrupt
-	delivered map[string]agQuestion
+	delivered map[string]agDelivery
 }
 type agPresence struct {
 	ctx    context.Context
 	detach func()
+}
+type agDelivery struct {
+	presence *agPresence
+	digest   [32]byte
 }
 type agQuestion struct {
 	q        api.Question
@@ -101,6 +110,15 @@ func (a *Agent) serveAGUI(ctx context.Context, opt ServeAGUIOptions, wrap func(h
 	}
 	if (opt.StatePlugin == "") != (opt.CurrentState == nil) {
 		return bad("AG-UI state needs a plugin name and snapshot reader")
+	}
+	if opt.JoinOnOpen == nil {
+		singleLocal := true
+		for _, p := range opt.Actors {
+			if p.Actor.ID != localActor {
+				singleLocal = false
+			}
+		}
+		opt.JoinOnOpen = &singleLocal
 	}
 	srv := &agServer{a: a, opt: opt, states: map[[2]string]*agClient{}}
 	tokens := map[string]agPrincipal{}
@@ -172,6 +190,14 @@ func (s *agServer) http(w http.ResponseWriter, r *http.Request, p *agPrincipal) 
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if r.Method == "OPTIONS" && len(r.Header.Values("Origin")) == 1 && slices.Contains(s.opt.Origins, r.Header.Get("Origin")) {
+		w.Header().Set("Access-Control-Allow-Origin", r.Header.Get("Origin"))
+		w.Header().Set("Vary", "Origin")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, MA-History-Cursor, Traceparent, Tracestate")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if p == nil {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		agHTTPError(w, agCode("unauthenticated"))
@@ -196,6 +222,10 @@ func (s *agServer) http(w http.ResponseWriter, r *http.Request, p *agPrincipal) 
 	q := &agRequest{agServer: s, agPrincipal: p, ctx: api.AsActor(r.Context(), p.Actor.ID), rights: p.Actor.Rights, w: w}
 	q.ctx = api.WithSessionScope(api.WithConnectionRights(q.ctx, &q.rights), q.scope)
 	if err := q.serve(r); err != nil {
+		status, code := agStatus(err)
+		if _, gateErr := q.encode("agui.error", agObject{"code": code}); gateErr != nil && status != 404 {
+			err = withheld
+		}
 		agHTTPError(w, err)
 	}
 }
@@ -245,6 +275,17 @@ func agHTTPError(w http.ResponseWriter, err error) {
 func (q *agRequest) scope(project, tenant string) bool {
 	return project == q.a.project && (q.Projects == nil || slices.Contains(q.Projects, project)) && (q.Tenants == nil && tenant == "" || slices.Contains(q.Tenants, tenant))
 }
+func (q *agRequest) narrowed(tenant string, limit *[]string) Actor {
+	p := q.Actor
+	if tenant != "" {
+		t := q.a.tenantGrants[tenant]
+		p.Rights = *api.IntersectConnectionRights(&p.Rights, &t.Rights)
+	}
+	if limit != nil {
+		p.Rights = slices.DeleteFunc(slices.Clone(p.Rights), func(s string) bool { return s != "administer" && !slices.Contains(*limit, s) })
+	}
+	return p
+}
 func (q *agRequest) allowed(right string) bool {
 	return slices.Contains(q.rights, right) && q.a.a.Authorize(q.id, q.Actor.ID, right)
 }
@@ -261,6 +302,16 @@ type agHost interface {
 	SessionInterruption(string) (<-chan struct{}, <-chan struct{}, error)
 }
 
+func (q *agRequest) member(s api.Session) bool {
+	if !q.scope(s.Project, s.Tenant) {
+		return false
+	}
+	_, recorded := s.Actors[q.Actor.ID]
+	if !recorded && q.Actor.ID != s.Actor && (!*q.opt.JoinOnOpen || !q.a.severalActors) {
+		return false
+	}
+	return q.host().DiscoverForHost(s, q.Actor)
+}
 func (q *agRequest) host() agHost { return q.a.a.(agHost) }
 func (q *agRequest) attach(id string) error {
 	if id == "" || !slices.Contains(q.rights, "watch") {
@@ -283,20 +334,21 @@ func (q *agRequest) attach(id string) error {
 			return missing
 		}
 		snap = list[at]
-		if !q.scope(snap.Project, snap.Tenant) || !q.host().DiscoverForHost(snap, q.Actor) {
+		if !q.member(snap) {
 			return missing
 		}
-		if err := q.host().OpenForHost(q.ctx, id, q.Actor); err != nil {
+		if err := q.host().OpenForHost(q.ctx, id, q.narrowed(snap.Tenant, snap.Limit)); err != nil {
 			return err
 		}
 		if _, err := q.a.a.Wait(q.ctx, id); err != nil {
 			return err
 		}
 	} else {
-		if !q.scope(snap.Project, snap.Tenant) || !q.host().DiscoverForHost(snap, q.Actor) {
+		if !q.member(snap) {
 			return missing
 		}
-		if err := q.host().JoinHost(id, q.Actor); err != nil {
+		grant := q.narrowed(snap.Tenant, snap.Limit)
+		if err := q.host().JoinHost(id, grant); err != nil {
 			return err
 		}
 	}
@@ -395,7 +447,11 @@ func (q *agRequest) serve(r *http.Request) error {
 		if !q.scope(q.a.project, q.opt.Tenant) || !slices.Contains(q.rights, "watch") || !slices.Contains(q.rights, "input") {
 			return denied
 		}
-		id, err := q.host().NewForHost(q.ctx, q.a.project, q.opt.Tenant, q.Actor)
+		actor := q.narrowed(q.opt.Tenant, nil)
+		if !slices.Contains(actor.Rights, "input") || !slices.Contains(actor.Rights, "watch") {
+			return denied
+		}
+		id, err := q.host().NewForHost(q.ctx, q.a.project, q.opt.Tenant, actor)
 		if err != nil {
 			return err
 		}
@@ -480,6 +536,9 @@ func (q *agRequest) present() error {
 	}
 }
 func (q *agRequest) frame(b []byte) error {
+	ctrl := http.NewResponseController(q.w)
+	_ = ctrl.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	defer ctrl.SetWriteDeadline(time.Time{})
 	if _, err := fmt.Fprintf(q.w, "data: %s\n\n", b); err != nil {
 		return err
 	}

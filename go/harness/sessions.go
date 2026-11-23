@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1009,7 +1010,7 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (receipt a
 		}
 	}
 	in.ConnectionRights = &starting
-	in.TraceContext = telemetry.Inject(ctx)
+	in.TraceContext = telemetry.WorkWire(ctx)
 	r, err := c.admitLocked(s, in, ctx)
 	if errors.Is(err, api.ErrCapacity) {
 		telemetry.Event(ctx, "modular_agent.capacity.refused")
@@ -1184,7 +1185,7 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 	if resume != nil {
 		turnID = resume.Turn
 	}
-	ctx = telemetry.Scope(telemetry.Extract(ctx, in.TraceContext), snap.ID, turnID, "", h.agentName)
+	ctx = telemetry.Scope(telemetry.WorkParent(ctx, in.TraceContext), snap.ID, turnID, "", h.agentName)
 	ctx = api.WithExecution(api.AsActor(ctx, in.Actor), api.Execution{Session: snap.ID, Turn: turnID})
 	ctx = api.WithJobContributors(api.WithConnectionRights(ctx, in.ConnectionRights), in.Actor, in.ViaActor, in.ReleasedBy)
 	var tools []api.Tool
@@ -1195,7 +1196,7 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 				return api.Outcome{Status: "failed", Error: "duplicate tool " + tool.Name}
 			}
 			seen[tool.Name] = true
-			if registered := h.interfaceTools[tool.Name]; registered != nil && (access != nil && access.Model().RunsTools || !runtime.Declaration().InterfaceTools || !h.interfaceAvailable(s, registered, tool.Name)) {
+			if registered := h.interfaceTools[tool.Name]; registered != nil && (access != nil && access.Model().RunsTools || !runtime.Declaration().InterfaceTools || !h.interfaceAvailable(s, registered, tool.Name, in, turnID)) {
 				continue
 			}
 			tools = append(tools, tool)
@@ -1489,6 +1490,9 @@ func (c *client) Emit(ctx context.Context, e api.Event) {
 	e.Time = time.Now().UTC()
 	out, err := c.output(ctx, e)
 	if err == nil && !out.Hold {
+		if strings.HasPrefix(e.Kind, "plugin.") && !bytes.Equal(e.Data, out.Event.Data) {
+			out.Event.OutputChanged = true
+		}
 		out.Event.ErasureEpoch = e.ErasureEpoch
 		e = out.Event
 	}

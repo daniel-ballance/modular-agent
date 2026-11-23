@@ -45,6 +45,12 @@ func (i *InterfaceConnection) Pending() ([]PendingInterfaceCall, error) {
 // ReleaseGroup checks every live ticket before authorizing any call in a terminal group.
 // callers must be the committed, gated calls of a completed turn, in call order.
 func (i *InterfaceConnection) ReleaseGroup(ctx context.Context, turn string, callers []api.Call) error {
+	return i.checkGroup(ctx, turn, callers, true)
+}
+func (i *InterfaceConnection) CheckGroup(ctx context.Context, turn string, callers []api.Call) error {
+	return i.checkGroup(ctx, turn, callers, false)
+}
+func (i *InterfaceConnection) checkGroup(ctx context.Context, turn string, callers []api.Call, release bool) error {
 	s := i.s
 	s.mu.Lock()
 	tickets := make([]stagedInterfaceCall, len(callers))
@@ -86,6 +92,9 @@ func (i *InterfaceConnection) ReleaseGroup(ctx context.Context, turn string, cal
 		}
 	}
 	return s.withErasureCheck(s.data, func() error {
+		if !release {
+			return nil
+		}
 		for _, t := range tickets {
 			delete(i.staged, t.entry.ID)
 			delete(s.interfaceUnreleased, t.entry.Call)

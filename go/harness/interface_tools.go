@@ -81,15 +81,16 @@ func (h *Harness) RegisterInterfaceTools(sources []InterfaceSource) error {
 // InterfaceConnection is an independently authenticated, session-scoped route.
 // The transport supplies the principal, scope and ceiling from operator configuration.
 type InterfaceConnection struct {
-	s            *session
-	c            *client
-	actor, route string
-	rights       *[]string
-	scope        func(project, tenant string) bool
-	advertised   map[string]bool
-	notify       chan struct{}
-	staged       map[string]stagedInterfaceCall
-	closed       bool
+	s                    *session
+	c                    *client
+	actor, route         string
+	rights               *[]string
+	scope                func(project, tenant string) bool
+	advertised           map[string]bool
+	inputKey, originTurn string
+	notify               chan struct{}
+	staged               map[string]stagedInterfaceCall
+	closed               bool
 }
 
 type stagedInterfaceCall struct {
@@ -133,7 +134,10 @@ func (i *InterfaceConnection) allowedLocked(right string, saved []string) bool {
 		(i.rights == nil || slices.Contains(*i.rights, right)) && (saved == nil || slices.Contains(saved, right)) && i.c.authorized(i.s.data, i.actor, right)
 }
 
-func (i *InterfaceConnection) Advertise(names []string) error {
+func (i *InterfaceConnection) Advertise(names []string) error { return i.AdvertiseFor(names, "", "") }
+
+// AdvertiseFor limits the offer to the named input or the continuation of the named turn.
+func (i *InterfaceConnection) AdvertiseFor(names []string, inputKey, origin string) error {
 	i.s.mu.Lock()
 	defer i.s.mu.Unlock()
 	if !i.allowedLocked("watch", nil) {
@@ -148,6 +152,7 @@ func (i *InterfaceConnection) Advertise(names []string) error {
 		available[name] = true
 	}
 	i.advertised = available
+	i.inputKey, i.originTurn = inputKey, origin
 	return nil
 }
 
@@ -171,10 +176,13 @@ func (i *InterfaceConnection) canReceiveLocked(source *interfaceSource, name str
 	return i.actor == source.Actor && i.route == source.Route && i.advertised[name] && i.allowedLocked("watch", nil) && i.allowedLocked("tools", nil)
 }
 
-func (h *Harness) interfaceAvailable(s *session, source *interfaceSource, name string) bool {
+func (i *InterfaceConnection) forWork(in api.Input, turn string) bool {
+	return i.inputKey == "" && i.originTurn == "" || i.inputKey != "" && in.Key == i.inputKey || i.originTurn != "" && (turn == i.originTurn || in.Continuation == i.originTurn)
+}
+func (h *Harness) interfaceAvailable(s *session, source *interfaceSource, name string, in api.Input, turn string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return slices.ContainsFunc(s.interfaceConnections, func(i *InterfaceConnection) bool { return i.canReceiveLocked(source, name) })
+	return slices.ContainsFunc(s.interfaceConnections, func(i *InterfaceConnection) bool { return i.forWork(in, turn) && i.canReceiveLocked(source, name) })
 }
 
 func (p *turnPorts) PruneSettledInterfaceCalls(open []api.Call) []api.Call {
@@ -218,7 +226,9 @@ func (p *turnPorts) DispatchInterface(ctx context.Context, call api.Call, lineag
 	}
 	s := p.s
 	s.mu.Lock()
-	at := slices.IndexFunc(s.interfaceConnections, func(i *InterfaceConnection) bool { return i.canReceiveLocked(src, call.Name) })
+	at := slices.IndexFunc(s.interfaceConnections, func(i *InterfaceConnection) bool {
+		return i.forWork(p.input, p.id) && i.canReceiveLocked(src, call.Name)
+	})
 	if at < 0 {
 		s.mu.Unlock()
 		return refuse("Interface tool is unavailable.")
@@ -240,7 +250,7 @@ func (p *turnPorts) DispatchInterface(ctx context.Context, call api.Call, lineag
 	if err := s.reconcileErasureLocked(); err != nil {
 		return refuse("Interface handoff could not check erasure.")
 	}
-	if ctx.Err() != nil || s.checkWriterLocked() != nil || !p.canRunToolsLocked(call.Actor) || !conn.canReceiveLocked(src, call.Name) || !offeredInterface(s.data, p.id, call) {
+	if ctx.Err() != nil || s.checkWriterLocked() != nil || !p.canRunToolsLocked(call.Actor) || !conn.forWork(p.input, p.id) || !conn.canReceiveLocked(src, call.Name) || !offeredInterface(s.data, p.id, call) {
 		return refuse("Interface tool is no longer authorized or available.")
 	}
 	if api.InterfaceHandoffs(s.data)[call.ID].ID != "" || interfaceTerminal(s.data, call.ID).ID != "" {

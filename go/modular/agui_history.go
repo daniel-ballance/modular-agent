@@ -3,7 +3,6 @@ package modular
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"slices"
 	"time"
@@ -87,6 +86,19 @@ func (q *agRequest) history(beforeStepsOf ...string) (h agHistory, err error) {
 			if r.Call != e.Call || r.Status == "" || !item.Visible {
 				continue
 			}
+			r.Content = item.Content
+			settled, err := q.gate(api.Event{Kind: "tool.end", Turn: item.Turn, Step: item.Step, Call: item.Call, Data: api.JSON(r)})
+			if errors.Is(err, api.ErrOutputWithheld) {
+				continue
+			}
+			if err != nil {
+				return h, err
+			}
+			r = api.Decode[api.ToolResult](settled.Data)
+			if r.Call != item.Call || r.Status == "" {
+				continue
+			}
+			item.Content = r.Content
 			m := agObject{"id": toolID(r.Call), "role": "tool", "toolCallId": r.Call, "content": agBody(item.Content)}
 			if r.Status != "completed" {
 				s := item.Content.Text()
@@ -110,7 +122,17 @@ func (q *agRequest) history(beforeStepsOf ...string) (h agHistory, err error) {
 			}
 			msg := agObject{"id": assistantID(e.Step), "role": "assistant"}
 			if text := e.Content.Text(); text != "" {
-				msg["content"] = text
+				// A snapshot is another delivery of the readable model stream. An entry gate alone
+				// cannot stand in for the recipient's stream gate.
+				g, err := q.gate(api.Event{Kind: "model.delta", Turn: e.Turn, Step: e.Step, Data: api.JSON(api.Part{Type: "text", Text: text})})
+				if err != nil && !errors.Is(err, api.ErrOutputWithheld) {
+					return h, err
+				}
+				if err == nil {
+					if p := api.Decode[api.Part](g.Data); p.Type == "text" && p.Text != "" {
+						msg["content"] = p.Text
+					}
+				}
 			}
 			calls := []agObject{}
 			for _, part := range e.Content {
@@ -222,9 +244,15 @@ func (q *agRequest) waitingQuestions() (map[string]agQuestion, error) {
 			if !ended {
 				continue
 			}
-			d = agQuestion{q: v, view: agInterrupt(v)}
 		}
-		out[v.ID] = d
+		view := agInterrupt(v)
+		if ok && sha256.Sum256(api.JSON(view)) != d.digest {
+			continue
+		}
+		if _, err := q.encode("agui.interrupt", view); err != nil {
+			continue
+		}
+		out[v.ID] = agQuestion{q: v, presence: d.presence, view: view}
 	}
 	return out, nil
 }
@@ -249,8 +277,7 @@ func agInterrupt(v api.Question) agObject {
 	case "link", "text":
 		m["responseSchema"] = agObject{"type": "string"}
 		if v.Kind == "link" {
-			d := api.Decode[agObject](v.Details)
-			if uri, ok := d["uri"].(string); ok {
+			if uri := api.Decode[string](v.Details); uri != "" {
 				m["metadata"] = agObject{"modular-agent.link": uri}
 			}
 		}
@@ -320,6 +347,4 @@ func (q *agRequest) snapshotFrames(h agHistory) ([][]byte, string, error) {
 	return [][]byte{m, c}, cursor, nil
 }
 
-// agTraceContext is used only after authenticating and attaching the work POST.
 func agReport(c api.Content) Content { return api.Decode[Content](api.JSON(portable.Content(c))) }
-func agData(raw json.RawMessage) any { return json.RawMessage(raw) }

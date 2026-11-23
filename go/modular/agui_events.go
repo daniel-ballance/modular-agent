@@ -3,6 +3,7 @@ package modular
 import (
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/portable"
+	"slices"
 	"strings"
 )
 
@@ -124,6 +125,22 @@ func (x *agExchange) project(e api.Event) error {
 			return x.finish(api.Outcome{Status: "completed"}, []agObject{d.view})
 		}
 	case "turn.end":
+		snap, err := x.a.a.Snapshot(x.id)
+		if err != nil {
+			return err
+		}
+		out := api.Decode[api.Outcome](e.Data)
+		same := false
+		for _, v := range snap.Branch() {
+			if v.Kind == "turn.end" && v.Turn == e.Turn {
+				raw := api.Decode[api.Outcome](v.Data)
+				same = raw.Status == out.Status && slices.EqualFunc(raw.Open, out.Open, func(a, b api.Call) bool { return a.ID == b.ID })
+				break
+			}
+		}
+		if !same {
+			return withheld
+		}
 		open, err := x.waitingQuestions()
 		if err != nil {
 			return err

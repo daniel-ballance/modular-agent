@@ -118,7 +118,7 @@ func (i *InterfaceConnection) ReportToolResult(ctx context.Context, report api.I
 		if s.interfaceParents == nil {
 			s.interfaceParents = map[string]*telemetry.Wire{}
 		}
-		s.interfaceParents[cp.Turn] = telemetry.Inject(ctx)
+		s.interfaceParents[cp.Turn] = telemetry.WorkWire(ctx)
 		i.c.h.armInterfaceTimerLocked(s)
 	}
 	s.mu.Unlock()

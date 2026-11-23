@@ -2,6 +2,7 @@ package modular
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -204,7 +205,8 @@ func (x *agExchange) matches(snap api.Session, turn string) bool {
 func (q *agRequest) run(r *http.Request, in agInput) error {
 	s := q.state
 	s.mu.Lock()
-	if s.active {
+	runKey := sha256.Sum256([]byte(in.run))
+	if s.active || slices.Contains(s.runs, runKey) {
 		s.mu.Unlock()
 		return stale
 	}
@@ -248,7 +250,7 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 		return err
 	}
 	if q.TrustTrace {
-		q.ctx = telemetry.Extract(q.ctx, &telemetry.Wire{Parent: r.Header.Get("traceparent")})
+		q.ctx = telemetry.HTTPParent(q.ctx, r.Header.Get("traceparent"), r.Header.Get("tracestate"), q.opt.TraceStateKeys)
 	}
 	x := &agExchange{agRequest: q, in: in, work: p, conn: c, epoch: h.epoch, steps: map[string]bool{}, text: map[string]string{}, reasoning: map[string]bool{}, emittedCalls: map[string]bool{}}
 	stopEvents, events, lost := x.follow()
@@ -261,7 +263,7 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 		return err
 	}
 	if c != nil && !keep {
-		if err = c.Advertise(p.names...); err != nil {
+		if err = c.connection.AdvertiseFor(p.names, p.key, p.origin); err != nil {
 			return denied
 		}
 	}
@@ -277,15 +279,22 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 		x.terminal = receipt.When == "command"
 	} else {
 		for _, a := range p.answers {
+			live, err := q.waitingQuestions()
+			if err != nil {
+				return err
+			}
+			if _, ok := live[a.Request]; !ok {
+				return stale
+			}
 			s.mu.Lock()
 			d, ok := s.delivered[a.Request]
 			if ok && d.presence != nil && (s.presence != d.presence || d.presence.ctx.Err() != nil) {
 				s.mu.Unlock()
 				return stale
 			}
-			if ok && !q.eligible(d.q) {
+			if !ok && live[a.Request].presence != nil {
 				s.mu.Unlock()
-				return denied
+				return stale
 			}
 			s.mu.Unlock()
 			if err = q.a.q.manager().Answer(q.ctx, q.id, a); err != nil {
@@ -293,7 +302,9 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 			}
 			s.mu.Lock()
 			delete(s.delivered, a.Request)
-			s.disconnect()
+			if len(s.delivered) == 0 {
+				s.disconnect()
+			}
 			s.mu.Unlock()
 		}
 		for _, report := range p.reports {
@@ -306,6 +317,12 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 			}
 		}
 	}
+	s.mu.Lock()
+	if len(s.runs) >= 256 {
+		s.runs = slices.Delete(s.runs, 0, 1)
+	}
+	s.runs = append(s.runs, runKey)
+	s.mu.Unlock()
 	keep = false
 	q.w.Header().Set("Content-Type", "text/event-stream")
 	if err = x.event(agObject{"type": "RUN_STARTED", "threadId": q.id, "runId": in.run, "protocolVersion": "1.0"}); err != nil {
@@ -453,9 +470,9 @@ func (x *agExchange) offerQuestion(e api.Event) {
 			p.detach = x.a.q.manager().Connect(x.id, x.Actor.ID)
 		}
 		if s.delivered == nil {
-			s.delivered = map[string]agQuestion{}
+			s.delivered = map[string]agDelivery{}
 		}
-		s.delivered[v.ID] = agQuestion{v, p, intended}
+		s.delivered[v.ID] = agDelivery{p, sha256.Sum256(api.JSON(intended))}
 		return
 	}
 }
@@ -547,6 +564,11 @@ func (x *agExchange) finish(out api.Outcome, interrupts []agObject) error {
 			if actual.ID != call.ID {
 				return withheld
 			}
+			ev := api.Event{Kind: "interface.handoff", Turn: x.turn, Step: actual.Step, Call: actual.ID, Actor: x.Actor.ID, Data: api.JSON(actual)}
+			g, err := x.gate(ev)
+			if err != nil || !agSameBytes(g.Data, ev.Data) {
+				return withheld
+			}
 			framesForCall, err := x.toolFrames(actual, h, nil)
 			if err != nil {
 				return err
@@ -573,11 +595,27 @@ func (x *agExchange) finish(out api.Outcome, interrupts []agObject) error {
 		return err
 	}
 	if len(calls) > 0 {
-		if err = x.conn.connection.ReleaseGroup(x.ctx, x.turn, calls); err != nil {
+		// Gate the entire executable group, not just its separately valid pieces.
+		group := make([]json.RawMessage, len(frames))
+		for i, b := range frames {
+			group[i] = b
+		}
+		if _, err = x.encode("agui.release", group); err != nil {
+			return err
+		}
+		if err = x.fresh(x.epoch); err != nil {
+			return err
+		}
+		if err = x.conn.connection.CheckGroup(x.ctx, x.turn, calls); err != nil {
 			return err
 		}
 	}
-	for _, b := range frames {
+	for i, b := range frames {
+		if i == len(frames)-1 && len(calls) > 0 {
+			if err = x.conn.connection.ReleaseGroup(x.ctx, x.turn, calls); err != nil {
+				return err
+			}
+		}
 		if err = x.fresh(x.epoch); err != nil {
 			return err
 		}
@@ -619,6 +657,47 @@ func (x *agExchange) optional(event agObject) error {
 func (x *agExchange) custom(kind string, data any) error {
 	return x.optional(agObject{"type": "CUSTOM", "name": "modular-agent.event", "value": agObject{"type": kind, "data": data}})
 }
+func agPatch(value any) bool {
+	list, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	pointer := func(v any) bool {
+		s, ok := v.(string)
+		if !ok || s != "" && s[0] != '/' {
+			return false
+		}
+		for i := 0; i < len(s); i++ {
+			if s[i] == '~' {
+				i++
+				if i == len(s) || s[i] != '0' && s[i] != '1' {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	for _, v := range list {
+		p := agMap(v)
+		if !pointer(p["path"]) {
+			return false
+		}
+		switch p["op"] {
+		case "add", "replace", "test":
+			if _, ok := p["value"]; !ok {
+				return false
+			}
+		case "copy", "move":
+			if !pointer(p["from"]) {
+				return false
+			}
+		case "remove":
+		default:
+			return false
+		}
+	}
+	return true
+}
 func (x *agExchange) currentState() error {
 	if x.opt.CurrentState == nil {
 		return nil
@@ -648,7 +727,7 @@ func (x *agExchange) stateEvent(kind string, data agObject) error {
 			x.revision = ""
 			return nil
 		}
-		if _, ok := data["delta"].([]any); !ok {
+		if !agPatch(data["delta"]) {
 			x.revision = ""
 			return nil
 		}
@@ -671,7 +750,10 @@ func (x *agExchange) pluginEvent(e api.Event) error {
 	}
 	var owner, name string
 	for _, p := range snap.Plugins {
-		if strings.HasPrefix(e.Kind, "plugin."+p+".") && len(p) > len(owner) {
+		if strings.HasPrefix(e.Kind, "plugin."+p+".") {
+			if owner != "" {
+				return nil
+			} // ambiguous plugin prefix
 			owner = p
 			name = strings.TrimPrefix(e.Kind, "plugin."+p+".")
 		}
@@ -683,6 +765,13 @@ func (x *agExchange) pluginEvent(e api.Event) error {
 	case "modular-agent.agui.stateSnapshot", "modular-agent.agui.stateDelta":
 		if owner != x.opt.StatePlugin {
 			return nil
+		}
+		if e.OutputChanged {
+			x.revision = ""
+			if name == "modular-agent.agui.stateDelta" {
+				return nil
+			}
+			defer func() { x.revision = "" }()
 		}
 		return x.stateEvent(strings.TrimPrefix(name, "modular-agent.agui."), api.Decode[portable.Object](e.Data))
 	case "modular-agent.agui.raw":

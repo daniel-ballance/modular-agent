@@ -394,6 +394,11 @@ func (f *agFixture) control(ctx context.Context, op, id, name string, ms int64) 
 	ctx = api.AsActor(ctx, "kit-owner")
 	switch op {
 	case "inspect":
+		if f.Name == "trace" {
+			if _, err := f.host.Wait(ctx, id); err != nil {
+				return nil, err
+			}
+		}
 		return f.evidence(id), nil
 	case "advance":
 		f.clock.advance(ms)
@@ -508,7 +513,7 @@ func TestAGUIKitProgram(t *testing.T) {
 	f.host = port
 	must(load(f.parts()))
 	must(load(api.Plugin{Name: "other", Setup: func(api.API) error { return nil }}))
-	opt := modular.ServeAGUIOptions{Listen: os.Getenv("MA_AGUI_LISTEN"), Tenant: "test", ACP: true, Warn: func(s string) { f.mu.Lock(); defer f.mu.Unlock(); f.warnings = append(f.warnings, s) }}
+	opt := modular.ServeAGUIOptions{Listen: os.Getenv("MA_AGUI_LISTEN"), Tenant: "test", ACP: true, JoinOnOpen: new(true), TraceStateKeys: []string{"kit"}, Warn: func(s string) { f.mu.Lock(); defer f.mu.Unlock(); f.warnings = append(f.warnings, s) }}
 	if f.Name == "state-and-gate" {
 		opt.StatePlugin = "kit"
 		opt.CurrentState = func(context.Context, string) (string, json.RawMessage, error) {

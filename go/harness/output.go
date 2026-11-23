@@ -1,11 +1,13 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 	"slices"
+	"strings"
 )
 
 type outputListener struct {
@@ -64,6 +66,9 @@ func (c *client) deliverOutput(ctx context.Context, final api.Event, events []ap
 					return
 				}
 				view := clone(event)
+				if strings.HasPrefix(final.Kind, "plugin.") {
+					view.OutputChanged = final.OutputChanged || !bytes.Equal(view.Data, final.Data)
+				}
 				view.ErasureEpoch = epoch
 				listener.deliver(view)
 			}
