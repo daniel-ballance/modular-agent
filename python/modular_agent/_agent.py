@@ -30,6 +30,7 @@ from ma_core.wire import model_out, settings_in, settings_out
 from ma_durable import Durable
 from ma_harness import Harness
 from ma_harness.authority import CONNECTION_AUTHORITY, PERMISSIONS, read_tenants
+from ma_harness.interface_tools import SOURCE, registrations as interface_registrations
 from ma_history import History
 from ma_history.http import HTTPHistory
 from ma_jobs import Jobs
@@ -56,6 +57,7 @@ from ._credentials import CredentialStore, _CredentialAdapter, environment_crede
 from ._environment import LocalEnvironment, MemoryEnvironment
 from ._history import HistoryStore
 from ._history_port import HistoryPort, _PortHistory
+from ._interface_tools import InterfaceToolConnection, InterfaceToolHandoff, InterfaceToolSource
 from ._runtime_port import _LocalRuntime
 from ._native import (
     _LocalPlugin,
@@ -878,6 +880,30 @@ class Agent:
             for row in catalog
         ]
 
+    def connect_interface_tools(
+        self,
+        *,
+        actor_id: str,
+        route_id: str,
+        on_handoff: Callable[[InterfaceToolHandoff], None] | None = None,
+        rights: Sequence[str] | None = None,
+        tenants: Sequence[str | None] = (None,),
+    ) -> InterfaceToolConnection:
+        """Bind an independently authenticated principal and operator route.
+
+        Only trusted adapter code may call this method. A handoff callback
+        receives the request synchronously and must return without blocking.
+        """
+        if self._closed or not self._h.interface_enabled():
+            raise AgentError(ErrorCode.NOT_SUPPORTED, "Interface tools are not enabled")
+        if self._h.interface_routes.get(route_id) != actor_id:
+            raise AgentError(ErrorCode.FORBIDDEN, "Interface route does not belong to this actor")
+        if rights is not None and not set(rights) <= PERMISSIONS:
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, "Unknown Interface right")
+        if any(t is not None and t not in self._h.tenants for t in tenants):
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, "Unknown Interface tenant")
+        return InterfaceToolConnection(self, actor_id, route_id, on_handoff, rights, tenants)
+
     def reservation_limits(self) -> dict[str, dict[str, int]]:
         """Return the operator's limits, never live use or another session's state."""
         return cast(dict[str, dict[str, int]], deepcopy(self._h.capacity.limits))
@@ -886,7 +912,7 @@ class Agent:
         if self._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")
         parts = self._h.declarations(str(self._project))
-        value = _declaration(parts)
+        value = _declaration(parts, interface_tools=self._h.interface_enabled())
         runtime = parts[self._h.capabilities["runtime"][0]]
         environment = parts[self._h.capabilities["environment"][0]]
         store = parts[self._h.capabilities["history"][0]]
@@ -1195,6 +1221,7 @@ def create_agent(
     credentials: CredentialStore | None = None,
     providers: Sequence[Provider] = (),
     tools: Sequence[Tool] = (),
+    interface_tools: Sequence[InterfaceToolSource] = (),
     plugins: Sequence[Plugin] = (),
     process_plugins: Sequence[ProcessPlugin | JsonObject] | None = None,
     service_plugins: Sequence[ServicePlugin] | None = None,
@@ -1546,6 +1573,26 @@ def create_agent(
                 and h.plugins[environment_owner] is local
             ):
                 raise ValueError("Local environment recovery needs data_dir")
+            if interface_tools:
+                registered, routes = interface_registrations(interface_tools)
+                existing = await h.call("@harness", "tools", "definitions", {})
+                if set(registered) & {tool["name"] for tool in existing} or SOURCE in h.plugins:
+                    raise ValueError("Conflicting Interface tool registration")
+                h.interface_tools, h.interface_routes = registered, routes
+                h.interface_advertisements = {
+                    tool["name"]: deepcopy(tool)
+                    for spec in interface_tools
+                    for tool in spec["tools"]
+                }
+                if not h.interface_enabled():
+                    raise ValueError("The Runtime does not support Interface tools")
+                if hasattr(h, "external_tool_names"):
+                    h.external_tool_names.update(
+                        {
+                            name: (SOURCE, registration[0])
+                            for name, registration in registered.items()
+                        }
+                    )
             runtime_owner = h.capabilities["runtime"][0]
             continues = bool(h.plugins[runtime_owner].declarations.get("durable"))
             # Offline ACP fixtures exercise both Runtime kinds with persistent

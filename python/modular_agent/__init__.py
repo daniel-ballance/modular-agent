@@ -113,6 +113,13 @@ from ._history import (
     memory_history as memory_history,
     serve_history as serve_history,
 )
+from ._interface_tools import (
+    InterfaceToolConnection as InterfaceToolConnection,
+    InterfaceToolDisposition as InterfaceToolDisposition,
+    InterfaceToolHandoff as InterfaceToolHandoff,
+    InterfaceToolReport as InterfaceToolReport,
+    InterfaceToolSource as InterfaceToolSource,
+)
 from ._jobs import (
     Job as Job,
     JobContext as JobContext,

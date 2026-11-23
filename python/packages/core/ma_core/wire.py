@@ -419,6 +419,7 @@ def entry_out(e):
             "kind": e.get("data", {}).get("originalKind", kind),
             "erased": True,
             **{TAGS[k]: e[k] for k in ("turn", "step", "call", "job") if e.get(k) is not None},
+            **({"sources": e["copies"]} if e.get("data", {}).get("interfaceErasure") else {}),
             **{
                 k: e["wire_fields"][k]
                 for k in ("inputId", "inputIds", "requestId", "sources", "usage", "jobKey")
@@ -596,7 +597,11 @@ def entry_in(e, sid, default_actor="user"):
         "parent": e.get("parentId"),
         "kind": native,
         "writer": e.get("writer", "history"),
-        "actor": e.get("actorId") or default_actor,
+        **(
+            {"actor": e.get("actorId") or default_actor}
+            if kind != "toolResult" or "actorId" in e
+            else {}
+        ),
         "time": datetime.fromtimestamp(e.get("time", 0) / 1000, UTC).isoformat(),
         "visible": e.get("modelVisible", False),
         "copies": e.get("sources") or [],

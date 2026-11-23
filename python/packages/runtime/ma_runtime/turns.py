@@ -8,7 +8,7 @@ from referencing import Registry
 
 from ma_core import TOOL_RESULT_BYTES, lower_reasoning, AgentError, content, identity
 from ma_core import telemetry as ot
-from ma_core.recovery import STEP_AFTER, step_checkpoint
+from ma_core.recovery import HANDOFF, STEP_AFTER, step_checkpoint
 from ma_core.wire import (
     entry_out,
     model_out,
@@ -138,9 +138,11 @@ class Turns:
                 ot.error(operation, "turn_failed")
             return result
 
-    async def _definitions(self, sid):
+    async def _definitions(self, sid, turn=None):
         try:
-            return await self.api.call("tools", "definitions", {"session": sid})
+            return await self.api.call(
+                "tools", "definitions", {"session": sid, **({"turn": turn} if turn else {})}
+            )
         except AgentError as exc:
             if exc.code != "process_lost":
                 raise
@@ -216,6 +218,16 @@ class Turns:
             {**settings, **settings_in(snapshot.get("settings") or {})}, access
         )
 
+    @staticmethod
+    def _start_trigger(queued):
+        if queued.get("interface_continuation"):
+            return {
+                "source": queued["data"]["source"],
+                "startedBy": queued["data"]["startedBy"],
+                "continuationCalls": queued["data"]["resume"],
+            }
+        return {"input": queued["id"], "source": queued["data"].get("source")}
+
     async def _run_turn(self, sid, queued, turn, recovering, segment):
         outcome, error = "completed", None
         self.steering_closed.discard(sid)
@@ -234,10 +246,14 @@ class Turns:
                 turn,
                 "turn_start",
                 actor=queued["actor"],
-                first_input=self._taken_input(queued),
+                **(
+                    {}
+                    if queued.get("interface_continuation")
+                    else {"first_input": self._taken_input(queued)}
+                ),
+                copies=queued.get("continuation_sources", []),
                 data={
-                    "input": queued["id"],
-                    "source": queued["data"].get("source"),
+                    **self._start_trigger(queued),
                     **snapshot,
                     **segment,
                     **(
@@ -269,7 +285,7 @@ class Turns:
             )
             actor = queued["actor"] if queued else start["actor"]
             access, settings = await self._turn_access(sid, start)
-            tools = await self._definitions(sid)
+            tools = await self._definitions(sid, turn)
             if additions is None:
                 additions = (
                     [
@@ -297,7 +313,11 @@ class Turns:
                     raise AgentError(last["decision"]["refuse"], "refused")
             else:
                 await self.api.hook("turn.start", {"session": sid, "turn": turn, "actor": actor})
-            resume = queued["data"].get("resume", []) if queued else []
+            resume = (
+                queued["data"].get("resume", [])
+                if queued
+                else start["data"].get("continuationCalls", [])
+            )
             if resume:
                 es = await self.api.session("branch", session=sid)
                 by_call = {
@@ -308,13 +328,15 @@ class Turns:
                 }
                 by_call.update({e["call"]: e["data"] for e in es if e["kind"] == "tool_call"})
                 calls = [by_call[cid] for cid in resume if cid in by_call]
-                origin = (queued["data"].get("source") or {}).get("continuesTurnId")
+                origin = (start["data"].get("source") or {}).get("continuesTurnId") or start.get(
+                    "wire_fields", {}
+                ).get("continuesTurnId")
                 open_calls = await self._tools(
                     sid, turn, "late:" + turn, calls, tools, continuation_of=origin
                 )
             # Replay journal decisions, not model requests or completed effects.
             while not open_calls:
-                tools = await self._definitions(sid)
+                tools = await self._definitions(sid, turn)
                 es = [e for e in await self._entries(sid) if e.get("turn") == turn]
                 responses = [e for e in es if e["kind"] == "response"]
                 usage = {}
@@ -336,6 +358,7 @@ class Turns:
                         result = last.get("result", result)
                         structured = {"value": last["value"]} if "value" in last else {}
                         outcome, error = last["outcome"], last.get("error")
+                        open_calls = await self._recovered_handoffs(sid, turn)
                         break
                 pending = starts[-1] if starts and starts[-1]["step"] not in ends else None
                 if not pending:
@@ -489,7 +512,24 @@ class Turns:
         finally:
             ot.step_end()
             if sid not in self.suspending:
-                await self._settle(sid, turn, outcome == "cancelled", prior_starts=prior_starts)
+                if outcome != "completed" and await self._recovered_handoffs(sid, turn):
+                    await self.api.session(
+                        "interface_settle",
+                        session=sid,
+                        turn=turn,
+                        reason="Originating turn did not complete",
+                    )
+                await self._settle(
+                    sid,
+                    turn,
+                    outcome == "cancelled",
+                    prior_starts=prior_starts,
+                    preserve_interface=True,
+                )
+                done = {
+                    e.get("call") for e in await self._entries(sid) if recorded_as(e, "tool_result")
+                }
+                open_calls = [cid for cid in open_calls if cid not in done]
         # Include the final response in usage even if the turn ended by an exception.
         usage = {}
         es = await self._entries(sid)
@@ -532,12 +572,22 @@ class Turns:
             for e in es
             if e.get("turn") == turn and e["kind"] in {"response", "tool_result"}
         ]
-        await self._record(sid, turn, "turn_end", data=answer, copies=sources)
+        end = await self._record(sid, turn, "turn_end", data=answer, copies=sources)
+        answer = end["data"]
         await self.api.hook("turn.end", answer)
         await self.api.event("turn_ended", **answer)
-        if open_calls:
+        if answer["open_calls"]:
             await self.wake({"session": sid}, None)
         return answer
+
+    async def _recovered_handoffs(self, sid, turn):
+        entries = await self._entries(sid)
+        done = {e.get("call") for e in entries if recorded_as(e, "tool_result")}
+        return [
+            e["call"]
+            for e in entries
+            if e["kind"] == HANDOFF and e.get("turn") == turn and e["call"] not in done
+        ]
 
     async def _step_checkpoint(self, sid, turn, step=None):
         branch = await self.api.session("branch", session=sid)
@@ -576,8 +626,16 @@ class Turns:
         return value
 
     async def _turn_authority(self, sid, turn, actor):
+        entries = await self._entries(sid)
+        if any(
+            e.get("turn") == turn and e["kind"] == "turn_start" and "continuationCalls" in e["data"]
+            for e in entries
+        ):
+            return await self.api.session(
+                "interface_work_rights", session=sid, turn=turn, actor=actor
+            )
         authority = set(await self.api.session("authority", session=sid, actor=actor))
-        for e in await self._entries(sid):
+        for e in entries:
             if e.get("turn") == turn and e["kind"] == "input":
                 authority &= set(
                     await self.api.session(
@@ -792,6 +850,8 @@ class Turns:
         return step
 
     async def _result(self, sid, turn, step, call, answer):
+        if answer.get("interface"):
+            return  # The Harness owns the checkpoint and terminal result.
         es = await self._entries(sid)
         if answer.get("open"):
             pending = answer
@@ -919,7 +979,7 @@ class Turns:
         deferred = {
             e.get("call")
             for e in es
-            if e.get("turn") == turn and e["kind"] in {"tool_deferred", "toolPending"}
+            if e.get("turn") == turn and e["kind"] in {"tool_deferred", "toolPending", HANDOFF}
         }
         pending = [c for c in calls if c["id"] not in done | deferred]
         parallel = bool(calls) and all(
@@ -1031,6 +1091,15 @@ class Turns:
                 changed = {**gate["call"], "id": call["id"], "name": call["name"]}
                 if replay and changed["input"] != call["input"]:
                     return unknown
+                if definition.get("interfaceSource"):
+                    return await self.api.session(
+                        "interface_dispatch",
+                        session=sid,
+                        turn=turn,
+                        step=step,
+                        call=changed,
+                        definition=definition,
+                    )
                 invocation = await self._record(
                     sid,
                     turn,
@@ -1086,7 +1155,7 @@ class Turns:
                 )
             )["result"]
         except asyncio.CancelledError:
-            if sid in self.suspending:
+            if sid in self.suspending or definition and definition.get("interfaceSource"):
                 raise
             if replay and not ran_again:
                 answer.update(unknown)
@@ -1125,8 +1194,19 @@ class Turns:
             sid, turn, "tool_finished", step=step, call=call["id"], copies=sources, data=answer
         )
 
-    async def _settle(self, sid, turn, cancelled=False, *, prior_starts=()):
+    async def _settle(
+        self, sid, turn, cancelled=False, *, prior_starts=(), preserve_interface=False
+    ):
         es = await self._entries(sid)
+        handed_off = {e["call"] for e in es if recorded_as(e, HANDOFF) and e.get("turn") == turn}
+        if handed_off and not preserve_interface:
+            await self.api.session(
+                "interface_settle",
+                session=sid,
+                turn=turn,
+                reason="Originating turn was interrupted",
+            )
+            es = await self._entries(sid)
         done = {e.get("call") for e in es if recorded_as(e, "tool_result")}
         started = {e["call"] for e in es if e["kind"] == "tool_started"}
         receipts = {e["call"]: e["data"] for e in es if e["kind"] == "tool_finished"}
@@ -1150,7 +1230,9 @@ class Turns:
                         es.append(added)
         deferred = {e["call"] for e in es if e["kind"] == "tool_deferred"}
         for e in es:
-            if not cancelled and e.get("call") in deferred and e.get("call") not in receipts:
+            if e.get("call") in handed_off or (
+                not cancelled and e.get("call") in deferred and e.get("call") not in receipts
+            ):
                 continue
             if (
                 e["kind"] != "tool_call"

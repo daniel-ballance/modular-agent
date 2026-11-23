@@ -5,6 +5,7 @@ from datetime import datetime
 
 from ma_core import telemetry as ot
 from ma_core import AgentError, Plugin, content, identity
+from ma_core.recovery import HANDOFF
 from ma_core.wire import recorded_as
 
 from .turns import Turns, require_processed_result
@@ -20,6 +21,7 @@ class Runtime(Turns, Plugin):
         "questions": True,
         "jobs": True,
         "open_calls": True,
+        "interface_tools": True,
         "parallel_tools": True,
         "nested_tools": True,
         "queued_input_after_restart": "handedBack",
@@ -67,7 +69,8 @@ class Runtime(Turns, Plugin):
 
     async def _pending(self, sid, *, proposals=False):
         settled, accepted = set(), {}
-        for e in await self._entries(sid):
+        entries = await self._entries(sid)
+        for e in entries:
             if e.get("fork_source"):
                 continue
             if e["kind"] == "input_queued":
@@ -77,12 +80,21 @@ class Runtime(Turns, Plugin):
             elif recorded_as(e, "input_withdrawn"):
                 d = e["data"]
                 settled.update(d.get("inputIds", [d.get("inputId", self._input_id(e))]))
-        return [
+        pending = [
             e
             for iid, e in accepted.items()
             if iid not in settled
             and (proposals or (e["data"]["when"] != "propose" and not e["data"].get("parked")))
         ]
+        if not proposals and any(e["kind"] == HANDOFF for e in entries):
+            ready = await self.api.session("interface_ready", session=sid)
+            if ready:
+                order = {e["id"]: index for index, e in enumerate(entries)}
+                pending = sorted(
+                    [*ready, *pending],
+                    key=lambda e: e.get("ready_order", order.get(e["id"], len(entries))),
+                )
+        return pending
 
     async def _restart_pending(self, d):
         pending = await self._pending(d["session"])
@@ -327,6 +339,8 @@ class Runtime(Turns, Plugin):
         return {"withdrawn": False}
 
     async def _return(self, sid, e):
+        if e.get("interface_continuation"):
+            return
         self.input_traces.pop((sid, e["id"]), None)
         await self.api.session(
             "append",
@@ -451,6 +465,10 @@ class Runtime(Turns, Plugin):
                 await task
             except asyncio.CancelledError:
                 pass
+        if any(e["kind"] == HANDOFF for e in await self._entries(sid)):
+            await self.api.session(
+                "interface_settle", session=sid, reason="Interface tool cancelled"
+            )
         for e in await self._pending(sid):
             await self._return(sid, e)
         await self.api.session("invalidate", session=sid, reason="cancelled")
@@ -505,10 +523,19 @@ class Runtime(Turns, Plugin):
         if not deferred:
             return {}
         qs = await self.api.call("questions", "list", {"session": sid})
+        interface_calls = {e.get("call") for e in es if e["kind"] == HANDOFF}
+        interface_origins = {
+            e.get("turn")
+            for e in es
+            if e["kind"] == "turn_end"
+            and interface_calls.intersection(e["data"].get("open_calls", ()))
+        }
         groups = {}
         for cid, entry in deferred.items():
             groups.setdefault(entry.get("turn"), []).append(cid)
         for origin_turn, calls in groups.items():
+            if origin_turn in interface_origins:
+                continue
             if any((sid, cid) in self.active_calls for cid in calls):
                 continue
             questions = [q for q in qs if q.get("call") in calls and not q.get("closed")]
@@ -535,6 +562,8 @@ class Runtime(Turns, Plugin):
                 },
                 emit,
             )
+        if interface_calls:
+            await self.kick(d, emit)
         return {}
 
     async def dispatch_nested(self, d, emit):
@@ -668,6 +697,10 @@ class Runtime(Turns, Plugin):
     async def abandon(self, d, emit):
         """Settle a stopped child without scheduling inference, under either Runtime."""
         sid = d["session"]
+        if any(e["kind"] == HANDOFF for e in await self._entries(sid)):
+            await self.api.session(
+                "interface_settle", session=sid, reason="Interface tool abandoned"
+            )
         await self.api.session("invalidate", session=sid, reason="cancelled")
         es = await self._entries(sid)
         ended = {e.get("turn") for e in es if recorded_as(e, "turn_end")}

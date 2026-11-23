@@ -115,7 +115,7 @@ def entry(value):
     return result
 
 
-def declaration(plugins, provider=None):
+def declaration(plugins, provider=None, *, interface_tools=False):
     runtime = next((p for p in plugins.values() if "parallel_tools" in p), {})
     providers = [p for p in plugins.values() if "stateful" in p]
     provider = (
@@ -137,6 +137,7 @@ def declaration(plugins, provider=None):
         "rewinding": bool(environment.get("rewind")),
         "forking": True,
         "nestedToolCalls": bool(runtime.get("nested_tools")),
+        **({"interfaceTools": True} if interface_tools and runtime.get("interface_tools") else {}),
         "portableSessions": True,
         "keepsStateAtProvider": bool(provider.get("stateful")),
         "runsToolsAtProvider": bool(provider.get("runs_tools")),

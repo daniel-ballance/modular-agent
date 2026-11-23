@@ -12,6 +12,7 @@ from ._agent import Agent, AgentStart, create_agent
 from ._environment import MemoryEnvironment, memory_environment as memory_environment
 from ._history import HistoryStore
 from ._history_port import HistoryPort
+from ._interface_tools import InterfaceToolSource
 from ._plugin import Plugin, ProcessPlugin, ServicePlugin
 from ._serve import _OverWire
 from ._provider import ModelInfo, ProviderContext, ProviderSupports
@@ -139,6 +140,7 @@ class _Options(TypedDict, total=False):
     process_plugins: Sequence[ProcessPlugin | JsonObject] | None
     service_plugins: Sequence[ServicePlugin] | None
     plugin_host: bool | None
+    interface_tools: Sequence[InterfaceToolSource]
     resource_reservations: dict[str, dict[str, int]] | None
     settings: JsonObject
     approval: Approval | None
