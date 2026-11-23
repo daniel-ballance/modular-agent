@@ -138,10 +138,6 @@ Use `encodeHistoryJson`, `parseHistoryJson` and `equalHistoryJson` to preserve o
 
 ## Findings
 
-**Trace trust.** Replace the sentence beginning “Incoming context from a peer outside” in [Context on the wire](../../../docs/telemetry.md#context-on-the-wire) with:
-
-> Incoming context from a peer outside the operator’s trace trust scope MUST be ignored. Authentication alone does not put a network ACP peer in that scope. The operator can opt a network peer in independently of its rights. A stdio host that launches its peer can trust that peer by default; the operator can turn that trust off.
-
 These are proposed documentation replacements, not changes to the specification.
 
 - **Availability diagnostics.** In [Providers](../../../docs/sdk/api.md#providers), replace the `available` description with: “Whether the Provider can take requests now, for example whether it has credentials. A Provider may expose a separate diagnostic in process. The `/1` plugin binding reports only a boolean.” Claude can name an API-key source locally without extending the wire reply.
