@@ -8,6 +8,15 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+type traceHandshakeKey struct{}
+
+// WithoutTraceHandshake disables the local handshake member for a compatibility check.
+func WithoutTraceHandshake(ctx context.Context) context.Context {
+	return context.WithValue(ctx, traceHandshakeKey{}, true)
+}
+
+func offersTraceContext(ctx context.Context) bool { return ctx.Value(traceHandshakeKey{}) != true }
+
 func traceWork(method string) bool {
 	switch method {
 	case "runtime/runTurn", "runtime/resumeTurn", "runtime/continueOpenCalls",

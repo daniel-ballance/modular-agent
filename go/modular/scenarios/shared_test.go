@@ -25,6 +25,7 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/modular"
 	"github.com/daniel-ballance/modular-agent/go/modular/internal/fixtures"
 	"github.com/daniel-ballance/modular-agent/go/modular/modulartest"
+	"github.com/daniel-ballance/modular-agent/go/pluginrpc"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 )
 
@@ -96,6 +97,7 @@ type run struct {
 	dir       string
 	placement placement
 	services  []modular.ServicePlugin
+	telemetry *telemetryRun
 }
 
 func (r run) countPath() string { return filepath.Join(r.dir, "count") }
@@ -119,7 +121,20 @@ func (r run) agent(ctx context.Context, s scenario, checkAnswers func(*modularte
 	if durability == "" {
 		durability = modular.Ephemeral
 	}
-	opts := []modular.Option{modulartest.Script(string(s.Model)), modular.WithProject(project), modular.WithDataDir(r.dataDir()), modular.WithDurability(durability), modular.WithSettings(s.Agent.Settings), modular.WithSeveralActors(s.Agent.SeveralActors)}
+	opts := []modular.Option{modular.WithProject(project), modular.WithDataDir(r.dataDir()), modular.WithDurability(durability), modular.WithSettings(s.Agent.Settings), modular.WithSeveralActors(s.Agent.SeveralActors)}
+	if r.telemetry == nil || r.telemetry.crash == nil {
+		opts = append(opts, modulartest.Script(string(s.Model)))
+	}
+	if r.telemetry != nil {
+		more, err := r.telemetryOptions(s, durability)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, more...)
+		if r.telemetry.Handshake == "no-offer" {
+			ctx = pluginrpc.WithoutTraceHandshake(ctx)
+		}
+	}
 	switch s.Agent.History {
 	case "":
 	case "file":
@@ -138,12 +153,23 @@ func (r run) agent(ctx context.Context, s scenario, checkAnswers func(*modularte
 		if r.placement.Service {
 			opts = append(opts, modular.WithServicePlugin(r.services[i]))
 		} else if r.placement.SDK == "" {
-			p, err := fixtures.Plugin(name)
+			choice := "yes"
+			if r.telemetry != nil && s.Name == "question-answered" {
+				choice = r.telemetry.Values.Answer
+			}
+			p, err := fixtures.PluginWithChoice(name, choice)
 			if err != nil {
 				return nil, err
 			}
 			p.Config = config
 			opts = append(opts, modular.WithPlugin(p))
+		} else if r.telemetry != nil {
+			idx := slices.IndexFunc(r.telemetry.Fixtures, func(f fixtureSpec) bool { return f.Name == name })
+			if idx < 0 {
+				return nil, fmt.Errorf("telemetry request is missing fixture %q", name)
+			}
+			f := r.telemetry.Fixtures[idx]
+			opts = append(opts, modular.WithProcessPlugin(modular.ProcessPlugin{Command: f.Command, Env: f.Env, Config: config}))
 		} else {
 			opts = append(opts, modular.WithProcessPlugin(modular.ProcessPlugin{Command: append(slices.Clone(r.placement.Command), name), Config: config}))
 		}
@@ -528,6 +554,20 @@ func (r run) check(t *testing.T, path string, sc scenario) {
 			}
 		}
 	}
+	if r.telemetry != nil {
+		if answers != nil {
+			answers.AssertDone(t)
+			answers = nil
+		}
+		if !t.Failed() {
+			if s == nil {
+				t.Fatal("telemetry scenario has no session")
+			}
+			if err := r.writeEvidence(ctx, a, s); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 }
 
 // The helper runs only the crash step. Its stdout carries one session id, not trace output.
@@ -544,7 +584,7 @@ func TestCrashChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := run{dir: args[1], placement: placement{SDK: args[4], Command: args[6:], Service: args[5] != ""}}
+	r := run{dir: args[1], placement: placement{SDK: args[4], Command: args[6:], Service: args[5] != ""}, telemetry: openTelemetryRun(t)}
 	if r.placement.Service {
 		if err := json.Unmarshal([]byte(args[5]), &r.services); err != nil {
 			t.Fatal(err)
@@ -649,6 +689,11 @@ func (r run) crash(ctx context.Context, path string, sc scenario, index int, id 
 		case <-ctx.Done():
 			return "", fmt.Errorf("the crash condition never held: %w", ctx.Err())
 		case <-tick.C:
+		}
+	}
+	if r.telemetry != nil {
+		if err := r.crashEvidence(id); err != nil {
+			return "", err
 		}
 	}
 	return id, groups.stop()

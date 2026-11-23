@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/daniel-ballance/modular-agent/go/modular"
 	"github.com/daniel-ballance/modular-agent/go/modular/internal/fixtures"
+	"github.com/daniel-ballance/modular-agent/go/pluginrpc"
 )
 
 func main() {
@@ -42,7 +44,24 @@ func main() {
 		}
 		return
 	}
-	if err = modular.Serve(context.Background(), plugin); err != nil {
+	ctx := context.Background()
+	if os.Getenv(fixtures.HandshakeEnv) == "no-acceptance" {
+		ctx = pluginrpc.WithoutTraceHandshake(ctx)
+	}
+	if endpoint := os.Getenv(fixtures.EndpointEnv); endpoint != "" {
+		flush, err := fixtures.InstallTelemetry(ctx, endpoint)
+		if err != nil {
+			log.Fatal(err)
+		}
+		// The host closes stdin after plugin/shutdown and waits for this
+		// process (or its wire proxy) to exit, including this flush.
+		err = errors.Join(modular.Serve(ctx, plugin), flush())
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if err := modular.Serve(ctx, plugin); err != nil {
 		log.Fatal(err)
 	}
 }

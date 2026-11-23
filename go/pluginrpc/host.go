@@ -187,7 +187,10 @@ func load(ctx context.Context, h *harness.Harness, project, home string, specs [
 				close(r.exited)
 			}
 		}()
-		init := object{"binding": Binding, "data": DataBinding, "host": object{"name": "modular-agent-go", "version": "1"}, "project": project, "home": state, "config": spec.Config, "traceContext": 1}
+		init := object{"binding": Binding, "data": DataBinding, "host": object{"name": "modular-agent-go", "version": "1"}, "project": project, "home": state, "config": spec.Config}
+		if offersTraceContext(ctx) {
+			init["traceContext"] = 1
+		}
 		if spec.Config == nil {
 			init["config"] = object{}
 		}
@@ -204,7 +207,7 @@ func load(ctx context.Context, h *harness.Harness, project, home string, specs [
 		}
 		err = r.validate()
 		r.peer.traceName.Store(&r.reg.Name)
-		r.peer.traceAgreed.Store(r.reg.TraceContext == 1)
+		r.peer.traceAgreed.Store(offersTraceContext(ctx) && r.reg.TraceContext == 1)
 		if err == nil && (r.reg.Name == "harness" || h.HasLocalPlugin(r.reg.Name) || bridge.registeredPlugin(r.reg.Name) != nil) {
 			err = errors.New("duplicate plugin name: " + r.reg.Name)
 		}

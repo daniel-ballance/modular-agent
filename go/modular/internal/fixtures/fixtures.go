@@ -24,6 +24,10 @@ type counterInput struct {
 }
 
 func Plugin(name string) (modular.Plugin, error) {
+	return PluginWithChoice(name, "yes")
+}
+
+func PluginWithChoice(name, yes string) (modular.Plugin, error) {
 	p := modular.Plugin{Name: name}
 	switch name {
 	case "tide":
@@ -51,7 +55,7 @@ func Plugin(name string) (modular.Plugin, error) {
 	case "confirm":
 		p.Setup = func(r *modular.Registrar) error {
 			return r.Tool(modular.NewTool("confirm", "Ask whether to go ahead.", func(ctx context.Context, in confirmInput, tc *modular.ToolContext) (string, error) {
-				answer, err := tc.Ask(ctx, modular.Question{Kind: "choice", Question: in.Question, Options: []string{"yes", "no"}})
+				answer, err := tc.Ask(ctx, modular.Question{Kind: "choice", Question: in.Question, Options: []string{yes, "no"}})
 				if answer.Declined {
 					return "declined", err
 				}

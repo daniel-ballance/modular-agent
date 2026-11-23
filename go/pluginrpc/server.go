@@ -288,7 +288,7 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 		s.initialized = true
 		reg := s.Registration
 		reg.TraceContext = 0
-		if n, ok := v["traceContext"].(json.Number); ok && string(n) == "1" {
+		if n, ok := v["traceContext"].(json.Number); ok && string(n) == "1" && offersTraceContext(ctx) {
 			reg.TraceContext = 1
 		}
 		s.peer.traceName.Store(&reg.Name)
