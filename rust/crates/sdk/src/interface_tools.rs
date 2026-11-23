@@ -20,6 +20,16 @@ impl InterfaceConnection {
         Ok(self.0.next_call().await?)
     }
 
+    /// Take a specific live delivery once, rechecking its writer, deadline,
+    /// erasure, authority and exact output. Knowing a historical ID is not a ticket.
+    pub async fn release(&mut self, call_id: &str) -> Result<Option<Value>> {
+        Ok(self.0.release(call_id).await?)
+    }
+    #[cfg(feature = "agui")]
+    pub(crate) async fn prepare_staged(&mut self) -> Result<Vec<Value>> {
+        Ok(self.0.prepare_staged().await?)
+    }
+
     /// Report a completed or failed ToolResult after the originating turn ends.
     /// No dispatch is performed by this operation.
     pub async fn report_tool_result(&self, report: Value) -> Result<InterfaceReportDisposition> {

@@ -2645,8 +2645,10 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "axum",
  "base64 0.22.1",
  "base64 0.23.1",
+ "chrono",
  "config-files",
  "credentials-file",
  "environment-local",
@@ -2663,6 +2665,7 @@ dependencies = [
  "history-fs",
  "history-http",
  "interface-acp",
+ "log",
  "opentelemetry",
  "opentelemetry_sdk",
  "plugin-stdio",
@@ -4515,17 +4518,22 @@ name = "sdk-scenarios"
 version = "0.1.0"
 dependencies = [
  "agent-api",
+ "anyhow",
+ "axum",
  "futures-util",
  "history-fs",
  "libc",
+ "log",
  "modular-agent",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "serde",
  "serde_json",
+ "standard",
  "tempfile",
  "tokio",
+ "transport-websocket",
  "uuid",
 ]
 
@@ -5428,7 +5436,10 @@ name = "transport-websocket"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum-core",
  "futures-util",
+ "hyper",
+ "hyper-util",
  "log",
  "rcgen",
  "rustls-native-certs",

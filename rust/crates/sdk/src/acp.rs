@@ -109,7 +109,7 @@ pub async fn validate_acp_token_files<'a>(paths: impl IntoIterator<Item = &'a Pa
     Ok(())
 }
 
-fn validate_actor(actor: &crate::Actor) -> Result<()> {
+pub(crate) fn validate_actor(actor: &crate::Actor) -> Result<()> {
     if actor.id.is_empty()
         || actor.id.starts_with("job:")
         || !matches!(actor.kind.as_str(), "user" | "host" | "agent" | "program")
@@ -119,7 +119,7 @@ fn validate_actor(actor: &crate::Actor) -> Result<()> {
     Ok(())
 }
 
-fn validate_scope(
+pub(crate) fn validate_scope(
     projects: Option<Vec<std::path::PathBuf>>,
     tenants: &Option<Vec<Option<String>>>,
     represents: &[String],
@@ -358,7 +358,7 @@ impl Agent {
         .await?)
     }
 
-    fn check_acp_host(&self) -> Result<()> {
+    pub(crate) fn check_acp_host(&self) -> Result<()> {
         if !self.inner.plugin_host {
             return Err(Error::new(
                 Code::InvalidComposition,
@@ -368,14 +368,14 @@ impl Agent {
         Ok(())
     }
 
-    fn acp_routes(&self) -> Arc<Routes> {
+    pub(crate) fn acp_routes(&self) -> Arc<Routes> {
         self.inner
             .acp
             .get_or_init(|| Arc::new(Routes::default()))
             .clone()
     }
 
-    fn connection_factory(
+    pub(crate) fn connection_factory(
         &self,
         compose: Option<Arc<dyn AcpComposition>>,
         routes: Arc<Routes>,
@@ -391,7 +391,7 @@ impl Agent {
         }
     }
 
-    async fn acp_factory(
+    pub(crate) async fn acp_factory(
         &self,
         compose: Option<Arc<dyn AcpComposition>>,
         routes: Arc<Routes>,

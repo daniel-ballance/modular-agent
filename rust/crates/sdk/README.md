@@ -116,11 +116,48 @@ rm -rf "$scratch"
 - `agent.serve_acp_websocket(AcpOptions { compose, ..Default::default() }, AcpServiceOptions { listen, actors, tls })` returns the same server handle. Omitted tenants allow only tenantless sessions; `Some(vec![None])` explicitly grants tenantless access. An explicit project list matches exact canonical paths; omitting it uses the serving composition's scope. An empty list grants nothing. A token caps the connection's rights without rewriting the actor's recorded rights. Each token may name additional represented actors. On stdio, supply `projects`, `tenants`, `rights` and `represents` in `AcpOptions`; they are not ACP parameters.
 - Use trusted loopback for plain `ws:`. `TlsOptions { cert_file, key_file }` enables `wss:` using a PEM certificate chain and private key; the plugin client verifies the server against the system trust store. Generate tokens with at least 128 bits of randomness and keep their files owner-readable only. The transport uses [Tokio Tungstenite 0.30's upgrade callback](https://docs.rs/tokio-tungstenite/0.30.0/tokio_tungstenite/fn.accept_hdr_async_with_config.html) and [message and frame limits](https://docs.rs/tungstenite/0.30.0/tungstenite/protocol/struct.WebSocketConfig.html). Deployments need no Node bridge.
 
+### Serving AG-UI
+
+Enable the `agui` Cargo feature. It is enabled in `ma`; applications that only embed the SDK need not build the HTTP adapter.
+
+```rust
+use modular_agent::{AcpActor, AguiActor, AguiOptions};
+
+let server = agent.serve_agui(AguiOptions {
+    listen: "127.0.0.1:0".into(),
+    actors: vec![AguiActor::new("editor", AcpActor::local(token_file))],
+    ..Default::default()
+}).await?;
+println!("{}", server.url); // HTTP origin
+// While the app is serving, requests go to /agui/v1.
+server.close().await;
+```
+
+Set `acp: true` on an agent built with `plugin_host(true)` for WebSocket upgrades on the same socket. Set `tls` to serve HTTPS. Set `client_ca_file` as well to require a client certificate; the bearer token is still required. `tenant` selects the creation tenant. `origins` adds allowed browser origins. Network trace parents are ignored unless `AguiActor::trust_trace_context` is set. `trace_state_keys` selects allowed vendor keys.
+
+The client ID is not a credential. It selects the history view and executor route. The agent checks the token's actor, project, tenant and current rights. Open the optional presence stream before a run to answer a question while its turn is still running. Closing the listener detaches streams, not the admitted work. Reconnect by reading the thread snapshot. Send its ordered messages, followed by the new input or reports. The history cursor is optional.
+
+`AguiState` names the document plugin and supplies its current revision and snapshot. Only that plugin's state events update the projection. `raw_events` maps an emitting plugin and event name to a configured foreign source. The actor's output gate still applies. For final AG-UI frames the gate's recipient is the nonsecret client ID, so two clients of one actor can have different views.
+
+Run `conformance/agui/rust.sh` from the repository root for the offline kit: three ordinary cases use `ma`; the other 22 use the separate SDK fixture, including four real process restarts. All 25 run; none are skipped.
+
 ## Built so far
 
 For Interface-run tools, pass `InterfaceToolSource { source_id, actor_id, route_id, result_timeout_ms, tools }` entries to `AgentBuilder::interface_tools`. `tools` holds shared tool definitions with `callers: ["model"]`. No local tool handler runs. The agent declares `interfaceTools: true` only when configured with these sources and a compatible Runtime. Custom Runtimes opt in with `RuntimeSupport::interface_tools`.
 
-After authenticating the actual actor and checking its project and tenant scope, a trusted app calls `Session::connect_interface_tools(route_id, actor_id, rights)`. Call `advertise` with the available subset of exact definitions and `next_call().await` to take a live executable request. Do not execute from history. After the originating turn ends, call `report_tool_result(report).await` on the same route, from the original connection or a new one. It returns `Accepted`, `AlreadySettled` or `Refused`, without dispatch. Dropping the connection clears its advertisements but does not close the session or settle its calls. ACP projects only the declaration. The SDK does not serve AG-UI yet.
+After authenticating the actual actor and checking its project and tenant scope, a trusted app calls `Session::connect_interface_tools(route_id, actor_id, rights)`. Call `advertise` with the available subset of exact definitions and `next_call().await` to take a live executable request. `release(call_id).await` takes a specific staged ticket once; a call ID from history is not a ticket. Do not execute from history. After the originating turn ends, call `report_tool_result(report).await` on the same route, from the original connection or a new one. It returns `Accepted`, `AlreadySettled` or `Refused`, without dispatch. Dropping the connection clears its advertisements but does not close the session or settle its calls. ACP projects only the declaration. AG-UI uses the same connection and defers release until the end of the originating turn.
+
+One Rust question constructor lacks a field required by the binding: “Link questions include their gated URI as `metadata["modular-agent.link"]`; the acknowledgment is not proof of sign-in.” The shared link draft has `details: string` (absolute URI). The adapter uses that field when supplied. Rust's `Ask::link(question)` does not set it; the adapter withholds such an interrupt rather than treating the prompt as a URI.
+
+The SDK API says: “A report uses the shared Interface result shape and returns `accepted`, `alreadySettled` or `refused`; `notReady` is a retryable refusal before the originating turn ends.” The existing Rust handle does not distinguish early reports from other refusals. The HTTP adapter checks the committed `turnEnd` before reporting and returns `409 conflict` for an early report; the client can refresh and try after the turn ends.
+
+The standard configuration specifies `--listen` only for ACP. Proposed text for its options table:
+
+> `--agui`: Serve AG-UI 1.0 over HTTP and SSE for the selected project. Requires `--listen`. With `--acp`, serve ACP WebSocket upgrades on the same listener.
+>
+> `--listen ADDR`: With `--acp`, `--agui`, or both, listen on loopback until stopped. With AG-UI, print the HTTP origin when ready. The executable has no TLS options.
+>
+> With AG-UI, each policy actor entry supplies a nonsecret `clientId`. Tokens sharing a client ID must have the same actor and scope. The single `--token-file` shorthand uses the client ID `ma-local`.
 
 The Harness declares `telemetry: 1`, whether export is installed or not. Set `Agent::builder().agent_name("my-agent")` to supply a stable, non-sensitive GenAI agent name. Register the application's tracer and meter providers with `opentelemetry::global` before building the agent. The SDK uses the OpenTelemetry API only; the application owns sampling, export and shutdown. Durable turns save their span context and use it as the parent and a link when they resume. Forks and public history do not carry that context. The SDK sends no baggage or vendor state. It trusts stdio ACP launchers for trace context; it treats network ACP principals as outside that scope. Configured plugin peers negotiate trace context separately on every connection.
 

@@ -38,6 +38,9 @@ use tokio_tungstenite::{
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+#[cfg(feature = "http")]
+pub mod http;
+
 pub const LIMIT: usize = 64 * 1024 * 1024;
 pub const PLUGIN: &str = "modular-agent-plugin-1";
 pub const ACP: &str = "modular-agent-acp-1";
@@ -204,18 +207,9 @@ fn refuse(status: StatusCode) -> ErrorResponse {
     response
 }
 
-pub async fn serve<T, F, Fut>(
-    listen: &str,
-    tls: Option<TlsOptions>,
-    protocol: &'static str,
-    entries: Vec<(PathBuf, T)>,
-    handler: F,
-) -> Result<Server>
-where
-    T: Clone + Send + Sync + 'static,
-    F: Fn(T, Connection) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = ()> + Send + 'static,
-{
+type Tokens<T> = Vec<(sha2::digest::Output<Sha256>, T)>;
+
+async fn read_tokens<T>(entries: Vec<(PathBuf, T)>) -> Result<Tokens<T>> {
     ensure!(!entries.is_empty(), "no WebSocket tokens configured");
     let mut tokens = Vec::new();
     for (path, value) in entries {
@@ -226,22 +220,45 @@ where
         );
         tokens.push((hash, value));
     }
-    let tls = tls
-        .map(|tls| -> Result<_> {
-            let certs =
-                CertificateDer::pem_file_iter(tls.cert_file)?.collect::<Result<Vec<_>, _>>()?;
-            let key = PrivateKeyDer::from_pem_file(tls.key_file)?;
-            let config = ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
-                .with_safe_default_protocol_versions()?
-                .with_no_client_auth()
-                .with_single_cert(certs, key)?;
-            Ok(TlsAcceptor::from(Arc::new(config)))
-        })
-        .transpose()?;
+    Ok(tokens)
+}
+
+fn acceptor(tls: Option<TlsOptions>, client_ca: Option<&Path>) -> Result<Option<TlsAcceptor>> {
+    ensure!(
+        tls.is_some() || client_ca.is_none(),
+        "client authentication requires TLS"
+    );
+    tls.map(|tls| -> Result<_> {
+        let certs = CertificateDer::pem_file_iter(tls.cert_file)?.collect::<Result<Vec<_>, _>>()?;
+        let key = PrivateKeyDer::from_pem_file(tls.key_file)?;
+        let config = ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+            .with_safe_default_protocol_versions()?;
+        let config = if let Some(ca) = client_ca {
+            let mut roots = RootCertStore::empty();
+            for cert in CertificateDer::pem_file_iter(ca)? {
+                roots.add(cert?)?;
+            }
+            let verifier =
+                tokio_rustls::rustls::server::WebPkiClientVerifier::builder_with_provider(
+                    Arc::new(roots),
+                    Arc::new(ring::default_provider()),
+                )
+                .build()?;
+            config.with_client_cert_verifier(verifier)
+        } else {
+            config.with_no_client_auth()
+        }
+        .with_single_cert(certs, key)?;
+        Ok(TlsAcceptor::from(Arc::new(config)))
+    })
+    .transpose()
+}
+
+async fn bind(listen: &str, tls: bool) -> Result<(TcpListener, String)> {
     let (host, port, path) = if listen.contains("://") {
         let url = parse_url(listen)?;
         ensure!(
-            (url.scheme() == "wss") == tls.is_some(),
+            (url.scheme() == "wss") == tls,
             "WebSocket listen URL scheme must match TLS configuration"
         );
         ensure!(
@@ -259,20 +276,35 @@ where
             .context("WebSocket listen address must be HOST:PORT")?;
         (host.to_owned(), port.parse()?, "/".into())
     };
-    let addrs = addresses(&host, port, tls.is_some()).await?;
+    let addrs = addresses(&host, port, tls).await?;
     let listener = TcpListener::bind(addrs.as_slice()).await?;
     let addr = listener.local_addr()?;
     // Retain the configured TLS name for certificate verification, but publish the
     // actual socket for plain listeners (a name can resolve to more than one IP).
-    let authority = if tls.is_some() {
+    let authority = if tls {
         format!("{host}:{}", addr.port())
     } else {
         addr.to_string()
     };
-    let url = format!(
-        "{}://{authority}{path}",
-        if tls.is_some() { "wss" } else { "ws" }
-    );
+    let url = format!("{}://{authority}{path}", if tls { "wss" } else { "ws" });
+    Ok((listener, url))
+}
+
+pub async fn serve<T, F, Fut>(
+    listen: &str,
+    tls: Option<TlsOptions>,
+    protocol: &'static str,
+    entries: Vec<(PathBuf, T)>,
+    handler: F,
+) -> Result<Server>
+where
+    T: Clone + Send + Sync + 'static,
+    F: Fn(T, Connection) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let tokens = read_tokens(entries).await?;
+    let tls = acceptor(tls, None)?;
+    let (listener, url) = bind(listen, tls.is_some()).await?;
     let stop = CancellationToken::new();
     let closing = stop.clone();
     let entries = Arc::new(tokens);

@@ -110,6 +110,8 @@ pub(crate) struct Inner {
     pub persistent: bool,
     pub history: History,
     pub plugin_host: bool,
+    #[cfg(feature = "agui")]
+    pub interface_sources: Vec<crate::InterfaceToolSource>,
     pub acp: std::sync::OnceLock<Arc<crate::acp::Routes>>,
     pub session_settings: Value,
     pub several_actors: bool,
@@ -917,7 +919,7 @@ impl AgentBuilder {
             ));
         }
         if let Err(error) = harness
-            .configure_interface_tools(self.interface_tools)
+            .configure_interface_tools(self.interface_tools.clone())
             .await
         {
             let _ = base::AgentApi::shutdown(harness.as_ref()).await;
@@ -958,6 +960,8 @@ impl AgentBuilder {
         }
         let agent = Agent {
             inner: Arc::new(Inner {
+                #[cfg(feature = "agui")]
+                interface_sources: self.interface_tools,
                 crash,
                 workers,
                 restart,

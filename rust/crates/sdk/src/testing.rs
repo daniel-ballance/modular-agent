@@ -19,6 +19,13 @@ use std::{
 mod environment;
 pub use environment::{ExecOutput, MemoryEnvironment, memory_environment, memory_environment_with};
 
+/// Native host for an in-process conformance controller. Never expose it on a
+/// deployed listener: it has the same trusted ports as a native Runtime.
+#[doc(hidden)]
+pub fn fixture_host(agent: &crate::Agent) -> crate::native::RuntimeHost {
+    agent.inner.harness.clone()
+}
+
 /// Add the offline fixtures required by the ACP kit.
 pub fn acp_conformance(mut builder: crate::AgentBuilder) -> crate::AgentBuilder {
     builder.acp_conformance = true;

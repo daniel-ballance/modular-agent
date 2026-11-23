@@ -5,7 +5,16 @@ edition.workspace = true
 license.workspace = true
 description = "Build agents from interchangeable parts. The Rust SDK, following docs/sdk."
 
+[features]
+agui = ["dep:axum", "dep:chrono", "dep:log", "transport-websocket/http"]
+
+[[test]]
+name = "agui"
+required-features = ["agui"]
+
 [dependencies]
+axum = { version = "0.8", default-features = false, optional = true }
+chrono = { version = "0.4", default-features = false, features = ["std"], optional = true }
 transport-websocket = { path = "../transport-websocket" }
 agent-api.workspace = true
 agent-harness.workspace = true
@@ -14,6 +23,7 @@ async-trait.workspace = true
 futures-util.workspace = true
 schemars = "1.2"
 async-stream = "0.3"
+log = { version = "0.4", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

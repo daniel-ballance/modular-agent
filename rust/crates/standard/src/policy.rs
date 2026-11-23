@@ -15,6 +15,7 @@ pub struct Policy {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct NetworkPrincipal {
     token_file: PathBuf,
+    client_id: Option<String>,
     actor: PolicyActor,
     tenants: Option<Vec<Option<String>>>,
     projects: Option<Vec<PathBuf>>,
@@ -167,6 +168,21 @@ impl Policy {
                 ..Default::default()
             },
             None => AcpOptions::default(),
+        }
+    }
+
+    pub fn agui_clients(&self) -> Result<Vec<String>> {
+        match &self.actors {
+            None => Ok(vec!["ma-local".into()]),
+            Some(actors) => actors
+                .iter()
+                .map(|p| {
+                    p.client_id
+                        .clone()
+                        .filter(|s| !s.is_empty())
+                        .context("AG-UI policy actor requires clientId")
+                })
+                .collect(),
         }
     }
 

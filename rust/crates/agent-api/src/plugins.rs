@@ -95,6 +95,8 @@ impl CredentialClaim {
         self.names.iter().any(|n| n == name)
     }
 }
+tokio::task_local! { pub static EMITTER: String; }
+
 pub trait Plugin: Send + Sync {
     fn name(&self) -> &str;
     fn registered_name(&self) -> &str {
@@ -349,9 +351,11 @@ impl Registry {
         let mut collected = vec![];
         let mut answered = false;
         for h in handlers {
-            let result = h
-                .handler
-                .handle(api.clone(), scope.clone(), value.clone())
+            let result = EMITTER
+                .scope(
+                    h.owner.clone(),
+                    h.handler.handle(api.clone(), scope.clone(), value.clone()),
+                )
                 .await;
             let reply = match result {
                 Ok(r) => r,

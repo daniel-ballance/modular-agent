@@ -75,7 +75,11 @@ ma -c                                        # reopen this folder's last session
 ma -v                                        # also show each call the code makes
 ma --acp                                     # serve ACP on stdio, for an editor or T3 Code
 ma --acp --listen 127.0.0.1:7401 --token-file /path/to/owner-only-token
+ma --agui --listen 127.0.0.1:7401 --token-file /path/to/owner-only-token
+ma --agui --acp --listen 127.0.0.1:7401 --token-file /path/to/owner-only-token
 ```
+
+With `--agui`, `ma` prints the HTTP origin when ready. The app presents its bearer token on every request, including discovery at `GET /agui/v1`. Threads use the operator's project, not a directory from the request. `--acp` adds WebSocket upgrades at the same address. There is no TLS option in `ma`; use loopback. For multiple tokens, supply a policy `actors` list with a stable `clientId` per AG-UI client instead of `--token-file`. The [SDK README](crates/sdk/README.md#serving-ag-ui) describes reconciliation, presence and Interface tools.
 
 `ma --help` lists the rest. With no `--model` and none in settings, `ma` uses the first Provider that is signed in.
 

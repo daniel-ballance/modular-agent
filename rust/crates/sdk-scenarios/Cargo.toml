@@ -20,3 +20,11 @@ libc.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+standard = { path = "../standard" }
+transport-websocket = { path = "../transport-websocket", features = ["http"] }
+axum = "0.8"
+anyhow.workspace = true
+opentelemetry_sdk = { version = "0.33.1", features = ["testing"] }
+log = { version = "0.4", features = ["std"] }

@@ -15,6 +15,10 @@
 //! # Ok(()) }
 //! ```
 mod acp;
+#[cfg(feature = "agui")]
+mod agui;
+#[cfg(feature = "agui")]
+pub use agui::{AguiActor, AguiOptions, AguiServer, AguiState};
 mod agent;
 mod api_key;
 mod chatgpt;

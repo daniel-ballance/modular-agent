@@ -76,7 +76,7 @@ struct Presence {
     authority: Authority,
     tools: BTreeSet<String>,
     generation: CancellationToken,
-    sender: mpsc::Sender<String>,
+    sender: mpsc::Sender<(String, String)>,
 }
 
 /// An operator-authenticated executor slot, scoped to one session. Disconnect
@@ -87,7 +87,8 @@ pub struct InterfaceConnection {
     route: String,
     id: String,
     generation: CancellationToken,
-    receiver: mpsc::Receiver<String>,
+    receiver: mpsc::Receiver<(String, String)>,
+    staged: std::collections::VecDeque<(String, String)>,
 }
 impl Drop for InterfaceConnection {
     fn drop(&mut self) {
@@ -130,22 +131,63 @@ impl InterfaceConnection {
         Ok(())
     }
 
-    /// Receive a live executable call. There is no replay. The SDK rechecks
-    /// staged calls here; a binding staging them further must recheck too.
+    /// Receive a live executable call. There is no replay.
     pub async fn next_call(&mut self) -> Result<Option<Value>> {
         loop {
-            let id = tokio::select! {
-                biased;
-                _ = self.generation.cancelled() => return Ok(None),
-                id = self.receiver.recv() => match id { Some(id) => id, None => return Ok(None) },
+            let (_, ticket) = if let Some(pending) = self.staged.pop_front() {
+                pending
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = self.generation.cancelled() => return Ok(None),
+                    id = self.receiver.recv() => match id { Some(id) => id, None => return Ok(None) },
+                }
             };
             let Some(h) = self.harness.upgrade() else {
                 return Ok(None);
             };
-            if let Some(call) = h.release_interface_call(self, &id).await? {
+            if let Some(call) = h.release_interface_call(self, &ticket).await? {
                 return Ok(Some(call));
             }
         }
+    }
+
+    fn collect_tickets(&mut self) {
+        while let Ok(ticket) = self.receiver.try_recv() {
+            self.staged.push_back(ticket);
+        }
+    }
+
+    /// A trusted adapter may prepare gated frames, but cannot authorize
+    /// execution until release succeeds for every ticket in its terminal group.
+    pub async fn prepare_staged(&mut self) -> Result<Vec<Value>> {
+        self.collect_tickets();
+        let h = self
+            .harness
+            .upgrade()
+            .ok_or_else(|| anyhow!("agent closed"))?;
+        let mut group = Vec::new();
+        for (_, ticket) in &self.staged {
+            group.push(
+                h.release_interface_call(self, ticket)
+                    .await?
+                    .ok_or_else(|| anyhow!("staged delivery refused"))?,
+            );
+        }
+        Ok(group)
+    }
+
+    pub async fn release(&mut self, call_id: &str) -> Result<Option<Value>> {
+        self.collect_tickets();
+        let Some(index) = self.staged.iter().position(|(id, _)| id == call_id) else {
+            return Ok(None);
+        };
+        let (_, ticket) = self.staged.remove(index).unwrap();
+        let h = self
+            .harness
+            .upgrade()
+            .ok_or_else(|| anyhow!("agent closed"))?;
+        h.release_interface_call(self, &ticket).await
     }
 
     pub async fn report_tool_result(&self, report: Value) -> Result<InterfaceReportDisposition> {
@@ -295,6 +337,7 @@ impl Harness {
             id,
             generation: open.generation.clone(),
             receiver,
+            staged: Default::default(),
         })
     }
 
@@ -445,7 +488,7 @@ impl Harness {
                 .lock()
                 .unwrap()
                 .insert(checkpoint.id.clone(), op.context());
-            slot.send(checkpoint.id.clone());
+            slot.send((call.id.clone(), checkpoint.id.clone()));
             (checkpoint, deadline, op)
         };
         op.outcome("modular_agent.tool.status", "pending");
@@ -722,13 +765,7 @@ impl Harness {
         let session = handoff.scope.session.clone();
         let id = handoff.id.clone();
         tokio::spawn(async move {
-            loop {
-                let delay = deadline.saturating_sub(now());
-                if delay == 0 {
-                    break;
-                }
-                tokio::select! { biased; _ = generation.cancelled() => return, _ = tokio::time::sleep(std::time::Duration::from_millis(delay)) => {} }
-            }
+            tokio::select! { biased; _ = generation.cancelled() => return, _ = wait_until(deadline) => {} }
             if let Some(h) = harness.upgrade()
                 && !generation.is_cancelled()
             {
@@ -894,13 +931,18 @@ impl Harness {
                 return Ok(status);
             }
             let start = interface_start(&open.data, &handoff).unwrap();
-            self.commit_interface_result(
+            let result = self.commit_interface_result(
                 open,
                 &handoff,
                 &scope,
                 Draft::new("tool.result", true, json!(proposed))
                     .copying(vec![start.id.clone(), handoff.id.clone()]),
             )?;
+            // The result, not whichever driver happens to wake up, starts the continuation.
+            let cx = telemetry::current();
+            if telemetry::traceparent(&cx).is_some() {
+                open.input_contexts.insert(result.id, cx);
+            }
         }
         op.outcome("modular_agent.tool.status", wire::status(&proposed.status));
         self.interface_work_ready(&connection.session).await?;

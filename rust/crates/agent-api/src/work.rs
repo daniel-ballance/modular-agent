@@ -306,6 +306,15 @@ pub trait InputRequests: Send + Sync {
         value: Value,
         declined: bool,
     ) -> Result<()>;
+    /// Commit an in-turn decision only while this exact authenticated route is live.
+    async fn answer_on_route(&self, _api: Api, _route: &str, _answer: Answer) -> Result<()> {
+        bail!("this question service does not support route-bound answers")
+    }
+    fn connect_answer_route(&self, session: &str, actor: &str, route: &str, approvals: bool) {
+        if approvals {
+            self.presence_route(session, actor, route, true);
+        }
+    }
     async fn decline(
         &self,
         api: Api,
@@ -328,6 +337,9 @@ pub trait InputRequests: Send + Sync {
         self.presence(session, actor, present);
     }
     fn detach_presence(&self, _session: &str, _route: &str) {}
+    fn present_for_approval(&self, session: &str) -> Vec<String> {
+        self.present(session)
+    }
     fn present(&self, _session: &str) -> Vec<String> {
         vec![]
     }

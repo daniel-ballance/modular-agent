@@ -176,7 +176,10 @@ export const advanced = {
         assert.equal(entries(evidence, 'turnStart').length, 1, 'resumed question uses original turn');
         const answers = entries(evidence, 'inputAnswer');
         assert.equal(answers.length, 1, 'question decision commits once');
-        assert.equal(answers[0].data.declined ?? false, status !== 'resolved');
+        if (status === 'resolved') {
+          assert.equal(answers[0].data.declined ?? false, false);
+          assert.equal(answers[0].data.value, value);
+        } else assert.equal(answers[0].data.declined, true);
         if (status === 'expired') assert.equal(answers[0].data.reason, 'timeLimit');
       } finally { await presence.close(); }
     }
@@ -278,7 +281,7 @@ export const advanced = {
     const copy = await api.view(view.threadId);
     assert.deepEqual(copy.messages, final.messages, 'gated replay matches live view');
     await refused(await at(origin, tokens.sibling).request(threadPath(view.threadId)), 403, 'output_withheld');
-    assert.ok(entries(await evidenceFor(control, view.threadId), 'response').some(e => e.message?.content.some(p => p.type === 'text' && p.text === hidden)), 'redaction does not change the authoritative response');
+    assert.ok(entries(await evidenceFor(control, view.threadId), 'response').some(e => e.message?.role === 'assistant' && e.message.content.some(p => p.type === 'text' && p.text === hidden)), 'redaction does not change the authoritative response');
   }),
 
   'output-size': scenario(simple, async ({ api, origin, tokens }) => {

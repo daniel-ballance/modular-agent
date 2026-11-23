@@ -187,6 +187,10 @@ impl Harness {
             config.map(tenants::parse).transpose()?.unwrap_or_default();
         Ok(())
     }
+    /// Apply tenant limits before an Interface creates a provisional session.
+    pub fn tenant_rights(&self, name: &str) -> Result<Authority> {
+        Ok(self.check_tenant(name)?.rights)
+    }
     fn check_tenant(&self, name: &str) -> Result<tenants::Tenant> {
         self.tenants
             .read()
