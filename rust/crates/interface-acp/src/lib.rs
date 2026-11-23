@@ -133,14 +133,17 @@ pub trait Factory: Send + Sync {
     fn list_kept(&self, project: Option<&Path>) -> Result<Vec<SessionData>> {
         self.list(project)
     }
-    /// Effective rights and local turn activity. Without an inspector, omit
-    /// the optional summary rather than guess at tenant or parent authority.
-    fn listing_view(
+    /// Without an inspector, omit the optional summary rather than guess at
+    /// tenant or parent authority.
+    fn listing_rights(
         &self,
         _data: &SessionData,
         _principal: &Identity,
-    ) -> Result<Option<(Authority, bool)>> {
+    ) -> Result<Option<Authority>> {
         Ok(None)
+    }
+    fn observes_writer(&self, _id: &str) -> bool {
+        false
     }
     fn trust(&self, project: &Path) -> Result<()>;
     fn serves_project(&self, _project: &Path) -> bool {
@@ -563,9 +566,7 @@ impl State {
                         continue;
                     }
                     let mut row = json!({"sessionId":data.id,"cwd":data.project});
-                    if let Some((rights, running)) =
-                        self.factory.listing_view(&data, &self.principal)?
-                    {
+                    if let Some(rights) = self.factory.listing_rights(&data, &self.principal)? {
                         if !rights.has("watch") {
                             continue;
                         }
@@ -576,7 +577,10 @@ impl State {
                             &rights,
                             &self.principal.id,
                             None,
-                            running || self.routes.is_running(&data.id),
+                            || {
+                                self.routes.is_running(&data.id)
+                                    || self.factory.observes_writer(&data.id)
+                            },
                             |q, _| {
                                 q.kind != RequestKind::Approval
                                     || attached.as_ref().is_some_and(|s| {

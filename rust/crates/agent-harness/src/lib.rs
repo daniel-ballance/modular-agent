@@ -231,15 +231,12 @@ impl Harness {
                 Authority::default()
             }
         });
-        self.limit_rights(data, actor, rights.intersect(ceiling))
+        self.limit_rights(
+            data,
+            ConnectionCeiling::for_discovery(&data.id, actor, rights.intersect(ceiling)),
+        )
     }
-    fn limit_rights(
-        &self,
-        data: &SessionData,
-        actor: &str,
-        rights: Authority,
-    ) -> Result<Authority> {
-        let mut rights = ConnectionCeiling::narrow(&data.id, actor, rights);
+    fn limit_rights(&self, data: &SessionData, mut rights: Authority) -> Result<Authority> {
         if let Some(cap) = data
             .entries
             .iter()
@@ -2458,7 +2455,7 @@ impl AgentApi for Harness {
                 Authority::default()
             }
         });
-        self.limit_rights(&data, actor, rights)
+        self.limit_rights(&data, ConnectionCeiling::narrow(&data.id, actor, rights))
     }
     fn grant(&self, scope: &Scope, actor: &str, authority: Authority) -> Result<()> {
         require(self, scope, "grant")?;

@@ -288,6 +288,11 @@ pub trait HistoryStore: Send + Sync {
     fn supports_service_snapshots(&self) -> bool {
         false
     }
+    /// Positive, read-only evidence of a live writer. Do not acquire a lease
+    /// to probe it. Stores without a reader-visible lease signal return false.
+    fn confirms_writer(&self, _session: &str) -> bool {
+        false
+    }
     fn acquire(&self, session: &str) -> Result<Box<dyn Lease>>;
     fn load(&self, session: &str) -> Result<SessionData>;
     fn save(&self, session: &SessionData) -> Result<()>;

@@ -63,6 +63,19 @@ impl ConnectionCeiling {
         }
     }
 
+    /// Discovery can consult an existing attachment, not pin a first grant.
+    pub fn for_discovery(session: &str, actor: &str, recorded: Authority) -> Authority {
+        CONNECTION_CEILING
+            .try_with(|ceiling| {
+                if actor != ceiling.actor {
+                    return recorded.clone();
+                }
+                let grants = ceiling.grants.lock().unwrap();
+                recorded.intersect(grants.get(session).unwrap_or(&ceiling.token))
+            })
+            .unwrap_or(recorded)
+    }
+
     pub fn narrow(session: &str, actor: &str, recorded: Authority) -> Authority {
         CONNECTION_CEILING
             .try_with(|ceiling| {

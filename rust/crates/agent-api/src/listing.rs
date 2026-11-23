@@ -64,7 +64,7 @@ impl SessionData {
         rights: &Authority,
         actor: &str,
         route: Option<&str>,
-        running: bool,
+        running: impl FnOnce() -> bool,
         eligible: impl Fn(&Question, bool) -> bool,
     ) -> Result<WaitingSummary> {
         let branch = self.branch();
@@ -120,7 +120,7 @@ impl SessionData {
             tool_calls,
             turn: if unfinished.is_empty() {
                 TurnState::None
-            } else if running {
+            } else if running() {
                 TurnState::Running
             } else {
                 TurnState::Interrupted

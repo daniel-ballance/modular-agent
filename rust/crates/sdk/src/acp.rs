@@ -260,12 +260,18 @@ impl interface_acp::Factory for ProjectFactory {
         history.0.list(project)
     }
 
-    fn listing_view(
+    fn listing_rights(
         &self,
         data: &base::SessionData,
         principal: &interface_acp::Identity,
-    ) -> base::Result<Option<(base::Authority, bool)>> {
-        self.1.acp_listing_view(&self.0.history()?, data, principal)
+    ) -> base::Result<Option<base::Authority>> {
+        self.1
+            .acp_listing_rights(&self.0.history()?, data, principal)
+    }
+    fn observes_writer(&self, id: &str) -> bool {
+        use base::AgentApi;
+        self.1.inner.harness.is_driving_turn(id)
+            || self.0.history().is_ok_and(|h| h.0.confirms_writer(id))
     }
 
     fn trust(&self, project: &Path) -> base::Result<()> {
@@ -380,13 +386,12 @@ impl Agent {
         .await?)
     }
 
-    fn acp_listing_view(
+    fn acp_listing_rights(
         &self,
         history: &crate::History,
         data: &base::SessionData,
         principal: &interface_acp::Identity,
-    ) -> base::Result<Option<(base::Authority, bool)>> {
-        use base::AgentApi;
+    ) -> base::Result<Option<base::Authority>> {
         let h = &self.inner.harness;
         let rights = if history.0.check_erasure(data).is_ok() {
             h.discovery_rights(
@@ -398,7 +403,7 @@ impl Agent {
         } else {
             base::Authority::default()
         };
-        Ok(Some((rights, h.is_driving_turn(&data.id))))
+        Ok(Some(rights))
     }
 
     /// Reopen an unfinished turn in this project as the local operator. A race
@@ -563,13 +568,17 @@ impl interface_acp::Factory for Factory {
         }
         self.0.inner.history.0.list(project)
     }
-    fn listing_view(
+    fn listing_rights(
         &self,
         data: &base::SessionData,
         principal: &interface_acp::Identity,
-    ) -> base::Result<Option<(base::Authority, bool)>> {
+    ) -> base::Result<Option<base::Authority>> {
         self.0
-            .acp_listing_view(&self.0.inner.history, data, principal)
+            .acp_listing_rights(&self.0.inner.history, data, principal)
+    }
+    fn observes_writer(&self, id: &str) -> bool {
+        use base::AgentApi;
+        self.0.inner.harness.is_driving_turn(id) || self.0.inner.history.0.confirms_writer(id)
     }
     fn trust(&self, _project: &Path) -> base::Result<()> {
         base::bail!("ACP cannot change project trust")

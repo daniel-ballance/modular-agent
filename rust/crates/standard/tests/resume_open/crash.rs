@@ -145,7 +145,19 @@ impl Rig {
 async fn held_then_interrupted_turn_resumes_once_without_a_client() -> Result<()> {
     let r = Rig::new()?;
     let (mut writer, id, stream) = r.live_writer().await?;
-    let (mut other, _) = r.listener(&["--resume-open"], "held").await?;
+    let (mut other, url) = r.listener(&["--resume-open"], "held").await?;
+    let listed: Value = reqwest::Client::new()
+        .get(format!("{url}/agui/v1/threads"))
+        .bearer_auth(TOKEN)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        listed["threads"][0]["waiting"]["turn"], "running",
+        "the observing service can confirm the other file writer is live"
+    );
     let log = fs::read_to_string(r.root.path().join("held"))?;
     assert!(
         log.lines()

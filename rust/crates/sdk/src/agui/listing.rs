@@ -46,7 +46,11 @@ impl Service {
             .clients
             .get(&(d.id.clone(), a.client_id.clone()))
             .cloned();
-        let running = self.h().is_driving_turn(&d.id) || self.acp_open.is_running(&d.id);
+        let running = || {
+            self.h().is_driving_turn(&d.id)
+                || self.acp_open.is_running(&d.id)
+                || self.agent.inner.history.0.confirms_writer(&d.id)
+        };
         let summary =
             d.waiting_summary(&rights, a.id(), Some(&a.client_id), running, |q, live| {
                 if !live && q.kind != base::RequestKind::Approval {
@@ -130,7 +134,7 @@ impl Service {
                 .as_str()
                 .and_then(|id| history.load(id).ok())
                 .and_then(|d| self.thread_row(a, &d).ok().flatten())
-                .is_some_and(|fresh| fresh == *row)
+                .is_some_and(|fresh| fresh["waiting"] == row["waiting"])
         });
         Ok(reply(200, "application/json", Body::from(encode(&page)?)))
     }

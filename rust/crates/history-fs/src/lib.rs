@@ -88,6 +88,12 @@ impl FileHistory {
         history.initialize_registry()?;
         Ok(history)
     }
+    #[cfg(target_os = "linux")]
+    fn lease_name(&self, session: &str) -> String {
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        self.root.hash(&mut hash);
+        format!("modular-agent-{:016x}-{session}", hash.finish())
+    }
     fn path(&self, id: &str) -> Result<PathBuf> {
         ensure!(
             !id.is_empty() && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'),
@@ -171,11 +177,23 @@ impl HistoryStore for FileHistory {
         true
     }
     #[cfg(target_os = "linux")]
+    fn confirms_writer(&self, session: &str) -> bool {
+        // proc_pid_net(5): field eight of /proc/net/unix is the socket path.
+        // An abstract socket starts with '@' and disappears with its last fd.
+        let name = format!("@{}", self.lease_name(session));
+        fs::read("/proc/net/unix").is_ok_and(|table| {
+            table.split(|&b| b == b'\n').any(|line| {
+                line.split(u8::is_ascii_whitespace)
+                    .filter(|word| !word.is_empty())
+                    .nth(7)
+                    == Some(name.as_bytes())
+            })
+        })
+    }
+    #[cfg(target_os = "linux")]
     fn acquire(&self, session: &str) -> Result<Box<dyn Lease>> {
         self.path(session)?;
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
-        self.root.hash(&mut hash);
-        let name = format!("modular-agent-{:016x}-{session}", hash.finish());
+        let name = self.lease_name(session);
         // The kernel releases this address on exit. No empty session lock file remains.
         // https://doc.rust-lang.org/std/os/linux/net/trait.SocketAddrExt.html
         let address = SocketAddr::from_abstract_name(name.as_bytes())?;
