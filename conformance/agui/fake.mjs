@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import { WebSocketServer } from 'ws';
 import { dispatch, offer, simple, transformed } from './cases.mjs';
 import { MAX, PATH, parse } from './wire.mjs';
+import { fakeFixture, makeSession } from './fake-fixture.mjs';
 
 export const fixtureTokens = () => Object.fromEntries(['owner', 'rotated', 'watch', 'sibling', 'foreign', 'tenant', 'project'].map(key => [key, randomUUID()]));
 const declaration = { interfaceTools: true, telemetry: 1 };
@@ -20,8 +21,9 @@ const equal = (a, b) => (a === b) || (a && b && typeof a === 'object' && typeof 
   Object.keys(a).length === Object.keys(b).length && Object.keys(a).every(k => Object.hasOwn(b, k) && equal(a[k], b[k])));
 const known = message => Object.fromEntries(Object.entries(message).filter(([key]) => ['role', 'id', 'content', 'name', 'toolCallId', 'toolCalls', 'error'].includes(key)));
 
-export async function fake({ model = simple, tokens = fixtureTokens(), fault } = {}) {
+export async function fake({ model = simple, tokens = fixtureTokens(), fault, scenario } = {}) {
   const sessions = new Map();
+  const fixture = scenario && fakeFixture(scenario, fault, model);
   const sockets = new WebSocketServer({ noServer: true, handleProtocols: protocols => protocols.has('modular-agent-acp-1') ? 'modular-agent-acp-1' : false });
   const peer = request => Object.keys(tokens).find(key => request.headers.authorization === `Bearer ${tokens[key]}`);
   const server = createServer(async (req, res) => {
@@ -31,7 +33,10 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault } =
       if (!auth && !(fault === 'anonymous' && url.pathname === PATH)) return error(res, 401, 'unauthenticated');
       const client = auth === 'rotated' ? 'owner' : auth;
       const path = url.pathname.slice(PATH.length);
-      if (req.method === 'GET' && path === '') return json(res, 200, { binding: 'modular-agent-agui/1', protocolVersion: '1.0', declaration });
+      if (req.method === 'GET' && path === '') {
+        if (scenario === 'error-gate') return error(res, 403, 'output_withheld');
+        return json(res, 200, { binding: 'modular-agent-agui/1', protocolVersion: '1.0', declaration });
+      }
       let data;
       if (req.method === 'POST') {
         if (req.headers['content-type'] !== 'application/json') return invalid(res);
@@ -53,7 +58,7 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault } =
         if (Object.keys(data).length) return invalid(res);
         if (client === 'watch') return forbidden(res);
         const threadId = randomUUID();
-        sessions.set(threadId, { threadId, messages: [], views: new Map(), runs: new Set(), presence: new Set() });
+        sessions.set(threadId, { ...makeSession(), threadId, messages: [], views: new Map(), runs: new Set(), presence: new Set() });
         return json(res, 201, { threadId, declaration });
       }
       const threadId = path === '/run' ? data?.threadId : /^\/threads\/([^/]+)(?:\/presence)?$/.exec(path)?.[1];
@@ -71,13 +76,16 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault } =
         if (session.presence.has(client)) return conflict(res);
         session.presence.add(client); sseHeaders(); res.write(': presence\n\n');
         const interval = setInterval(() => res.write(': presence\n\n'), 3000);
-        res.on('close', () => { session.presence.delete(client); clearInterval(interval); });
+        res.on('close', () => { session.presence.delete(client); clearInterval(interval); fixture?.disconnect(session, client); });
         return;
       }
       if (req.method === 'GET') {
         const toolCalls = session.open && (client === 'owner' || fault === 'foreign-wait') ? [{ toolCallId: session.open, expiresAt: session.expiresAt,
           ...(fault === 'snapshot-args' ? { args: dispatch } : {}) }] : [];
-        return json(res, 200, { threadId, declaration, ...snapshot(), waiting: { questions: [], toolCalls } });
+        if (scenario === 'state-and-gate' && client === 'sibling') return error(res, 403, 'output_withheld');
+        if (fault === 'keep-presence' && scenario === 'approval-lost' && client === 'owner') return json(res, 200, { threadId, declaration, ...snapshot(), waiting: { questions: [session.question], toolCalls } });
+        const questions = fixture?.eligible(session, client) ? [session.question] : [];
+        return json(res, 200, { threadId, declaration, ...snapshot(), waiting: { questions, toolCalls } });
       }
       if (req.method !== 'POST' || path !== '/run') return missing(res);
       const { protocolVersion, runId, messages, tools = [], context = [], resume = [] } = data;
@@ -93,6 +101,26 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault } =
       if ((cursor !== undefined && cursor !== last.cursor && fault !== 'stale-cursor') || (found && fault !== 'duplicate-run') ||
           (!equal(messages.slice(0, last.messages.length).map(known), last.messages) && fault !== 'changed-history')) return conflict(res);
       const suffix = messages.slice(last.messages.length);
+      if (session.invalidated && messages.some(m => m.id?.startsWith('ma:'))) return conflict(res);
+      if (fixture) {
+        const events = [event('RUN_STARTED', { threadId, runId, protocolVersion: '1.0' })];
+        const push = (type, value) => events.push(event(type, value));
+        const emit = () => {
+          const { messages, ...value } = snapshot();
+          push('MESSAGES_SNAPSHOT', { messages });
+          push('CUSTOM', { name: 'modular-agent.history', value });
+        };
+        if (client === 'watch') return forbidden(res);
+        const finish = outcome => push('RUN_FINISHED', { threadId, runId, outcome });
+        const rejected = await fixture.run({ s: session, suffix, resume, data, offered: Boolean(tools.length), headers: req.headers, client, push, emit, finish, response: res });
+        if (rejected) {
+          if (rejected[0] !== -1) return error(res, ...rejected);
+          return;
+        }
+        session.runs.add(`${client}:${runId}`);
+        sseHeaders();
+        return res.end(events.map(e => `data: ${JSON.stringify(e)}\n\n`).join(''));
+      }
       if (!suffix.length && resume.length) return conflict(res);
       if (!suffix.length || suffix.some(m => !['user', 'tool'].includes(m?.role) || typeof m.id !== 'string' || m.id.startsWith('ma:'))) return invalid(res);
       if (client === 'watch') return forbidden(res);
@@ -156,14 +184,29 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault } =
       });
     });
   });
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
+  async function listen() {
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+  }
+  async function close() {
+    const closed = new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    for (const ws of sockets.clients) ws.terminate();
+    server.closeAllConnections();
+    await closed;
+  }
+  await listen();
   return {
-    origin: `http://127.0.0.1:${server.address().port}`, tokens,
-    async close() {
-      for (const ws of sockets.clients) ws.terminate();
-      server.closeAllConnections();
-      await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    get origin() { return `http://127.0.0.1:${server.address().port}`; }, tokens,
+    async control(operation, args) {
+      const session = sessions.get(args.threadId);
+      if (!fixture || !session) throw new Error('fixture session unavailable');
+      return fixture.control(operation, session, args);
     },
+    async restart() {
+      await close();
+      await fixture.restart(sessions);
+      await listen();
+    },
+    close,
   };
 }
