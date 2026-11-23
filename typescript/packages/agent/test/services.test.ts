@@ -164,8 +164,11 @@ test("services: a second agent can't write to a session another holds; once it i
 	const { sessionId } = await http(first, "POST", "/sessions");
 	await http(first, "POST", `/sessions/${sessionId}/input`, { content: "say hello" });
 	await first.h.api("t").waitForIdle(sessionId);
-	const second = await agent();
-	await assert.rejects(http(second, "POST", `/sessions/${sessionId}/open`), /409|already open for writing|held by another owner/);
+	const store = new HttpHistoryStore(history);
+	const second = await agent({ store });
+	// The HTTP open waits for an abandoned lease. This writer is alive and renews
+	// until we stop it, so check the exclusion with a non-waiting acquire instead.
+	await assert.rejects(store.openForWriting(sessionId), { code: "held", status: 409 });
 	await first.h.stop();
 	await http(second, "POST", `/sessions/${sessionId}/open`);
 	await http(second, "POST", `/sessions/${sessionId}/input`, { content: "say goodbye" });

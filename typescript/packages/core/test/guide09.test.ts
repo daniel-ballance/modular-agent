@@ -45,7 +45,9 @@ async function handoff(project: string, writerDir: string, readerDir: string, ur
   }
 }
 
-test("hands off a session over HTTP", { timeout: 10_000 }, async () => {
+// Hang guard only: the test waits for prompts and close, not for lease expiry.
+// A loaded run took 62 seconds with service setup and durable writes.
+test("hands off a session over HTTP", { timeout: 90_000 }, async () => {
   const tmp = await mkdtemp(join(tmpdir(), "guide09-"));
   const project = join(tmp, "project");
   const tokenFile = join(tmp, "token");
