@@ -74,9 +74,10 @@ async def test_interface_result_on_new_connection(placement):
             "status": "completed",
             "content": [{"type": "text", "text": "green"}],
         }
-        assert sorted(
-            await asyncio.gather(*(peer.report_tool_result(session.id, report) for _ in range(2)))
-        ) == ["accepted", "alreadySettled"]
+        outcomes = await asyncio.gather(
+            *(peer.report_tool_result(session.id, report) for _ in range(2))
+        )
+        assert sorted(outcome["status"] for outcome in outcomes) == ["accepted", "alreadySettled"]
         await session.wait_idle()
         rows = await session.history()
         [start] = [r for r in rows if r["kind"] == "toolStarted"]
@@ -91,6 +92,39 @@ async def test_interface_result_on_new_connection(placement):
         assert second["data"]["startedBy"] == {"kind": "toolResult", "id": result["id"]}
         assert len([r for r in rows if r["kind"] in {"inputAccepted", "input"}]) == 2
         peer.close()
+
+
+async def test_early_interface_report_is_retryable(placement):
+    handed = asyncio.get_running_loop().create_future()
+    release = asyncio.Event()
+
+    async def hold_step(_):
+        await release.wait()
+
+    async with make_agent(
+        script=SCRIPT,
+        interface_tools=[source()],
+        plugins=[Plugin("hold", hooks={"step.after": hold_step})],
+        **placement,
+    ) as agent:
+        session = await agent.session()
+        cx = agent.connect_interface_tools(
+            actor_id="user", route_id="editor", on_handoff=handed.set_result
+        )
+        cx.advertise(session.id, [TOOL])
+        turn = asyncio.create_task(session.prompt("Pick a color"))
+        try:
+            request = await handed
+            report = {"callId": request["call_id"], "status": "completed", "content": []}
+            assert await cx.report_tool_result(session.id, report) == {
+                "status": "refused",
+                "reason": "notReady",
+            }
+        finally:
+            release.set()
+            await turn
+        assert await cx.report_tool_result(session.id, report) == {"status": "accepted"}
+        await session.wait_idle()
 
 
 async def test_interface_presence_and_approval(placement):
@@ -177,13 +211,13 @@ async def test_interface_report_checks_branch_route_rights_and_runs_after(placem
         limited = agent.connect_interface_tools(
             actor_id="user", route_id="editor", rights=["watch"]
         )
-        assert await wrong.report_tool_result(session.id, report) == "refused"
-        assert await limited.report_tool_result(session.id, report) == "refused"
-        assert (
-            await cx.report_tool_result(session.id, {**report, "status": "cancelled"}) == "refused"
-        )
+        assert await wrong.report_tool_result(session.id, report) == {"status": "refused"}
+        assert await limited.report_tool_result(session.id, report) == {"status": "refused"}
+        assert await cx.report_tool_result(session.id, {**report, "status": "cancelled"}) == {
+            "status": "refused"
+        }
         assert not reports
-        assert await cx.report_tool_result(session.id, report) == "accepted"
+        assert await cx.report_tool_result(session.id, report) == {"status": "accepted"}
         await session.wait_idle()
         assert reports == [report["content"]]
         rows = await session.history()
@@ -211,12 +245,9 @@ async def test_interface_expiry_refuses_results_and_continues(placement):
                     assert event.data.fields["status"] == "outcomeUnknown"
                     break
         peer = agent.connect_interface_tools(actor_id="user", route_id="editor")
-        assert (
-            await peer.report_tool_result(
-                session.id, {"callId": request["call_id"], "status": "completed", "content": []}
-            )
-            == "refused"
-        )
+        assert await peer.report_tool_result(
+            session.id, {"callId": request["call_id"], "status": "completed", "content": []}
+        ) == {"status": "refused"}
         await session.wait_idle()
         rows = await session.history()
         [result] = [e for e in rows if e["kind"] == "toolResult"]
@@ -245,7 +276,7 @@ async def test_interface_handoff_and_settlement_are_separate_spans(placement, mo
                 "content": [{"type": "text", "text": "RESULT-SENTINEL"}],
             }
             with provider.get_tracer("test").start_as_current_span("caller"):
-                assert await cx.report_tool_result(session.id, report) == "accepted"
+                assert await cx.report_tool_result(session.id, report) == {"status": "accepted"}
             await session.wait_idle()
         spans = traces.get_finished_spans()
         [execution] = [s for s in spans if s.name == "execute_tool pick_color"]
@@ -291,28 +322,22 @@ async def test_interface_lifetime_controls(placement, tmp_path, action):
             await session.close()
             session = await agent.open_session(session.id)
         elif action == "erase-result":
-            assert (
-                await cx.report_tool_result(
-                    session.id,
-                    {
-                        "callId": request["call_id"],
-                        "status": "completed",
-                        "content": [{"type": "text", "text": "erased payload"}],
-                    },
-                )
-                == "accepted"
-            )
+            assert await cx.report_tool_result(
+                session.id,
+                {
+                    "callId": request["call_id"],
+                    "status": "completed",
+                    "content": [{"type": "text", "text": "erased payload"}],
+                },
+            ) == {"status": "accepted"}
             await session.wait_idle()
             [result] = [e for e in await session.history() if e["kind"] == "toolResult"]
             await session.erase([result["id"]])
         else:
             await session.cancel()
-        assert (
-            await cx.report_tool_result(
-                session.id, {"callId": request["call_id"], "status": "completed", "content": []}
-            )
-            == "refused"
-        )
+        assert await cx.report_tool_result(
+            session.id, {"callId": request["call_id"], "status": "completed", "content": []}
+        ) == {"status": "refused"}
         rows = await session.history()
         [terminal] = [e for e in rows if e["kind"] == "toolResult"]
         assert terminal.get("erased") or terminal["data"]["status"] == "outcomeUnknown"
@@ -418,9 +443,9 @@ async def test_interface_crash_recovery(tmp_path, process, durable, active):
         session = await agent.open_session(request["session_id"])
         retry = agent.connect_interface_tools(actor_id="user", route_id="editor")
         report = {"callId": request["call_id"], "status": "completed", "content": []}
-        assert await retry.report_tool_result(session.id, report) == (
-            "refused" if active and not durable else "accepted"
-        )
+        assert await retry.report_tool_result(session.id, report) == {
+            "status": "refused" if active and not durable else "accepted"
+        }
         await session.wait_idle()
         rows = await session.history()
         assert len([e for e in rows if e["kind"] == "toolStarted"]) == 1

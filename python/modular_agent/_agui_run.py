@@ -382,7 +382,7 @@ class Exchange:
                 )
             for report in converted:
                 assert self.cx is not None
-                require(await self.cx.report_tool_result(v.sid, report) == "accepted", "conflict")
+                require((await self.cx.report_tool_result(v.sid, report))["status"] == "accepted", "conflict")
             v.binding.decision_runs[run_key] = None
             if len(v.binding.decision_runs) > 8192:
                 v.binding.decision_runs.popitem(last=False)

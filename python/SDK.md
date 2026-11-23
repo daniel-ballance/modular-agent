@@ -137,7 +137,7 @@ With `defer=True`, the callback runs only on a successful `await connection.rele
 
 Call `connection.advertise(session.id, definitions)` with the exact subset this connection can execute. Use an empty list to withdraw it. The synchronous `on_handoff` callback receives `session_id`, `call_id`, `name`, `input` and the absolute `deadline`. It must not block. Calling `connection.close()` clears presence without settling an open call. A new authenticated connection on the same route can report without advertising or registering a callback.
 
-After the originating turn ends, call `await connection.report_tool_result(session.id, report)`, with shared fields `callId`, `status` (`completed` or `failed`), `content` and optional `value`. It returns `accepted`, `alreadySettled` or `refused`. A pre-end refusal can be retried; an expired call cannot be reported. Results supply context to a continuation, not a new user message. Do not execute a call from a history entry or an event replay. ACP does not expose the executor connection or the report method.
+After the originating turn ends, call `await connection.report_tool_result(session.id, report)`, with shared fields `callId`, `status` (`completed` or `failed`), `content` and optional `value`. It returns a dictionary with `status` set to `accepted`, `alreadySettled` or `refused`. A valid report before turn end returns `{"status": "refused", "reason": "notReady"}`. It can be retried; an expired call cannot. Results supply context to a continuation, not a new user message. Do not execute a call from a history entry or an event replay. ACP does not expose the executor connection or the report method.
 
 ## Subscription sign-in
 
@@ -156,8 +156,6 @@ The launcher of a stdio ACP host is trusted for per-request trace context. Set `
 - The [SDK API](../docs/sdk/api.md#the-agent) now defines a session-bound executor handle. Python's existing handle is scoped to the configured project and actor; its `advertise`, `release` and `report_tool_result` take the session ID explicitly. For a language note:
 
   > | `connection.reportToolResult(sessionId, report)` | `accepted`, `alreadySettled` or `refused`. The connection is bound to an independently authenticated actor and operator-configured Interface route. The report uses the [shared shape](../docs/bindings/data.md#interface-handoff-records). This operation never dispatches a tool. |
-
-- The [Interface handle](../docs/sdk/api.md#the-agent) says: “A report uses the shared Interface result shape and returns `accepted`, `alreadySettled` or `refused`; `notReady` is a retryable refusal before the originating turn ends.” The existing Python handle returns `refused` rather than a distinct `notReady` disposition. The HTTP adapter detects an open origin in the committed branch and rejects an early report with HTTP 409 `conflict`.
 
 - For [Serving AG-UI](../docs/sdk/placement.md#serving-ag-ui), replace “The app advertises the exact definitions it can run.” with:
 
