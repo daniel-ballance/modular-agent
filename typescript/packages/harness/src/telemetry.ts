@@ -9,7 +9,6 @@ export const TURN_TRACE = "modular-agent.turnTrace";
 export const conversation = (id: string): Attributes => ({ "gen_ai.conversation.id": id });
 const scopeKeys = ["gen_ai.conversation.id", "modular_agent.turn.id", "modular_agent.step.id"] as const;
 const scope = new AsyncLocalStorage<{ context: Context; attributes: Attributes; operation: Operation }>();
-const tracer = trace.getTracer("modular-agent");
 
 // Only IDs and flags are carried. There is no configured allowlist for vendor state.
 export function readTrace(value: unknown): SpanContext | undefined {
@@ -50,7 +49,7 @@ export function startOperation(name: string, attributes: Attributes = {}, option
 	let span: Span | undefined;
 	let sc: SpanContext | undefined;
 	try {
-		span = tracer.startSpan(name, { kind: options.kind, attributes: all, links: options.links?.map(context => ({ context })) }, parentContext);
+		span = trace.getTracer("modular-agent").startSpan(name, { kind: options.kind, attributes: all, links: options.links?.map(context => ({ context })) }, parentContext);
 		const candidate = span.spanContext();
 		if (isSpanContextValid(candidate) && candidate.spanId !== parent?.spanId) sc = candidate;
 	} catch { /* The application's instrumentation must not affect work. */ }

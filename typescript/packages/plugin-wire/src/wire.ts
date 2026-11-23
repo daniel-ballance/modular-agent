@@ -101,6 +101,7 @@ export class WirePeer {
 	}
 
 	private paramsWithTrace(method: string, params: unknown): unknown {
+		if (method === "plugin/initialize") return params;
 		const traceContext = this.trace?.agreed && workMethod(method) && method !== "host/credentials/read" ? carrier(currentSpan()) : undefined;
 		if (!objectParams(params)) return params;
 		if (!traceContext && !Object.hasOwn(params, "traceContext")) return params;
@@ -111,7 +112,7 @@ export class WirePeer {
 	private incoming<T>(method: string, params: any, work: (clean: any, parent: ReturnType<typeof readTrace> | null) => T): T {
 		const tracked = workMethod(method) && method !== "host/credentials/read" ? this.trace?.callbackScope?.(params) : undefined;
 		const received = this.trace?.agreed && workMethod(method) && method !== "host/credentials/read" ? readTrace(params?.traceContext) : undefined;
-		const clean = objectParams(params) && Object.hasOwn(params, "traceContext") ? (({ traceContext: _discard, ...rest }) => rest)(params) : params;
+		const clean = method !== "plugin/initialize" && objectParams(params) && Object.hasOwn(params, "traceContext") ? (({ traceContext: _discard, ...rest }) => rest)(params) : params;
 		const run = () => {
 			const authorized = tracked ? currentSpan() : undefined;
 			const parent = this.trace?.callbackScope ? (received && received.traceId === authorized?.traceId ? received : authorized) : received;
