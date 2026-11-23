@@ -434,7 +434,7 @@ impl Harness {
             start.content["openWorld"] = json!(true);
             let start = push(&mut next, scope, start);
             let checkpoint = push(&mut next, scope, Draft::new(INTERFACE_HANDOFF, false, json!({
-                "sourceId":source.config.source_id, "actorId":candidate.actor, "routeId":source.config.route_id,
+                "toolStartedId":start.id, "executorActorId":candidate.actor, "routeId":source.config.route_id,
                 "rights":ceiling, "deadline":deadline,
             })).copying(vec![start.id.clone()]));
             self.commit(open, &next)?;
@@ -539,9 +539,10 @@ impl Harness {
             || call.started_by != "model"
             || checkpoint.scope.turn.is_none()
             || checkpoint.scope.step.is_none()
-            || v["sourceId"] != source.config.source_id
+            || v["toolStartedId"] != json!(interface_start(data, checkpoint)?.id)
             || v["routeId"] != source.config.route_id
-            || v["actorId"] != source.config.actor_id
+            || v["executorActorId"] != source.config.actor_id
+            || !v["rights"].is_array()
             || start["safeToRepeat"] != false
             || start["openWorld"] != true
             || !same_json(
