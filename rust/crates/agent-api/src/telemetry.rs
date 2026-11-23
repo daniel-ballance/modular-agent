@@ -287,11 +287,26 @@ where
         }
         attrs.retain(|kv| kv.key.as_str() != "error.type");
         attrs.push(KeyValue::new("gen_ai.token.modality", "unknown"));
+        let cache_read = r.usage.cached_tokens;
+        let cache_write = r.usage.cache_write_tokens;
+        let input = r
+            .usage
+            .input_tokens
+            .saturating_add(cache_read)
+            .saturating_add(cache_write);
+        for (attr, count) in [
+            ("gen_ai.usage.cache_read.input_tokens", cache_read),
+            ("gen_ai.usage.cache_write.input_tokens", cache_write),
+        ] {
+            if count > 0 {
+                op.attr(attr, count.min(i64::MAX as u64) as i64);
+            }
+        }
         for (attr, metric, count) in [
             (
                 "gen_ai.usage.input_tokens",
                 "gen_ai.client.inference.usage.input_tokens",
-                r.usage.input_tokens,
+                input,
             ),
             (
                 "gen_ai.usage.output_tokens",
@@ -299,8 +314,10 @@ where
                 r.usage.output_tokens,
             ),
         ] {
-            if count > 0 {
+            if r.has_usage() {
                 op.attr(attr, count.min(i64::MAX as u64) as i64);
+            }
+            if count > 0 {
                 meter
                     .u64_counter(metric)
                     .with_unit("{token}")

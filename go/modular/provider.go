@@ -55,13 +55,15 @@ type Message struct {
 	ProviderData json.RawMessage `json:"providerData,omitempty"`
 }
 type AssistantMessage struct {
-	Role         string          `json:"role"`
-	Content      Content         `json:"content"`
-	Stop         string          `json:"stop"`
-	Usage        Usage           `json:"usage"`
-	Error        *ModelError     `json:"error,omitempty"`
-	ProviderData json.RawMessage `json:"providerData,omitempty"`
-	runtimeWire  json.RawMessage
+	Role    string  `json:"role"`
+	Content Content `json:"content"`
+	Stop    string  `json:"stop"`
+	Usage   Usage   `json:"usage,omitzero"`
+	// UsageReported distinguishes an explicit zero from missing usage.
+	UsageReported bool            `json:"-"`
+	Error         *ModelError     `json:"error,omitempty"`
+	ProviderData  json.RawMessage `json:"providerData,omitempty"`
+	runtimeWire   json.RawMessage
 }
 type ProviderContext struct {
 	piece      func(Part)
@@ -240,7 +242,9 @@ func (m modelAccess) Generate(ctx context.Context, r api.Request, emit func(api.
 	if err := decodeInto(response, &o); err != nil {
 		return failedModelResponse(err), nil
 	}
-	return portable.ReadResponse(o), nil
+	res := portable.ReadResponse(o)
+	res.UsageReported = res.UsageReported || response.UsageReported
+	return res, nil
 }
 
 func failedModelResponse(err error) api.Response {

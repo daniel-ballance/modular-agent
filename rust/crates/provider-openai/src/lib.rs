@@ -290,6 +290,7 @@ pub fn normalize(response: &Value) -> Result<ModelResponse> {
         parts,
         opaque: json!({"output":output}),
         stop: stop.into(),
+        usage_reported: response["usage"].is_object(),
         usage: Usage {
             input_tokens: response["usage"]["input_tokens"].as_u64().unwrap_or(0),
             output_tokens: response["usage"]["output_tokens"].as_u64().unwrap_or(0),

@@ -10,6 +10,7 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/modular"
 	"github.com/daniel-ballance/modular-agent/go/modular/modulartest"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -56,7 +57,7 @@ func TestTelemetryMapping(t *testing.T) {
 				}
 				return "sentinel-tool-result", nil
 			})
-			a := modulartest.Agent(t, modular.WithAgentName("fixture"), modular.WithModel(modulartest.ScriptedModel), modulartest.Script(`[{"toolCalls":[{"name":"check","input":{"value":"sentinel-argument"}}],"usage":{"input":10,"output":3}},{"text":"sentinel-completion","reasoning":"sentinel-reasoning","usage":{"input":12,"output":2}}]`), modular.WithTool(tool))
+			a := modulartest.Agent(t, modular.WithAgentName("fixture"), modular.WithModel(modulartest.ScriptedModel), modulartest.Script(`[{"toolCalls":[{"name":"check","input":{"value":"sentinel-argument"}}],"usage":{"input":10,"cacheRead":12,"cacheWrite":14,"output":3}},{"text":"sentinel-completion","reasoning":"sentinel-reasoning"}]`), modular.WithTool(tool))
 			if got := a.Declaration()["telemetry"]; got != 1 {
 				t.Fatalf("telemetry declaration: %v", got)
 			}
@@ -118,9 +119,30 @@ func TestTelemetryMapping(t *testing.T) {
 			if byName["chat script"][0].SpanKind != trace.SpanKindInternal {
 				t.Error("scripted inference should be internal")
 			}
+			cached, absent := byName["chat script"][0], byName["chat script"][1]
+			counts := attribute.NewSet(cached.Attributes...)
+			for key, want := range map[attribute.Key]int64{
+				"gen_ai.usage.input_tokens":             36,
+				"gen_ai.usage.cache_read.input_tokens":  12,
+				"gen_ai.usage.cache_write.input_tokens": 14,
+				"gen_ai.usage.output_tokens":            3,
+			} {
+				if got, ok := counts.Value(key); !ok || got.Type() != attribute.INT64 || got.AsInt64() != want {
+					t.Errorf("%s: got %v, want %d", key, got, want)
+				}
+			}
+			for _, a := range absent.Attributes {
+				if strings.HasPrefix(string(a.Key), "gen_ai.usage.") {
+					t.Errorf("reply without usage recorded %s", a.Key)
+				}
+			}
 			var m metricdata.ResourceMetrics
 			if err := reader.Collect(ctx, &m); err != nil {
 				t.Fatal(err)
+			}
+			counters := map[string]int64{
+				"gen_ai.client.inference.usage.input_tokens":  36,
+				"gen_ai.client.inference.usage.output_tokens": 3,
 			}
 			for _, scope := range m.ScopeMetrics {
 				for _, v := range scope.Metrics {
@@ -130,15 +152,16 @@ func TestTelemetryMapping(t *testing.T) {
 							t.Errorf("duration: %v", data)
 						}
 					case metricdata.Sum[int64]:
-						want := int64(5)
-						if strings.HasSuffix(v.Name, "input_tokens") {
-							want = 22
-						}
-						if len(data.DataPoints) != 1 || data.DataPoints[0].Value != want {
+						want, ok := counters[v.Name]
+						delete(counters, v.Name)
+						if !ok || len(data.DataPoints) != 1 || data.DataPoints[0].Value != want {
 							t.Errorf("%s: %v", v.Name, data)
 						}
 					}
 				}
+			}
+			if len(counters) > 0 {
+				t.Errorf("missing token counters: %v", counters)
 			}
 		})
 	}

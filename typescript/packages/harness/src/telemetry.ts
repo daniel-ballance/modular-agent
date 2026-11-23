@@ -150,11 +150,18 @@ export async function observeInference(providerId: string, model: string, attrib
 			meter.createHistogram("gen_ai.client.inference.duration", { unit: "s" }).record(elapsed,
 				errorType ? { ...dimensions, "error.type": errorType } : dimensions);
 			const usage = reply?.usage;
-			for (const [label, count] of [["input", usage?.input], ["output", usage?.output], ["cache_read.input", usage?.cacheRead], ["cache_creation.input", usage?.cacheWrite]] as const) {
-				if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) continue;
-				operation.set(`gen_ai.usage.${label}_tokens`, count);
-				if (count && (label === "input" || label === "output")) meter.createCounter(`gen_ai.client.inference.usage.${label}_tokens`, { unit: "{token}" })
-					.add(count, { ...dimensions, "gen_ai.token.modality": "unknown" });
+			if (usage) {
+				const tokens = (n: number) => Number.isSafeInteger(n) && n >= 0 ? n : 0;
+				const cacheRead = tokens(usage.cacheRead);
+				const cacheWrite = tokens(usage.cacheWrite);
+				if (cacheRead) operation.set("gen_ai.usage.cache_read.input_tokens", cacheRead);
+				if (cacheWrite) operation.set("gen_ai.usage.cache_write.input_tokens", cacheWrite);
+				for (const [label, count] of [["input", tokens(usage.input) + cacheRead + cacheWrite], ["output", tokens(usage.output)]] as const) {
+					if (!Number.isSafeInteger(count)) continue;
+					operation.set(`gen_ai.usage.${label}_tokens`, count);
+					if (count) meter.createCounter(`gen_ai.client.inference.usage.${label}_tokens`, { unit: "{token}" })
+						.add(count, { ...dimensions, "gen_ai.token.modality": "unknown" });
+				}
 			}
 		} catch { /* A meter or exporter failure must not affect work. */ }
 		operation.end();

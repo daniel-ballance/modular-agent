@@ -42,6 +42,31 @@ function firstTurn() {
 
 test("accepts a trace with spans exported out of order", () => compareTrace(firstTurn()));
 
+test("checks the input total, cache counts, and output against scripted usage", () => {
+  const s = firstTurn();
+  s.scriptedReplies = [{ usage: { input: 2, cacheRead: 3, cacheWrite: 5, output: 7 } }];
+  const expected = [
+    attribute("gen_ai.usage.input_tokens", 10),
+    attribute("gen_ai.usage.cache_read.input_tokens", 3),
+    attribute("gen_ai.usage.cache_write.input_tokens", 5),
+    attribute("gen_ai.usage.output_tokens", 7),
+  ];
+  const attempt = s.received.spans[0];
+  attempt.attributes.push(...expected);
+  compareTrace(s);
+  for (const count of expected) {
+    const i = attempt.attributes.indexOf(count);
+    attempt.attributes[i] = attribute(count.key, 2);
+    assert.throws(() => compareTrace(s), new RegExp(count.key));
+    attempt.attributes[i] = count;
+  }
+  attempt.attributes.splice(-4, 4, attribute("gen_ai.usage.input_tokens", 2), attribute("gen_ai.usage.output_tokens", 7));
+  s.scriptedReplies[0].usage = { input: 2, cacheRead: 0, cacheWrite: 0, output: 7 };
+  compareTrace(s);
+  attempt.attributes.push(attribute("gen_ai.usage.cache_write.input_tokens", 0));
+  assert.throws(() => compareTrace(s), /gen_ai.usage.cache_write.input_tokens/);
+});
+
 const modelStep = (stepId, stepNumber, invocationNumber = 1) => [
   makeSpan(stepNumber, invocationNumber, "modular_agent.step", step(stepId)),
   attempt(stepNumber + 1, stepNumber, stepId),

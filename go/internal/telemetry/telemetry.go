@@ -153,7 +153,7 @@ func Own(ctx context.Context, span trace.Span) *Wire {
 	return nil
 }
 
-func Inference(ctx context.Context, provider, model string, internal bool, stream ...bool) (context.Context, func(error, string, int, int)) {
+func Inference(ctx context.Context, provider, model string, internal bool, stream ...bool) (context.Context, func(error, string, bool, int, int, int, int)) {
 	provider = Name(provider)
 	model = Name(model)
 	vendor := provider
@@ -179,7 +179,7 @@ func Inference(ctx context.Context, provider, model string, internal bool, strea
 	}
 	start := time.Now()
 	ctx, span := Start(ctx, Named("chat", model), trace.WithSpanKind(k), trace.WithAttributes(attrs...))
-	return ctx, func(err error, stop string, input, output int) {
+	return ctx, func(err error, stop string, reported bool, input, output, cacheRead, cacheWrite int) {
 		if (err != nil && !errors.Is(err, context.Canceled)) || stop == "failed" {
 			Failed(span, "inference_failed")
 			dims = append(dims, String("error.type", "inference_failed"))
@@ -193,17 +193,24 @@ func Inference(ctx context.Context, provider, model string, internal bool, strea
 			h.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(dims...))
 		}
 		tokenDims := append(dims, String("gen_ai.token.modality", "unknown"))
-		record := func(which string, n int) {
-			if n <= 0 {
-				return
+		if reported {
+			if cacheRead > 0 {
+				span.SetAttributes(attribute.Int("gen_ai.usage.cache_read.input_tokens", cacheRead))
 			}
-			span.SetAttributes(attribute.Int("gen_ai.usage."+which+"_tokens", n))
-			if c, e := m.Int64Counter("gen_ai.client.inference.usage."+which+"_tokens", metric.WithUnit("{token}")); e == nil {
-				c.Add(ctx, int64(n), metric.WithAttributes(tokenDims...))
+			if cacheWrite > 0 {
+				span.SetAttributes(attribute.Int("gen_ai.usage.cache_write.input_tokens", cacheWrite))
 			}
+			record := func(which string, n int) {
+				span.SetAttributes(attribute.Int("gen_ai.usage."+which+"_tokens", n))
+				if n > 0 {
+					if c, e := m.Int64Counter("gen_ai.client.inference.usage."+which+"_tokens", metric.WithUnit("{token}")); e == nil {
+						c.Add(ctx, int64(n), metric.WithAttributes(tokenDims...))
+					}
+				}
+			}
+			record("input", input+cacheRead+cacheWrite)
+			record("output", output)
 		}
-		record("input", input)
-		record("output", output)
 		span.End()
 	}
 }

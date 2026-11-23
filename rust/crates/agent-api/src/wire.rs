@@ -324,13 +324,17 @@ pub fn response(r: &ModelResponse) -> Value {
         "limit" => "length",
         s => s,
     });
-    if !v["usage"].is_object() {
-        v["usage"] = json!({});
+    if r.has_usage() {
+        if !v["usage"].is_object() {
+            v["usage"] = json!({});
+        }
+        merge(
+            &mut v["usage"],
+            json!({"input":r.usage.input_tokens,"output":r.usage.output_tokens,"cacheRead":r.usage.cached_tokens,"cacheWrite":r.usage.cache_write_tokens,"cost":r.usage.cost}),
+        );
+    } else if let Some(fields) = v.as_object_mut() {
+        fields.remove("usage");
     }
-    merge(
-        &mut v["usage"],
-        json!({"input":r.usage.input_tokens,"output":r.usage.output_tokens,"cacheRead":r.usage.cached_tokens,"cacheWrite":r.usage.cache_write_tokens,"cost":r.usage.cost}),
-    );
     v
 }
 pub fn parse_response(v: Value) -> Result<ModelResponse> {
@@ -351,6 +355,7 @@ pub fn parse_response(v: Value) -> Result<ModelResponse> {
             s => s,
         }
         .into(),
+        usage_reported: v["usage"].is_object(),
         usage: Usage {
             input_tokens: v["usage"]["input"].as_u64().unwrap_or(0),
             output_tokens: v["usage"]["output"].as_u64().unwrap_or(0),

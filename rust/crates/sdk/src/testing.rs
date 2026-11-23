@@ -126,10 +126,11 @@ where
             );
             calls = true;
         }
-        Ok(AssistantMessage(
-            json!({"role":"assistant","content":parts,"stop":if calls {"toolUse"} else {"finished"},
-            "usage":step["usage"]}),
-        ))
+        let mut reply = json!({"role":"assistant","content":parts,"stop":if calls {"toolUse"} else {"finished"}});
+        if let Some(usage) = step.get("usage") {
+            reply["usage"] = usage.clone();
+        }
+        Ok(AssistantMessage(reply))
     }
 }
 

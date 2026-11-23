@@ -86,7 +86,7 @@ class ScriptedProvider:
             "role": "assistant",
             "content": list(parts),
             "stop": "failed" if "error" in response else "toolUse" if calls else "finished",
-            "usage": response.get("usage", {}),
+            **({"usage": response["usage"]} if "usage" in response else {}),
             **({"error": response["error"]} if "error" in response else {}),
         }
 

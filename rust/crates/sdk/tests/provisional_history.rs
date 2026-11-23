@@ -131,7 +131,12 @@ impl RuntimePart for ServedRuntime {
             outcome: Outcome::Completed,
             result: json!({"text":response.0["content"][0]["text"],"openToolCalls":[]}),
             entries: vec![entry["id"].as_str().unwrap().into()],
-            usage: serde_json::from_value(response.0["usage"].clone())?,
+            usage: response
+                .get("usage")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()?
+                .unwrap_or_default(),
         })
     }
 }

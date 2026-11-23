@@ -173,7 +173,7 @@ const counts = {
   "durable-crash": [2, ["bump"]], "kept-crash": [1, ["bump"]],
 };
 
-export function compareTrace({ testCase, report, received, connections = [], sentinels }) {
+export function compareTrace({ testCase, report, received, connections = [], scriptedReplies = [], sentinels }) {
   const { scenario, placement, handshake, sdk } = testCase;
   const { sessionId, turnId } = report;
   assert.equal(report.scenario, scenario, "Runner reported the wrong scenario");
@@ -230,7 +230,7 @@ export function compareTrace({ testCase, report, received, connections = [], sen
   for (const span of [...inference, ...stepSpans]) {
     assert(observedSteps.some(s => matches(span, { ...scope, [step]: s.id })), "Unobserved step or inference attempt");
   }
-  for (const observed of observedSteps) {
+  for (const [index, observed] of observedSteps.entries()) {
     assert(id(observed.model), "Missing final request model");
     const scoped = { ...scope, [step]: observed.id };
     const attempts = inference.filter(s => matches(s, scoped));
@@ -255,6 +255,14 @@ export function compareTrace({ testCase, report, received, connections = [], sen
       shape(attempt, `chat ${observed.model}`, "INTERNAL");
       attrs(attempt, { [operation]: "chat", "gen_ai.request.model": observed.model,
         "gen_ai.provider.name": "scripted", "modular_agent.provider.id": "scripted" });
+      // The scripted Provider selects replies in dispatch order in these cases.
+      const usage = scriptedReplies[index]?.usage;
+      if (usage) attrs(attempt, {
+        "gen_ai.usage.input_tokens": (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0),
+        "gen_ai.usage.cache_read.input_tokens": usage.cacheRead || undefined,
+        "gen_ai.usage.cache_write.input_tokens": usage.cacheWrite || undefined,
+        "gen_ai.usage.output_tokens": usage.output ?? 0,
+      });
     }
     if (!observed.beforeCrash) {
       const work = one(stepMatches, "Step with observed ID");
