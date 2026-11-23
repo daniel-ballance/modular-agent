@@ -1,11 +1,11 @@
 //! The transport and tool catalog shared by the Rust MCP adapters.
 use anyhow::{Result, ensure};
 use opentelemetry::{Context, trace::TraceContextExt};
-use rmcp::model::CallToolRequestParams;
+use rmcp::model::{CallToolRequestParams, ClientConfig, PaginatedRequestParams, RequestParamsMeta};
 pub use rmcp::model::{CallToolResult, Tool};
 use rmcp::{
     ClientHandler, RoleClient, ServiceExt,
-    service::{NotificationContext, RunningService},
+    service::{NotificationContext, Peer, RunningService, ServiceError},
     transport::{StreamableHttpClientTransport, TokioChildProcess},
 };
 use serde::{Deserialize, Serialize};
@@ -49,9 +49,13 @@ struct Client {
     failed: Arc<RwLock<Option<String>>>,
 }
 impl ClientHandler for Client {
+    fn get_info(&self) -> ClientConfig {
+        with_trace(ClientConfig::default())
+    }
+
     async fn on_tool_list_changed(&self, context: NotificationContext<RoleClient>) {
         // Refresh before returning from the notification, so the next step sees it.
-        match context.peer.list_all_tools().await {
+        match list_tools(&context.peer).await {
             Ok(tools) => {
                 *self.tools.write().unwrap() = tools;
                 *self.failed.write().unwrap() = None;
@@ -151,8 +155,8 @@ impl Connection {
     }
 
     pub async fn refresh(&self) -> Result<()> {
-        let tools =
-            tokio::time::timeout(Duration::from_secs(15), self.service.list_all_tools()).await??;
+        let tools = tokio::time::timeout(Duration::from_secs(15), list_tools(self.service.peer()))
+            .await??;
         validate(&self.name, &tools)?;
         *self.client.tools.write().unwrap() = tools;
         Ok(())
@@ -171,8 +175,7 @@ impl Connection {
         name: String,
         arguments: Map<String, Value>,
     ) -> Result<Option<CallToolResult>> {
-        let mut request = CallToolRequestParams::new(name).with_arguments(arguments);
-        request.meta = trace_metadata();
+        let request = with_trace(CallToolRequestParams::new(name).with_arguments(arguments));
         match tokio::time::timeout(Duration::from_secs(60), self.service.call_tool(request)).await {
             Ok(result) => Ok(Some(result?)),
             Err(_) => Ok(None),
@@ -184,22 +187,36 @@ impl Connection {
     }
 }
 
-fn trace_metadata() -> Option<rmcp::model::RequestMetaObject> {
+async fn list_tools(peer: &Peer<RoleClient>) -> Result<Vec<Tool>, ServiceError> {
+    let mut tools = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = peer
+            .list_tools(Some(with_trace(
+                PaginatedRequestParams::default().with_cursor(cursor),
+            )))
+            .await?;
+        tools.extend(page.tools);
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            return Ok(tools);
+        }
+    }
+}
+
+fn with_trace<T: RequestParamsMeta>(mut params: T) -> T {
     let cx = Context::current();
     let span = cx.span();
     let sc = span.span_context();
-    sc.is_valid().then(|| {
-        let parent = format!(
+    if sc.is_valid() {
+        params.set_traceparent(&format!(
             "00-{}-{}-{:02x}",
             sc.trace_id(),
             sc.span_id(),
             sc.trace_flags().to_u8()
-        );
-        rmcp::model::RequestMetaObject::from(Map::from_iter([(
-            "traceparent".into(),
-            Value::String(parent),
-        )]))
-    })
+        ));
+    }
+    params
 }
 
 fn validate(server: &str, tools: &[Tool]) -> Result<()> {

@@ -1,5 +1,6 @@
 //! modular-agent-plugin/1 adapters. No Runtime or turn loop lives here.
 mod host;
+pub use host::LoadOptions;
 mod jobs;
 mod output;
 mod relay;

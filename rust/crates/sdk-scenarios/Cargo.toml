@@ -7,6 +7,12 @@ publish = false
 description = "Runs conformance/sdk/scenarios against the Rust SDK"
 
 [dependencies]
+agent-api = { path = "../agent-api" }
+history-fs = { path = "../history-fs" }
+opentelemetry.workspace = true
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "rt-tokio", "experimental_trace_batch_span_processor_with_async_runtime"] }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["trace", "http-proto", "reqwest-client", "reqwest-rustls"] }
+serde.workspace = true
 uuid.workspace = true
 modular-agent = { path = "../sdk" }
 futures-util.workspace = true

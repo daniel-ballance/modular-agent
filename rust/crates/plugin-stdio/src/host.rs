@@ -75,6 +75,12 @@ pub enum ExternalLaunch {
     Service(ServiceLaunch),
 }
 
+#[derive(Default)]
+pub struct LoadOptions {
+    pub readiness: Option<ProviderReadiness>,
+    pub omit_trace_offer: bool,
+}
+
 impl ExternalLaunch {
     pub async fn load(
         self,
@@ -83,17 +89,17 @@ impl ExternalLaunch {
         home: &Path,
         index: usize,
     ) -> Result<Arc<Remote>> {
-        self.load_with_readiness(harness, project, home, index, None)
+        self.load_with_options(harness, project, home, index, LoadOptions::default())
             .await
     }
 
-    pub async fn load_with_readiness(
+    pub async fn load_with_options(
         self,
         harness: &Arc<Harness>,
         project: &Path,
         home: &Path,
         index: usize,
-        readiness: Option<ProviderReadiness>,
+        options: LoadOptions,
     ) -> Result<Arc<Remote>> {
         match self {
             Self::Process(launch) => {
@@ -106,7 +112,7 @@ impl ExternalLaunch {
                     project,
                     home,
                     index,
-                    readiness,
+                    options,
                 )
                 .await
             }
@@ -126,7 +132,7 @@ impl ExternalLaunch {
                     project,
                     home,
                     index,
-                    None,
+                    LoadOptions::default(),
                 )
                 .await
             }
@@ -165,7 +171,8 @@ impl ProviderReadiness {
         );
         let _close_on_drop = peer.closed.clone().drop_guard();
         let result = async {
-            let registration = initialize(&peer, &state, &state, launch.config.clone()).await?;
+            let registration =
+                initialize(&peer, &state, &state, launch.config.clone(), true).await?;
             validate_binding(&registration)?;
             wire::string(&registration, "name")?;
             self.validate(&registration)?;
@@ -252,7 +259,7 @@ pub async fn load_pipe(
         project,
         home,
         index,
-        None,
+        LoadOptions::default(),
     )
     .await
 }
@@ -270,14 +277,14 @@ async fn load_transport(
     project: &Path,
     home: &Path,
     index: usize,
-    readiness: Option<ProviderReadiness>,
+    options: LoadOptions,
 ) -> Result<Arc<Remote>> {
     tokio::fs::create_dir_all(home).await?;
     let project = project.canonicalize()?;
     let home = home.canonicalize()?;
     let api: Api = harness.clone();
     let shared = Arc::new(Shared {
-        readiness,
+        readiness: options.readiness,
         api: Arc::downgrade(&api),
         registration: Mutex::new(Value::Null),
         sessions: Mutex::default(),
@@ -359,14 +366,15 @@ async fn load_transport(
             peer
         }
     };
-    let registration = match initialize(&peer, &project, &home, config).await {
-        Ok(r) => r,
-        Err(e) => {
-            peer.close();
-            reaped.cancelled().await;
-            return Err(e.into());
-        }
-    };
+    let registration =
+        match initialize(&peer, &project, &home, config, !options.omit_trace_offer).await {
+            Ok(r) => r,
+            Err(e) => {
+                peer.close();
+                reaped.cancelled().await;
+                return Err(e.into());
+            }
+        };
     let result: Result<Arc<Remote>> = async {
         validate_binding(&registration)?;
         let name = format!("external.{index}.{}", wire::string(&registration, "name")?);
@@ -516,20 +524,19 @@ async fn load_transport(
 }
 const CONTROL: Duration = Duration::from_secs(5);
 
-async fn initialize(peer: &Peer, project: &Path, home: &Path, config: Value) -> Reply {
+async fn initialize(peer: &Peer, project: &Path, home: &Path, config: Value, offer: bool) -> Reply {
     let config = if config.is_null() { json!({}) } else { config };
-    let registration = control(
-        peer,
-        "plugin/initialize",
-        json!({
-            "binding":"modular-agent-plugin/1","data":"modular-agent-data/1",
-            "host":{"name":"modular-agent-rs","version":env!("CARGO_PKG_VERSION")},
-            "project":project,"home":home,"config":config,"traceContext":1
-        }),
-    )
-    .await?;
+    let mut params = json!({
+        "binding":"modular-agent-plugin/1","data":"modular-agent-data/1",
+        "host":{"name":"modular-agent-rs","version":env!("CARGO_PKG_VERSION")},
+        "project":project,"home":home,"config":config
+    });
+    if offer {
+        params["traceContext"] = json!(1);
+    }
+    let registration = control(peer, "plugin/initialize", params).await?;
     if let Some(name) = registration["name"].as_str() {
-        peer.configure_trace(name, registration["traceContext"] == 1, false);
+        peer.configure_trace(name, offer && registration["traceContext"] == 1, false);
     }
     Ok(registration)
 }

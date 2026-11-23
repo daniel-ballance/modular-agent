@@ -34,16 +34,30 @@ pub const SCRIPTED_MODEL: &str = "scripted/script";
 /// with the response at that index, so a request repeated after a crash gets the same
 /// answer and a turn that carries on after a restart picks up where it left off.
 pub fn scripted_provider(script: Value) -> impl Provider {
-    Scripted(match script {
-        Value::Array(items) => items,
-        other => vec![other],
-    })
+    scripted_provider_observed(script, |_, _| Ok(()))
 }
 
-struct Scripted(Vec<Value>);
+/// Observe the final model and Harness scope at each scripted dispatch.
+pub fn scripted_provider_observed(
+    script: Value,
+    observe: impl Fn(&ModelRef, &ProviderContext) -> Result<()> + Send + Sync + 'static,
+) -> impl Provider {
+    Scripted(
+        match script {
+            Value::Array(items) => items,
+            other => vec![other],
+        },
+        observe,
+    )
+}
+
+struct Scripted<F>(Vec<Value>, F);
 
 #[async_trait::async_trait]
-impl Provider for Scripted {
+impl<F> Provider for Scripted<F>
+where
+    F: Fn(&ModelRef, &ProviderContext) -> Result<()> + Send + Sync + 'static,
+{
     fn id(&self) -> &str {
         "scripted"
     }
@@ -67,10 +81,11 @@ impl Provider for Scripted {
     }
     async fn request(
         &self,
-        _: ModelRef,
+        model: ModelRef,
         request: ModelRequest,
         cx: ProviderContext,
     ) -> Result<AssistantMessage> {
+        (self.1)(&model, &cx)?;
         let index = request.0["messages"]
             .as_array()
             .into_iter()
@@ -165,16 +180,20 @@ pub fn test_agent() -> TestAgentBuilder {
     TestAgentBuilder {
         builder: Agent::builder(),
         script: Value::Array(vec![]),
+        observe: None,
         model: None,
         project: None,
         environment: memory_environment(),
     }
 }
 
+type DispatchObserver = dyn Fn(&ModelRef, &ProviderContext) -> Result<()> + Send + Sync;
+
 #[must_use]
 pub struct TestAgentBuilder {
     builder: AgentBuilder,
     script: Value,
+    observe: Option<Box<DispatchObserver>>,
     model: Option<String>,
     project: Option<PathBuf>,
     environment: MemoryEnvironment,
@@ -191,6 +210,19 @@ impl TestAgentBuilder {
     }
     pub fn script(mut self, script: Value) -> Self {
         self.script = script;
+        self
+    }
+    /// Observe each actual scripted Provider dispatch.
+    pub fn observe_scripted_dispatch(
+        mut self,
+        observe: impl Fn(&ModelRef, &ProviderContext) -> Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        self.observe = Some(Box::new(observe));
+        self
+    }
+    /// Simulate a host that predates the trace context offer.
+    pub fn omit_plugin_trace_offer(mut self) -> Self {
+        self.builder.omit_plugin_trace_offer = true;
         self
     }
     pub fn tool(mut self, tool: Tool) -> Self {
@@ -289,10 +321,15 @@ impl TestAgentBuilder {
                 (dir.path().to_path_buf(), Some(dir))
             }
         };
+        let observe = self.observe;
         let agent = self
             .builder
             .environment(self.environment)
-            .provider(scripted_provider(self.script))
+            .provider(scripted_provider_observed(self.script, move |model, cx| {
+                observe
+                    .as_ref()
+                    .map_or(Ok(()), |observe| observe(model, cx))
+            }))
             .model(self.model.as_deref().unwrap_or(SCRIPTED_MODEL))
             .project(project)
             .build()
@@ -328,6 +365,11 @@ pub async fn restart(agent: Agent) -> Result<Agent> {
 
 /// The fixture plugins every SDK implements identically (docs/sdk/testing.md#the-fixture-plugins).
 /// Each is an ordinary plugin, so the same code runs in process and served.
+/// Serve the fixture as a peer that does not accept the trace context offer.
+pub async fn serve_without_trace_acceptance(plugin: crate::Plugin) -> Result<()> {
+    crate::serve::serve_stdio(plugin, false).await
+}
+
 pub mod fixtures {
     use super::*;
     use crate::{
@@ -447,16 +489,23 @@ pub mod fixtures {
     }
 
     pub fn confirm() -> Tool {
+        confirm_with_choice("yes".into())
+    }
+
+    pub fn confirm_with_choice(yes: String) -> Tool {
         Tool::new("confirm", "Ask whether to go ahead.").run(
-            |input: ConfirmInput, cx: ToolContext| async move {
-                Ok(
-                    match cx.ask(Ask::choice(input.question, &["yes", "no"])).await? {
-                        Answer::Value(v) => v,
-                        Answer::Allow => "allow".into(),
-                        Answer::Secret(_) => unreachable!("a choice has no secret value"),
-                        Answer::Declined { .. } => "declined".into(),
-                    },
-                )
+            move |input: ConfirmInput, cx: ToolContext| {
+                let yes = yes.clone();
+                async move {
+                    Ok(
+                        match cx.ask(Ask::choice(input.question, &[&yes, "no"])).await? {
+                            Answer::Value(v) => v,
+                            Answer::Allow => "allow".into(),
+                            Answer::Secret(_) => unreachable!("a choice has no secret value"),
+                            Answer::Declined { .. } => "declined".into(),
+                        },
+                    )
+                }
             },
         )
     }

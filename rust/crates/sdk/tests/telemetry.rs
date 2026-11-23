@@ -210,5 +210,125 @@ async fn metadata_only_work_and_recovery() -> Result<()> {
             .any(|s| s.name == "modular_agent.history.commit"
                 && s.parent_span_id == resumed.span_context.span_id())
     );
+    retry_has_its_own_step(&exporter).await?;
+    Ok(())
+}
+
+async fn retry_has_its_own_step(exporter: &InMemorySpanExporter) -> Result<()> {
+    use modular_agent::{
+        Agent, AssistantMessage, ModelDecision, ModelError, ModelErrorKind, ModelInfo, ModelRef,
+        ModelRequest, Order, Plugin, Provider, ProviderContext,
+        testing::{memory_environment, scripted_provider},
+    };
+
+    struct Retry<P>(P, AtomicUsize);
+    #[modular_agent::async_trait]
+    impl<P: Provider> Provider for Retry<P> {
+        fn id(&self) -> &str {
+            self.0.id()
+        }
+        fn models(&self) -> Vec<ModelInfo> {
+            self.0.models()
+        }
+        async fn request(
+            &self,
+            model: ModelRef,
+            request: ModelRequest,
+            cx: ProviderContext,
+        ) -> Result<AssistantMessage> {
+            if self.1.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Ok(ModelError::new(ModelErrorKind::Temporary, "offline failure").failed());
+            }
+            self.0.request(model, request, cx).await
+        }
+    }
+
+    let dir = tempfile::tempdir()?;
+    let agent = Agent::builder()
+        .agent_name("retry-fixture")
+        .project(dir.path())
+        .environment(memory_environment())
+        .provider(Retry(
+            scripted_provider(json!([{"text":"retried"}])),
+            AtomicUsize::new(0),
+        ))
+        .model("scripted/script")
+        .plugin(
+            Plugin::new("retry")
+                .on_model_failed_with(Order::First, |_| async { Ok(ModelDecision::Retry(None)) }),
+        )
+        .build()
+        .await?;
+    let session = agent.session().await?;
+    let result = session.prompt("try again").await?;
+    assert_eq!(result.text, "retried");
+    agent.close().await?;
+
+    let spans = exporter.get_finished_spans().unwrap();
+    let session_id = opentelemetry::Value::from(session.id().to_owned());
+    let turn_id = opentelemetry::Value::from(result.turn_id.unwrap());
+    let scoped: Vec<_> = spans
+        .iter()
+        .filter(|span| {
+            attr(span, "gen_ai.conversation.id") == Some(&session_id)
+                && attr(span, "modular_agent.turn.id") == Some(&turn_id)
+        })
+        .collect();
+    let turn = scoped
+        .iter()
+        .find(|span| span.name == "invoke_agent retry-fixture")
+        .unwrap();
+    let steps: Vec<_> = scoped
+        .iter()
+        .filter(|span| span.name == "modular_agent.step")
+        .collect();
+    let attempts: Vec<_> = scoped
+        .iter()
+        .filter(|span| span.name == "chat script")
+        .collect();
+    assert_eq!(steps.len(), 2);
+    assert_eq!(attempts.len(), 2);
+    let first = attempts
+        .iter()
+        .find(|span| matches!(span.status, Status::Error { .. }))
+        .unwrap();
+    let second = attempts
+        .iter()
+        .find(|span| span.span_context != first.span_context)
+        .unwrap();
+    let first_id = attr(first, "modular_agent.step.id").unwrap();
+    let second_id = attr(second, "modular_agent.step.id").unwrap();
+    assert_ne!(first_id, second_id);
+    for attempt in [first, second] {
+        let id = attr(attempt, "modular_agent.step.id");
+        let step = steps
+            .iter()
+            .find(|span| attr(span, "modular_agent.step.id") == id)
+            .unwrap();
+        assert_eq!(
+            step.parent_span_id,
+            turn.span_context.span_id(),
+            "both steps are children of the turn"
+        );
+        assert_eq!(attempt.parent_span_id, step.span_context.span_id());
+    }
+    let retry_step = steps
+        .iter()
+        .find(|span| attr(span, "modular_agent.step.id") == Some(second_id))
+        .unwrap();
+    let retry_commits: Vec<_> = scoped
+        .iter()
+        .filter(|span| {
+            span.name == "modular_agent.history.commit"
+                && attr(span, "modular_agent.step.id") == Some(second_id)
+        })
+        .collect();
+    assert!(
+        retry_commits.len() > 1,
+        "the retry commits more than just the attempt intent"
+    );
+    assert!(retry_commits.iter().all(|span| span.parent_span_id
+        == retry_step.span_context.span_id()
+        || span.parent_span_id == second.span_context.span_id()));
     Ok(())
 }

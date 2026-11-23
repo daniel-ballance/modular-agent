@@ -159,6 +159,7 @@ pub struct AgentBuilder {
     approval: Option<Approval>,
     on_question: Option<QuestionHandler>,
     pub(crate) restartable: bool,
+    pub(crate) omit_plugin_trace_offer: bool,
 }
 
 /// Overrides and initial membership for a new session.
@@ -857,7 +858,16 @@ impl AgentBuilder {
         {
             let home = state.join("plugins").join(index.to_string());
             if let Err(e) = launch
-                .load_with_readiness(&harness, &project, &home, index, readiness)
+                .load_with_options(
+                    &harness,
+                    &project,
+                    &home,
+                    index,
+                    plugin_stdio::LoadOptions {
+                        readiness,
+                        omit_trace_offer: self.omit_plugin_trace_offer,
+                    },
+                )
                 .await
             {
                 // An agent never runs without a part it was configured to have.
