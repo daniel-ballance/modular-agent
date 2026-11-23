@@ -129,17 +129,6 @@ For shared state, set `state_plugin` to the emitting plugin's name and provide i
 
 The [managed kit](../conformance/agui/README.md) checks 25 cases. History, encoding and the official client's ordinary conversation use the actual `ma` executable. The other 22 use the kit's scripted SDK composition. None are skipped.
 
-## Proposed standard configuration text
-
-Add these rows to the flags table in [Standard configuration](../docs/reference/standard-configuration.md), replacing the existing `--listen` row:
-
-> | `--agui` | Serve AG-UI for the selected project. Requires `--listen`. With `--acp`, serve ACP WebSocket upgrades at `/` on the same listener. |
-> | `--listen ADDR` | With `--acp` or `--agui`, listen on a loopback HOST:PORT. For ACP alone a `ws:` URL is also accepted. `ma` has no TLS options. With AG-UI, print the HTTP origin once ready. Serve until stopped. |
-
-Add to the policy's `actors` description:
-
-> For AG-UI, each token entry also requires a stable nonsecret `clientId`. The single-token shorthand uses client ID `ma-local`. The creation route uses the selected project and no tenant. It does not take project or tenant from a request.
-
 ## Interface-run tools
 
 Register definitions in shared ToolDefinition form (`parameters`, `callers: ["model"]`), without handlers. Use a finite positive integer timeout in milliseconds. After authenticating the peer, trusted adapter code calls `agent.connect_interface_tools(actor_id=..., route_id=..., on_handoff=...)`. It can supply `rights` to cap the connection and `tenants` to allow named tenants; the default is the agent's project with no tenant. The actor still needs recorded `watch` and `tools` rights.
