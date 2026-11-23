@@ -6,7 +6,7 @@ import asyncio
 import json
 import math
 import os
-from collections.abc import Awaitable, Callable, Coroutine, Generator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Coroutine, Generator, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from os import PathLike
@@ -52,6 +52,7 @@ from .mcp import _McpPlugin
 from ._credentials import CredentialStore, _CredentialAdapter, environment_credentials
 from ._environment import LocalEnvironment, MemoryEnvironment
 from ._history import HistoryStore
+from ._listing import SessionSummary, summarize
 from ._history_port import HistoryPort, _PortHistory
 from ._interface_tools import InterfaceToolConnection, InterfaceToolHandoff, InterfaceToolSource
 from ._runtime_port import _LocalRuntime
@@ -469,6 +470,65 @@ class Agent:
         return [
             {**row, "model": settings_out({"model": row.get("model")})["model"]} for row in rows
         ]
+
+    async def session_summary(
+        self,
+        id: str,
+        *,
+        actor: str = "user",
+        kind: str | None = None,
+        rights: Collection[str] | None = None,
+        route_id: str | None = None,
+        live_questions: Collection[str] | None = None,
+        approval_views: Collection[str] = (),
+        represents: Collection[str] = (),
+        local: bool = False,
+    ) -> SessionSummary | None:
+        """Inspect kept work for a viewer, without a writer lease, recovery or presence."""
+        if not id or not id.isalnum():
+            raise AgentError(ErrorCode.INVALID_PARAMS, "Invalid session id")
+        if not self.declaration()["portableSessions"]:
+            return None
+        h = self._h
+        owned = h.sessions.get(id)
+        if owned and not owned.get("writer_lost") and id not in h.interruptions:
+            state = owned
+        else:
+            state = await self._call("history", "read", session=id)
+
+        def discoverable() -> bool:
+            return bool(
+                state
+                and state["entries"]
+                and not state.get("provisional")
+                and h.can_open(state, actor, local=local, kind=kind)
+                and (rights is None or "watch" in rights)
+            )
+
+        if not discoverable():
+            return None
+        if h.supports_erasure():
+            await self._call(
+                "history",
+                "erasure_revision",
+                session=id,
+                tombstones=state.get("_history_tombstones", []),
+            )
+        if owned is not None and state is owned:
+            state = h.sessions.get(id)
+            if not discoverable() or state.get("writer_lost"):
+                return None
+        return summarize(
+            h,
+            state,
+            running=bool(state is h.sessions.get(id) and (state.get("busy") or id in h.reopening)),
+            actor=actor,
+            rights=h.permissions(state, actor, rights),
+            represents=represents,
+            route_id=route_id,
+            live_questions=live_questions,
+            approval_views=approval_views,
+        )
 
     async def session_info(self, id: str) -> JsonObject:
         """Read saved local session settings without starting recovery or taking its lease."""

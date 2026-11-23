@@ -168,6 +168,7 @@ from ._working import (
     EnvironmentSupports as EnvironmentSupports,
     WorkingEnvironment as WorkingEnvironment,
 )
+from ._listing import SessionSummary as SessionSummary, WaitingSummary as WaitingSummary
 from ._types import (
     Actor as Actor,
     AgentError as AgentError,

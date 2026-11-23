@@ -102,11 +102,13 @@ class Authority:
         connection = CONNECTION_AUTHORITY.get()
         return connection is None or connection[3](s)
 
-    def can_open(self, s, actor, *, local=False):
+    def can_open(self, s, actor, *, local=False, kind=None):
         if not self.connection_allows(s):
             return False
         if actor in s.get("actors", {}):
-            return "watch" in self.permissions(s, actor)
+            return (kind is None or kind == s["actors"][actor]["kind"]) and (
+                "watch" in self.permissions(s, actor)
+            )
         # Local stdio retains the operator fallback for an unrecorded principal.
         if not local or actor in s.get("departed", []):
             return False

@@ -214,7 +214,10 @@ async def listen_agui(
             require(entry is not None, "unauthenticated")
             assert entry is not None
             require(origin_ok, "refused")
-            require(not scope["query_string"])
+            require(
+                not scope["query_string"]
+                or (scope.get("method") == "GET" and scope["path"] == "/agui/v1/threads")
+            )
             require(len(active) < 128, "busy")
             active.add(task)
             if ws is not None:
