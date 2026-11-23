@@ -10,6 +10,9 @@ name = "ma"
 path = "src/main.rs"
 
 [dependencies]
+opentelemetry.workspace = true
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "metrics", "rt-tokio", "experimental_trace_batch_span_processor_with_async_runtime", "experimental_metrics_periodicreader_with_async_runtime"] }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["trace", "metrics", "http-proto", "reqwest-client", "reqwest-rustls", "grpc-tonic", "tls-ring", "tls-roots"] }
 modular-agent = { path = "../sdk" }
 modular-agent-files = { path = "../tools-files" }
 modular-agent-mcp = { path = "../sdk-mcp" }

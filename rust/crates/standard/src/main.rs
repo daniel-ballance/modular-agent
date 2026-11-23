@@ -11,6 +11,7 @@ use standard::{
 };
 
 mod sandbox_worker;
+mod telemetry;
 use standard::policy::Policy;
 
 const HELP: &str = "ma, the standard Modular Agent
@@ -93,7 +94,10 @@ fn main() -> std::process::ExitCode {
 
 #[tokio::main]
 async fn agent_main(client_identity: ClientIdentity) {
-    if let Err(error) = start(client_identity).await {
+    let telemetry = telemetry::Export::install();
+    let result = start(client_identity).await;
+    telemetry.shutdown().await;
+    if let Err(error) = result {
         eprintln!("Error: {error:#}");
         std::process::exit(1)
     }

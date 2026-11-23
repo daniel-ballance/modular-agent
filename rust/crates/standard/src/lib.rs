@@ -200,6 +200,7 @@ pub fn builder(
     }
     let skills = standard.skills();
     let mut b = Agent::builder()
+        .agent_name("ma")
         .project(&project)
         .model_provider_aliases(ALIASES)
         .data_dir(&standard.state)
