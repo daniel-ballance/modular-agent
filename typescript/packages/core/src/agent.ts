@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { ALL_AUTHORITY, Harness, parseModel, type CredentialStore, type Runtime, type InterfaceToolSource, type InterfaceToolConnection, type InterfaceToolConnectionOptions as HarnessToolConnection, type PluginApi, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider, type ReservationOptions, type ReservationLimits } from "@modular-agent/harness";
+import { ALL_AUTHORITY, Harness, parseModel, type CredentialStore, type Runtime, type ListingViewer, type SessionListing, type InterfaceToolSource, type InterfaceToolConnection, type InterfaceToolConnectionOptions as HarnessToolConnection, type PluginApi, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider, type ReservationOptions, type ReservationLimits } from "@modular-agent/harness";
 import { JsonlHistoryStore } from "@modular-agent/history-jsonl";
 import { localEnvironment } from "@modular-agent/env-local";
 import { contextCompaction } from "@modular-agent/context-compaction";
@@ -77,6 +77,9 @@ export interface ServeAcpOptions {
   rights?: readonly Right[];
   represents?: readonly string[];
   compose?(project: string, saved?: SessionInfo): Promise<Agent>;
+  /** Start ordinary recovery before listening. Report only the session ID and disposition. */
+  resumeOpen?: boolean;
+  onResumeOpen?(sessionId: string, disposition: "resumed" | "skipped"): void;
   projectSettings?(project: string): Settings | Promise<Settings>;
   projectMcp?(project: string): Record<string, McpServerConfig> | Promise<Record<string, McpServerConfig>>;
   showApproval?: boolean;
@@ -106,6 +109,7 @@ export interface ServeAguiOptions extends ServeAcpServiceOptions, AguiProjection
   actors: readonly (AcpActorToken & { clientId: string })[];
   acp?: boolean; tenant?: string; origins?: readonly string[];
 }
+export type SessionListingOptions = Omit<ListingViewer, "actor" | "allowJoin"> & { actor: Actor };
 export interface SessionSummary { id: string; project: string; updated: number; model?: ModelRef; title?: string }
 export interface SessionInfo { id: string; project: string; created: number; updated: number; settings: Settings; tenant?: string }
 const local = { id: "user", kind: "user" as const, authority: ALL_AUTHORITY };
@@ -522,6 +526,13 @@ export class Agent {
       }));
     });
   }
+  /** Inspect committed waits without opening a session, joining an actor or supplying presence. */
+  async sessionListing(id: string, viewer: SessionListingOptions): Promise<SessionListing | undefined> {
+    this.#check();
+    if (!/^[\w-]+$/.test(id)) throw new AgentError("invalid_params", "Invalid session id");
+    const { rights, ...actor } = viewer.actor;
+    return checked(() => this.#api.sessionListing(id, { ...viewer, actor:{...actor, authority:rights}, allowJoin:this.#authority.severalActors }));
+  }
   /** Read saved session metadata without opening it or starting recovery. */
   async sessionInfo(id: string): Promise<SessionInfo> {
     this.#check();
@@ -683,9 +694,9 @@ export class Agent {
         allowTenant: scope.allowTenant,
         allowAttached: (project, tenant) => !disconnected && scope.allowProject(project) && scope.allowTenant(tenant ?? null),
         authorizeSession: authorize,
-        allowSession: async id => {
-          try { await authorize(id); return true; }
-          catch (e) { if (e instanceof AgentError && e.code === "forbidden") return false; throw e; }
+        listOwner: id => {
+          const owner = sessions.get(id) ?? this;
+          return { api:owner.#api, allowJoin:!network || owner.#authority.severalActors };
         },
         listProject: cwd => realpath(cwd),
         showApproval: options.showApproval ?? this.#approval,
@@ -719,6 +730,24 @@ export class Agent {
         attached.clear();
       } };
     };
+    const resumeOpen = async (scope?: Pick<Awaited<ReturnType<typeof makeScope>>, "allowProject" | "allowTenant">) => {
+      if (!options.resumeOpen || scope && !scope.allowProject(this.#project)) return;
+      // The embedded local opener is not a token or a future stdio connection.
+      // Its prospective grant is watch only. The turn keeps its own recorded authority.
+      const actor = { ...local, authority:["watch" as const] };
+      for (const {id, project} of await this.#api.listSessions(this.#project)) {
+        if (project !== this.#project) continue;
+        const row = await this.#api.sessionListing(id, {actor, allowJoin:true});
+        if (!row || row.waiting.turn === "none" || !(scope?.allowTenant(row.tenant ?? null) ?? (row.tenant === undefined))) continue;
+        if (row.waiting.turn === "running") { options.onResumeOpen?.(id, "skipped"); continue; }
+        const agent = await selectProject(project, id, await this.sessionInfo(id));
+        let resumed: boolean;
+        try { resumed = await agent.#h.withConnectionActor(actor, () => agent.#h.resumeInterruptedSession(id, actor)); }
+        catch (error) { if ((error as {code?: string}).code !== "held") throw error; resumed = false; }
+        if (resumed) sessions.set(id, agent);
+        options.onResumeOpen?.(id, resumed ? "resumed" : "skipped");
+      }
+    };
     let serving = false;
     try {
       if (options.listen === undefined) {
@@ -729,6 +758,7 @@ export class Agent {
           rights: list(options.rights, r => ALL_AUTHORITY.includes(r), "rights") ?? [...ALL_AUTHORITY] };
         const scope = await makeScope(localActor, options, options.actor !== undefined || options.rights !== undefined);
         await installMcp(this);
+        await resumeOpen(scope);
         const { binding, detach } = prepareConnection(scope, false);
         try { await binding.acp.serveStdio(); } finally { detach(); }
         return;
@@ -752,7 +782,7 @@ export class Agent {
           throw new AgentError("invalid_composition", "Invalid browser origin");
         }
         const target = (agent: Agent): Target => ({ h: agent.#h, api: agent.#api, agent, sources: agent.#sources });
-        http = new AguiBinding({ ...agui, root: target(this), project: this.#project, principalScope: (actor, fn) => this.#h.withConnectionActor(actor, fn),
+        http = new AguiBinding({ ...agui, root: target(this), project: this.#project, owner: id => target(sessions.get(id) ?? this), principalScope: (actor, fn) => this.#h.withConnectionActor(actor, fn),
           associate: (id, agent) => sessions.set(id, agent),
           locate: async (p, id) => {
             if (!id && !p.allowProject(this.#project)) fail("not_found");
@@ -780,7 +810,7 @@ export class Agent {
             controlTimeoutMs, lose: () => ws.terminate(),
           });
         } finally { detach(); if (ws.readyState === ws.OPEN) ws.close(1000); }
-      }, http);
+      }, http, options.resumeOpen ? () => resumeOpen() : undefined);
       const stopListener = async () => { http?.close(); await server.close(); };
       this.#stopAcp = async () => { await stopListener(); await disposeProjects(); };
       if (agui) { serving = true; return { url: new URL(server.url.replace(/^ws/, "http")).origin, close: stopListener }; }

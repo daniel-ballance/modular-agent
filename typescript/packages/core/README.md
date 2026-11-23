@@ -18,7 +18,7 @@ try {
 
 The Interface tool tests use the public SDK with embedded and served Runtimes. They check exact offers, denied approval, output withholding, delayed release, reconnect, racing reports, early reports, expiry before and after turn end, checked results, cancellation, erasure, branch and close guards, and metadata-only spans. The crash tests kill the agent process group with `SIGKILL` before or after the originating turn ends and reopen kept or durable history. No Runtime executes the same handoff twice. The existing shared-scenario format has no operations for advertising or reporting through an authenticated executor route, so these tests are TypeScript-only.
 
-The Interface tool change passed all 26 feature tests. The full suite passed 473 tests with 5 skipped in each of the default and `MA_REMOTE` builds. The Claude sidecar passed 51 tests with 1 skipped. The reference checks passed 25/25 and the stdio ACP kit passed 188/188. The WebSocket kits passed 153/153 plugin checks, 14/14 separate-listener checks and 193/193 ACP checks. The project-notes demo passed both the scripted and crash-and-reopen runs.
+The Interface tool change passed all 26 feature tests. With thread discovery and startup recovery, the full suite passed 490 tests with 5 skipped in each of the default and `MA_REMOTE` builds. The Claude sidecar passed 51 tests with 1 skipped. The reference checks passed 26/26 and the stdio ACP kit passed 188/188. The WebSocket kits passed 153/153 plugin checks, 14/14 separate-listener checks and 193/193 ACP checks. The project-notes demo passed both the scripted and crash-and-reopen runs.
 
 The telemetry tests use an OpenTelemetry in-memory span exporter and metric reader. They check the span tree, overlapping nested calls, question and refusal events, one measurement per inference, metadata-only export, both plugin handshake omissions, exporter failure, and a `SIGKILL` over durable history. The crash check matches the resumed trace, parent, link and checkpoint against the saved segment. A turn also completes with no registered OpenTelemetry SDK.
 
@@ -134,7 +134,15 @@ Output hooks receive the actor as recipient. AG-UI reply and interrupt envelopes
 
 Set `traceTrusted: true` on a token entry to accept a work POST's trace parent. `traceStateVendors` lists vendor keys accepted into the local operation context. Trace headers on presence and snapshot reads are ignored. No baggage is accepted. `onWarning(field)` receives field names, not payloads.
 
-Run `typescript/scripts/check-agui.sh` after building. It installs the kit in a temporary directory. Four cases launch the standard ma. The other 21 use a disposable SDK application with operator-registered tools and controls. All 25 cases run, including TLS, the stock client, clocks, release races and four process kills.
+Run `typescript/scripts/check-agui.sh` after building. It installs the kit in a temporary directory. Five cases launch the standard ma. The other 21 use a disposable SDK application with operator-registered tools and controls. All 26 cases run, including TLS, the stock client, clocks, release races and four process kills.
+
+#### Listing and resuming threads
+
+`GET /agui/v1/threads` returns kept threads the caller may watch in the route's project and tenant. Each row contains only `threadId`, `updatedAt` and `waiting`. The latter has the caller's counts of eligible questions and Interface calls, and a turn state: `none`, `running` or `interrupted`. A completed turn can still have open calls. The list is newest change first. Set `limit` to 1–500 (default 100); send `next` as `after` for another page. An invalid or expired cursor gets HTTP 400, `invalid_request`. Listing never opens a session or marks presence.
+
+The adapter uses the new `agent.sessionListing(id, { actor, routeId, inTurn })` read. Give it the authenticated actor with its connection rights, the executor route if any, and the in-turn question IDs still held by that connection. It inspects committed records, including those in sessions not open in this process. A trusted embedding must also apply its project and tenant scope. ACP uses the same Harness read for `session/list` and returns `_meta["modular-agent"].waiting` per row. An ACP connection is not a tool executor.
+
+With `serveAgui({ resumeOpen:true, ... })` or `serveAcp({ resumeOpen:true, ... })`, the SDK installs ordinary recovery for interrupted turns in the configured project before accepting clients. The opener is the embedded local actor with a watch ceiling, not a client token. Recovery keeps the authority recorded for the turn. Use `onResumeOpen(id, disposition)` to receive `resumed` or `skipped`; an idle session with open waits is left alone.
 
 #### Gaps in the core operations
 
@@ -182,6 +190,9 @@ Use `encodeHistoryJson`, `parseHistoryJson` and `equalHistoryJson` to preserve o
 ## Findings
 
 These are proposed documentation replacements, not changes to the specification.
+
+- **Waits after a turn.** In [Listing threads](../../../docs/bindings/agui.md#listing-threads), replace the last bullet with: “The server MAY compute `waiting` lazily. It MUST count committed open questions and Interface-run calls for which this client is eligible, even when `turn` is `none`. It MUST NOT report `turn: "none"` for an unfinished turn.”
+- **Observing a writer.** A start without an end looks the same in a live writer's history and after a crash. The JSONL store can check its writer's process; history HTTP `/1` has no read-only lease query. In the second bullet of [Listing threads](../../../docs/bindings/agui.md#listing-threads), replace the sentence defining `turn` with: “For an unfinished turn on the current branch, report `running` if the service observes a running turn or can confirm a live writer; otherwise report `interrupted`. Report `none` when no turn is unfinished. Listing MUST NOT acquire a writer to test liveness.”
 
 - **Availability diagnostics.** In [Providers](../../../docs/sdk/api.md#providers), replace the `available` description with: “Whether the Provider can take requests now, for example whether it has credentials. A Provider may expose a separate diagnostic in process. The `/1` plugin binding reports only a boolean.” Claude can name an API-key source locally without extending the wire reply.
 

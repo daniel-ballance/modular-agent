@@ -89,6 +89,7 @@ export async function listenWebSocket<T>(options: ListenOptions, protocol: strin
 	actors: readonly { tokenFile: string; value: T }[],
 	connection: ((ws: WebSocket, value: T, tokenKey: string) => Promise<void>) | undefined,
 	http?: { request(req: IncomingMessage, res: ServerResponse, principal?: T): void; allowOrigin(req: IncomingMessage): boolean },
+	beforeListen?: () => Promise<void>,
 ): Promise<ServiceServer> {
 	const { url, port, host } = listenAddress(options);
 	const entries = await Promise.all(actors.map(async ({ tokenFile, value }) => ({ value, key: digest(`Bearer ${await tokenFrom(tokenFile)}`) })));
@@ -132,6 +133,7 @@ export async function listenWebSocket<T>(options: ListenOptions, protocol: strin
 			void done.then(() => active.delete(done));
 		});
 	});
+	await beforeListen?.();
 	await new Promise<void>((resolve, reject) => {
 		server.once("error", reject);
 		server.listen(port, host, () => { server.off("error", reject); resolve(); });

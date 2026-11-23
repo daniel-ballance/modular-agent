@@ -237,6 +237,13 @@ export function fakeFixture(name, fault, script) {
 
   return {
     run, eligible,
+    waiting(s, client) {
+      const records = s.batches.flat(), start = records.findLast(e => e.kind === 'turnStart');
+      const unfinished = start && !records.some(e => e.kind === 'turnEnd' && e.turnId === start.turnId);
+      return { questions:Number(!!(eligible(s, client) || fault === 'list-foreign-question' && s.question)),
+        toolCalls:Number(!!s.checkpoint && !s.result && client === 'owner'),
+        turn:unfinished && fault !== 'list-idle' ? s.needsReopen ? 'interrupted' : 'running' : 'none' };
+    },
     disconnect(s, client) {
       if (client !== 'owner') return;
       if (fault !== 'keep-presence' && s.question?.reason === 'approval') closeQuestion(s, { reason: 'refused', declined: true, system: true });
@@ -246,6 +253,12 @@ export function fakeFixture(name, fault, script) {
       for (const s of sessions.values()) {
         s.restarted = true;
         s.views.clear();
+        s.needsReopen = true;
+      }
+    },
+    reopen(s) {
+        if (!s.needsReopen) return;
+        s.needsReopen = false;
         if (name === 'crash-before-handoff' && s.originTurn && !s.call) {
           record(s, 'toolResult', { status: 'notStarted' }, { turnId: s.originTurn });
           turnEnd(s, s.originTurn);
@@ -254,7 +267,6 @@ export function fakeFixture(name, fault, script) {
           if (!s.nextTurn) startContinuation(s, s.context);
           completeContinuation(s, () => {}, name === 'crash-continuation');
         }
-      }
     },
     async control(operation, s, args) {
       switch (operation) {

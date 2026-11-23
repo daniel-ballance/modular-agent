@@ -30,6 +30,21 @@ export function at(origin, token) {
   });
   return {
     request,
+    async list(query = '') {
+      const page = await json(await request('/threads' + query));
+      assert.deepEqual(Object.keys(page).sort(), page.next === undefined ? ['threads'] : ['next', 'threads'], 'listing envelope has no content');
+      if ('next' in page) assert.ok(typeof page.next === 'string' && page.next.length, 'opaque next cursor');
+      assert.ok(Array.isArray(page.threads), 'threads array');
+      for (const row of page.threads) {
+        assert.deepEqual(Object.keys(row).sort(), ['threadId', 'updatedAt', 'waiting'], 'thread metadata only');
+        assert.ok(typeof row.threadId === 'string' && row.threadId.length, 'listed thread ID');
+        assert.ok(typeof row.updatedAt === 'string' && /^\d{4}-\d\d-\d\dT/.test(row.updatedAt) && Number.isFinite(Date.parse(row.updatedAt)), 'ISO 8601 change time');
+        assert.deepEqual(Object.keys(row.waiting).sort(), ['questions', 'toolCalls', 'turn'], 'waiting summary has no content');
+        for (const key of ['questions', 'toolCalls']) assert.ok(Number.isSafeInteger(row.waiting[key]) && row.waiting[key] >= 0, 'waiting count');
+        assert.ok(['none', 'interrupted', 'running'].includes(row.waiting.turn), 'turn state');
+      }
+      return page;
+    },
     async create() {
       const value = await json(await request('/threads', { method: 'POST', body: '{}' }), 201);
       assert.ok(typeof value.threadId === 'string' && value.threadId, 'new thread ID');

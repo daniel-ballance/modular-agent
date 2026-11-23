@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { checkTls } from './tls.mjs';
-import { answer, dispatch, draft, first, frontend, handoff, historyError, offer, options, opts, rawReport, reportRefused, second, simple, success, transformed } from './cases.mjs';
+import { answer, checkWaiting, dispatch, draft, first, frontend, handoff, historyError, offer, options, opts, rawReport, reportRefused, second, simple, success, transformed } from './cases.mjs';
 import { at, clean, finalView, input, refused, threadPath, tool, user } from './wire.mjs';
 
 const action = (id, payload, status = 'resolved') => ({ interruptId: id, status, ...(payload === undefined ? {} : { payload }) });
@@ -107,6 +107,8 @@ export const advanced = {
       const [approval] = interrupts(waiting, 'approval');
       assert.ok(approval.toolCallId && approval.message.includes(offer.name) && approval.message.includes(dispatch.color), 'approval view names exact dispatched tool and arguments');
       assert.ok(Number.isFinite(Date.parse(approval.expiresAt)), 'approval deadline is ISO 8601');
+      await checkWaiting(api, view.threadId, 1, 0, 'running');
+      await checkWaiting(at(origin, tokens.sibling), view.threadId, 0, 0, 'running');
       const delivered = finalView(waiting);
       const sibling = at(origin, tokens.sibling);
       const alien = await sibling.view(view.threadId);
@@ -311,6 +313,7 @@ export const advanced = {
       assert.equal(entries(await evidenceFor(control, view.threadId), 'toolStarted').length, 0, 'kill before write of toolStarted');
       const reopened = await restart();
       await dropped;
+      await checkWaiting(reopened.api, view.threadId, 0, 0, 'interrupted');
       const snapshot = await reopened.api.view(view.threadId);
       assert.deepEqual(snapshot.waiting.toolCalls, [], 'transient Runtime cannot release an interrupted draft');
       const evidence = await evidenceFor(reopened.control, view.threadId);

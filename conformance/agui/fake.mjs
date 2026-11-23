@@ -24,7 +24,8 @@ const equal = (a, b) => (a === b) || (a && b && typeof a === 'object' && typeof 
 const known = message => Object.fromEntries(Object.entries(message).filter(([key]) => ['role', 'id', 'content', 'name', 'toolCallId', 'toolCalls', 'error'].includes(key)));
 
 export async function fake({ model = simple, tokens = fixtureTokens(), fault, scenario } = {}) {
-  const sessions = new Map();
+  const sessions = new Map(), pages = new Map();
+  let clock = Date.now();
   const fixture = scenario && fakeFixture(scenario, fault, model);
   const sockets = new WebSocketServer({ noServer: true, handleProtocols: protocols => protocols.has('modular-agent-acp-1') ? 'modular-agent-acp-1' : false });
   const peer = request => Object.keys(tokens).find(key => request.headers.authorization === `Bearer ${tokens[key]}`);
@@ -40,6 +41,23 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault, sc
       if (req.method === 'GET' && path === '') {
         if (scenario === 'error-gate') return error(res, 403, 'output_withheld');
         return json(res, 200, { binding: 'modular-agent-agui/1', protocolVersion: '1.0', declaration });
+      }
+      if (path === '/threads' && req.method === 'GET') {
+        const raw = url.searchParams.get('limit') ?? '100', limit = Number(raw);
+        if (!/^\d+$/.test(raw) || limit < 1 || limit > 500) return invalid(res);
+        const cursor = pages.get(url.searchParams.get('after'));
+        if (url.searchParams.has('after') && cursor?.client !== client && fault !== 'unknown-page') return invalid(res);
+        const threads = [...sessions.values()].filter(s => (s.messages.length || fault === 'list-provisional') &&
+          (!['tenant', 'project'].includes(client) || fault === 'list-scope')).map(s => ({
+          threadId:s.threadId, updatedAt:new Date(s.updated ?? s.now).toISOString(),
+          waiting:fixture?.waiting(s, client) ?? { questions:0, toolCalls:Number(!!s.open && (client === 'owner' || fault === 'list-foreign-call')), turn:'none' },
+          ...(fault === 'list-content' && { messages:s.messages }),
+        })).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.threadId.localeCompare(b.threadId));
+        if (fault === 'reverse-list') threads.reverse();
+        const i = fault === 'repeat-page' ? 0 : cursor?.index ?? 0, page = threads.slice(i, i + limit);
+        const next = i + limit < threads.length && randomUUID();
+        if (next) pages.set(next, {client, index:i + limit});
+        return json(res, 200, { threads:page, ...(next && {next}) });
       }
       let data;
       if (req.method === 'POST') {
@@ -68,6 +86,7 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault, sc
       const threadId = path === '/run' ? data?.threadId : /^\/threads\/([^/]+)(?:\/presence)?$/.exec(path)?.[1];
       const session = sessions.get(threadId);
       if (!session || (['tenant', 'project'].includes(client) && fault !== 'outside-scope')) return missing(res);
+      fixture?.reopen(session);
       const snapshot = () => {
         const messages = structuredClone(session.messages);
         const cursor = randomUUID();
@@ -158,6 +177,7 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault, sc
         push('MESSAGES_SNAPSHOT', { messages: copy });
         push('CUSTOM', { name: 'modular-agent.history', value: { cursor: next, lastMessageId } });
       };
+      session.updated = ++clock;
       if (isReport) {
         const report = suffix[0];
         session.messages.push({ id: 'ma:tool:' + session.open, role: 'tool', toolCallId: session.open,
@@ -226,6 +246,7 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault, sc
     },
     async restart() {
       await close();
+      pages.clear();
       await fixture.restart(sessions);
       await listen();
     },

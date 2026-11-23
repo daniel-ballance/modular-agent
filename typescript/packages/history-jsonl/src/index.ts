@@ -32,7 +32,7 @@ const SETUP_KINDS = new Set(["setting", "actorJoined", "plugins"]);
  * on load: a batch is kept whole or not at all.
  */
 export class JsonlHistoryStore implements HistoryStore {
-	readonly supports = { erasure: true, retention: false };
+	readonly supports = { erasure: true, retention: false, persistent: true };
 	private paths = new Map<string, string>();
 	private held = new Set<string>();
 	/** New sessions not yet worth a file: their header and batches so far. */
@@ -75,6 +75,16 @@ export class JsonlHistoryStore implements HistoryStore {
 		this.unsaved.delete(id);
 		if (this.held.has(id)) writeFileSync(`${path}.lock`, String(process.pid));
 		for (const batch of pending.batches) this.write(id, batch);
+	}
+
+	writerActive(id: string): boolean {
+		try {
+			const pid = Number(readFileSync(`${this.find(id)}.lock`, "utf8"));
+			return Number.isSafeInteger(pid) && pid > 0 && alive(pid);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			return false;
+		}
 	}
 
 	async openForWriting(id: string): Promise<void> {

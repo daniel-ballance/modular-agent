@@ -264,6 +264,15 @@ const checks = [
     },
   },
   {
+    name: "resume-open",
+    about: "An interrupted served turn carries on at startup only when requested. Its tool effect happens once.",
+    script: [codemode("tools.exec(command='echo once >> effect; while test ! -f release; do sleep 0.1; done')"), { text: "Recovered without a repeated effect." }],
+    async run(command, invoke, skip, t) {
+      const { checkResumeOpen } = await import("./resume-open.mjs");
+      await checkResumeOpen(command, t, environment(t));
+    },
+  },
+  {
     name: "transient-crash",
     about: "With the transient Runtime the interrupted turn fails on reopen, and nothing runs again.",
     script: [codemode("tools.exec(command='echo started >> started.txt; sleep 60')"), { text: "after" }],
@@ -366,8 +375,8 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const gitOut = (dir, args) => { const r = spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" }); return r.status === 0 ? r.stdout.trim() : ""; };
 const last = (req, role) => (req?.messages ?? []).filter((m) => m.role === role).at(-1);
 
-function runOnce(command, t, run) {
-  const env = {
+function environment(t) {
+  return {
     PATH: process.env.PATH,
     HOME: t.home,
     LANG: "C.UTF-8",
@@ -375,8 +384,11 @@ function runOnce(command, t, run) {
     MODULAR_AGENT_SCRIPT: t.scriptFile,
     MODULAR_AGENT_SCRIPT_LOG: t.logFile,
     ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}),
-    ...(run.env ?? {}),
   };
+}
+
+function runOnce(command, t, run) {
+  const env = { ...environment(t), ...run.env };
   return new Promise((done) => {
     const child = spawn(command[0], [...command.slice(1), ...run.args], { cwd: t.project, env, stdio: ["ignore", "pipe", "pipe"], detached: true });
     let stdout = "", stderr = "", killed = false, timer, poll;
@@ -433,7 +445,7 @@ async function runCheck(command, check, skip) {
   const failures = [];
   const ok = (cond, what, got) => { if (!cond) failures.push(got === undefined ? what : `${what}: got ${JSON.stringify(got)}`); };
   if (check.run) {
-    try { await check.run(command, (cmd, run) => runOnce(cmd, t, run), skip); }
+    try { await check.run(command, (cmd, run) => runOnce(cmd, t, run), skip, t); }
     catch (error) { failures.push(error.message); }
   }
   for (const [i, run] of (check.runs ?? []).entries()) {

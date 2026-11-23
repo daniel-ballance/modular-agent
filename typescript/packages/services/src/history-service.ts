@@ -500,6 +500,7 @@ export class HistoryArchive {
 				}
 				this.local.set(id, owner);
 			}),
+			writerActive: id => this.local.has(id) || this.remote?.leased(id) === true,
 			checkWriter: ensureWriter,
 			close: async id => {
 				if (this.local.get(id) === owner) this.local.delete(id);

@@ -5,11 +5,11 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultAcpActor } from '@modular-agent/core';
 const { name, tokenFiles, project } = JSON.parse(await readFile(process.env.MA_AGUI_FIXTURE, 'utf8'));
-if (!['listener', 'encoding', 'history', 'stock-conversation'].includes(name)) {
+if (!['listener', 'thread-listing', 'encoding', 'history', 'stock-conversation'].includes(name)) {
   await import('./agui-fixture.mjs');
 } else {
   const args = ['--agui', '--acp', '--listen', process.env.MA_AGUI_LISTEN];
-  if (name !== 'listener') args.push('--token-file', tokenFiles.owner);
+  if (!['listener', 'thread-listing'].includes(name)) args.push('--token-file', tokenFiles.owner);
   else {
     const policy = join(process.env.HOME, 'kit-policy.json');
     const actors = Object.entries(tokenFiles).map(([role, tokenFile]) => ({ tokenFile, actor: { ...defaultAcpActor(), id: role === 'foreign' ? 'kit-foreign' : 'kit-owner',
