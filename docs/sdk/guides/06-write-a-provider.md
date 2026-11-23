@@ -212,7 +212,7 @@ async fn beacon_streams_and_records_failures() -> Result<()> {
                 pieces.push(event.data["delta"].as_str().unwrap().to_owned());
             }
         }
-        let turn = session.last_turn()?.expect("prompt settled");
+        let turn = session.last_turn().await?.expect("prompt settled");
         if key == "offline-key" {
             assert_eq!(pieces, ["Beacon ", "ready."]);
             assert_eq!(turn.text, "Beacon ready.");
@@ -222,7 +222,7 @@ async fn beacon_streams_and_records_failures() -> Result<()> {
                 turn.outcome,
                 Some(modular_agent::Outcome::Failed { .. })
             ));
-            let history = session.history()?;
+            let history = session.history().await?;
             let response = history.iter().find(|e| e["kind"] == "response").unwrap();
             assert_eq!(response["message"]["stop"], "failed");
             assert_eq!(response["message"]["error"]["kind"], "credentials");
