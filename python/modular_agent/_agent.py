@@ -6,7 +6,7 @@ import asyncio
 import json
 import math
 import os
-from collections.abc import Awaitable, Callable, Coroutine, Generator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Coroutine, Generator, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from os import PathLike
@@ -52,6 +52,8 @@ from .mcp import _McpPlugin
 from ._credentials import CredentialStore, _CredentialAdapter, environment_credentials
 from ._environment import LocalEnvironment, MemoryEnvironment
 from ._history import HistoryStore
+from ._listing import SessionSummary, summarize
+from ._resume import ResumeOpen, resume_sessions
 from ._history_port import HistoryPort, _PortHistory
 from ._interface_tools import InterfaceToolConnection, InterfaceToolHandoff, InterfaceToolSource
 from ._runtime_port import _LocalRuntime
@@ -252,6 +254,7 @@ class Agent:
         self._scratch = scratch
         self._test_project: TemporaryDirectory[str] | None = None
         self._sessions: dict[str, Session] = {}
+        self._resumed: dict[str, Agent] = {}
         self._question_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
@@ -470,6 +473,74 @@ class Agent:
             {**row, "model": settings_out({"model": row.get("model")})["model"]} for row in rows
         ]
 
+    async def session_summary(
+        self,
+        id: str,
+        *,
+        actor: str = "user",
+        kind: str | None = None,
+        rights: Collection[str] | None = None,
+        route_id: str | None = None,
+        live_questions: Collection[str] | None = None,
+        approval_views: Collection[str] = (),
+        represents: Collection[str] = (),
+        local: bool = False,
+    ) -> SessionSummary | None:
+        """Inspect kept work for a viewer, without a writer lease, recovery or presence."""
+        if not id or not id.isalnum():
+            raise AgentError(ErrorCode.INVALID_PARAMS, "Invalid session id")
+        h = self._h
+        store = h.plugins[h.capabilities["history"][0]].declarations
+        if store.get("retention") == "process":
+            return None
+        owned = h.sessions.get(id)
+        if owned and not owned.get("writer_lost") and id not in h.interruptions:
+            state = owned
+        else:
+            state = await self._call("history", "read", session=id)
+
+        def discoverable() -> bool:
+            return bool(
+                state
+                and state["entries"]
+                and not state.get("provisional")
+                and h.can_open(state, actor, local=local, kind=kind)
+                and (rights is None or "watch" in rights)
+            )
+
+        if not discoverable():
+            return None
+        if h.supports_erasure():
+            await self._call(
+                "history",
+                "erasure_revision",
+                session=id,
+                tombstones=state.get("_history_tombstones", []),
+            )
+        if owned is not None and state is owned:
+            state = h.sessions.get(id)
+            if not discoverable() or state.get("writer_lost"):
+                return None
+        row = summarize(
+            h,
+            state,
+            running=bool(state is h.sessions.get(id) and (state.get("busy") or id in h.reopening)),
+            actor=actor,
+            rights=h.permissions(state, actor, rights),
+            represents=represents,
+            route_id=route_id,
+            live_questions=live_questions,
+            approval_views=approval_views,
+        )
+        if (
+            owned is None
+            and row["waiting"]["turn"] == "interrupted"
+            and store.get("observes_writer")
+            and await self._call("history", "writer_present", session=id)
+        ):
+            row["waiting"]["turn"] = "running"
+        return row
+
     async def session_info(self, id: str) -> JsonObject:
         """Read saved local session settings without starting recovery or taking its lease."""
         if not id or not id.isalnum():
@@ -599,6 +670,7 @@ class Agent:
         state_snapshot: Callable[[str], Awaitable[JsonObject | None]] | None = None,
         raw_sources: Mapping[str, str] | None = None,
         trace_state_keys: Sequence[str] = (),
+        resume_open: ResumeOpen | None = None,
     ) -> AguiServer:
         """Serve HTTP + SSE for this project, optionally alongside ACP at /."""
         from ._agui import Binding
@@ -624,7 +696,9 @@ class Agent:
             handle = None
             if acp:
                 _, handle = await self._network_acp(binding.actors, None, None, None, None)
-            server = await listen_agui(listen, tls, origins, binding, handle)
+            server = await listen_agui(
+                listen, tls, origins, binding, handle, lambda: resume_sessions(self, resume_open)
+            )
             self._acp_server = server
             return server
 
@@ -703,6 +777,7 @@ class Agent:
         rights: Sequence[str] | None = None,
         represents: Sequence[str] | None = None,
         actor: Actor | None = None,
+        resume_open: ResumeOpen | None = None,
     ) -> None: ...
 
     @overload
@@ -716,6 +791,7 @@ class Agent:
         compose_reopen: Callable[[Path, str], Awaitable[Agent]] | None = None,
         project_settings: Callable[[Path], JsonObject] | None = None,
         project_mcp: Callable[[Path], Sequence[JsonObject]] | None = None,
+        resume_open: ResumeOpen | None = None,
     ) -> WebSocketServer: ...
 
     async def serve_acp(
@@ -733,6 +809,7 @@ class Agent:
         rights: Sequence[str] | None = None,
         represents: Sequence[str] | None = None,
         actor: Actor | None = None,
+        resume_open: ResumeOpen | None = None,
     ) -> WebSocketServer | None:
         """Serve ACP on stdio or start an authenticated WebSocket listener."""
         options = {
@@ -785,9 +862,13 @@ class Agent:
                 principals, handle = await self._network_acp(
                     deepcopy(actors), compose, compose_reopen, project_settings, project_mcp
                 )
+                tokens = [(entry["token_file"], entry) for entry in principals]
+                for filename, _ in tokens:
+                    read_token(filename)
+                await resume_sessions(self, resume_open, compose_reopen, project_mcp)
                 self._acp_server = await listen_websocket(
                     listen,
-                    [(entry["token_file"], entry) for entry in principals],
+                    tokens,
                     ACP_PROTOCOL,
                     handle,
                     tls,
@@ -807,6 +888,7 @@ class Agent:
                 stdio_actor=stdio_actor,
             )
             await self._h.load(interface)
+            await resume_sessions(self, resume_open, compose_reopen, project_mcp)
         try:
             await interface.serve()
         finally:
@@ -857,6 +939,9 @@ class Agent:
                         await session.close()
                     except Exception as exc:
                         failure = failure or exc
+                for owner in self._resumed.values():
+                    await owner.close()
+                self._resumed.clear()
                 await self._h.stop()
             finally:
                 self._closed = True

@@ -69,6 +69,18 @@ def test_public_sdk_only() -> None:
                 assert all(not alias.name.startswith("_") for alias in node.names)
 
 
+def test_resume_open_is_global_and_not_a_session_setting(tmp_path: Path) -> None:
+    paths = Paths(tmp_path, tmp_path / "state")
+    (tmp_path / ".modular-agent.json").write_text('{"resume_open":true}')
+    assert not paths.resume_open()
+    (tmp_path / "settings.json").write_text('{"resume_open":true}')
+    assert paths.resume_open()
+    assert "resume_open" not in paths.settings(tmp_path)
+    (tmp_path / "settings.json").write_text('{"resume_open":"false"}')
+    with pytest.raises(ValueError, match="resume_open must be a boolean"):
+        paths.resume_open()
+
+
 async def test_rust_auth_fixture(tmp_path: Path) -> None:
     # serde_json::to_vec_pretty over AuthFile Contents: struct fields keep
     # declaration order, BTreeMap keys sort, and there is no final newline.

@@ -78,6 +78,30 @@ async def test_authenticated_run_and_reconnect(tmp_path: Path):
         ]
 
 
+@pytest.mark.parametrize("durability", ["durable", "ephemeral"])
+async def test_thread_listing_only_returns_committed_kept_sessions(tmp_path, durability):
+    async with service(tmp_path, data_dir=tmp_path / "store", durability=durability) as (_, client):
+        sid = await new(client)
+        assert (await client.get("threads")).json() == {"threads": []}
+        assert events(await client.post("run", json=prompt(sid)))[-1]["type"] == "RUN_FINISHED"
+        reply = await client.get("threads")
+        assert reply.status_code == 200
+        rows = reply.json()["threads"]
+        if durability == "ephemeral":
+            assert rows == []
+        else:
+            from datetime import datetime
+
+            assert datetime.fromisoformat(rows[0]["updatedAt"]).tzinfo is not None
+            assert rows == [
+                {
+                    "threadId": sid,
+                    "updatedAt": rows[0]["updatedAt"],
+                    "waiting": {"questions": 0, "toolCalls": 0, "turn": "none"},
+                }
+            ]
+
+
 async def test_preflight_does_not_need_identity_or_admit_work(tmp_path):
     origin = "https://allowed.invalid"
     async with service(tmp_path, server={"origins": [origin]}) as (agent, client):

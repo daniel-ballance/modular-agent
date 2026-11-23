@@ -19,11 +19,12 @@ from ._agui_http import Stream
 from ma_core import telemetry as ot
 from ma_core.wire import provider_projection
 from ma_harness.authority import CONNECTION_AUTHORITY
-from ma_harness.interface_tools import branch_entries, clock, handoff_fold, same_json
+from ma_harness.interface_tools import branch_entries, same_json
 from opentelemetry.context import Context
 
 from ._agui_wire import Obj, Failure, content, encode, event, fingerprint, iso, parse_run, require
 from ._interface_tools import InterfaceToolConnection
+from ._listing import still_disclosable
 from ._types import AgentError, ErrorCode, JsonObject
 
 if TYPE_CHECKING:
@@ -73,6 +74,7 @@ class Binding:
         self.active: set[tuple[str, str]] = set()
         self.presence: dict[tuple[str, str], Presence] = {}
         self.cursors: OrderedDict[tuple[str, str], Cursor] = OrderedDict()
+        self.pages: OrderedDict[str, tuple[str, tuple[str, str]]] = OrderedDict()
         self.admission = asyncio.Lock()
         self.decision_runs: OrderedDict[tuple[str, str, str], None] = OrderedDict()
         self.scopes: dict[str, Obj] = {}
@@ -116,6 +118,7 @@ class Binding:
         self.decision_runs.clear()
         self.presence.clear()
         self.cursors.clear()
+        self.pages.clear()
         self.agent._acp_server = None
 
     async def error_allowed(self, actor: AguiActor, code: str) -> bool:
@@ -145,6 +148,8 @@ class Binding:
                         "declaration": self.agent.declaration(),
                     },
                 )
+            elif req.method == "GET" and path == "/threads":
+                reply = await view.threads(req)
             elif req.method == "POST" and path == "/threads":
                 require(not raw)
                 require(
@@ -234,8 +239,64 @@ class View:
         return (
             project == self.agent._project
             and project in self.scope.get("projects", (project,))
+            and state.get("tenant") == self.binding.tenant
             and state.get("tenant") in self.scope["tenants"]
         )
+
+    async def thread(self, sid: str) -> Obj | None:
+        presence = self.binding.presence.get((self.client, sid))
+        delivered = presence.delivered.keys() if presence else ()
+        row = await self.agent.session_summary(
+            sid,
+            actor=self.actor,
+            kind=self.principal["actor"]["kind"],
+            route_id=self.client,
+            live_questions=delivered,
+            approval_views=delivered,
+        )
+        if row is None:
+            return None
+        return {"threadId": sid, "updatedAt": row["updatedAt"], "waiting": row["waiting"]}
+
+    async def threads(self, req: Request) -> Obj:
+        query = req.query_params
+        require(all(k in {"after", "limit"} and len(query.getlist(k)) == 1 for k in query))
+        size = query.get("limit", "100")
+        require(bool(re.fullmatch(r"[0-9]+", size)) and len(size.lstrip("0")) <= 3)
+        limit = int(size.lstrip("0") or "0")
+        require(1 <= limit <= 500)
+        pages = self.binding.pages
+        boundary = None
+        if "after" in query:
+            saved = pages.get(query["after"])
+            require(saved and saved[0] == self.client)
+            assert saved is not None
+            boundary = saved[1]
+        rows = []
+        for item in await self.agent.sessions(project=self.agent._project):
+            if row := await self.thread(cast(str, item["id"])):
+                key = row["updatedAt"], row["threadId"]
+                if boundary is None or key < boundary:
+                    rows.append((key, row))
+        rows.sort(key=lambda pair: pair[0], reverse=True)
+        page = [row for _, row in rows[:limit]]
+        reply: Obj = {"threads": page}
+        if len(rows) > limit:
+            reply["next"] = uuid4().hex
+        await self.required("threads", reply, exact=True)
+        # The page describes the records we read, not a reservation on the next
+        # commit. Recheck disclosure, not the timestamp or the turn's progress.
+        visible = []
+        for row in page:
+            current = await self.thread(row["threadId"])
+            if current and still_disclosable(row["waiting"], current["waiting"]):
+                visible.append(row)
+        reply["threads"] = visible
+        if "next" in reply:
+            pages[reply["next"]] = self.client, rows[limit - 1][0]
+            if len(pages) > 1024:
+                pages.popitem(last=False)
+        return reply
 
     async def attach(self, sid: str) -> None:
         require(sid.isalnum(), "not_found")
@@ -247,8 +308,7 @@ class View:
             require(
                 saved
                 and self.in_scope(saved)
-                and self.h.can_open(saved, self.actor)
-                and saved["actors"][self.actor]["kind"] == self.principal["actor"]["kind"],
+                and self.h.can_open(saved, self.actor, kind=self.principal["actor"]["kind"]),
                 "not_found",
             )
             self.sid = sid
@@ -432,19 +492,12 @@ class View:
         return text
 
     def open_calls(self, branch: list[Obj]) -> dict[str, Obj]:
-        calls = {}
-        for cid in handoff_fold(branch):
-            start, cp, terminal = self.h.interface_state(self.sid, cid)
-            if terminal or not self.h.restored_interface(start, cp):
-                continue
-            d = cp["data"]
-            if (
-                (d["executorActorId"], d["routeId"]) == (self.actor, self.client)
-                and {"watch", "tools"} <= self.rights_now().intersection(d["rights"])
-                and clock() < d["deadline"]
-            ):
-                calls[cid] = start | {"deadline": d["deadline"]}
-        return calls
+        return cast(
+            dict[str, Obj],
+            self.h.open_interface_calls(
+                self.h.sessions[self.sid], branch, self.actor, self.client, self.rights_now()
+            ),
+        )
 
     async def questions(self, branch: list[Obj]) -> dict[str, tuple[Obj, Obj]]:
         ended = {e.get("turn") for e in branch if e["kind"] == "turn_end"}

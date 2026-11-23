@@ -87,6 +87,13 @@ def branch_entries(s):
     return branch[::-1]
 
 
+def unfinished_turn(branch, ended):
+    return any(
+        e["kind"] == "turn_start" and not e.get("fork_source") and e["turn"] not in ended
+        for e in branch
+    )
+
+
 def handoff_fold(entries):
     starts, checkpoints, terminal = {}, {}, {}
     for e in entries:
@@ -417,9 +424,15 @@ class InterfaceTools:
 
     def interface_state(self, sid, cid):
         s = self.sessions[sid]
-        start, checkpoints, terminal = handoff_fold(s["entries"]).get(cid, (None, [], None))
+        return self.checked_interface_state(
+            handoff_fold(s["entries"]).get(cid, (None, [], None)),
+            {e["id"] for e in branch_entries(s)},
+        )
+
+    @staticmethod
+    def checked_interface_state(state, branch):
+        start, checkpoints, terminal = state
         checkpoint = checkpoints[0] if len(checkpoints) == 1 else None
-        branch = {e["id"] for e in branch_entries(s)}
         if not (
             start
             and checkpoint
@@ -452,6 +465,24 @@ class InterfaceTools:
             and (start["data"].get("source") or {}).get("toolSource") == registered[0]
             and same_json(start["data"].get("definition"), tool_out(registered[-1]))
         )
+
+    def open_interface_calls(self, s, branch, actor, route, rights):
+        if not route or not REQUIRED <= rights:
+            return {}
+        ids = {e["id"] for e in branch}
+        calls = {}
+        for cid, state in handoff_fold(s["entries"]).items():
+            start, cp, terminal = self.checked_interface_state(state, ids)
+            if terminal or not self.restored_interface(start, cp):
+                continue
+            d = cp["data"]
+            if (
+                (d["executorActorId"], d["routeId"]) == (actor, route)
+                and REQUIRED <= rights.intersection(d["rights"])
+                and clock() < d["deadline"]
+            ):
+                calls[cid] = start | {"deadline": d["deadline"]}
+        return calls
 
     def arm_interface_deadline(self, sid, cid, deadline):
         key = sid, cid

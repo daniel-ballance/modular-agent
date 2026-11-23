@@ -4,6 +4,8 @@ import fcntl
 import json
 import os
 import sqlite3
+import stat
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -23,6 +25,7 @@ class History(Plugin):
         "pending_erasure": True,
         "retention": "indefinite",
         "single_writer": True,
+        "observes_writer": sys.platform == "linux",
     }
 
     def __init__(self, root):
@@ -72,12 +75,21 @@ class History(Plugin):
         if not sid.isalnum():
             raise AgentError("Invalid session ID")
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(self.root / (sid + ".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        fd = os.open(self.root / (sid + ".lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             os.close(fd)
             raise AgentError("Session already has a writer", "locked") from None
+        if sys.platform == "linux":
+            # A hint, not a lease. Readers must confirm the descriptor still
+            # names this inode and still holds its flock. A crash leaves no lock.
+            info = os.fstat(fd)
+            if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                try:
+                    os.pwrite(fd, f"{os.getpid()} {fd}\n".encode(), 0)
+                except OSError:
+                    pass  # The kernel lock, not discovery metadata, owns the write.
         self.locks[sid] = fd
 
     def _read(self, db, sid):
@@ -126,6 +138,28 @@ class History(Plugin):
             return None
         with self._connect() as db:
             return self._read(db, d["session"])
+
+    async def writer_present(self, d, emit):
+        # proc_pid_fdinfo(5) reports the locks of this open file description.
+        # Do not try a lock: even a shared lock could exclude the next writer.
+        path = self.root / (d["session"] + ".lock")
+        try:
+            with path.open("rb") as hint:
+                fields = hint.readline(64).split()
+                if len(fields) != 2 or not all(field.isdigit() for field in fields):
+                    return False
+                pid, fd = (field.decode("ascii") for field in fields)
+                process = Path("/proc") / pid
+                info = (process / "fdinfo" / fd).read_bytes()
+                return os.path.samestat(
+                    os.fstat(hint.fileno()), (process / "fd" / fd).stat()
+                ) and any(
+                    line.split()[2:5] == [b"FLOCK", b"ADVISORY", b"WRITE"]
+                    for line in info.splitlines()
+                    if line.startswith(b"lock:")
+                )
+        except OSError:
+            return False  # No positive evidence of a live writer in this namespace.
 
     async def open(self, d, emit):
         self._lock(d["session"])

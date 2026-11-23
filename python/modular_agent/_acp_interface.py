@@ -16,6 +16,7 @@ from ma_core.wire import settings_in
 from ma_harness.authority import CONNECTION_AUTHORITY
 
 from ._agui_http import AguiServer
+from ._listing import SessionSummary, still_disclosable
 from ._types import Actor, JsonObject
 
 if TYPE_CHECKING:
@@ -171,31 +172,60 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
             raise protocol_error("forbidden", "Actor cannot create this session")
         return sorted(rights)
 
+    def _owner(self, sid: str) -> Agent | None:
+        return (
+            self._agents.get(sid)
+            or (self._connections.composition(sid) if self._connections else None)
+            or self._agent._resumed.get(sid)
+        )
+
+    async def _listed_session(self, sid: str) -> SessionSummary | None:
+        return await (self._owner(sid) or self._current()).session_summary(
+            sid,
+            actor=self.actor,
+            local=not self.network,
+            represents=self.represents,
+            approval_views={qid for session, qid in self.approval_views if session == sid},
+        )
+
+    async def authorize_frame(
+        self, sid: str | None, method: str, message: dict[str, Any], prepared: Any = None
+    ) -> Any:
+        if method != "session/list" or "result" not in message:
+            return await super().authorize_frame(sid, method, message, prepared)
+        scope = self.project_scope()
+        try:
+            rows = []
+            for row in message["result"]["sessions"]:
+                summary = await self._listed_session(row["sessionId"])
+                shown = (row.get("_meta", {}).get("modular-agent") or {}).get("waiting")
+                if (
+                    summary
+                    and row["cwd"] == summary["project"]
+                    and (shown is None or still_disclosable(shown, summary["waiting"]))
+                ):
+                    rows.append(row)
+            return {**message, "result": {**message["result"], "sessions": rows}}
+        except Exception as exc:
+            raise protocol_error("unavailable", "Session listing unavailable") from exc
+        finally:
+            self.reset_project_scope(scope)
+
     async def visible_sessions(self, project: str | None) -> list[dict[str, Any]]:
         canonical = str(Path(project).resolve()) if project is not None else None
         rows = cast(list[dict[str, Any]], await super().visible_sessions(canonical))
-        agent = self._current()
         visible = []
         for row in rows:
             if not self._project_allowed(Path(row["project"])):
                 continue
-            if self._compose is None and Path(row["project"]) != self._agent._project:
-                continue
-            owner = self._connections.composition(row["id"]) if self._connections else None
-            session = (owner or agent)._h.sessions.get(row["id"])
-            if session is None:
-                session = await agent._api.call("history", "read", {"session": row["id"]})
-            if (
-                session is not None
-                and self._scope_allows(session)
-                and agent._h.can_open(session, self.actor, local=not self.network)
-            ):
-                visible.append(row)
+            sid = row["id"]
+            summary = await self._listed_session(sid)
+            if summary is not None:
+                visible.append({**row, "waiting": summary["waiting"]})
         return visible
 
     async def require_visible_session(self, project: str | None, sid: str) -> None:
-        owner = self._connections.composition(sid) if self._connections else None
-        agent = owner or self._agent
+        agent = self._owner(sid) or self._agent
         session = agent._h.sessions.get(sid)
         if session is None:
             session = await self._agent._api.call("history", "read", {"session": sid})
@@ -230,8 +260,9 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
             response = await super()._open(
                 cwd, sid, mcp_servers, replay, additional_directories, kwargs
             )
-            if self.network:
-                self._bind(sid)
+            # A startup reopen already ran session.start. Bind this client to
+            # the owning composition for delivery even if no start hook ran here.
+            self._bind(sid)
             return response
         finally:
             self._release_claim(sid)
@@ -251,9 +282,7 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
 
     async def select_project(self, project: str, session_id: str | None = None) -> None:
         folder = Path(project)
-        selected = self._agents.get(session_id or "")
-        if selected is None and session_id is not None and self._connections is not None:
-            selected = self._connections.composition(session_id)
+        selected = self._owner(session_id) if session_id is not None else None
         if selected is None:
             if self._compose_reopen is not None and session_id is not None:
                 selected = await self._compose_reopen(folder, session_id)
@@ -273,7 +302,7 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
             try:
                 if first:
                     await selected._install_acp_mcp(self._project_mcp)
-                if self.network:
+                if self.network or selected._h.sessions:
                     await selected._h.attach_interface(_AcpProject(selected, self))
                 else:
                     await selected._h.load(_AcpProject(selected, self))
@@ -393,4 +422,7 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
                 if clients:
                     continue
                 del self._connections.projects[agent]
+            for sid, owner in list(self._agent._resumed.items()):
+                if owner is agent:
+                    del self._agent._resumed[sid]
             await agent.close()

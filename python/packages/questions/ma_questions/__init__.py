@@ -30,6 +30,34 @@ ASK_USER = {
 }
 
 
+def question_state(entries):
+    requests = {}
+    for entry in entries:
+        if entry["kind"] == "question_open":
+            q = {**entry["data"], "entry": entry["id"]}
+            if q.get("timeout") is not None:
+                q["deadline"] = (
+                    datetime.fromisoformat(entry["time"]) + timedelta(seconds=q["timeout"])
+                ).isoformat()
+            requests[q["id"]] = q
+        else:
+            state = {
+                "question_answer": "answer",
+                "question_closed": "closed",
+                "secret_answer_accepted": "selected",
+            }.get(entry["kind"])
+            if state and (q := requests.get(entry["data"]["request"])):
+                q[state] = entry["data"]
+    return requests
+
+
+def eligible_question(q, actor, rights):
+    responders = q.get("restrictedResponders")
+    return (responders is None or actor in responders) and (
+        "approve" if q["kind"] == "approval" else "answer"
+    ) in rights
+
+
 class Questions(Plugin):
     name = "questions"
     role = "tool_source"
@@ -101,33 +129,11 @@ class Questions(Plugin):
         return False
 
     async def _state(self, sid):
-        es = await self.api.session("branch", session=sid)
-        requests = {}
-        for entry in es:
-            if entry["kind"] != "question_open":
-                continue
-            q = {**entry["data"], "entry": entry["id"]}
-            if q.get("timeout") is not None:
-                q["deadline"] = (
-                    datetime.fromisoformat(entry["time"]) + timedelta(seconds=q["timeout"])
-                ).isoformat()
-            requests[q["id"]] = q
-        for e in es:
-            state = {
-                "question_answer": "answer",
-                "question_closed": "closed",
-                "secret_answer_accepted": "selected",
-            }.get(e["kind"])
-            if state and (q := requests.get(e["data"]["request"])):
-                q[state] = e["data"]
-        return requests
+        return question_state(await self.api.session("branch", session=sid))
 
     async def _eligible(self, sid, q, actor, ceiling=None):
         allowed = await self.api.session("authority", session=sid, actor=actor, ceiling=ceiling)
-        responders = q.get("restrictedResponders")
-        return (responders is None or actor in responders) and (
-            "approve" if q["kind"] == "approval" else "answer"
-        ) in allowed
+        return eligible_question(q, actor, allowed)
 
     async def list(self, d, emit):
         sid = d["session"]

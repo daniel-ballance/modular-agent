@@ -177,6 +177,12 @@ class Paths:
             json.dump(entries, file, ensure_ascii=False, indent=2)
         Path(file.name).replace(self.ledger)
 
+    def resume_open(self) -> bool:
+        value = read_object(self.config / "settings.json").get("resume_open", False)
+        if not isinstance(value, bool):
+            raise ValueError("resume_open must be a boolean in global settings.json")
+        return value
+
     def settings(self, project: Path) -> JsonObject:
         settings: JsonObject = {
             "thinking": "medium",
@@ -193,6 +199,7 @@ class Paths:
                 if not key.startswith("_") and key not in {
                     "plugins",
                     "plugin_settings",
+                    "resume_open",
                     "mcp_servers",
                     "trusted",
                 }:
