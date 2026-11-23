@@ -13,7 +13,7 @@ pub(super) struct Cursor {
 fn digest(v: &Value) -> [u8; 32] {
     Sha256::digest(v.to_string()).into()
 }
-fn epoch(d: &SessionData) -> Option<String> {
+pub(super) fn epoch(d: &SessionData) -> Option<String> {
     d.entries
         .iter()
         .rev()
@@ -41,6 +41,31 @@ fn parts(content: &Value) -> Value {
     }
 }
 impl Service {
+    // Replay has the same display gates as the live exchange. A terminal
+    // snapshot is not an alternate channel for a withheld text stream.
+    async fn replay_text(&self, a: &AguiActor, id: &str, step: &str, text: String) -> R<String> {
+        if text.is_empty() {
+            return Ok(text);
+        }
+        let message = assistant(step);
+        let shared = self
+            .gate(
+                a,
+                id,
+                json!({"type":"text","data":{"stepId":step,"delta":text}}),
+            )
+            .await?;
+        for frame in [
+            json!({"type":"TEXT_MESSAGE_START","role":"assistant","messageId":message}),
+            json!({"type":"TEXT_MESSAGE_END","messageId":message}),
+        ] {
+            if self.gate(a, id, frame.clone()).await? != frame {
+                return Err(Fail::Withheld);
+            }
+        }
+        let frame=self.gate(a,id,json!({"type":"TEXT_MESSAGE_CONTENT","messageId":message,"delta":shared["data"]["delta"]})).await?;
+        Ok(frame["delta"].as_str().ok_or(Fail::Withheld)?.into())
+    }
     pub(super) async fn messages(&self, a: &AguiActor, d: &SessionData) -> R<Value> {
         let mut messages = Vec::new();
         let mut settled = BTreeMap::new();
@@ -73,7 +98,14 @@ impl Service {
                     let Some(step) = e.scope.step.as_deref() else {
                         continue;
                     };
-                    let text = base::wire::text(&msg["content"]);
+                    let text = match self
+                        .replay_text(a, &d.id, step, base::wire::text(&msg["content"]))
+                        .await
+                    {
+                        Ok(v) => v,
+                        Err(Fail::Withheld) => String::new(),
+                        Err(e) => return Err(e),
+                    };
                     let id = assistant(step);
                     let mut m = json!({"id":id,"role":"assistant","content":text});
                     let ids: Vec<_> = msg["content"]
@@ -216,7 +248,7 @@ impl Service {
                 _ => json!({"type":"string"}),
             };
             if v["kind"] == "link" {
-                interrupt["metadata"] = json!({"modular-agent.link":v["details"]["uri"]});
+                interrupt["metadata"] = json!({"modular-agent.link":v["details"]});
             }
             if q.extra["whenTimeLimit"] == "decline"
                 && let Some(ms) = q.timeout_ms
@@ -258,8 +290,13 @@ impl Service {
         } else {
             json!({"type":"MESSAGES_SNAPSHOT","messages":messages})
         };
+        let waiting = v.get("waiting").cloned();
         let view = self.gate(a, id, v).await?;
-        if http && (view["cursor"] != token || view["lastMessageId"] != json!(last)) {
+        if http
+            && (view["cursor"] != token
+                || view["lastMessageId"] != json!(last)
+                || view.get("waiting") != waiting.as_ref())
+        {
             return Err(Fail::Withheld);
         }
         let count = view["messages"].as_array().ok_or(Fail::Withheld)?.len();
@@ -321,7 +358,7 @@ impl Service {
     pub(super) async fn http_snapshot(&self, a: &AguiActor, id: &str, c: &Client) -> R<Response> {
         let d = self.watch(a, id)?;
         let (v, cursor) = self.snapshot_value(a, id, c, &d, &base::id(), true).await?;
-        let bytes = encode(&v)?;
+        let bytes = self.buffer(id, encode(&v)?)?;
         if d.position != self.watch(a, id)?.position {
             return Err(Fail::Conflict);
         }

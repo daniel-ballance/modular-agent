@@ -306,6 +306,15 @@ pub trait InputRequests: Send + Sync {
         value: Value,
         declined: bool,
     ) -> Result<()>;
+    /// Commit an in-turn decision only while this exact authenticated route is live.
+    async fn answer_on_route(&self, _api: Api, _route: &str, _answer: Answer) -> Result<()> {
+        bail!("this question service does not support route-bound answers")
+    }
+    fn connect_answer_route(&self, session: &str, actor: &str, route: &str, approvals: bool) {
+        if approvals {
+            self.presence_route(session, actor, route, true);
+        }
+    }
     async fn decline(
         &self,
         api: Api,

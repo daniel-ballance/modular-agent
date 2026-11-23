@@ -2335,6 +2335,7 @@ impl Endpoint for Callbacks {
                 }),
             });
         }
+        let mut emitter = None;
         let mut event = match method {
             "provider/event"
                 if work.as_ref().is_some_and(|work| {
@@ -2365,6 +2366,7 @@ impl Endpoint for Callbacks {
                 let kind = p["type"].as_str().filter(|kind| kind.contains('.'))?;
                 let registration = self.0.registration.lock().unwrap();
                 let plugin = registration["name"].as_str()?;
+                emitter = Some(plugin.to_owned());
                 Event::new(
                     &scope,
                     &format!("plugin.{plugin}.{kind}"),
@@ -2383,7 +2385,11 @@ impl Endpoint for Callbacks {
             barrier,
             run: Box::pin(async move {
                 if api.snapshot(&scope.session).is_ok() {
-                    let _ = api.emit(event).await;
+                    if let Some(name) = emitter {
+                        let _ = EMITTER.scope(name, api.emit(event)).await;
+                    } else {
+                        let _ = api.emit(event).await;
+                    }
                 }
             }),
         })

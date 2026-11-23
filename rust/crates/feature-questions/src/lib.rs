@@ -10,7 +10,7 @@ pub struct QuestionsPlugin;
 #[derive(Default)]
 struct Questions {
     lock: Mutex<()>,
-    present: Mutex<BTreeSet<(String, String, String)>>,
+    present: Mutex<std::collections::BTreeMap<(String, String, String), bool>>,
     notify: Notify,
 }
 impl Plugin for QuestionsPlugin {
@@ -24,6 +24,13 @@ impl Plugin for QuestionsPlugin {
         r.declare(json!({"questions_outlast_turn":true,"input_requests":["approval","choice","text","secret"]}));
         Ok(())
     }
+}
+fn question_deadline(data: &SessionData, q: &Question) -> Option<u64> {
+    let timeout = q.timeout_ms?;
+    data.entries
+        .iter()
+        .find(|e| e.kind == "request.open" && e.content.as_ref().is_some_and(|v| v["id"] == q.id))
+        .map(|e| e.at.saturating_add(timeout))
 }
 fn right(q: &Question) -> &str {
     if q.kind == RequestKind::Approval {
@@ -107,8 +114,9 @@ impl InputRequests for Questions {
         {
             return Ok(RequestReply::Declined);
         }
-        let deadline = now().saturating_add(q.timeout_ms.unwrap_or(u64::MAX / 2));
         let q = self.open(api.as_ref(), q)?;
+        let deadline =
+            question_deadline(&api.snapshot(&q.scope.session)?, &q).unwrap_or(u64::MAX / 2);
         if let Some(answer) = q.answer.clone() {
             return Ok(RequestReply::Answer(answer));
         }
@@ -137,10 +145,9 @@ impl InputRequests for Questions {
         }
         if q.kind == RequestKind::Approval {
             let present = self.present.lock().unwrap().clone();
-            if !present
-                .iter()
-                .any(|(session, actor, _)| may_answer(api.as_ref(), &q, session, actor))
-            {
+            if !present.iter().any(|((session, actor, _), allowed)| {
+                *allowed && may_answer(api.as_ref(), &q, session, actor)
+            }) {
                 api.append(
                     &q.scope,
                     "feature.questions",
@@ -179,7 +186,9 @@ impl InputRequests for Questions {
                     .lock()
                     .unwrap()
                     .iter()
-                    .any(|(session, actor, _)| may_answer(api.as_ref(), &q, session, actor))
+                    .any(|((session, actor, _), allowed)| {
+                        *allowed && may_answer(api.as_ref(), &q, session, actor)
+                    })
             {
                 api.append(
                     &q.scope,
@@ -218,7 +227,7 @@ impl InputRequests for Questions {
         value: Value,
         declined: bool,
     ) -> Result<()> {
-        self.record_answer(api, session, actor, request, value, declined, None)
+        self.record_answer(api, session, actor, request, value, declined, None, None)
             .await
     }
 
@@ -230,8 +239,17 @@ impl InputRequests for Questions {
         request: &str,
         reason: Option<String>,
     ) -> Result<()> {
-        self.record_answer(api, session, actor, request, Value::Null, true, reason)
-            .await
+        self.record_answer(
+            api,
+            session,
+            actor,
+            request,
+            Value::Null,
+            true,
+            reason,
+            None,
+        )
+        .await
     }
 
     fn recover(&self, api: &dyn AgentApi, session: &str) -> Result<()> {
@@ -291,13 +309,35 @@ impl InputRequests for Questions {
         may_answer(api, question, session, actor)
     }
 
+    async fn answer_on_route(&self, api: Api, route: &str, a: Answer) -> Result<()> {
+        self.record_answer(
+            api,
+            &a.session,
+            &a.actor,
+            &a.request,
+            a.value,
+            a.declined,
+            a.reason,
+            Some(route),
+        )
+        .await
+    }
+    fn connect_answer_route(&self, session: &str, actor: &str, route: &str, approvals: bool) {
+        let _guard = self.lock.lock().unwrap();
+        self.present
+            .lock()
+            .unwrap()
+            .insert((session.into(), actor.into(), route.into()), approvals);
+        self.notify.notify_waiters();
+    }
     fn presence(&self, session: &str, actor: &str, present: bool) {
         self.presence_route(session, actor, "", present);
     }
     fn presence_route(&self, session: &str, actor: &str, route: &str, present: bool) {
+        let _guard = self.lock.lock().unwrap();
         let key = (session.into(), actor.into(), route.into());
         if present {
-            self.present.lock().unwrap().insert(key);
+            self.present.lock().unwrap().insert(key, true);
         } else {
             self.present.lock().unwrap().remove(&key);
         }
@@ -305,10 +345,11 @@ impl InputRequests for Questions {
     }
 
     fn detach_presence(&self, session: &str, route: &str) {
+        let _guard = self.lock.lock().unwrap();
         self.present
             .lock()
             .unwrap()
-            .retain(|(id, _, on)| id != session || on != route);
+            .retain(|(id, _, on), _| id != session || on != route);
         self.notify.notify_waiters();
     }
     fn present(&self, session: &str) -> Vec<String> {
@@ -316,8 +357,8 @@ impl InputRequests for Questions {
             .lock()
             .unwrap()
             .iter()
-            .filter(|(id, _, _)| id == session)
-            .map(|(_, actor, _)| actor.clone())
+            .filter(|((id, _, _), approved)| **approved && id == session)
+            .map(|((_, actor, _), _)| actor.clone())
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
@@ -355,6 +396,7 @@ impl Questions {
         value: Value,
         declined: bool,
         reason: Option<String>,
+        route: Option<&str>,
     ) -> Result<()> {
         let (q, answer) = {
             let _guard = self.lock.lock().unwrap();
@@ -381,14 +423,31 @@ impl Questions {
                         .lock()
                         .unwrap()
                         .iter()
-                        .any(|(s, a, _)| s == session && a == actor),
+                        .any(|((s, a, _), approved)| *approved && s == session && a == actor),
                     "approval answerer is not present"
                 );
             }
             // The portable answer for an approval refusal is an actor decline,
             // even when the permission route sends the option as a string.
             let declined = declined || (q.kind == RequestKind::Approval && value == "refuse");
+            if let Some(route) = route {
+                ensure!(
+                    self.present
+                        .lock()
+                        .unwrap()
+                        .get(&(session.into(), actor.into(), route.into()))
+                        .is_some_and(|allow| *allow || q.kind != RequestKind::Approval),
+                    "answer route is no longer eligible"
+                );
+            }
             let data = api.snapshot(&q.scope.session)?;
+            if q.extra["whenTimeLimit"] == "decline"
+                && question_deadline(&data, &q).is_some_and(|deadline| now() >= deadline)
+            {
+                self.close_question(api.as_ref(), &q, "timeLimit")?;
+                self.notify.notify_waiters();
+                bail!("question deadline expired");
+            }
             if q.kind == RequestKind::Secret && (selected(&data, &q).is_some() || !declined) {
                 let store = capability::<dyn CredentialStore>(api.as_ref(), "credentials")?;
                 let receipt = StagingReceipt {

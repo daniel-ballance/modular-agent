@@ -174,7 +174,9 @@ struct Service {
 }
 impl Agent {
     pub async fn serve_agui(&self, options: AguiOptions) -> crate::Result<AguiServer> {
-        self.check_acp_host()?;
+        if options.acp {
+            self.check_acp_host()?;
+        }
         let mut entries = Vec::new();
         let mut clients = BTreeMap::new();
         for mut actor in options.actors {
@@ -282,6 +284,7 @@ impl Service {
         d.project == self.agent.inner.project && a.allows(&d.project, tenant)
     }
     fn watch(&self, a: &AguiActor, id: &str) -> R<SessionData> {
+        self.h().check_writer(id)?;
         let d = self.h().snapshot(id)?;
         if !self.scope_ok(a, &d) || !self.right(a, id, "watch")? {
             return Err(Fail::Missing);
@@ -291,17 +294,17 @@ impl Service {
     fn right(&self, a: &AguiActor, id: &str, right: &str) -> R<bool> {
         Ok(a.principal.actor.rights.has(right) && self.h().authority(id, a.id())?.has(right))
     }
-    async fn gate(&self, a: &AguiActor, id: &str, v: Value) -> R<Value> {
+    async fn gate(&self, a: &AguiActor, id: &str, mut value: Value) -> R<Value> {
         if !id.is_empty() {
             self.watch(a, id)?;
         }
-        let v = self
+        let view = self
             .h()
             .output(
                 &scope(id, a.id()),
                 base::Output {
                     recipient: a.client_id.clone(),
-                    value: v,
+                    value: value.clone(),
                     stream: None,
                     end: true,
                 },
@@ -311,7 +314,20 @@ impl Service {
         if !id.is_empty() {
             self.watch(a, id)?;
         }
-        Ok(v)
+        if value != view && !agent_harness::apply_redactions(&mut value, &view) {
+            return Err(Fail::Withheld);
+        }
+        Ok(view)
+    }
+    fn buffer(&self, id: &str, bytes: Vec<u8>) -> R<Bytes> {
+        struct Reserved(Vec<u8>, #[allow(dead_code)] Box<dyn Send>);
+        impl AsRef<[u8]> for Reserved {
+            fn as_ref(&self) -> &[u8] {
+                &self.0
+            }
+        }
+        let permit = self.h().reserve_output(id, bytes.len() as u64)?;
+        Ok(Bytes::from_owner(Reserved(bytes, permit)))
     }
     fn client(&self, id: &str, a: &AguiActor) -> R<Arc<Client>> {
         let mut r = self.routes.lock().unwrap();
@@ -483,10 +499,9 @@ impl Service {
         if slot.is_some() {
             return Err(Fail::Conflict);
         }
+        let approvals = self.right(&a, &id, "approve")?;
+        questions.connect_answer_route(&id, a.id(), &route, approvals);
         *slot = Some(route.clone());
-        if self.right(&a, &id, "approve")? {
-            questions.presence_route(&id, a.id(), &route, true);
-        }
         drop(slot);
         struct Guard(Arc<Client>, Arc<dyn base::InputRequests>, String, String);
         impl Drop for Guard {

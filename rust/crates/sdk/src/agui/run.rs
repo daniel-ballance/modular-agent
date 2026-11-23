@@ -44,6 +44,8 @@ struct Exchange {
     reasoning: BTreeSet<String>,
     closed_text: BTreeSet<String>,
     initial_input: bool,
+    epoch: Option<String>,
+    presence_at_start: Option<String>,
     state_revision: Option<String>,
     interruption: base::CancellationToken,
 }
@@ -66,6 +68,7 @@ impl Service {
         let c = self.client(id, &a)?;
         let guard = c.run.clone().try_lock_owned().map_err(|_| Fail::Conflict)?;
         let d = self.watch(&a, id)?;
+        let presence_at_start = c.presence.lock().unwrap().clone();
         let token = headers
             .get("ma-history-cursor")
             .map(|v| v.to_str().map_err(|_| Fail::Cursor))
@@ -244,17 +247,42 @@ impl Service {
             for (qid, value) in answers {
                 let service = base::requests(self.h())?;
                 let declined = value.is_none();
-                service
-                    .answer(
-                        self.agent.inner.harness.clone(),
-                        id,
-                        a.id(),
-                        &qid,
-                        value.unwrap_or(Value::Null),
-                        declined,
-                    )
-                    .await
-                    .map_err(|_| Fail::Conflict)?;
+                if live.is_some() {
+                    let route = c
+                        .questions
+                        .lock()
+                        .unwrap()
+                        .get(&qid)
+                        .and_then(Clone::clone)
+                        .ok_or(Fail::Conflict)?;
+                    service
+                        .answer_on_route(
+                            self.agent.inner.harness.clone(),
+                            &route,
+                            base::Answer {
+                                session: id.clone(),
+                                request: qid,
+                                actor: a.id().into(),
+                                value: value.unwrap_or(Value::Null),
+                                declined,
+                                reason: None,
+                            },
+                        )
+                        .await
+                        .map_err(|_| Fail::Conflict)?;
+                } else {
+                    service
+                        .answer(
+                            self.agent.inner.harness.clone(),
+                            id,
+                            a.id(),
+                            &qid,
+                            value.unwrap_or(Value::Null),
+                            declined,
+                        )
+                        .await
+                        .map_err(|_| Fail::Conflict)?;
+                }
             }
             for report in reports {
                 if executor
@@ -300,24 +328,43 @@ impl Service {
             reasoning: Default::default(),
             closed_text: Default::default(),
             initial_input: true,
+            epoch: view::epoch(&d),
+            presence_at_start,
             state_revision: None,
             interruption,
         };
-        let mut drive = session.drive();
+        let mut driver = Some(session.drive());
         let stream = async_stream::stream! {
-            let _guard=guard;
-            let mut finished=false;
-            let mut next=ex.open(initial).await;
+            let _guard = guard;
+            let mut next = ex.open(initial).await.map(|bytes|(bytes,false));
             loop {
-                match next {Ok(bytes)=>{if !bytes.is_empty(){yield Ok::<_,std::convert::Infallible>(Bytes::from(bytes));}},Err(err)=>{let error=json!({"type":"RUN_ERROR","code":err.code(),"message":"The run could not be delivered."});let _=ex.gate(error.clone()).await;yield Ok(Bytes::from(format!("data: {error}\n\n")));break;}}
-                if finished{break}
-                let result=if matches!(ex.target,Target::Handled){ex.finish("success",vec![]).await.map(|v|(v,true))}else{tokio::select!{biased;
-                    _=ex.interruption.cancelled()=>Err(Fail::Lost),
-                    event=ex.events.recv()=>match event{Ok(event)=>ex.event(event).await,Err(_)=>Err(Fail::Lost)},
-                    _=&mut drive=>{if matches!(ex.target,Target::Continuation(_)) && ex.turn().is_ok_and(|v|v.is_none()) {ex.wait_for_origin().map(|_|(b": waiting\n\n".to_vec(),false))}else{Err(Fail::Lost)}},
-                    _=tokio::time::sleep(Duration::from_secs(10))=>ex.wait_for_origin().map(|_|(b": waiting\n\n".to_vec(),false)),
+                match next.and_then(|(bytes,end)| {ex.check_delivery()?; Ok((ex.server.buffer(&ex.id,bytes)?,end))}) {
+                    Ok((bytes,finished)) => {
+                        if !bytes.is_empty() {yield Ok::<_,std::convert::Infallible>(bytes);}
+                        if finished {break;}
+                    }
+                    Err(err) => {
+                        let error=json!({"type":"RUN_ERROR","code":err.code(),"message":"The run could not be delivered."});
+                        // Even when the error is withheld the binding requires a content-free terminal.
+                        let gated=ex.exact(error.clone()).await.unwrap_or_else(|_|json!({"type":"RUN_ERROR","code":"output_withheld","message":"Output withheld."}));
+                        yield Ok(Bytes::from(format!("data: {gated}\n\n")));
+                        break;
+                    }
+                }
+                next=if matches!(ex.target,Target::Handled) {
+                    ex.finish("success",vec![]).await.map(|v|(v,true))
+                }else{tokio::select! {
+                    biased;
+                    _=ex.interruption.cancelled() => Err(Fail::Lost),
+                    event=ex.events.recv() => match event {Ok(e)=>ex.event(e).await,Err(_)=>Err(Fail::Lost)},
+                    _=async{driver.as_mut().unwrap().await}, if driver.is_some() => {
+                        driver=None;
+                        if matches!(ex.target,Target::Continuation(_)) && ex.turn().is_ok_and(|t|t.is_none()){
+                            ex.wait_for_origin().map(|_|(b": waiting\n\n".to_vec(),false))
+                        }else{Err(Fail::Lost)}
+                    }
+                    _=tokio::time::sleep(Duration::from_secs(10)) => ex.wait_for_origin().map(|_|(b": waiting\n\n".to_vec(),false)),
                 }};
-                next=result.map(|(v,end)|{finished=end;v});
             }
         };
         Ok(reply(200, "text/event-stream", Body::from_stream(stream)))
@@ -343,6 +390,13 @@ impl Exchange {
             return Err(Fail::Withheld);
         }
         Ok(after)
+    }
+    fn check_delivery(&self) -> R<()> {
+        let current = self.server.watch(&self.a, &self.id)?;
+        if self.interruption.is_cancelled() || view::epoch(&current) != self.epoch {
+            return Err(Fail::Conflict);
+        }
+        Ok(())
     }
     fn turn(&self) -> R<Option<String>> {
         Ok(self.target.turn(&self.server.watch(&self.a, &self.id)?))
@@ -465,7 +519,12 @@ impl Exchange {
             *self.c.cursor.lock().unwrap() = Some(cur);
             self.initial_input = false;
         }
-        match event.event_type.as_str() {
+        let ty = event
+            .emitter
+            .as_ref()
+            .and_then(|name| event.event_type.strip_prefix(&format!("plugin.{name}.")))
+            .unwrap_or(&event.event_type);
+        match ty {
             "stepStarted" => {
                 if self.steps.insert(step.into()) {
                     out.push(
@@ -509,6 +568,11 @@ impl Exchange {
                 }
             }
             "questionOpened" => {
+                if self.presence_at_start.is_none()
+                    || *self.c.presence.lock().unwrap() != self.presence_at_start
+                {
+                    return Ok((vec![], false));
+                }
                 let data = self.server.watch(&self.a, &self.id)?;
                 let questions = self.server.questions(&self.a, &data, &self.c, true).await?;
                 let selected = questions
@@ -526,6 +590,20 @@ impl Exchange {
                     Some("cancelled" | "limit") => "cancelled",
                     _ => return Err(Fail::Lost),
                 };
+                if outcome == "success" {
+                    let data = self.server.watch(&self.a, &self.id)?;
+                    let questions = self
+                        .server
+                        .questions(&self.a, &data, &self.c, true)
+                        .await?
+                        .into_iter()
+                        .filter(|(q, _)| q.scope.turn.as_ref() == Some(&turn))
+                        .map(|(_, v)| v)
+                        .collect::<Vec<_>>();
+                    if !questions.is_empty() {
+                        return self.finish("interrupt", questions).await.map(|v| (v, true));
+                    }
+                }
                 return self.finish(outcome, vec![]).await.map(|v| (v, true));
             }
             "entry" => {
@@ -689,12 +767,19 @@ impl Exchange {
             .await?;
         let mut end = json!({"type":outcome});
         let mut pending = vec![];
+        let turn = self.target.turn(&d);
+        let in_turn = outcome == "interrupt"
+            && !d
+                .branch()
+                .iter()
+                .any(|e| e.kind == "turn.end" && e.scope.turn == turn);
         if outcome == "interrupt" {
             end["interrupts"] = json!(questions);
-        } else if outcome == "success"
+        }
+        if (outcome == "success" || outcome == "interrupt" && !in_turn)
             && let Some(conn) = &mut self.executor
         {
-            while let Some(call) = conn.release_next().await.map_err(|_| Fail::Withheld)? {
+            for call in conn.prepare_staged().await.map_err(|_| Fail::Withheld)? {
                 let id = &call["id"];
                 if !d.branch().iter().any(|e| {
                     base::interface_handoff(e)
@@ -717,14 +802,22 @@ impl Exchange {
                 out.extend([start,json!({"type":"TOOL_CALL_ARGS","toolCallId":id,"delta":call["input"].to_string()}),json!({"type":"TOOL_CALL_END","toolCallId":id})]);
                 pending.push(id.clone());
             }
-            if !pending.is_empty() {
+            if !pending.is_empty() && outcome == "success" {
                 end["pendingToolCallIds"] = json!(pending);
             }
         }
         out.extend(pair);
         let terminal =
             json!({"type":"RUN_FINISHED","threadId":self.id,"runId":self.run,"outcome":end});
-        out.push(self.exact(terminal).await?);
+        match self.exact(terminal).await {
+            Ok(event) => out.push(event),
+            Err(err) => {
+                if in_turn && let Some(route) = &self.presence_at_start {
+                    base::requests(self.server.h())?.detach_presence(&self.id, route);
+                }
+                return Err(err);
+            }
+        }
         // Gate all executable frames together. Do not write a prefix on failure.
         if !pending.is_empty() {
             for frame in out.iter().filter(|v| {
@@ -736,6 +829,18 @@ impl Exchange {
             }
         }
         let bytes = frames(out)?;
+        if let Some(conn) = &mut self.executor {
+            for id in &pending {
+                if conn
+                    .release(id.as_str().ok_or(Fail::Withheld)?)
+                    .await
+                    .map_err(|_| Fail::Withheld)?
+                    .is_none()
+                {
+                    return Err(Fail::Withheld);
+                }
+            }
+        }
         let current = self.server.watch(&self.a, &self.id)?;
         if self.interruption.is_cancelled() || current.position != d.position {
             return Err(Fail::Conflict);
@@ -752,14 +857,18 @@ impl Exchange {
         }
         if outcome == "interrupt" {
             let presence = self.c.presence.lock().unwrap();
-            if presence.is_none() {
+            if in_turn && (presence.is_none() || *presence != self.presence_at_start) {
                 return Err(Fail::Refused);
             }
             let mut delivered = self.c.questions.lock().unwrap();
+            delivered.clear();
             for q in questions {
-                delivered.insert(q["id"].as_str().ok_or(Fail::Lost)?.into(), presence.clone());
+                delivered.insert(
+                    q["id"].as_str().ok_or(Fail::Lost)?.into(),
+                    if in_turn { presence.clone() } else { None },
+                );
             }
-            if let Some(conn) = self.executor.take() {
+            if in_turn && let Some(conn) = self.executor.take() {
                 *self.c.paused.lock().unwrap() =
                     Some((self.target.turn(&current).ok_or(Fail::Lost)?, conn));
             }
