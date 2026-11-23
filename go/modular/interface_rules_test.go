@@ -104,7 +104,7 @@ func TestInterfaceExpiryAndCancellationSettleUnknown(t *testing.T) {
 			if err := s.WaitIdle(ctx); err != nil {
 				t.Fatal(err)
 			}
-			if status, err := reportFixture(ctx, c, call.ID); status != modular.InterfaceToolRefused || err != nil {
+			if status, err := reportFixture(ctx, c, call.ID); status.Status != modular.InterfaceToolRefused || err != nil {
 				t.Fatalf("late report: %v, %v", status, err)
 			}
 			rows := interfaceHistory(t, ctx, s, "toolResult")
@@ -194,7 +194,7 @@ func TestInterfaceReportChecksRouteScopeAndCeiling(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer wrong.Close()
-	if status, err := reportFixture(ctx, wrong, call.ID); status != modular.InterfaceToolRefused || err != nil {
+	if status, err := reportFixture(ctx, wrong, call.ID); status.Status != modular.InterfaceToolRefused || err != nil {
 		t.Fatalf("wrong route: %v %v", status, err)
 	}
 	rights := []string{"watch"}
@@ -203,13 +203,13 @@ func TestInterfaceReportChecksRouteScopeAndCeiling(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer narrowed.Close()
-	if status, err := reportFixture(ctx, narrowed, call.ID); status != modular.InterfaceToolRefused || err != nil {
+	if status, err := reportFixture(ctx, narrowed, call.ID); status.Status != modular.InterfaceToolRefused || err != nil {
 		t.Fatalf("narrow ceiling: %v %v", status, err)
 	}
 	if _, err := a.ConnectInterfaceTools(s.ID(), modular.InterfaceToolConnectionOptions{ActorID: "editor", RouteID: "editor-primary", Scope: func(string, string) bool { return false }}); err == nil {
 		t.Fatal("attached outside scope")
 	}
-	if status, err := reportFixture(ctx, c, call.ID); status != modular.InterfaceToolAccepted || err != nil {
+	if status, err := reportFixture(ctx, c, call.ID); status.Status != modular.InterfaceToolAccepted || err != nil {
 		t.Fatalf("right route: %v %v", status, err)
 	}
 	if err := s.WaitIdle(ctx); err != nil {
@@ -228,7 +228,7 @@ func TestInterfaceErasureInvalidatesHandoffAndResult(t *testing.T) {
 				t.Fatal(err)
 			}
 			if erase == "toolResult" {
-				if status, err := reportFixture(ctx, c, call.ID); status != modular.InterfaceToolAccepted || err != nil {
+				if status, err := reportFixture(ctx, c, call.ID); status.Status != modular.InterfaceToolAccepted || err != nil {
 					t.Fatalf("report: %v %v", status, err)
 				}
 				if err := s.WaitIdle(ctx); err != nil {
@@ -243,7 +243,7 @@ func TestInterfaceErasureInvalidatesHandoffAndResult(t *testing.T) {
 			if err != nil || len(erasure.Erased) == 0 || !slices.ContainsFunc(erasure.OutOfReach, func(x string) bool { return strings.Contains(x, "Interface executor") }) {
 				t.Fatalf("erase: %+v %v", erasure, err)
 			}
-			if status, err := reportFixture(ctx, c, call.ID); status != modular.InterfaceToolRefused || err != nil {
+			if status, err := reportFixture(ctx, c, call.ID); status.Status != modular.InterfaceToolRefused || err != nil {
 				t.Fatalf("report after erasure: %v %v", status, err)
 			}
 			kept := interfaceHistory(t, ctx, s, erase)
@@ -283,14 +283,14 @@ func TestInterfaceReportBeforeTurnEndCanBeRetried(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status, err := reportFixture(ctx, c, call.ID); status != modular.InterfaceToolRefused || err != nil {
+	if status, err := reportFixture(ctx, c, call.ID); status.Status != modular.InterfaceToolRefused || status.Reason != modular.InterfaceToolNotReady || err != nil {
 		t.Fatalf("early report: %v %v", status, err)
 	}
 	close(release)
 	if err := s.WaitIdle(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if status, err := reportFixture(ctx, c, call.ID); status != modular.InterfaceToolAccepted || err != nil {
+	if status, err := reportFixture(ctx, c, call.ID); status.Status != modular.InterfaceToolAccepted || err != nil {
 		t.Fatalf("report after turn end: %v %v", status, err)
 	}
 	if err := s.WaitIdle(ctx); err != nil {
@@ -310,7 +310,7 @@ func TestInterfaceTelemetryLinksWithoutPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status, err := reportFixture(ctx, c, call.ID); status != modular.InterfaceToolAccepted || err != nil {
+	if status, err := reportFixture(ctx, c, call.ID); status.Status != modular.InterfaceToolAccepted || err != nil {
 		t.Fatalf("report: %v %v", status, err)
 	}
 	if err := s.WaitIdle(ctx); err != nil {

@@ -1,4 +1,4 @@
-import { mapOutput } from "@modular-agent/plugin-wire";
+import { checkOutputSize, mapOutput } from "@modular-agent/harness";
 import { customHistoryWriter, type LeasedHistoryStore } from "@modular-agent/services";
 import type { Configuration, CredentialStore, ModelStreamEvent, OutputPayload, HistoryStore as WriterHistoryStore, Runtime, WorkingEnvironment, Plugin as BasePlugin, PluginApi } from "@modular-agent/harness";
 import type { Agent } from "./agent.js";
@@ -377,6 +377,7 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
             if (answer === "block") return { action: "block" };
             if (typeof answer === "object" && "redact" in answer) {
               if (!mapped) return { action: "pass", events: answer.redact };
+              checkOutputSize(answer.redact);
               if (mapped.length !== answer.redact.length) throw new AgentError("invalid_request", "Invalid output gate answer");
               return { action: "pass", events: mapped.map((m, i) => m.restore(answer.redact[i])) };
             }

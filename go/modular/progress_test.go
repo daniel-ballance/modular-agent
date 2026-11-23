@@ -67,7 +67,7 @@ func TestServedJobProgressThroughOwnOutputGate(t *testing.T) {
 			for _, text := range []string{"first", "second"} {
 				got := takeInterruptionCheck(t, ctx, progress, "gated job progress")
 				if got.JobID == "" || jobID != "" && got.JobID != jobID || got.Content.Text() != "gated "+text ||
-					len(got.Content) != 3 || !reflect.DeepEqual(got.Content[1:], previewContent(text)) {
+					!reflect.DeepEqual(got.Content, previewContent("gated "+text)) {
 					t.Fatalf("job progress: %+v", got)
 				}
 				jobID = got.JobID
@@ -131,7 +131,16 @@ func progressPlugin() modular.Plugin {
 					if err := json.Unmarshal(event.Data, &data); err != nil || data.JobID == "" || len(data.Content) != 2 {
 						return modular.OutputDecision{}, fmt.Errorf("wrong job progress in gate: %s", event.Data)
 					}
-					data.Content = append([]json.RawMessage{json.RawMessage(`{"type":"text","text":"gated "}`)}, data.Content...)
+					var part map[string]json.RawMessage
+					if err := json.Unmarshal(data.Content[0], &part); err != nil {
+						return modular.OutputDecision{}, err
+					}
+					var text string
+					if err := json.Unmarshal(part["text"], &text); err != nil {
+						return modular.OutputDecision{}, err
+					}
+					part["text"], _ = json.Marshal("gated " + text)
+					data.Content[0], _ = json.Marshal(part)
 					replacement, err := json.Marshal(data)
 					if err != nil {
 						return modular.OutputDecision{}, err

@@ -626,15 +626,17 @@ class InterfaceTools:
                 cp["routeId"],
             ) or not REQUIRED <= self.permissions(s, actor, cp["rights"]):
                 return None
-            branch = branch_entries(s)
-            if not any(
-                e["kind"] == "turn_end"
-                and e.get("turn") == start["turn"]
-                and cid in e["data"].get("open_calls", [])
-                for e in branch
-            ):
+            end = next(
+                (
+                    e
+                    for e in branch_entries(s)
+                    if e.get("turn") == start["turn"] and recorded_as(e, "turn_end")
+                ),
+                None,
+            )
+            if end is not None and cid not in end["data"].get("open_calls", []):
                 return None
-            return start, checkpoint, terminal
+            return start, checkpoint, terminal, end
 
         from ma_runtime.turns import checked_tool_result, require_processed_result
 
@@ -649,7 +651,7 @@ class InterfaceTools:
                         await self._assert_writable(sid)
                     except AgentError:
                         return "refused"
-                    start, checkpoint, terminal = state
+                    start, checkpoint, terminal, end = state
                     if terminal:
                         return (
                             "alreadySettled"
@@ -658,6 +660,8 @@ class InterfaceTools:
                         )
                     if clock() >= checkpoint["data"]["deadline"]:
                         return "refused"
+                    if end is None:
+                        return "notReady"
                     call = start["data"]["call"]
                     proposed = {
                         "call": cid,

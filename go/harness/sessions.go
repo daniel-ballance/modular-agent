@@ -28,6 +28,7 @@ type session struct {
 	interfaceUnreleased  map[string]bool
 	interfaceTimer       worktime.Timer
 	interfaceReports     sync.Mutex
+	continuationWaiters  map[chan struct{}]string
 	queuedContinuations  map[string]bool
 	jobSpans             map[string]context.Context
 	id                   string // immutable, safe for event routing while snapshots change
@@ -1495,6 +1496,7 @@ func (c *client) Emit(ctx context.Context, e api.Event) {
 		e.ErasureEpoch = epoch
 	}
 	e.Time = time.Now().UTC()
+	boundary := e
 	out, err := c.output(ctx, e)
 	if err == nil && !out.Hold {
 		if strings.HasPrefix(e.Kind, "plugin.") && !bytes.Equal(e.Data, out.Event.Data) {
@@ -1503,12 +1505,11 @@ func (c *client) Emit(ctx context.Context, e api.Event) {
 		out.Event.ErasureEpoch = e.ErasureEpoch
 		e = out.Event
 	}
-	events, release := c.streamOutput(e, err != nil || out.Hold)
+	events, release, deliver := c.streamOutput(boundary, e, err != nil || out.Hold)
 	defer release()
-	if len(events) == 0 {
-		return
+	if deliver {
+		c.deliverOutput(ctx, boundary, events)
 	}
-	c.deliverOutput(ctx, e, events)
 }
 
 type turnPorts struct {
@@ -1802,6 +1803,14 @@ func (p *turnPorts) Record(ctx context.Context, e api.Entry) (api.Entry, error) 
 	}
 	if err == nil {
 		err = actual.commitLocked(staged.data, ctx)
+	}
+	if errors.Is(err, api.ErrCapacity) && start.ContinuesTurn != "" {
+		for waiter, origin := range actual.continuationWaiters {
+			if origin == start.ContinuesTurn {
+				delete(actual.continuationWaiters, waiter)
+				close(waiter)
+			}
+		}
 	}
 	actual.mu.Unlock()
 	if err == nil {

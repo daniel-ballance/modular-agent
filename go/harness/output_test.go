@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/portable"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -42,7 +44,79 @@ func TestOutputBatchHoldsEachStreamAndFailsClosed(t *testing.T) {
 	}
 	emit("tool.end", "step", "blocked")
 	emit("model.stream.end", "step", "")
-	if !reflect.DeepEqual(seen, []string{"model.delta", "model.delta", "model.stream.end"}) || len(filtered) != 0 || len(batches) != 4 || len(batches[0].Events) != 2 || len(batches[2].Events) != 3 {
+	if !reflect.DeepEqual(seen, []string{"model.delta", "model.delta", "model.stream.end"}) || len(filtered) != 0 || len(batches) != 5 || len(batches[0].Events) != 1 {
 		t.Fatalf("got events %v, filtered %v, batches %+v", seen, filtered, batches)
+	}
+}
+
+func TestHeldOutputOverflowIsAtomic(t *testing.T) {
+	for _, mode := range []string{"segments", "single", "buffer", "replacement", "late block"} {
+		t.Run(mode, func(t *testing.T) {
+			h := New()
+			if mode == "buffer" {
+				limits := DefaultCapacityLimits()
+				limits.Session.BufferedBytes = 1024
+				h.UseCapacity(NewCapacity(limits))
+			}
+			segments := 0
+			err := h.Load(api.Plugin{Name: "gate", Setup: func(a api.API) error {
+				return a.Handle("output.batch", "", func(_ context.Context, v any) (api.Decision, error) {
+					b := v.(api.OutputBatch)
+					if b.Events[0].Kind != "model.delta" {
+						return api.Decision{}, nil
+					}
+					wire := make([]portable.OutputEvent, 0, len(b.Events))
+					for _, e := range b.Events {
+						wire = append(wire, portable.ProjectOutput(e))
+					}
+					if n := len(api.JSON(wire)); n > portable.GateSegmentBytes {
+						t.Errorf("oversized gate segment: %d", n)
+					}
+					segments++
+					if segments == 2 && mode == "late block" {
+						return api.Decision{Refuse: true}, nil
+					}
+					if segments == 2 && mode == "replacement" {
+						b.Events[0].Data = api.JSON(api.Part{Type: "text", Text: strings.Repeat("y", portable.GateSegmentBytes)})
+						return api.Decision{Value: b}, nil
+					}
+					return api.Decision{}, nil
+				})
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := h.API()
+			var seen []string
+			a.Subscribe(func(e api.Event) { seen = append(seen, e.Kind) })
+			sizes := []int{portable.GateSegmentBytes / 2, portable.GateSegmentBytes / 2}
+			if mode == "single" {
+				sizes = []int{5, portable.GateSegmentBytes, 5}
+			}
+			if mode == "buffer" {
+				sizes = []int{5, 1024, 5}
+			}
+			for _, n := range sizes {
+				a.Emit(t.Context(), api.Event{Session: "s", Step: "step", Kind: "model.delta", Data: api.JSON(api.Part{Type: "text", Text: strings.Repeat("x", n)})})
+			}
+			if len(seen) != 0 {
+				t.Fatal("early release")
+			}
+			a.Emit(t.Context(), api.Event{Session: "s", Step: "step", Kind: "model.stream.end"})
+			switch mode {
+			case "segments":
+				if segments != 2 || !reflect.DeepEqual(seen, []string{"model.delta", "model.delta", "model.stream.end"}) {
+					t.Fatal(segments, seen)
+				}
+			case "late block":
+				if segments != 2 || len(seen) != 0 {
+					t.Fatal(segments, seen)
+				}
+			default:
+				if !reflect.DeepEqual(seen, []string{"output.overflow"}) {
+					t.Fatal(segments, seen)
+				}
+			}
+		})
 	}
 }

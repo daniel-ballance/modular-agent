@@ -159,6 +159,7 @@ func (q *agRequest) plan(in agInput, suffix []agObject, c *InterfaceToolConnecti
 }
 
 type agExchange struct {
+	presenceAtStart *agPresence
 	*agRequest
 	in           agInput
 	work         agWork
@@ -211,7 +212,9 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 		return stale
 	}
 	s.active = true
+	defer q.a.q.manager().ConnectClient(q.id, q.Actor.ID, q.client)()
 	c := s.tools
+	presenceAtStart := s.presence
 	s.mu.Unlock()
 	keep := c != nil
 	defer func() {
@@ -252,7 +255,7 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 	if q.TrustTrace {
 		q.ctx = telemetry.HTTPParent(q.ctx, r.Header.Get("traceparent"), r.Header.Get("tracestate"), q.opt.TraceStateKeys)
 	}
-	x := &agExchange{agRequest: q, in: in, work: p, conn: c, epoch: h.epoch, steps: map[string]bool{}, text: map[string]string{}, reasoning: map[string]bool{}, emittedCalls: map[string]bool{}}
+	x := &agExchange{presenceAtStart: presenceAtStart, agRequest: q, in: in, work: p, conn: c, epoch: h.epoch, steps: map[string]bool{}, text: map[string]string{}, reasoning: map[string]bool{}, emittedCalls: map[string]bool{}}
 	stopEvents, events, lost := x.follow()
 	defer stopEvents()
 	_, interrupted, err := q.host().SessionInterruption(q.id)
@@ -261,6 +264,15 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 	}
 	if err = q.fresh(h.epoch); err != nil {
 		return err
+	}
+	var capacity <-chan struct{}
+	if p.continued {
+		var detach func()
+		capacity, detach, err = q.host().WatchContinuation(q.id, p.origin)
+		if err != nil {
+			return err
+		}
+		defer detach()
 	}
 	if c != nil && !keep {
 		if err = c.connection.AdvertiseFor(p.names, p.key, p.origin); err != nil {
@@ -298,10 +310,14 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 				return stale
 			}
 			s.mu.Unlock()
-			if err = q.a.q.manager().Answer(q.ctx, q.id, a); err != nil {
+			if err = q.a.q.manager().AnswerOnClient(q.ctx, q.id, q.client, a); err != nil {
 				return err
 			}
 			s.mu.Lock()
+			if s.presence != nil && s.presence.detach[a.Request] != nil {
+				s.presence.detach[a.Request]()
+				delete(s.presence.detach, a.Request)
+			}
 			delete(s.delivered, a.Request)
 			if len(s.delivered) == 0 {
 				s.disconnect()
@@ -313,7 +329,7 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 			if err != nil {
 				return err
 			}
-			if d != InterfaceToolAccepted {
+			if d.Status != InterfaceToolAccepted {
 				return stale
 			}
 		}
@@ -347,6 +363,8 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 			select {
 			case <-q.ctx.Done():
 				return nil
+			case <-capacity:
+				err = api.ErrCapacity
 			case <-lost:
 				err = unavailable
 			case <-interrupted:
@@ -392,7 +410,9 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 }
 func (s *agClient) disconnect() {
 	if s.presence != nil && s.presence.detach != nil {
-		s.presence.detach()
+		for _, detach := range s.presence.detach {
+			detach()
+		}
 		s.presence.detach = nil
 	}
 }
@@ -464,11 +484,14 @@ func (x *agExchange) offerQuestion(e api.Event) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		p := s.presence
-		if p == nil || p.ctx.Err() != nil {
+		if p == nil || p != x.presenceAtStart || p.ctx.Err() != nil {
 			return
 		}
-		if v.Kind == "approval" && p.detach == nil {
-			p.detach = x.a.q.manager().Connect(x.id, x.Actor.ID)
+		if v.Kind == "approval" && p.detach[v.ID] == nil {
+			if p.detach == nil {
+				p.detach = map[string]func(){}
+			}
+			p.detach[v.ID] = x.a.q.manager().OfferApproval(x.id, x.Actor.ID, x.client, v.ID)
 		}
 		if s.delivered == nil {
 			s.delivered = map[string]agDelivery{}

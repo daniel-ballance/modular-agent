@@ -66,6 +66,28 @@ test("a queued client follows only its own turn and does not inherit another cli
   } finally { release.resolve(); }
 });
 
+test("an accepted report ends its waiting exchange with busy when the continuation cannot reserve a turn", { timeout: 10000 }, async t=>{
+  const dir = await mkdtemp(join(tmpdir(),"agui-capacity-"));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const options = {project:dir, dataDir:dir, durability:"kept" as const, interfaceTools:[source],
+    providers:[scriptedProvider([{toolCalls:[{name:"pick",input:{}}]}])]};
+  const first = await setup(t, options);
+  const id = await first.thread();
+  const origin = await events(await first.run(id,[prompt("choose")],{tools:[definition]}));
+  const [call] = origin.at(-1).outcome.pendingToolCallIds;
+  await first.listener.close();
+  await first.agent.close();
+  // Lowering the limit cannot consume the open call's settlement reservation.
+  const next = await setup(t, {...options, resourceReservations:{session:{storageBytes:1,controlBytes:0}}});
+  const view = await (await next.request("/threads/"+id)).json() as {messages:unknown[]};
+  const settled = await events(await next.run(id,[...view.messages,{id:"report",role:"tool",toolCallId:call,content:"blue"}]));
+  assert.equal(settled.at(-1).type,"RUN_ERROR");
+  assert.equal(settled.at(-1).code,"busy");
+  const history=await (await next.agent.openSession(id)).history();
+  assert.equal(history.filter(e=>e.kind==="turnStart").length,1);
+  assert.equal(history.filter(e=>e.kind==="toolResult").length,1);
+});
+
 test("media stay in order and only text and inline image bytes reach the model", async t=>{
   const warnings:string[]=[], seen:unknown[]=[];
   const audit=definePlugin({name:"audit",hooks:{"provider.request":({request})=>{seen.push(request.messages.at(-1)?.content);}}});

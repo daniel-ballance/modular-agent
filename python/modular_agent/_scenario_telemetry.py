@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from ma_plugin.host import External
 
 from . import Agent, ModelRef, ProcessPlugin, PromptResult, ProviderContext, Session
-from ._agent import _Interface
+from ._acp_interface import _Interface
 from ._native import _MemoryHistory
 from .testing import ScriptedProvider
 

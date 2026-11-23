@@ -177,14 +177,18 @@ func (p *Capacity) permits(row api.Session, charge CapacityBounds) bool {
 // ReserveOutput uses the same byte pool as queued input. Dropping or
 // consuming output frees only buffer bytes, never durable write headroom.
 func (c *client) ReserveOutput(e api.Event) func() {
+	n := int64(128 + len(e.Data) + len(e.Session) + len(e.Turn) + len(e.Step) + len(e.Call) + len(e.Actor) + len(e.Kind))
+	return c.reserveOutputBytes(e.Session, n)
+}
+
+func (c *client) reserveOutputBytes(session string, n int64) func() {
 	tenant := ""
-	if e.Session != "" {
-		if s, err := c.find(e.Session); err == nil {
+	if session != "" {
+		if s, err := c.find(session); err == nil {
 			tenant = s.tenant
 		}
 	}
-	n := int64(128 + len(e.Data) + len(e.Session) + len(e.Turn) + len(e.Step) + len(e.Call) + len(e.Actor) + len(e.Kind))
-	return c.h.capacity.reserveOutput(e.Session, tenant, n)
+	return c.h.capacity.reserveOutput(session, tenant, n)
 }
 
 func (p *Capacity) reserveOutput(id, tenant string, n int64) func() {

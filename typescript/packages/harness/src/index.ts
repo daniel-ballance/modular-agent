@@ -1,4 +1,5 @@
 export * from "./types.js";
+export * from "./output.js";
 export { memoryPendingErasure, filePendingErasure, type PendingErasure, type ErasurePlan, type ErasurePublication, type HistoryErasureRegistry } from "./erasure.js";
 export { reservationLimits, type ReservationOptions, type ReservationLimits, type ReservationDeclaration } from "./reservations.js";
 export * from "./hooks.js";

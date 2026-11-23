@@ -7,12 +7,6 @@ from pathlib import Path
 import re
 from contextlib import AsyncExitStack
 
-import httpx2
-from mcp import ClientSession
-from mcp import types
-from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamable_http_client
-
 from ma_core import telemetry as ot
 from ma_core import AgentError, Plugin, content
 
@@ -59,11 +53,15 @@ class Connection:
 
     async def _serve(self):
         try:
+            from mcp import ClientSession
+
             # SDK contexts MUST enter and exit in this same task (AnyIO cancel scopes).
             # https://github.com/modelcontextprotocol/python-sdk/blob/v2.3.0/docs/client/transports.md
             async with AsyncExitStack() as stack:
                 spec = self.spec
                 if spec.get("type", "stdio") == "stdio":
+                    from mcp.client.stdio import StdioServerParameters, stdio_client
+
                     streams = await stack.enter_async_context(
                         stdio_client(
                             StdioServerParameters(
@@ -75,6 +73,9 @@ class Connection:
                         )
                     )
                 else:
+                    import httpx2
+                    from mcp.client.streamable_http import streamable_http_client
+
                     client = (self.http_factory or httpx2.AsyncClient)(
                         headers=mapping(spec.get("headers", {}))
                     )
@@ -129,6 +130,8 @@ class Connection:
         return self.session
 
     async def tools(self):
+        from mcp import types
+
         tools, cursor, seen = [], None, set()
         while True:
             metadata = ot.inject()
@@ -277,6 +280,8 @@ class MCP(Plugin):
                 connection.previous = snapshot
                 await self.api.event("tools_changed", session=sid, source="mcp", server=server)
             for tool in tools:
+                from mcp import types
+
                 a = tool.annotations or types.ToolAnnotations()
                 read_only = a.read_only_hint is True
                 name = (

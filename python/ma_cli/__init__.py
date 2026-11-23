@@ -84,7 +84,6 @@ async def build(
 
 async def cli(args):
     import signal
-    from ma_claude import Claude
     from ma_core import AgentError
     from ma_fake import Fake
     from ma_terminal import Terminal
@@ -117,11 +116,12 @@ async def cli(args):
                     args.project = Path(match["project"])
             finally:
                 await directory.stop()
-    provider = (
-        Fake(__import__("json").loads(args.fake_script.read_text()))
-        if args.fake_script
-        else Claude()
-    )
+    if args.fake_script:
+        provider = Fake(__import__("json").loads(args.fake_script.read_text()))
+    else:
+        from ma_claude import Claude
+
+        provider = Claude()
     actor = os.environ.get("MODULAR_AGENT_ACTOR", "user")
     if args.mode == "acp" and (not actor or any(0xD800 <= ord(c) <= 0xDFFF for c in actor)):
         raise SystemExit("MODULAR_AGENT_ACTOR must be a nonempty Unicode Id")

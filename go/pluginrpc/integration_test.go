@@ -173,7 +173,7 @@ func TestBindingChild(t *testing.T) {
 						}); err != nil {
 							return nil, err
 						}
-						event["data"] = "gated problem"
+						event["data"].(map[string]any)["message"] = "gated problem"
 					}
 				}
 				return map[string]any{"events": events}, nil
@@ -477,7 +477,7 @@ func testHostCallbacks(t *testing.T, mode string) {
 	notifications := make(chan string, 2)
 	a.Subscribe(func(e api.Event) {
 		if e.Kind == "plugin.wire-fixture.probe.notice" || e.Kind == "plugin.problem" &&
-			(mode != "probe-output" || string(e.Data) == `"gated problem"`) {
+			(mode != "probe-output" || api.Decode[map[string]any](e.Data)["message"] == "gated problem") {
 			notifications <- e.Kind
 		}
 	})

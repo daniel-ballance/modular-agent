@@ -35,6 +35,7 @@ struct OpenSession {
     journal_uncertain: bool,
     environment_work: usize,
     steer_closed: bool,
+    continuation_waiters: BTreeMap<String, Weak<CancellationToken>>,
     cancel: CancellationToken,
 }
 impl Drop for OpenSession {
@@ -60,7 +61,31 @@ impl Drop for TurnActivity<'_> {
     }
 }
 
-type HeldOutput = BTreeMap<(String, String, String), Vec<(Event, Value, capacity::Buffer)>>;
+const GATE_SEGMENT: u64 = 4 << 20;
+const MAX_HELD: u64 = 64 << 20;
+#[derive(Default)]
+struct HeldPieces {
+    bytes: u64,
+    pieces: Vec<(Event, Value, capacity::Buffer)>,
+}
+// None marks a blocked stream. Ignore later pieces until its end.
+type HeldOutput = BTreeMap<(String, String, String), Option<HeldPieces>>;
+
+#[derive(Debug)]
+struct OutputOverflow;
+#[derive(Debug)]
+struct ContinuationRefused;
+impl std::fmt::Display for ContinuationRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("continuation start refused")
+    }
+}
+impl std::fmt::Display for OutputOverflow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("output exceeds the gate or buffer limit")
+    }
+}
+impl std::error::Error for OutputOverflow {}
 
 pub struct Harness {
     me: Weak<Harness>,
@@ -359,6 +384,7 @@ impl Harness {
                         journal_uncertain: false,
                         environment_work: 0,
                         steer_closed: false,
+                        continuation_waiters: Default::default(),
                         cancel: CancellationToken::new(),
                     },
                 );
@@ -497,6 +523,7 @@ impl Harness {
                     journal_uncertain: false,
                     environment_work: 0,
                     steer_closed: false,
+                    continuation_waiters: Default::default(),
                     cancel: CancellationToken::new(),
                 },
             );
@@ -688,6 +715,26 @@ impl Harness {
         )
     }
 
+    /// Subscribe before committing a report or answer. This signal carries no
+    /// output and names no other origin.
+    pub fn watch_continuation(&self, id: &str, origin: &str) -> Result<Arc<CancellationToken>> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let open = sessions
+            .get_mut(id)
+            .ok_or_else(|| anyhow!("session not open"))?;
+        open.continuation_waiters
+            .retain(|_, w| w.strong_count() > 0);
+        let slot = open
+            .continuation_waiters
+            .entry(origin.to_owned())
+            .or_default();
+        if let Some(existing) = slot.upgrade() {
+            return Ok(existing);
+        }
+        let signal = Arc::new(CancellationToken::new());
+        *slot = Arc::downgrade(&signal);
+        Ok(signal)
+    }
     pub fn open_session_ids(&self) -> Vec<String> {
         self.sessions.lock().unwrap().keys().cloned().collect()
     }
@@ -835,33 +882,63 @@ impl Harness {
         &self,
         scope: &Scope,
         recipient: &str,
-        mut events: Vec<Value>,
+        events: Vec<Value>,
     ) -> Result<Vec<Value>> {
-        if events.is_empty() {
-            return Ok(events);
-        }
+        let registry = self.registry.read().unwrap().clone();
         let recipient = if recipient == "interface.acp" {
-            self.registry.read().unwrap().declaration()["acp"]["actor"]["id"]
+            registry.declaration()["acp"]["actor"]["id"]
                 .as_str()
                 .unwrap_or(ACP_HOST_ACTOR)
                 .to_owned()
         } else {
             recipient.to_owned()
         };
-        let result = self.invoke(&self.points["output.stream"], scope,
-             json!({"sessionId":scope.session,"recipient":recipient,"events":events,"final":true})).await?;
-        let Some(after) = result.value["events"].as_array() else {
-            return Ok(vec![]);
-        };
-        if after.len() != events.len() {
-            return Ok(vec![]);
+        let mut accepted = Vec::new();
+        let mut charges = Vec::new();
+        let mut total = bytes::size(&events);
+        if total > MAX_HELD {
+            return Err(OutputOverflow.into());
         }
-        for (before, after) in events.iter_mut().zip(after) {
-            if before["type"] != after["type"] || !output::apply_redactions(before, after) {
+        let mut remaining = events.into_iter().peekable();
+        while remaining.peek().is_some() {
+            let mut segment = Vec::new();
+            let mut charged = 2;
+            while let Some(item) = remaining.peek() {
+                let n = bytes::size(item);
+                if n + 2 > GATE_SEGMENT {
+                    return Err(OutputOverflow.into());
+                }
+                let next = charged + n + u64::from(!segment.is_empty());
+                if next > GATE_SEGMENT {
+                    break;
+                }
+                charged = next;
+                segment.push(remaining.next().unwrap());
+            }
+            let result = registry.invoke_checked(self.api(), &self.points["output.stream"], scope,
+                json!({"sessionId":scope.session,"recipient":recipient,"events":segment,"final":true}),
+                |before,after| {
+                    let size = bytes::size(&after["events"]);
+                    if size > GATE_SEGMENT {return Err(OutputOverflow.into());}
+                    ensure!(after["events"].is_array() && output::apply_redactions(&mut before["events"].clone(), &after["events"]), "invalid output redaction");
+                    if size>charged {total+=size-charged; if total>MAX_HELD{return Err(OutputOverflow.into())}}
+                        if size > charged && !scope.session.is_empty() {
+                        charges.push(self.reserve_output(&scope.session,size-charged).map_err(|_|OutputOverflow)?);
+                        charged=size;
+                    }
+                    Ok(())
+                }).await?;
+            let Some(after) = result.value["events"].as_array() else {
                 return Ok(vec![]);
+            };
+            for (mut before, after) in segment.into_iter().zip(after) {
+                if !output::apply_redactions(&mut before, after) {
+                    return Ok(vec![]);
+                }
+                accepted.push(before);
             }
         }
-        Ok(events)
+        Ok(accepted)
     }
     fn holds_remote_output(&self) -> bool {
         self.registry.read().unwrap().declaration()["remote_output"] == true
@@ -1541,6 +1618,7 @@ impl Harness {
         self.check_writer(session)?;
         let result = match result {
             Ok(r) => r,
+            Err(e) if e.is::<ContinuationRefused>() => return Err(e),
             Err(e) => {
                 let mut r = TurnResult {
                     outcome: if cancel.is_cancelled() {
@@ -1800,6 +1878,7 @@ impl Harness {
         if let Some(interface) = interface {
             sources.extend(interface.sources.iter().cloned());
         }
+        let continuation_origin = start["continuesTurnId"].as_str().map(str::to_owned);
         entries.push(Draft::new("turn.start", false, start).copying(sources));
         let mut taken = json!({"text":input.text,"inputId":input_id,"key":input.key,"authority":cap,"context":context});
         if let Some(value) = source.and_then(|s| s.content.as_ref()) {
@@ -1817,7 +1896,27 @@ impl Harness {
             entries.push(Draft::new("input", true, taken).copying(vec![input.id]));
         }
         op.run(async {
-            self.publish(scope, "harness", entries, None, None)?;
+            if let Err(err) = self.publish(scope, "harness", entries, None, None) {
+                if let Some(origin) = continuation_origin
+                    && matches!(
+                        err.downcast_ref::<OperationError>(),
+                        Some(OperationError::Busy(_))
+                    )
+                {
+                    if let Some(signal) = self
+                        .sessions
+                        .lock()
+                        .unwrap()
+                        .get_mut(&scope.session)
+                        .and_then(|s| s.continuation_waiters.remove(&origin))
+                        .and_then(|s| s.upgrade())
+                    {
+                        signal.cancel();
+                    }
+                    return Err(err.context(ContinuationRefused));
+                }
+                return Err(err);
+            }
             if budget_reached {
                 let result = TurnResult {
                     outcome: Outcome::Limit,
@@ -2885,6 +2984,7 @@ impl AgentApi for Harness {
                 journal_uncertain: false,
                 environment_work: 0,
                 steer_closed: false,
+                continuation_waiters: Default::default(),
                 cancel: CancellationToken::new(),
             },
         );
@@ -3035,7 +3135,8 @@ impl AgentApi for Harness {
         };
         let gated = self
             .remote_output(scope, recipient, vec![json!({"type":kind,"data":value})])
-            .await?;
+            .await
+            .unwrap_or_default();
         if self.output_epoch(&scope.session)? != epoch {
             return Ok(None);
         }
@@ -3094,19 +3195,41 @@ impl AgentApi for Harness {
                     .and_then(|e| output::encode(&e, self).ok().map(|item| (e, item)));
                 let batch = if let Some(stream) = &event.stream {
                     let key = (event.scope.session.clone(), name.clone(), stream.clone());
-                    let item = item.and_then(|(event, item)| {
-                        let data = self.snapshot(&event.scope.session).ok()?;
-                        let permit = self.reservations().buffer(&data, bytes::size(&item)).ok()?;
-                        Some((event, item, permit))
+                    let item = item.map(|(event, item)| -> Result<_> {
+                        let n = bytes::size(&item) + 2;
+                        ensure!(n <= GATE_SEGMENT, OutputOverflow);
+                        let data = self.snapshot(&event.scope.session)?;
+                        let permit = self.reservations().buffer(&data, n)?;
+                        Ok((n, (event, item, permit)))
                     });
                     let mut held = self.held_output.lock().unwrap();
-                    if let Some(item) = item {
-                        held.entry(key.clone()).or_default().push(item);
+                    let stream = held
+                        .entry(key.clone())
+                        .or_insert_with(|| Some(HeldPieces::default()));
+                    match item {
+                        Some(Err(_)) => *stream = None,
+                        Some(Ok((n, item))) => {
+                            if let Some(held) = stream {
+                                if held.bytes + n > MAX_HELD {
+                                    *stream = None;
+                                } else {
+                                    held.bytes += n;
+                                    held.pieces.push(item);
+                                }
+                            }
+                        }
+                        None => {}
                     }
                     if !event.end {
                         continue;
                     }
-                    held.remove(&key).unwrap_or_default()
+                    let batch = held.remove(&key).flatten();
+                    drop(held);
+                    let Some(batch) = batch else {
+                        sink.send(Event::new(&event.scope, "output.overflow", Value::Null));
+                        continue;
+                    };
+                    batch.pieces
                 } else {
                     item.and_then(|(event, item)| {
                         let data = self.snapshot(&event.scope.session).ok()?;
@@ -3116,13 +3239,22 @@ impl AgentApi for Harness {
                     .into_iter()
                     .collect()
                 };
-                let gated = self
+                let gated = match self
                     .remote_output(
                         &event.scope,
                         &name,
                         batch.iter().map(|(_, item, _)| item.clone()).collect(),
                     )
-                    .await?;
+                    .await
+                {
+                    Ok(gated) => gated,
+                    Err(error) => {
+                        if error.is::<OutputOverflow>() && event.stream.is_some() {
+                            sink.send(Event::new(&event.scope, "output.overflow", Value::Null));
+                        }
+                        continue;
+                    }
+                };
                 let decoded = batch
                     .into_iter()
                     .zip(gated)

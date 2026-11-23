@@ -309,7 +309,8 @@ pub struct Ask {
     text: String,
     options: Vec<String>,
     credential: Option<String>,
-    link: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    link: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     wait_ms: Option<u64>,
 }
@@ -329,7 +330,8 @@ impl Ask {
             question.timeout_ms = Some(ms);
             question.extra["whenTimeLimit"] = json!("leaveOpen");
         }
-        if self.link {
+        if let Some(uri) = self.link {
+            question.extra["details"] = json!(uri);
             question.extra["kind"] = json!("link");
         }
         question
@@ -340,7 +342,7 @@ impl Ask {
             text: question.into(),
             options: options.iter().map(|o| o.to_string()).collect(),
             credential: None,
-            link: false,
+            link: None,
             wait_ms: None,
         }
     }
@@ -350,7 +352,7 @@ impl Ask {
             text: question.into(),
             options: vec![],
             credential: None,
-            link: false,
+            link: None,
             wait_ms: None,
         }
     }
@@ -360,13 +362,13 @@ impl Ask {
             text: question.into(),
             options: vec![],
             credential: None,
-            link: false,
+            link: None,
             wait_ms: None,
         }
     }
-    pub fn link(question: impl Into<String>) -> Self {
+    pub fn link(question: impl Into<String>, uri: impl Into<String>) -> Self {
         Self {
-            link: true,
+            link: Some(uri.into()),
             ..Self::text(question)
         }
     }
@@ -616,11 +618,14 @@ impl ToolContext {
                 let kind = match ask.kind {
                     base::RequestKind::Approval => "approval",
                     base::RequestKind::Choice => "choice",
-                    base::RequestKind::Text if ask.link => "link",
+                    base::RequestKind::Text if ask.link.is_some() => "link",
                     base::RequestKind::Text => "text",
                     base::RequestKind::Secret => "secret",
                 };
                 let mut request = json!({"kind": kind, "question": ask.text});
+                if let Some(uri) = ask.link {
+                    request["details"] = json!(uri);
+                }
                 if let Some(name) = ask.credential {
                     request["credential"] = json!(name);
                 }

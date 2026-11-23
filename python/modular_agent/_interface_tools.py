@@ -36,7 +36,9 @@ class InterfaceToolReport(TypedDict):
     value: NotRequired[Json]
 
 
-InterfaceToolDisposition = Literal["accepted", "alreadySettled", "refused"]
+class InterfaceToolDisposition(TypedDict):
+    status: Literal["accepted", "alreadySettled", "refused"]
+    reason: NotRequired[Literal["notReady"]]
 
 
 class InterfaceToolConnection:
@@ -130,12 +132,12 @@ class InterfaceToolConnection:
         from ._native import _error
 
         try:
-            return cast(
-                InterfaceToolDisposition,
-                await self._agent._h.report_interface_result(
-                    session_id, self._id, deepcopy(report)
-                ),
+            status = await self._agent._h.report_interface_result(
+                session_id, self._id, deepcopy(report)
             )
+            if status == "notReady":
+                return {"status": "refused", "reason": "notReady"}
+            return {"status": status}
         except Exception as exc:
             raise _error(exc) from exc
 

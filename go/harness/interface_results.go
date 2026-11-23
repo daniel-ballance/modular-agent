@@ -46,6 +46,7 @@ const (
 	InterfaceAccepted       = "accepted"
 	InterfaceAlreadySettled = "alreadySettled"
 	InterfaceRefused        = "refused"
+	InterfaceNotReady       = "notReady"
 )
 
 func (i *InterfaceConnection) ReportToolResult(ctx context.Context, report api.InterfaceReport) (string, error) {
@@ -164,15 +165,35 @@ func (i *InterfaceConnection) checkReportLocked(ctx context.Context, id string) 
 		i.c.h.startInterfaceContinuationsLocked(s)
 		return refuse()
 	}
-	if s.interfaceUnreleased[id] {
-		return refuse()
-	}
 	for _, e := range s.data.Branch() {
-		if e.Kind == "turn.end" && e.Turn == cp.Turn && api.Decode[api.Outcome](e.Data).Status == "completed" && slices.ContainsFunc(api.Decode[api.Outcome](e.Data).Open, func(c api.Call) bool { return c.ID == id }) {
+		if e.Turn != cp.Turn || !e.WasKind("turn.end") {
+			continue
+		}
+		out := api.Decode[api.Outcome](e.Data)
+		if !e.IsErased() && !s.interfaceUnreleased[id] && out.Status == "completed" &&
+			slices.ContainsFunc(out.Open, func(c api.Call) bool { return c.ID == id }) {
 			return cp, call, "", nil
 		}
+		return refuse()
 	}
-	return refuse()
+	return cp, call, InterfaceNotReady, nil
+}
+
+// WatchContinuation registers before an Interface commits an answer or report.
+// No history entry or turn exists for a capacity refusal.
+func (c *client) WatchContinuation(id, origin string) (<-chan struct{}, func(), error) {
+	s, err := c.find(id)
+	if err != nil {
+		return nil, nil, err
+	}
+	ch := make(chan struct{})
+	s.mu.Lock()
+	if s.continuationWaiters == nil {
+		s.continuationWaiters = make(map[chan struct{}]string)
+	}
+	s.continuationWaiters[ch] = origin
+	s.mu.Unlock()
+	return ch, func() { s.mu.Lock(); delete(s.continuationWaiters, ch); s.mu.Unlock() }, nil
 }
 
 // Interface and question completions use the same session run queue. Derive

@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { activeOperation, carrier, conversation, currentSpan, historyForPeer, observeInference, readTrace, safeName, startOperation, telemetryEvent, toolAttributes, TURN_TRACE, withTrace, type Operation } from "./telemetry.js";
+import { mapOutput, OUTPUT_SEGMENT_BYTES } from "./output.js";
 import { Reservations, resourceBytes, reservationLimits, type ReservationOptions } from "./reservations.js";
 import { memoryPendingErasure, type ErasureIntent, type ErasurePlan, type HistoryErasureRegistry, type PendingErasure } from "./erasure.js";
 import { addAbortListener } from "node:events";
@@ -519,12 +520,14 @@ export class Harness {
 				const s = this.sessions.get(sessionId);
 				const freshness = s && await this.admitHistory(s);
 				let out: typeof data | undefined;
-				const follower = new Follower(this.hooks, recipient, false, (e) => { if (e.type === type) out = e.data; }, (e) => this.problem("harness", "output gate", e), undefined, undefined,
+				let overflow = false;
+				const follower = new Follower(this.hooks, recipient, false, (e) => { if (e.type === type) out = e.data; }, (e) => { if ((e as {code?: string}).code === "result_too_large") overflow = true; else this.problem("harness", "output gate", e); }, undefined, undefined,
 					s && this.httpErasure() ? () => this.admitHistory(s).then(current => { if (current !== freshness) throw failure("unavailable", "Erasure changed the output view"); }) : undefined);
 				follower.push({ type, time: this.now(), sessionId, source: pluginName, ...ids, data });
 				if (type === "model.output") follower.push({ type: "model.streamEnd", time: this.now(), sessionId, source: pluginName, ...ids });
 				await follower.idle();
 				if (s && await this.admitHistory(s) !== freshness) throw failure("unavailable", "Erasure changed the output view");
+				if (overflow && type === "reply") throw failure("result_too_large", "Reply exceeds the gate limit");
 				return out;
 			},
 			declaration: (sessionId) => this.declaration(sessionId ? this.session(sessionId) : undefined),
@@ -2164,6 +2167,11 @@ export class Harness {
 		const continuesTurnId = queued.continueTurnId;
 		if (continuesTurnId && !this.readyContinuations(s).some(item => item.origin === continuesTurnId)) return;
 		const continuing = continuesTurnId ? this.openCalls(s, continuesTurnId) : undefined;
+		if (continuesTurnId && !this.reservations.reserve(s, `turn:${turnId}`, { storageBytes: 3 * this.reservations.limits.settlementBytes })) {
+			// No turn was admitted. Wake only exchanges waiting on this origin.
+			this.emit(s, "continuation.refused", { code: "busy" }, "harness", { turnId: continuesTurnId });
+			return;
+		}
 		const runtime = this.runtime();
 		const ref = parseModel(s.settings.model);
 		const model: ModelAccess | undefined = this.modelAccess(s, ref) ?? (ref ? {
@@ -2211,10 +2219,6 @@ export class Harness {
 			snapshot = { model: ref ?? null, system: "", settings: {}, tools: [] };
 		}
 		const state: TurnState = { ...snapshot, ...authority, interfaceOffer, interfaceAllowances: new Map(), dispatched: new Set(), steps: new Map(), sources: new Map(), actors, jobs };
-		if (continuing && !this.reservations.reserve(s, `turn:${turnId}`, { storageBytes: 3 * unit })) {
-			// Leave existing open calls intact when a continuation cannot reserve its own turn.
-			return;
-		}
 		const span = this.turnSpan(s, turnId, queued.trace ?? null, undefined, continuesTurnId);
 		return span.run(async () => {
 			try {
@@ -4283,7 +4287,9 @@ class Follower {
 
 	push(event: AgentEvent): void {
 		if (this.disconnected || this.include && !this.include(event)) return;
-		const size = resourceBytes(event);
+		const nativeSize = resourceBytes(event);
+		const size = !this.raw && this.hooks.raw("output").some(h => h.stream) && ["model.output","tool.progress"].includes(event.type)
+			? Math.max(nativeSize, resourceBytes(mapOutput(event).wire) + 2) : nativeSize;
 		const lease = this.reserve?.(size);
 		if (this.pending >= 1024 || this.bytes + size > 64 * 1024 * 1024 || this.reserve && !lease) {
 			lease?.();
@@ -4358,36 +4364,65 @@ class Follower {
 	}
 
 	private async gate(initial: AgentEvent[], final: boolean, handlers: ReturnType<HookRegistry["raw"]>): Promise<void> {
-		let events = initial;
-		for (const h of handlers) {
-			const payload: OutputPayload = { sessionId: initial[0].sessionId, events, recipient: this.recipient, final };
-			const answer = (await h.handler(payload)) as OutputAnswer;
-			if (!answer) continue;
-			if (answer.action === "block") {
-				this.held = [];
-				return;
-			}
-			if (answer.action === "hold") {
-				if (final) {
-					this.held = []; // what can't be decided at the end is blocked: fail closed
-					return;
+		const heldStream = handlers.some(h => h.stream);
+		const bytes = (e: AgentEvent) => resourceBytes(mapOutput(e).wire);
+		const overflow = () => failure("result_too_large", "Output exceeds the gate or buffer limit");
+		const accepted: AgentEvent[] = [], charges: Array<() => void> = [];
+		try {
+			for (let start = 0; start < initial.length;) {
+				let end = start, charged = 2;
+				if (heldStream) {
+					for (; end < initial.length; ++end) {
+						const size = bytes(initial[end]);
+						if (size + 2 > OUTPUT_SEGMENT_BYTES) throw overflow();
+						const next = charged + size + Number(end > start);
+						if (next > OUTPUT_SEGMENT_BYTES) break;
+						charged = next;
+					}
+				} else end = initial.length;
+				let events = initial.slice(start,end);
+				for (const h of handlers) {
+					const answer = await h.handler({sessionId: initial[0].sessionId, events, recipient:this.recipient, final}) as OutputAnswer;
+					if (!answer) continue;
+					if (answer.action === "block") return;
+					if (answer.action === "hold") {
+						if (!final && events.every(e => this.charges.has(e))) this.held = events;
+						return;
+					}
+					if (!answer.events) continue;
+					events = answer.events;
+					if (heldStream) {
+						const n = events.reduce((sum,e,i) => sum + bytes(e) + Number(i>0), 2);
+						if (n > OUTPUT_SEGMENT_BYTES) throw overflow();
+						if (n > charged) {
+							const delta = n-charged;
+							if (this.bytes+delta > 64*1024*1024) throw overflow();
+							const lease = this.reserve?.(delta);
+							if (this.reserve && !lease) throw overflow();
+							this.bytes += delta;
+							charges.push(() => {this.bytes -= delta; lease?.()});
+							charged = n;
+						}
+					}
 				}
-				// Keep the original accounting when a gate held the whole chunk. Redacted
-				// replacements are not held if the gate changed their representation.
-				if (events.every(event => this.charges.has(event))) this.held = events;
-				return;
+				for (const event of events) accepted.push(event);
+				start = end;
 			}
-			if (answer.events) events = answer.events;
-		}
-		this.held = [];
-		for (const e of events) if (!this.disconnected) {
-			// A gate may rewrite events; authorize the original batch, including held pieces.
-			for (const original of initial) {
-				const admission = this.admit?.(this.originals.get(original) ?? original);
-				if (admission) await admission;
+			// No segment may escape before all segments pass all gates.
+			for (const e of accepted) if (!this.disconnected) {
+				for (const original of initial) {
+					const admission = this.admit?.(this.originals.get(original) ?? original);
+					if (admission) await admission;
+				}
+				if (!this.disconnected) await this.listener(e);
 			}
-			if (!this.disconnected) await this.listener(e);
-		}
+		} catch (e) {
+			if (heldStream && this.onLag && ["model.output","tool.progress"].includes(initial[0].type) &&
+				(e as {code?:string})?.code === "result_too_large") {
+				this.disconnect(); this.onLag(); return;
+			}
+			throw e;
+		} finally { for (const release of charges) release(); }
 	}
 }
 

@@ -61,12 +61,16 @@ type InterfaceToolReport struct {
 	Value   json.RawMessage `json:"value,omitempty"`
 }
 
-type InterfaceToolReportDisposition string
+type InterfaceToolReportDisposition struct {
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
+}
 
 const (
-	InterfaceToolAccepted       InterfaceToolReportDisposition = harness.InterfaceAccepted
-	InterfaceToolAlreadySettled InterfaceToolReportDisposition = harness.InterfaceAlreadySettled
-	InterfaceToolRefused        InterfaceToolReportDisposition = harness.InterfaceRefused
+	InterfaceToolAccepted       = harness.InterfaceAccepted
+	InterfaceToolAlreadySettled = harness.InterfaceAlreadySettled
+	InterfaceToolRefused        = harness.InterfaceRefused
+	InterfaceToolNotReady       = harness.InterfaceNotReady
 )
 
 func (a *Agent) ConnectInterfaceTools(sessionID string, options InterfaceToolConnectionOptions) (*InterfaceToolConnection, error) {
@@ -91,7 +95,10 @@ func (c *InterfaceToolConnection) NextHandoff(ctx context.Context) (ToolCall, er
 // ReportToolResult never dispatches the reported call.
 func (c *InterfaceToolConnection) ReportToolResult(ctx context.Context, report InterfaceToolReport) (InterfaceToolReportDisposition, error) {
 	status, err := c.connection.ReportToolResult(ctx, api.InterfaceReport{CallID: report.CallID, Status: string(report.Status), Content: portable.ReadContent(api.Decode[[]any](api.JSON(report.Content))), Value: report.Value})
-	return InterfaceToolReportDisposition(status), appError(err, InvalidRequest)
+	if status == harness.InterfaceNotReady {
+		return InterfaceToolReportDisposition{Status: InterfaceToolRefused, Reason: InterfaceToolNotReady}, nil
+	}
+	return InterfaceToolReportDisposition{Status: status}, appError(err, InvalidRequest)
 }
 
 // Close clears presence but does not cancel or settle handed-off calls.

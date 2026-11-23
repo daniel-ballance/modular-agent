@@ -54,6 +54,7 @@ export class Exchange {
     });
     this.observe = api.onEvent(e => {
       if (e.sessionId !== id || this.closed) return;
+      if (e.source === "harness" && e.type === "continuation.refused" && this.origin && e.turnId === this.origin) return error({ code: "busy" });
       if (e.type === "session.interrupted" || e.type === "session.ended") return error({ code: "unavailable" });
       if (e.type === "entries.erased" || e.type === "position.moved") return error({ code: "conflict" });
       if (e.type === "turn.ended" || e.type === "input.request.opened") {

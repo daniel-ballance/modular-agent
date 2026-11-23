@@ -10,7 +10,7 @@ from ma_core.wire import provider_projection, recorded_as
 from .authority import Authority, PERMISSIONS, read_tenants
 from .erasure import Erasure
 from .interface_tools import HANDOFF, SOURCE, InterfaceTools, branch_entries, handoff_fold
-from .output import gate
+from .output import SEGMENT_BYTES, OutputOverflow, encoded_size, gate, project
 from .reservations import Reservations, size
 
 
@@ -56,6 +56,7 @@ class Harness(Authority, Erasure, InterfaceTools):
         self.followers = []
         self.delivery_observers = {}
         self.output_streams = {}
+        self.continuation_waiters = {}
         self.erasure_locks = {}
         self.capacity = Reservations(reservations)
         self.trace = []
@@ -286,6 +287,18 @@ class Harness(Authority, Erasure, InterfaceTools):
     def follow(self, owner, recipient, handler):
         self.followers.append((owner, recipient, handler))
 
+    def watch_continuation(self, sid, origin, refused):
+        key = sid, origin
+        waiters = self.continuation_waiters.setdefault(key, set())
+        waiters.add(refused)
+
+        def detach():
+            waiters.discard(refused)
+            if not waiters:
+                self.continuation_waiters.pop(key, None)
+
+        return detach
+
     def observe_delivery(self, owner, recipient, include, observe):
         """Trusted binding: observe a gated delivery or its loss, scoped before gating.
 
@@ -304,7 +317,7 @@ class Harness(Authority, Erasure, InterfaceTools):
             self.followers.remove(follower)
             self.delivery_observers.pop(follower)
             for key in [k for k in self.output_streams if k[0] == owner]:
-                for reservation, _ in self.output_streams.pop(key):
+                for reservation, _ in self.output_streams.pop(key) or ():
                     self.capacity.release(reservation)
 
         return detach
@@ -702,7 +715,16 @@ class Harness(Authority, Erasure, InterfaceTools):
         if sid in self.sessions:
             await self._assert_writable(sid)
         response = next(((sid, e.get("step")) for e in entries if e["kind"] == "response"), None)
-        charged = self.capacity.stage(session, entries, response=response)
+        try:
+            charged = self.capacity.stage(session, entries, response=response)
+        except AgentError as exc:
+            if exc.code == "busy":
+                for entry in entries:
+                    if entry["kind"] == "turn_start":
+                        origin = (entry["data"].get("source") or {}).get("continuesTurnId")
+                        for notify in self.continuation_waiters.get((sid, origin), ()):
+                            notify()
+            raise
         if "history" in self.capabilities:
             cancellation = await self._commit(sid, session, entries)
         self.capacity.finish(sid, session.get("tenant"), charged, response=response)
@@ -1072,20 +1094,34 @@ class Harness(Authority, Erasure, InterfaceTools):
                     key = (owner, recipient, sid, kind, event.get("step"), event.get("call"))
                     if not event.get("final") and sid in self.sessions:
                         buffered = self.output_streams.setdefault(key, [])
+                        if buffered is None:
+                            continue
                         try:
+                            n = encoded_size(project(events[0])[0][0]) + 2
+                            if n > SEGMENT_BYTES:
+                                raise OutputOverflow()
                             reservation = self.capacity.hold(
-                                self.sessions[sid], bufferedBytes=size(events)
+                                self.sessions[sid], bufferedBytes=max(n, size(events))
                             )
                         except AgentError:
-                            continue  # Optional output never spends settlement capacity.
+                            for charge, _ in buffered:
+                                self.capacity.release(charge)
+                            self.output_streams[key] = None
+                            continue
                         buffered.append((reservation, events[0]))
                         continue
                     buffered = self.output_streams.pop(key, [])
+                    if buffered is None:
+                        raise OutputOverflow()
+                    events = [piece for _, piece in buffered] + events
+                else:
+                    buffered = []
+                try:
+                    revision = await self.erasure_revision(sid) if sid is not None else 0
+                    gated = await self.output(sid, recipient, events)
+                finally:
                     for reservation, _ in buffered:
                         self.capacity.release(reservation)
-                    events = [piece for _, piece in buffered] + events
-                revision = await self.erasure_revision(sid) if sid is not None else 0
-                gated = await self.output(sid, recipient, events)
                 if observer and not gated:
                     await observer[1](event, None)
                 for original, item in zip(events, gated):
@@ -1102,6 +1138,13 @@ class Harness(Authority, Erasure, InterfaceTools):
                             await handler(value)
                     elif observer:
                         await observer[1](original["data"], None)
+            except OutputOverflow:
+                if kind in {"model_output", "tool_progress"}:
+                    notice = {"kind": "output_overflow", "session": sid, "turn": event.get("turn")}
+                    if observer:
+                        await observer[1](notice, notice)
+                    else:
+                        await handler(notice)
             except Exception:
                 # A failed output gate or recipient can never expose ungated output.
                 continue

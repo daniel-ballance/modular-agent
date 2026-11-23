@@ -10,47 +10,9 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/portable"
 )
 
-type outputEvent struct {
-	Type string          `json:"type"`
-	Data json.RawMessage `json:"data"`
-}
+type outputEvent = portable.OutputEvent
 
-func outputOut(e api.Event) outputEvent {
-	kind := e.Kind
-	var data any = e.Data
-	switch kind {
-	case "model.delta":
-		part := api.Decode[api.Part](e.Data)
-		if part.Type == "text" || part.Type == "reasoning" {
-			kind = part.Type
-			d := object{"delta": part.Text}
-			if e.Step != "" {
-				d["stepId"] = e.Step
-			}
-			data = d
-		}
-	case "tool.requested":
-		kind, data = "toolCall", object{"call": portable.Call(api.Decode[api.Call](e.Data))}
-	case "tool.progress":
-		kind, data = "toolOutput", portable.ToolOutput(e.Call, e.Data)
-	case "tool.end":
-		r := api.Decode[api.ToolResult](e.Data)
-		kind, data = "toolResult", object{"toolCallId": e.Call, "status": portable.StatusOut(r.Status), "content": portable.Content(r.Content)}
-	case "history.added":
-		kind, data = "entry", object{"entry": portable.Entry(api.Decode[api.Entry](e.Data))}
-	case "turn.end":
-		o := api.Decode[api.Outcome](e.Data)
-		kind, data = "turnEnded", object{"turnId": e.Turn, "outcome": outcomeKindOut(o), "result": turnResultOut(o)}
-	case "interface.answer":
-		kind, data = "reply", object{"method": e.Method, "result": e.Data}
-	case "interface.request":
-		kind, data = "request", object{"method": e.Method, "params": e.Data}
-	}
-	if kind == e.Kind && !strings.Contains(kind, ".") {
-		kind = "go." + kind
-	}
-	return outputEvent{kind, mustJSON(data)}
-}
+func outputOut(e api.Event) outputEvent { return portable.ProjectOutput(e) }
 
 func canonicalOutput(raw json.RawMessage) []byte {
 	var v any
@@ -168,11 +130,9 @@ func (r *remote) outputHandler(ctx context.Context, id int, batch api.OutputBatc
 
 func handleOutput(ctx context.Context, batch api.OutputBatch, invoke func(context.Context, Object, any) error) (api.Decision, error) {
 	events := make([]outputEvent, 0, len(batch.Events))
-	byKind := map[string][]api.Event{}
 	for _, e := range batch.Events {
 		v := outputOut(e)
 		events = append(events, v)
-		byKind[v.Type] = append(byKind[v.Type], e)
 	}
 	var result *struct {
 		Block  bool           `json:"block"`
@@ -191,17 +151,19 @@ func handleOutput(ctx context.Context, batch api.OutputBatch, invoke func(contex
 	if result.Events == nil {
 		return api.Decision{}, fault("invalid_request", "output handler must return events or block")
 	}
+	if len(*result.Events) != len(events) || len(mustJSON(*result.Events)) > portable.GateSegmentBytes {
+		return api.Decision{}, api.ErrOutputOverflow
+	}
+	originals := batch.Events
 	batch.Events = nil
-	for _, v := range *result.Events {
-		orig := byKind[v.Type]
-		if len(orig) == 0 {
-			return api.Decision{}, fault("invalid_request", "cannot map changed output event")
+	for i, v := range *result.Events {
+		if !portable.ValidOutputEdit(events[i], v) {
+			return api.Decision{}, fault("invalid_request", "invalid output redaction")
 		}
-		e, err := outputIn(orig[0], v)
+		e, err := outputIn(originals[i], v)
 		if err != nil {
 			return api.Decision{}, err
 		}
-		byKind[v.Type] = orig[1:]
 		batch.Events = append(batch.Events, e)
 	}
 	return api.Decision{Value: batch}, nil

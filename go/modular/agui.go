@@ -69,7 +69,7 @@ type agClient struct {
 }
 type agPresence struct {
 	ctx    context.Context
-	detach func()
+	detach map[string]func()
 }
 type agDelivery struct {
 	presence *agPresence
@@ -235,7 +235,7 @@ func agStatus(err error) (int, agCode) {
 	var c agCode
 	if !errors.As(err, &c) {
 		switch {
-		case errors.Is(err, api.ErrResultTooLarge):
+		case errors.Is(err, api.ErrResultTooLarge), errors.Is(err, api.ErrOutputOverflow):
 			c = tooLarge
 		case errors.Is(err, api.ErrOutputWithheld):
 			c = withheld
@@ -301,6 +301,7 @@ type agHost interface {
 	OutputValueFor(context.Context, string, api.Event) (api.Event, error)
 	ErasureEpoch(string) (int, error)
 	SubscribeOutput(func(api.Event) string, func(api.Event)) func()
+	WatchContinuation(string, string) (<-chan struct{}, func(), error)
 	SessionInterruption(string) (<-chan struct{}, <-chan struct{}, error)
 }
 
@@ -512,6 +513,7 @@ func (q *agRequest) present() error {
 	}
 	p := &agPresence{ctx: q.ctx}
 	s.presence = p
+	defer q.a.q.manager().ConnectClient(q.id, q.Actor.ID, q.client)()
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()

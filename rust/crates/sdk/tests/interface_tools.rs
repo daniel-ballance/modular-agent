@@ -86,7 +86,7 @@ fn entry<'a>(rows: &'a [Value], kind: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("missing {kind}: {rows:?}"))
 }
 
-async fn round_trip(builder: AgentBuilder) -> Result<()> {
+async fn round_trip(builder: AgentBuilder) -> Result<String> {
     let agent = builder
         .interface_tools(sources(30_000))
         .plugin(Plugin::new("checked-report").on_tool_after(|_| async {
@@ -177,12 +177,13 @@ async fn round_trip(builder: AgentBuilder) -> Result<()> {
             .contains(&checkpoint["id"])
     );
     assert!(!json!(history).to_string().contains("raw-"));
-    agent.close().await
+    agent.close().await?;
+    Ok(session.id().to_owned())
 }
 
 #[tokio::test]
 async fn a_new_connection_reports_once_and_continues_without_dispatch() -> Result<()> {
-    round_trip(builder()).await
+    round_trip(builder()).await.map(|_| ())
 }
 
 #[tokio::test]
@@ -208,7 +209,7 @@ async fn expiry_or_cancellation_closes_a_started_call_as_unknown() -> Result<()>
         continuation(&session, turn.turn_id.as_deref().unwrap()).await?;
         assert_eq!(
             connection.report_tool_result(report(id, "late")).await?,
-            Disposition::Refused
+            Disposition::Refused { reason: None }
         );
         let rows = session.history().await?;
         let result = entry(&rows, "toolResult");
@@ -379,7 +380,9 @@ async fn a_runtime_in_another_process_runs_the_result_only_continuation() -> Res
         root.path(),
     )
     .await?;
-    let result = round_trip(builder().service_plugin(ServicePlugin::new(url, token))).await;
+    let result = round_trip(builder().service_plugin(ServicePlugin::new(url, token)))
+        .await
+        .map(|_| ());
     child.kill().await?;
     result
 }
@@ -502,7 +505,7 @@ async fn erasing_arguments_invalidates_a_staged_call_and_accounts_for_the_copy()
             .report_tool_result(report(id, "invalidated"))
             .await
             .expect("refuse the erased call"),
-        Disposition::Refused
+        Disposition::Refused { reason: None }
     );
     session.wait_idle().await.expect("no erased continuation");
     let rows = session.history().await.expect("history remains available");
@@ -582,7 +585,9 @@ async fn a_report_is_not_ready_until_the_origin_ends_and_rights_are_current() ->
         connection
             .report_tool_result(report(id, "too early"))
             .await?,
-        Disposition::Refused
+        Disposition::Refused {
+            reason: Some("notReady")
+        }
     );
     release.notify_one();
     assert_eq!(turn.await.unwrap()?.open_tool_calls, vec![id]);
@@ -591,7 +596,7 @@ async fn a_report_is_not_ready_until_the_origin_ends_and_rights_are_current() ->
         connection
             .report_tool_result(report(id, "no rights"))
             .await?,
-        Disposition::Refused
+        Disposition::Refused { reason: None }
     );
     agent.close().await
 }
@@ -605,11 +610,11 @@ async fn handoff_and_settlement_are_separate_metadata_only_spans() -> Result<()>
         .with_simple_exporter(exporter.clone())
         .build();
     global::set_tracer_provider(tracer.clone());
-    round_trip(builder()).await?;
+    let conversation = KeyValue::new("gen_ai.conversation.id", round_trip(builder()).await?);
     let spans = exporter.get_finished_spans().unwrap();
     let tool = spans
         .iter()
-        .find(|s| s.name == "execute_tool pick_color")
+        .find(|s| s.name == "execute_tool pick_color" && s.attributes.contains(&conversation))
         .unwrap();
     assert!(
         tool.attributes
@@ -617,7 +622,7 @@ async fn handoff_and_settlement_are_separate_metadata_only_spans() -> Result<()>
     );
     let settlement = spans
         .iter()
-        .find(|s| s.name == "modular_agent.tool.settle")
+        .find(|s| s.name == "modular_agent.tool.settle" && s.attributes.contains(&conversation))
         .unwrap();
     assert!(
         settlement

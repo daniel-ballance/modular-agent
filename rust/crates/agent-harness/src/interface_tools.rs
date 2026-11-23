@@ -16,7 +16,7 @@ pub struct InterfaceToolSource {
 pub enum InterfaceReportDisposition {
     Accepted,
     AlreadySettled,
-    Refused,
+    Refused { reason: Option<&'static str> },
 }
 
 struct Source {
@@ -804,12 +804,13 @@ impl Harness {
         connection: &InterfaceConnection,
         report: Value,
     ) -> Result<InterfaceReportDisposition> {
-        use InterfaceReportDisposition::*;
+        use InterfaceReportDisposition::{Accepted, AlreadySettled, Refused};
+        const REFUSED: InterfaceReportDisposition = Refused { reason: None };
         let Some(call_id) = report["callId"].as_str().filter(|id| !id.is_empty()) else {
-            return Ok(Refused);
+            return Ok(REFUSED);
         };
         let Some(content) = report["content"].as_array() else {
-            return Ok(Refused);
+            return Ok(REFUSED);
         };
         if !matches!(report["status"].as_str(), Some("completed" | "failed"))
             || !content
@@ -820,29 +821,29 @@ impl Harness {
                     .any(|k| !matches!(k.as_str(), "callId" | "status" | "content" | "value"))
             })
         {
-            return Ok(Refused);
+            return Ok(REFUSED);
         }
         let mut proposed = wire::parse_result(report.clone(), call_id)?;
         if proposed.status == ToolStatus::Failed && proposed.text.trim().is_empty() {
-            return Ok(Refused);
+            return Ok(REFUSED);
         }
         let _serial = self.interface_tools.reports.lock().await;
         let Ok(_erasure) = self.erasure.try_read() else {
-            return Ok(Refused);
+            return Ok(REFUSED);
         };
         let inspect = |data: &SessionData| -> std::result::Result<_, InterfaceReportDisposition> {
             let branch = data.branch();
             let handoff = branch
                 .iter()
                 .find(|e| interface_handoff(e) && e.scope.call.as_deref() == Some(call_id))
-                .ok_or(Refused)?;
+                .ok_or(REFUSED)?;
             let (source, call, ceiling, deadline) =
-                self.restored_interface(data, handoff).ok_or(Refused)?;
+                self.restored_interface(data, handoff).ok_or(REFUSED)?;
             if connection.generation.is_cancelled() || connection.route != source.config.route_id {
-                return Err(Refused);
+                return Err(REFUSED);
             }
             let connections = self.interface_tools.connections.lock().unwrap();
-            let live = connections.get(&connection.id).ok_or(Refused)?;
+            let live = connections.get(&connection.id).ok_or(REFUSED)?;
             if !self
                 .executor_rights(
                     data,
@@ -851,7 +852,7 @@ impl Harness {
                 )
                 .is_ok_and(|a| eligible(&a))
             {
-                return Err(Refused);
+                return Err(REFUSED);
             }
             if let Some(result) = interface_result(data, handoff) {
                 return Err(
@@ -862,24 +863,32 @@ impl Harness {
                     {
                         AlreadySettled
                     } else {
-                        Refused
+                        REFUSED
                     },
                 );
             }
-            if deadline <= now()
-                || !branch.iter().any(|e| {
-                    e.kind == "turn.end" && e.scope.turn == handoff.scope.turn && listed(e, handoff)
-                })
+            if deadline <= now() {
+                return Err(REFUSED);
+            }
+            match branch
+                .iter()
+                .find(|e| e.kind == "turn.end" && e.scope.turn == handoff.scope.turn)
             {
-                return Err(Refused);
+                None => {
+                    return Err(Refused {
+                        reason: Some("notReady"),
+                    });
+                }
+                Some(end) if !listed(end, handoff) => return Err(REFUSED),
+                _ => {}
             }
             Ok((handoff.clone(), call, source.config.actor_id.clone()))
         };
         if connection.generation.is_cancelled() {
-            return Ok(Refused);
+            return Ok(REFUSED);
         }
         let Ok(data) = self.snapshot(&connection.session) else {
-            return Ok(Refused);
+            return Ok(REFUSED);
         };
         let (handoff, call, actor) = match inspect(&data) {
             Ok(v) => v,
@@ -922,10 +931,10 @@ impl Harness {
             let _guard = op.enter();
             let mut sessions = self.sessions.lock().unwrap();
             let Some(open) = sessions.get_mut(&connection.session) else {
-                return Ok(Refused);
+                return Ok(REFUSED);
             };
             if self.refresh_open_erasure(open).is_err() {
-                return Ok(Refused);
+                return Ok(REFUSED);
             }
             if let Err(status) = inspect(&open.data) {
                 return Ok(status);

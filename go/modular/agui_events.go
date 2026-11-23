@@ -28,6 +28,8 @@ func (x *agExchange) project(e api.Event) error {
 		return nil
 	}
 	switch e.Kind {
+	case "output.overflow":
+		return withheld
 	case "turn.start":
 		h, err := x.history(e.Turn)
 		if err != nil {

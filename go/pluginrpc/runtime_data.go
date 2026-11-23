@@ -3,7 +3,7 @@ package pluginrpc
 import (
 	"encoding/json"
 	"github.com/daniel-ballance/modular-agent/go/api"
-	"strings"
+	"github.com/daniel-ballance/modular-agent/go/portable"
 )
 
 type RuntimeRegistration struct {
@@ -28,29 +28,8 @@ func usageOut(u api.Usage) object {
 func usageIn(u object) api.Usage {
 	return api.Usage{Input: number(u, "input"), Output: number(u, "output"), Cached: number(u, "cacheRead"), CacheWrite: number(u, "cacheWrite"), Cost: real(u, "cost")}
 }
-func outcomeKindOut(o api.Outcome) object {
-	v := object{"kind": o.Status}
-	if o.Status == "limit" {
-		v["limit"] = strings.TrimSuffix(o.Error, " limit")
-	} else if o.Error != "" {
-		v["error"] = o.Error
-	}
-	return v
-}
-func turnResultOut(o api.Outcome) object {
-	ids := []string{}
-	for _, c := range o.Open {
-		ids = append(ids, c.ID)
-	}
-	v := object{"openToolCalls": ids}
-	if text := o.Result.Text(); text != "" {
-		v["text"] = text
-	}
-	if len(o.Value) > 0 {
-		v["value"] = o.Value
-	}
-	return v
-}
+func outcomeKindOut(o api.Outcome) object { return portable.OutcomeKind(o) }
+func turnResultOut(o api.Outcome) object  { return portable.TurnResult(o) }
 func outcomeIn(v object) api.Outcome {
 	k, r := asObject(v["outcome"]), asObject(v["result"])
 	o := api.Outcome{Status: str(k, "kind"), Error: str(k, "error"), Usage: usageIn(asObject(v["usage"]))}

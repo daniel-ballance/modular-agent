@@ -30,7 +30,7 @@ import type {
 	ToolSource,
 	WorkingEnvironment,
 } from "@modular-agent/harness";
-import { mapOutput } from "./output.js";
+import { checkOutputSize, mapOutput } from "@modular-agent/harness";
 import { fromWire, toWire } from "./translate.js";
 import { connectWebSocket, PLUGIN_PROTOCOL, receiveMessages } from "./websocket.js";
 import { DATA_BINDING, listDirectory, notFoundAsEnoent, optionalMethod, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
@@ -531,6 +531,7 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 						if (answer === null) return undefined;
 						if (answer?.block === true) return { action: "block" };
 						if (!Array.isArray(answer?.events) || answer.events.length !== events.length) throw new WireError("invalid_request", "Invalid output gate answer");
+						checkOutputSize(answer.events);
 						return { action: "pass", events: mapped.map((m, i) => m.restore(answer.events![i])) };
 					}, h.order, { stream: true });
 				} else {

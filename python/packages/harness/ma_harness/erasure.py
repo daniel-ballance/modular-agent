@@ -70,7 +70,7 @@ class Erasure:
         for p in pending:
             groups[p["intent"], p.get("recordId")].append(p["id"])
         for key in [k for k in self.output_streams if k[2] == sid]:
-            for reservation, _ in self.output_streams.pop(key):
+            for reservation, _ in self.output_streams.pop(key) or ():
                 self.capacity.release(reservation)
         for (operation, record_id), targets in groups.items():
             s = self.sessions[sid]
