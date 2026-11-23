@@ -115,7 +115,9 @@ export async function messages(api: PluginApi, id: string, p: Principal, entries
         ...(message.isError ? { error: textOf(message.content) || "Tool failed." } : {}) });
     }
   }
-  const candidate = await reply(api, id, p, "messages", out);
+  return checkedMessages(out, await reply(api, id, p, "messages", out));
+}
+export function checkedMessages(out: Message[], candidate: Message[]) {
   encode(candidate);
   if (!Array.isArray(candidate) || candidate.length !== out.length || candidate.some((m, i) => !MessageSchema.safeParse(m).success || m.id !== out[i].id || m.role !== out[i].role)) fail("output_withheld");
   return candidate.map(cleanMessage);

@@ -97,6 +97,28 @@ test("server tool framing is contiguous, and withholding the result withholds th
   assert.doesNotMatch(JSON.stringify(hidden),/INPUT_MARKER|RESULT_MARKER/);
 });
 
+test("a tenant without input authority cannot allocate even a provisional thread", async t=>{
+  let created=0;
+  const {actors}=await setup(t), agent=await createAgent({environment:memoryEnvironment(),tenants:{readonly:{rights:["watch"]}},
+    plugins:[definePlugin({name:"count",hooks:{"session.start":()=>{created++;}}})]}); t.after(()=>agent.close());
+  const token=randomUUID(); const tokenFile=actors[0].tokenFile; await writeFile(tokenFile,token,{mode:0o600});
+  const server=await agent.serveAgui({listen:"127.0.0.1:0",tenant:"readonly",actors:[{...actors[0],tenants:["readonly"]}]});
+  const res=await fetch(server.url+"/agui/v1/threads",{method:"POST",headers:{authorization:`Bearer ${token}`,"content-type":"application/json"},body:"{}"});
+  assert.equal(res.status,403); assert.equal(created,0);
+});
+
+test("reconciliation uses the exact redacted HTTP snapshot, not the earlier live view",async t=>{
+  const gate=definePlugin({name:"short-view",hooks:{output:({events})=>{
+    const data=events[0].data as any;
+    if(data?.method==="agui.snapshot" && data.result.messages.length){data.result.messages[0].content="Redacted.";return {redact:events};}
+  }}});
+  const {thread,run,request}=await setup(t,{plugins:[gate]}); const id=await thread();
+  const live=(await events(await run(id,[prompt("original")]))).filter(e=>e.type==="MESSAGES_SNAPSHOT").at(-1).messages;
+  const res=await request("/threads/"+id); assert.equal(res.status,200); const {messages}=await res.json() as {messages:any[]};
+  assert.equal(messages[0].content,"Redacted."); assert.equal((await run(id,[...live,prompt("stale")])).status,409);
+  assert.equal(deltas(await events(await run(id,[...messages,prompt("next")]))),"two");
+});
+
 test("a token rotation cannot rebind a registered route to another actor",async t=>{
   const {actors}=await setup(t); const agent=await createAgent({interfaceTools:[source],environment:memoryEnvironment()}); t.after(()=>agent.close());
   await assert.rejects(agent.serveAgui({listen:"127.0.0.1:0",actors:[actors[0],{...actors[1],clientId:"primary",actor:{...actors[0].actor,id:"stranger"}}]}),{code:"invalid_composition"});

@@ -19,7 +19,7 @@ export class Exchange {
   private opened = latch(); private finished = latch();
   done = this.finished.promise;
   private off?: (() => void) & { idle(): Promise<void> }; private observe?: () => void; private absent?: () => void; private beat?: NodeJS.Timeout;
-  private closed = false; private endSeen = false;
+  private closed = false; private failing = false; private finishedNormally = false; private endSeen = false;
   private steps = new Set<string>(); private streams = new Map<string, { text: string; reasoning: boolean }>();
   private pieces = new Map<string, number>(); private received = new Map<string, number>();
   private starts = new Map<string, ToolCall>(); private stateRevision?: string; private originals = new Map<string, unknown>();
@@ -93,18 +93,26 @@ export class Exchange {
   }
   private write(data: string) {
     if (!data) return;
-    if (this.closed || this.res.destroyed || this.res.writableLength + Buffer.byteLength(data) > MAX * 2) fail("busy");
+    if (this.closed || this.failing || this.res.destroyed || this.res.writableLength + Buffer.byteLength(data) > MAX * 2) fail("busy");
     this.res.write(data);
   }
   private error(error: unknown) {
-    if (this.closed) return;
-    this.r.c.cursor = undefined;
-    const code = errorCode(error);
-    if (this.res.headersSent && !this.res.destroyed) this.res.end(frame({ type: "RUN_ERROR", code, message: "Run could not be delivered." }));
-    this.stop();
+    if (this.closed || this.failing) return;
+    this.failing = true; this.r.c.cursor = undefined; this.r.c.needsSnapshot = true;
+    const terminal = { type: "RUN_ERROR", code: errorCode(error), message: "Run could not be delivered." };
+    void this.r.events([terminal]).catch(() => frame({ ...terminal, code: "output_withheld" })).then(frames => {
+      if (this.res.headersSent && !this.res.destroyed && !this.res.writableEnded) this.res.end(frames);
+    }).finally(() => this.stop());
   }
   stop() {
     if (this.closed) return; this.closed = true;
+    const presence = this.r.c.presence;
+    if (!this.finishedNormally && this.turn && presence) {
+      for (const id of presence.questions) if (!this.r.c.delivered.has(id)) {
+        presence.questions.delete(id); presence.rejected.add(id);
+      }
+      this.r.api.presenceChanged(this.r.id);
+    }
     clearInterval(this.beat); this.off?.(); this.observe?.(); this.absent?.(); this.opened.resolve(); this.finished.resolve();
   }
   private async send(events: WireEvent[], required = true) { this.write(await this.r.events(events, required)); }
@@ -176,6 +184,9 @@ export class Exchange {
       return;
     }
     if (e.type === "turn.ended" && turn === this.turn) { this.endSeen = true; await this.finish(d.outcome.kind); return; }
+    if (e.type === "input.accepted" && d.inputId === this.inputId) await this.notice(e.type, { inputId: d.inputId, taken: d.taken });
+    if (["input.request.answered", "input.request.closed", "input.request.unanswerable"].includes(e.type) && d.requestId) await this.notice(e.type, {requestId: d.requestId, declined: d.declined});
+    if ((e.type === "tool.ended" || e.type === "tool.result") && d.status) await this.notice(e.type, {toolCallId: e.toolCallId, status: d.status});
     if (e.type === "tool.call" || e.type === "tool.started") await this.notice(e.type, { toolCallId: e.toolCallId, name: d.call?.name });
     else if (e.type === "tool.progress") await this.notice(e.type, { toolCallId: e.toolCallId, content: content(d.content) });
     else if (!/^(session|actor|input|turn|step|model|tool|provider|history|position|entries|setting|plugin|capability)\./.test(e.type) && e.type.includes(".")) await this.notice(e.type, d ?? null);
@@ -216,7 +227,7 @@ export class Exchange {
     const tail = terminal.map(frame).join("");
     const frames = groups.map(group => group.map(frame).join(""));
     const end = () => {
-      this.write(tail); this.res.end(); r.remember(snap); r.c.delivered = new Set(questions.map(q => q.id)); this.stop();
+      this.write(tail); this.finishedNormally = true; this.res.end(); r.remember(snap); r.c.delivered = new Set(questions.map(q => q.id)); this.stop();
     };
     if (kind === "interrupt" && connection && this.turn && !owned) r.c.held = { connection, turnId: this.turn, setDeliver: this.setDeliver };
     if (!calls.length) { if (owned && kind !== "interrupt") { owned.connection.disconnect(); r.c.held = undefined; } end(); return; }

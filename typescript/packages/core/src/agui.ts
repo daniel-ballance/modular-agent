@@ -5,7 +5,7 @@ import { readTrace, withTrace } from "@modular-agent/harness/telemetry";
 import type { Actor, Declaration, Harness, HistoryEntry, InputRequest, InterfaceToolConnection, InterfaceToolSource, PluginApi, ToolCall } from "@modular-agent/harness";
 import type { Agent } from "./agent.js";
 import { PATH, body, encode, errorCode, fail, frame, hash, httpError, json, object, parts, runInput, same, sse, type Code, type WireEvent } from "./agui-wire.js";
-import { current, interrupt, messages, pending, reply, rights, watch, type InterruptView, type Principal } from "./agui-view.js";
+import { checkedMessages, current, interrupt, messages, pending, reply, rights, watch, type InterruptView, type Principal } from "./agui-view.js";
 import { Exchange } from "./agui-exchange.js";
 
 export interface AguiProjectionOptions {
@@ -40,6 +40,7 @@ export class AguiBinding {
   };
   request = (req: IncomingMessage, res: ServerResponse, p?: Principal) => {
     res.on("error", () => res.destroy());
+    let authorized: Route | undefined;
     const work = async () => {
       if (req.method === "OPTIONS" && req.headers.origin && this.allowOrigin(req) && /^\/agui\/v1(?:\/|$)/.test(req.url ?? "")) {
         res.writeHead(204, { "cache-control": "no-store", vary: "Origin", "access-control-allow-origin": req.headers.origin,
@@ -57,6 +58,7 @@ export class AguiBinding {
         if (Object.keys(await body(req)).length) fail("invalid_request");
         if (!p.actor.authority.includes("input") || !p.actor.authority.includes("watch") || !p.allowProject(this.host.project) || !p.allowTenant(this.host.tenant ?? null)) fail("refused");
         const t = await this.host.locate(p);
+        if (!t.h.tenantAllows(this.host.tenant, "watch") || !t.h.tenantAllows(this.host.tenant, "input")) fail("refused");
         const threadId = await t.api.startSession({ actor: p.actor, tenant: this.host.tenant });
         this.host.associate(threadId, t.agent);
         watch(t.api, threadId, p);
@@ -82,7 +84,7 @@ export class AguiBinding {
         }
         client = { delivered: new Set(), runs: new Set(), hidden: new Set() }; this.clients.set(key, client);
       }
-      const route = new Route(this, t, id, p, client);
+      const route = authorized = new Route(this, t, id, p, client);
       if (input) return route.run(res, input, req);
       if (match && match[2]) return route.presence(res);
       try {
@@ -93,7 +95,8 @@ export class AguiBinding {
     void withTrace(undefined, () => p ? this.host.principalScope(p.actor, work) : work()).catch(async e => {
       let code = errorCode(e);
       if (p && !res.headersSent) try {
-        const out = await reply(this.host.root.api, "", p, "error", { code });
+        if (authorized) await authorized.current();
+        const out = await reply(authorized?.api ?? this.host.root.api, authorized?.id ?? "", p, "error", { code });
         if (out.code !== code) code = "output_withheld";
       } catch { code = "output_withheld"; }
       if (!res.headersSent && !res.destroyed) httpError(res, code);
@@ -134,11 +137,12 @@ export class Route {
       waiting: { questions: (await this.questions(records)).map(q => q.wire), toolCalls: this.pending(records).filter(c => c.ended).map(({toolCallId, expiresAt}) => ({ toolCallId, expiresAt })) } };
     const gated = http ? await reply(this.api, this.id, this.p, "snapshot", view) : view;
     encode(gated);
-    // Message redaction takes place at entry and agui.messages. A wrapper cannot change identities or grant an interrupt.
-    if (!same(view, gated)) fail("output_withheld");
+    // A wrapper may redact message content. It cannot change routing, question identity or expiry.
+    if (!same({ ...gated, messages: copy }, view)) fail("output_withheld");
+    gated.messages = checkedMessages(copy, gated.messages);
     if (await this.branchGeneration() !== branch) fail("conflict");
     await this.current();
-    return { view: gated, cursor: { id: cursor, digest: hash(copy), branch, http } };
+    return { view: gated, cursor: { id: cursor, digest: hash(gated.messages), branch, http } };
   }
   async branchGeneration() {
     const all = await this.scoped(() => this.api.readHistory(this.id, { all: true }));
@@ -180,10 +184,15 @@ export class Route {
       if (echoed !== undefined && echoed !== seen?.id) fail("cursor_expired");
       const snap = await this.snapshot(seen?.http ?? false, undefined, seen?.id);
       const known = snap.view.messages;
+      if (seen && !seen.http) {
+        try { await this.events([{type:"MESSAGES_SNAPSHOT", messages:known}, {type:"CUSTOM",name:"modular-agent.history",value:{cursor:seen.id,lastMessageId:snap.view.lastMessageId}}]); }
+        catch (e) { c.cursor = undefined; c.needsSnapshot = true; throw e; }
+      }
       if (seen ? seen.digest !== snap.cursor.digest || seen.branch !== snap.cursor.branch : known.length !== 0) fail("conflict");
       if (seen !== c.cursor || !same(input.messages.slice(0, known.length), known) || c.runs.has(input.runId)) fail("conflict");
       const suffix = input.messages.slice(known.length);
-      if (suffix.some(m => !m.id || m.id.startsWith("ma:")) || new Set(suffix.map(m => m.id)).size !== suffix.length) fail("invalid_request");
+      if (suffix.some(m => m.id.startsWith("ma:"))) fail("conflict");
+      if (suffix.some(m => !m.id) || new Set(suffix.map(m => m.id)).size !== suffix.length) fail("invalid_request");
       const user = suffix.find(m => m.role === "user");
       if (user && (suffix.length !== 1 || input.resume?.length) || suffix.some(m => m.role !== "user" && m.role !== "tool")) fail("invalid_request");
       if (!suffix.length && !input.resume?.length) fail("invalid_request");

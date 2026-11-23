@@ -39,7 +39,7 @@ export function sse(res: ServerResponse) {
 export type WireEvent = { type: string; [key: string]: unknown };
 export const object = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
 export const same = (a: unknown, b: unknown) => isDeepStrictEqual(a, b);
-export const hash = (v: unknown) => createHash("sha256").update(JSON.stringify(v)).digest("hex");
+export const hash = (v: unknown) => createHash("sha256").update(JSON.stringify(v, (_, item) => object(item) ? Object.fromEntries(Object.keys(item).sort().map(k => [k, item[k]])) : item)).digest("hex");
 export async function body(req: IncomingMessage) {
   if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(req.headers["content-type"] ?? "")) fail("invalid_request");
   if (Number(req.headers["content-length"]) > MAX) fail("result_too_large");
@@ -63,7 +63,7 @@ export function cleanMessage(m: Message): Message {
   const result = pick(m, "role id metadata encryptedValue subagentRunId");
   if (m.role !== "tool") Object.assign(result, pick(m, "name"));
   if ("content" in m) result.content = Array.isArray(m.content) ? m.content.map(p => ({ ...pick(p, "type id metadata"),
-    ...(p.type === "text" ? { text: p.text } : { source: pick(p.source, "type value mimeType provider") }) })) : m.content;
+    ...(p.type === "text" ? { text: p.text } : { source: pick(p.source, p.source.type === "file" ? "type value mimeType provider" : "type value mimeType") }) })) : m.content;
   if (m.role === "assistant" && m.toolCalls) result.toolCalls = m.toolCalls.map(c => ({ ...pick(c, "id type encryptedValue metadata"), function: pick(c.function, "name arguments") }));
   if (m.role === "tool") Object.assign(result, pick(m, "toolCallId error"));
   return result as Message;

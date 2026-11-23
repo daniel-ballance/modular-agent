@@ -1022,6 +1022,11 @@ export class Harness {
 		return id;
 	}
 
+	/** Check the operator's creation ceiling before allocating a provisional session. */
+	tenantAllows(tenant: string | undefined, right: Authority): boolean {
+		return tenant === undefined || this.tenants.get(tenant)?.rights.includes(right) === true;
+	}
+
 	/** Discovery is the open authority check without joining or taking a writer lease. */
 	async canDiscoverSession(id: string, actor: Actor, severalActors: boolean): Promise<boolean> {
 		const s = this.sessions.get(id) ?? await this.loadInto(id);
