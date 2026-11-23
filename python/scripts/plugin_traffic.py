@@ -55,8 +55,17 @@ async def seed(h, sid, count):
     # Build an ordinary linked branch in one store batch, outside the timed
     # region. Mix model-visible text with records that never belong in a model
     # request. Keep the text and fraction visible fixed as history grows.
-    await h.api().session("append", session=sid, kind="setting", data={"approval": "off"})
+    # Publish the provisional session before the measured turn. Otherwise the
+    # first admission would (correctly) write the entire seed batch.
+    api = h.api()
+    admitted = await api.session(
+        "append", session=sid, kind="input_queued", content=content("setup"), data={"when": "after"}
+    )
+    await api.session(
+        "append", session=sid, kind="input_withdrawn", data={"inputIds": [admitted["id"]]}
+    )
     s = h.sessions[sid]
+    assert not s.get("provisional")
     batch, parent = [], s["position"]
     for i in range(len(s["entries"]), count):
         visible = i % 10 == 0
