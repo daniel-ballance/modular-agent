@@ -116,6 +116,8 @@ export interface AcpOptions {
 	represents?: ReadonlySet<string>;
 	connectionScope?<T>(run: () => T): T;
 	allowSession?(id: string, project: string): Promise<boolean>;
+	/** Read through the composition that owns this session, without attaching to it. */
+	listOwner?(id: string): { api: PluginApi; allowJoin: boolean };
 	declaration?: (sessionId?: string) => Record<string, unknown>;
 	projectSettings?(project: string): Promise<Record<string, unknown>>;
 	project?(cwd: string, sessionId?: string): Promise<{ api: PluginApi; cwd: string }>;
@@ -289,12 +291,25 @@ export class AcpInterface implements InterfaceCapability {
 			if (this.options.actor && !this.actor().authority.includes("watch")) throw bindingError("forbidden");
 			const project = params.cwd && this.options.listProject ? await this.checked(() => this.options.listProject!(params.cwd!)) : params.cwd;
 			const all = await this.api.listSessions(project ?? null);
-			const sessions = this.options.allowSession ? (await Promise.all(all.map(async s =>
-				await this.options.allowSession!(s.id, s.project) ? s : undefined))).filter(s => s !== undefined) : all;
-			return {
-				sessions: sessions
-					.map((s) => ({ sessionId: s.id, cwd: s.project, updatedAt: new Date(s.created).toISOString() })),
-			};
+			const sessions = [];
+			for (const {id, project:cwd} of all) {
+				if (project && project !== cwd || this.options.allowSession && !await this.options.allowSession(id, cwd)) continue;
+				const { api, allowJoin } = this.options.listOwner?.(id) ?? { api:this.apiFor(id), allowJoin:true };
+				const inspect = () => api.sessionListing(id, {
+					actor:this.actor(), allowJoin, inTurn:this.attached(id) || undefined, secrets:true,
+					represented:[...this.options.represents ?? []], present:this.presentActors(id),
+				});
+				try {
+					const row = await inspect();
+					if (!row || this.options.allowAttached && !this.options.allowAttached(row.project, row.tenant)) continue;
+					const result = { sessionId:id, cwd:row.project, updatedAt:new Date(row.updated).toISOString(), _meta:{[NS]:{waiting:row.waiting}} };
+					const out = await api.gateOutput(id, this.actorId, "reply", {method:"session/list", result:structuredClone(result)});
+					if (isDeepStrictEqual(out?.result, result) && isDeepStrictEqual(row, await inspect())) sessions.push(result);
+				} catch (error) {
+					if (!["not_found", "unavailable"].includes((error as {code:string}).code)) throw error;
+				}
+			}
+			return { sessions };
 		});
 
 		app.onRequest(methods.agent.session.close, async ({ params }) => {

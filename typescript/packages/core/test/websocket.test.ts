@@ -105,6 +105,7 @@ for (const reason of ["commitFailed", "writerLost"] as const) {
     const prompt = (text: string) => request(a, "session/prompt", { sessionId, prompt: [{ type: "text", text }] });
     const pending = assert.rejects(prompt("Start"), { code: "lost" });
     await running;
+    const listed = await request(b, "session/list", {cwd:dir});
     if (reason === "writerLost") revoke(sessionId);
     else {
       failNextAppend();
@@ -112,6 +113,8 @@ for (const reason of ["commitFailed", "writerLost"] as const) {
     }
     assert.deepEqual(await Promise.all(events), [{ reason }, { reason }]);
     await pending;
+    assert.deepEqual(listed.sessions.find((s: {sessionId:string}) => s.sessionId === sessionId)?._meta?.["modular-agent"]?.waiting,
+      {questions:0, toolCalls:0, turn:"running"});
     await request(a, "session/resume", { sessionId, cwd: dir });
     assert.equal((await prompt("Fresh input")).stopReason, "end_turn");
   });

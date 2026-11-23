@@ -130,6 +130,9 @@ export interface ListingViewer {
 	/** In-turn question views held by this connection. Late non-approval questions need no presence. */
 	inTurn?: readonly string[] | true;
 	secrets?: boolean;
+	/** Other actors the operator permits this connection to represent; presence is connection-local. */
+	represented?: readonly string[];
+	present?: readonly string[];
 }
 
 /** Everything a plugin can do. A plugin can do nothing else. */
@@ -1078,7 +1081,11 @@ export class Harness {
 			if (inTurn && viewer.inTurn !== true && !viewer.inTurn?.includes(r.id) ||
 				r.kind === "approval" && !inTurn || r.kind === "secret" && !viewer.secrets ||
 				r.timeLimitMs !== undefined && r.whenTimeLimit !== "leaveOpen" && this.now() >= e.time + r.timeLimitMs) return false;
-			return rights.includes(r.kind === "approval" ? "approve" : "answer") && (!r.answerers.length || r.answerers.includes(viewer.actor.id));
+			const right = r.kind === "approval" ? "approve" : "answer";
+			if (!rights.includes(right)) return false;
+			if (!r.answerers.length || r.answerers.includes(viewer.actor.id)) return true;
+			return viewer.represented?.some(actorId => r.answerers.includes(actorId) && this.actorRights(s, actorId).includes(right) &&
+				(!inTurn || viewer.present?.includes(actorId)));
 		}).length;
 		const toolCalls = !viewer.routeId || !rights.includes("tools") ? 0 : this.unsettledHandoffs(s).filter(({data, checkpoint}) => {
 			if (!data || data.routeId !== viewer.routeId || data.executorActorId !== viewer.actor.id || data.deadline <= this.now() ||

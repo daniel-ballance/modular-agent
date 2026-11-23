@@ -691,9 +691,9 @@ export class Agent {
         allowTenant: scope.allowTenant,
         allowAttached: (project, tenant) => !disconnected && scope.allowProject(project) && scope.allowTenant(tenant ?? null),
         authorizeSession: authorize,
-        allowSession: async id => {
-          try { await authorize(id); return true; }
-          catch (e) { if (e instanceof AgentError && e.code === "forbidden") return false; throw e; }
+        listOwner: id => {
+          const owner = sessions.get(id) ?? this;
+          return { api:owner.#api, allowJoin:!network || owner.#authority.severalActors };
         },
         listProject: cwd => realpath(cwd),
         showApproval: options.showApproval ?? this.#approval,
