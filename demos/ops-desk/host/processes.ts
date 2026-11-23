@@ -128,6 +128,7 @@ export function launch(projects: Projects, agent: Agent, pluginUrl: string, appr
             tokenFile: auth.path,
             actor: { id: 'desk', kind: 'user', rights },
             clientId: 'ops-desk',
+            traceTrusted: true,
             projects: [project]
           }
         ]

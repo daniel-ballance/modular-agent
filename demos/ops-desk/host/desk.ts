@@ -44,7 +44,7 @@ export class Desk {
   async start() {
     for (const a of agents) {
       const slot = this.slots[a];
-      await this.connect(a);
+      await this.connect(a, null);
       if (!slot.route) {
         const p = slot.process!;
         slot.process = undefined;
@@ -60,7 +60,7 @@ export class Desk {
       for (const a of agents) this.pump(a);
     }
   }
-  private async connect(a: Agent) {
+  private async connect(a: Agent, parent: string | null) {
     const s = this.slots[a];
     clearTimeout(s.idle);
     if (!s.process) {
@@ -78,7 +78,7 @@ export class Desk {
               s.recovering = true;
               this.detach(s);
               try {
-                await this.connect(a); // --resume-open, then list the agent again
+                await this.connect(a, s.route.parent); // --resume-open, then list the agent again
                 if (!s.route) {
                   this.armIdle(a);
                   this.wake();
@@ -92,15 +92,15 @@ export class Desk {
         })
       );
       const api = await p.ready;
-      await api.discover(null);
-      await this.findWork(a, api);
+      await api.discover(parent);
+      await this.findWork(a, api, parent);
     }
     return s.process.ready;
   }
 
-  private async findWork(a: Agent, api: Agui) {
+  private async findWork(a: Agent, api: Agui, parent: string | null) {
     const s = this.slots[a];
-    for await (const row of api.threads()) {
+    for await (const row of api.threads(parent)) {
       const { threadId: thread, waiting } = row;
       let r = this.db.activeThread(a, thread);
       if (waiting.turn === 'none' && !waiting.questions && !waiting.toolCalls) {
@@ -181,7 +181,7 @@ export class Desk {
   private async drive(a: Agent, r: Route) {
     const s = this.slots[a];
     try {
-      const api = await this.connect(a);
+      const api = await this.connect(a, r.parent);
       if (s.route?.id !== r.id || s.waiting) return;
       if (!r.thread) {
         this.projects.prepare(r);
@@ -278,7 +278,7 @@ export class Desk {
     if (!view.waiting.questions.length && !view.waiting.toolCalls.length) {
       if (s.ended) this.finish(a, s.recovering ? 'reopened' : 'done');
       else if (s.recovering) {
-        for await (const row of (await s.process.ready).threads())
+        for await (const row of (await s.process.ready).threads(r.parent))
           if (
             row.threadId === r.thread &&
             row.waiting.turn === 'none' &&
@@ -376,7 +376,7 @@ export class Desk {
     if (!r?.thread) throw new HttpError(404, 'No snapshot');
     return this.slots[r.agent].serial(async () => {
       try {
-        return await (await this.connect(r.agent)).snapshot(r);
+        return await (await this.connect(r.agent, r.parent)).snapshot(r);
       } finally {
         this.armIdle(r.agent);
       }

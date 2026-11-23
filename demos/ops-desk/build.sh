@@ -7,8 +7,9 @@ demo="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$demo/../.." && pwd)"
 mkdir -p "$demo/.build"
 
-# In the shared check phase the language lanes have just built both.
+# The shared check phase already has the OTLP receiver and both builds.
 if [[ ${1:-} != --sdk-built ]]; then
+  npm ci --silent --prefix "$repo/conformance/telemetry"
   (cd "$repo/typescript" && npm ci && npm run build)
   (cd "$repo/rust" && mise exec -- cargo build --locked -p standard --bin ma)
 fi
