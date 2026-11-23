@@ -43,6 +43,7 @@ struct Exchange {
     text: BTreeMap<String, String>,
     reasoning: BTreeSet<String>,
     closed_text: BTreeSet<String>,
+    initial_input: bool,
     state_revision: Option<String>,
     interruption: base::CancellationToken,
 }
@@ -298,6 +299,7 @@ impl Service {
             text: Default::default(),
             reasoning: Default::default(),
             closed_text: Default::default(),
+            initial_input: true,
             state_revision: None,
             interruption,
         };
@@ -358,13 +360,15 @@ impl Exchange {
     }
     async fn open(&mut self, (pair, cur): (Vec<Value>, Cursor)) -> R<Vec<u8>> {
         let mut v=vec![self.exact(json!({"type":"RUN_STARTED","protocolVersion":"1.0","threadId":self.id,"runId":self.run})).await?];
-        v.extend(pair);
+        self.initial_input = matches!(self.target, Target::Input(_));
+        if !self.initial_input {
+            v.extend(pair);
+            *self.c.cursor.lock().unwrap() = Some(cur);
+        }
         if let Some(s) = self.state_snapshot().await? {
             v.push(s);
         }
-        let b = frames(v)?;
-        *self.c.cursor.lock().unwrap() = Some(cur);
-        Ok(b)
+        frames(v)
     }
     async fn state_snapshot(&mut self) -> R<Option<Value>> {
         self.state_revision = None;
@@ -443,6 +447,24 @@ impl Exchange {
         let step = event.step_id.as_deref().unwrap_or("");
         let d = &event.data;
         let mut out = vec![];
+        if self.initial_input {
+            // Offer the committed user ID before live assistant text. Upstream
+            // snapshots reconcile by ID; they do not reorder existing messages.
+            let mut data = self.server.watch(&self.a, &self.id)?;
+            let taken = data
+                .branch()
+                .into_iter()
+                .find(|e| e.kind == "input" && e.scope.turn.as_ref() == Some(&turn))
+                .ok_or(Fail::Conflict)?;
+            data.position = Some(taken.id);
+            let (pair, cur) = self
+                .server
+                .snapshot_pair(&self.a, &self.id, &self.c, &data)
+                .await?;
+            out.extend(pair);
+            *self.c.cursor.lock().unwrap() = Some(cur);
+            self.initial_input = false;
+        }
         match event.event_type.as_str() {
             "stepStarted" => {
                 if self.steps.insert(step.into()) {

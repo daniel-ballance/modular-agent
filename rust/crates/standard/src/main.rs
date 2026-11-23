@@ -40,7 +40,8 @@ Options:
   --history             print the session's history
   --declaration         print what this agent declares it supports
   --acp                 serve the Agent Client Protocol on stdio, for an editor or host
-  --listen ADDR         with --acp, serve on a loopback WebSocket instead
+  --agui                serve AG-UI over HTTP and SSE; requires --listen
+  --listen ADDR         loopback listener for --agui, --acp, or both
   --token-file FILE     configure a single local token for --listen
   --policy FILE         read operator policy instead of policy.json
 
@@ -404,6 +405,7 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
         verbose: false,
     };
     let (mut acp, mut trust, mut resume) = (false, false, false);
+    let mut agui = false;
     let (mut listen, mut token_file) = (None, None);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -418,6 +420,7 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
             "sessions" => terminal.list = true,
             "--all" => terminal.all_projects = true,
             "--acp" => acp = true,
+            "--agui" => agui = true,
             "--listen" => listen = Some(take(&mut args, &arg)?),
             "--token-file" => token_file = Some(take(&mut args, &arg)?),
             "--trust-project" => trust = true,
@@ -448,8 +451,10 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
             _ => bail!("unknown argument {arg}; use --help"),
         }
     }
+    ensure!(!agui || listen.is_some(), "--agui requires --listen");
+    let clients = if agui { policy.agui_clients()? } else { vec![] };
     let service = match (listen, token_file) {
-        (Some(listen), token_file) if acp => Some(sdk::AcpServiceOptions {
+        (Some(listen), token_file) if acp || agui => Some(sdk::AcpServiceOptions {
             listen,
             actors: policy
                 .network(token_file.map(Into::into))
@@ -457,8 +462,66 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
             tls: None,
         }),
         (None, None) => None,
-        _ => bail!("--listen requires --acp, and --token-file requires --listen"),
+        _ => bail!("--listen requires --acp or --agui, and --token-file requires --listen"),
     };
+    if agui {
+        ensure!(
+            terminal.prompt.is_none() && terminal.session.is_none() && !resume,
+            "with --agui the client creates or reopens sessions"
+        );
+        if trust {
+            standard.configuration().trust(&project)?;
+        }
+        let project = project.canonicalize()?;
+        let configured = standard.configuration().settings(&project)?;
+        let mut model = terminal.settings["model"]
+            .as_str()
+            .or(configured["model"].as_str())
+            .map(canonical_model);
+        if standard.scripted.is_some() {
+            model = Some(SCRIPTED_MODEL.into());
+        } else if model.is_none() && !standard.conformance {
+            model = standard::default_model(&standard).await.map(str::to_owned);
+        }
+        standard.claude = model.as_deref().is_some_and(|s| s.starts_with("claude/"));
+        let mcp = Mcp::default();
+        let mut b = builder(&standard, &project, &mcp, vec![])?;
+        if let Some(model) = model {
+            b = b.model(model);
+        }
+        if let Some(thinking) = terminal.settings.get("thinking") {
+            b = b.setting("thinking", thinking.clone());
+        }
+        let agent = b.build().await?;
+        let service = service.expect("AG-UI requires a listener");
+        let result = async {
+            let server = agent
+                .serve_agui(sdk::AguiOptions {
+                    listen: service.listen,
+                    actors: service
+                        .actors
+                        .into_iter()
+                        .zip(clients)
+                        .map(|(p, id)| sdk::AguiActor::new(id, p))
+                        .collect(),
+                    acp,
+                    acp_composition: Some(std::sync::Arc::new(standard::acp::Factory {
+                        standard,
+                        settings: terminal.settings,
+                        mcp,
+                    })),
+                    ..Default::default()
+                })
+                .await?;
+            println!("{}", server.url);
+            let stopped = tokio::signal::ctrl_c().await;
+            server.close().await;
+            Ok::<_, anyhow::Error>(stopped?)
+        }
+        .await;
+        let closed = agent.close().await;
+        return result.and(closed.map_err(Into::into));
+    }
     if acp {
         ensure!(
             terminal.prompt.is_none() && terminal.session.is_none() && !resume,
