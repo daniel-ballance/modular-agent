@@ -4,18 +4,18 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { createAgent, defaultAcpActor, definePlugin, tool, type AgentOptions, type ServeAguiOptions } from "../src/index.js";
+import { createAgent, defaultAcpActor, definePlugin, tool, type Actor, type AgentOptions, type ServeAguiOptions } from "../src/index.js";
 import { memoryEnvironment, scriptedProvider } from "../src/testing.js";
 
 const prompt = (content: unknown) => ({role:"user", id:randomUUID(), content});
 const definition = { name: "pick", description: "Choose", parameters: {} };
 const source = {sourceId:"ui",actorId:"user",routeId:"primary",resultTimeoutMs:60000,tools:[{...definition,callers:["model" as const]}]};
 function latch() { let resolve!: () => void; const promise = new Promise<void>(done => {resolve=done;}); return {promise,resolve}; }
-async function setup(t: TestContext, options: AgentOptions = {}, serving: Partial<ServeAguiOptions> = {}) {
+const owner = {...defaultAcpActor(), id:"user"};
+async function setup(t: TestContext, options: AgentOptions = {}, serving: Partial<ServeAguiOptions> = {}, principals: Actor[] = [owner,owner]) {
   const dir = await mkdtemp(join(tmpdir(),"sdk-agui-")); t.after(() => rm(dir,{recursive:true,force:true}));
-  const actor = {...defaultAcpActor(),id:"user"};
-  const tokens = [randomUUID(),randomUUID()];
-  const actors = await Promise.all(tokens.map(async (token,i) => { const tokenFile = join(dir,String(i)); await writeFile(tokenFile,token,{mode:0o600}); return {actor,tokenFile,clientId:i?"secondary":"primary"}; }));
+  const tokens = principals.map(() => randomUUID());
+  const actors = await Promise.all(tokens.map(async (token,i) => { const tokenFile = join(dir,String(i)); await writeFile(tokenFile,token,{mode:0o600}); return {actor:principals[i],tokenFile,clientId:["primary","secondary"][i] ?? String(i)}; }));
   const agent = await createAgent({environment:memoryEnvironment(), providers:[scriptedProvider([{text:"one"},{text:"two"}])],...options}); t.after(() => agent.close());
   const listener = await agent.serveAgui({listen:"127.0.0.1:0", actors, ...serving});
   const base = listener.url+"/agui/v1";
@@ -55,6 +55,49 @@ test("listing returns only kept threads, with a timestamp and no content", async
   }
 });
 
+test("listing counts committed waits per client, pages in change order and does not reopen", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "agui-waits-"));
+  t.after(() => rm(dir, {recursive:true, force:true}));
+  const kept = {project:dir, dataDir:dir, durability:"kept" as const, questionsOutlastTurns:true, interfaceTools:[source]};
+  const note = tool({name:"note", description:"Ask for a note", input:{type:"object"}, async run(_, cx) {
+    await cx.ask({kind:"text", question:"PRIVATE QUESTION", answerers:["user"]}, {wait:0, then:"leaveOpen"});
+  }});
+  const seed = await createAgent({...kept, environment:memoryEnvironment(), tools:[note],
+    providers:[scriptedProvider([{toolCalls:[{name:"note",input:{}}]}])]});
+  const q = await seed.session();
+  try { assert.equal((await q.prompt("leave a question")).openToolCalls.length, 1); }
+  finally { await seed.close(); }
+
+  const opened: string[] = [], recovered: string[] = [];
+  const audit = definePlugin({name:"audit-opens", hooks:{"session.start":({sessionId}) => {opened.push(sessionId);}}});
+  const options = {...kept, tools:[note], plugins:[audit], providers:[scriptedProvider([{toolCalls:[{name:"pick",input:{}}]}])]};
+  const server = await setup(t, options, {}, [owner, {...owner,rights:["watch"]}, owner, {...owner,id:"unjoined"}]);
+  const call = await server.thread();
+  assert.equal((await events(await server.run(call, [prompt("private call")], {tools:[definition]}))).at(-1).outcome.pendingToolCallIds.length, 1);
+  const list = async (client:number, query = "") => {
+    const res = await server.request("/threads" + query, undefined, client);
+    assert.equal(res.status, 200);
+    return await res.json() as {threads:{threadId:string; waiting:{questions:number;toolCalls:number;turn:string}}[];next?:string};
+  };
+  const waits = (page: Awaited<ReturnType<typeof list>>) => page.threads.map(t => [t.threadId, t.waiting]);
+  const idle = {questions:0, toolCalls:0, turn:"none"};
+  assert.deepEqual(waits(await list(0)), [[call,{...idle,toolCalls:1}], [q.id,{...idle,questions:1}]]);
+  assert.deepEqual(waits(await list(1)), [[call,idle], [q.id,idle]]);
+  assert.deepEqual(waits(await list(2)), [[call,idle], [q.id,{...idle,questions:1}]]);
+  assert.deepEqual(await list(3), {threads:[]});
+  const first = await list(0, "?limit=1");
+  assert.ok(first.next); assert.deepEqual(waits(first), [[call,{...idle,toolCalls:1}]]);
+  const second = await list(0, "?limit=1&after=" + encodeURIComponent(first.next));
+  assert.deepEqual(waits(second), [[q.id,{...idle,questions:1}]]); assert.equal(second.next, undefined);
+  const invalid = async (res:Response) => { assert.equal(res.status, 400); assert.deepEqual(await res.json(), {code:"invalid_request"}); };
+  await invalid(await server.request("/threads?after=" + first.next, undefined, 1));
+  for (const value of ["0","501","1.5","x",""]) await invalid(await server.request("/threads?limit=" + value));
+  await server.listener.close(); await server.agent.close();
+  const restarted = await setup(t, options, {resumeOpen:true, onResumeOpen:id => recovered.push(id)});
+  await invalid(await restarted.request("/threads?after=" + first.next));
+  assert.deepEqual(recovered, []); assert.deepEqual(opened, [call]);
+});
+
 test("a withheld HTTP snapshot retires its cursor, even if the gate later opens",async t=>{
   let blocked=false;
   const plugin=definePlugin({name:"privacy", hooks:{output:({events})=> {if (blocked && events.some(e=>(e.data as any)?.method==="agui.snapshot")) return "block";}}});
@@ -71,10 +114,13 @@ test("a queued client follows only its own turn and does not inherit another cli
   const plugin=definePlugin({name:"stop-first",hooks:{"provider.request":async ({request})=>{
     seen.push(request.tools.map(t=>t.name)); if (seen.length===1){entered.resolve();await release.promise;}
   }}});
-  const {thread,run,request}=await setup(t,{plugins:[plugin],interfaceTools:[source]}); const id=await thread();
+  const dataDir=await mkdtemp(join(tmpdir(),"agui-running-")); t.after(()=>rm(dataDir,{recursive:true,force:true}));
+  const {thread,run,request}=await setup(t,{dataDir,durability:"kept",plugins:[plugin],interfaceTools:[source]}); const id=await thread();
   const first=run(id,[prompt("first")],{tools:[definition]});
   try {
     await entered.promise;
+    const listing=await (await request("/threads",undefined,1)).json() as {threads:{waiting:unknown}[]};
+    assert.deepEqual(listing.threads.map(t=>t.waiting), [{questions:0,toolCalls:0,turn:"running"}]);
     const view=await (await request("/threads/"+id,undefined,1)).json() as {messages:unknown[]};
     const second=await run(id,[...view.messages,prompt("second")],{},1); release.resolve();
     assert.equal(deltas(await events(await first)),"one"); assert.equal(deltas(await events(second)),"two");

@@ -738,7 +738,8 @@ export class Agent {
       for (const {id, project} of await this.#api.listSessions(this.#project)) {
         if (project !== this.#project) continue;
         const row = await this.#api.sessionListing(id, {actor, allowJoin:true});
-        if (row?.waiting.turn !== "interrupted" || !(scope?.allowTenant(row.tenant ?? null) ?? (row.tenant === undefined))) continue;
+        if (!row || row.waiting.turn === "none" || !(scope?.allowTenant(row.tenant ?? null) ?? (row.tenant === undefined))) continue;
+        if (row.waiting.turn === "running") { options.onResumeOpen?.(id, "skipped"); continue; }
         const agent = await selectProject(project, id, await this.sessionInfo(id));
         let resumed: boolean;
         try { resumed = await agent.#h.withConnectionActor(actor, () => agent.#h.resumeInterruptedSession(id, actor)); }

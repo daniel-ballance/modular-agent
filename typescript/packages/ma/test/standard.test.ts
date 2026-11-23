@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile, fork, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { createServer } from "node:http";
@@ -11,7 +11,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import assert from "node:assert/strict";
-import { createAgent, fileHistory, serveHistory, tool, type HistoryEntry } from "@modular-agent/core";
+import { createAgent, defaultAcpActor, fileHistory, serveHistory, tool, type HistoryEntry } from "@modular-agent/core";
 import { scriptedProvider } from "@modular-agent/core/testing";
 import { standardFileTools } from "@modular-agent/tools-files/sdk";
 import { codemode } from "../src/codemode.js";
@@ -37,6 +37,69 @@ test("--resume-open has no effect in print mode", async t => {
   const p = await project(t);
   assert.equal((await p.run("--resume-open", "-p", "Hello")).stdout, "ok\n");
 });
+
+for (const runtime of ["durable", "transient"] as const) {
+  test(`resume-open: ${runtime} after a process is killed inside a tool`, {timeout:20_000}, async t => {
+    const p = await project(t), dataDir = join(p.config, "state"), tokenFile = join(p.dir, "token");
+    const token = randomBytes(24).toString("hex");
+    await writeFile(tokenFile, token, {mode:0o600});
+    await p.put(p.script, JSON.stringify([{toolCalls:[{name:"mark",input:{}}]}, {text:"carried on"}]));
+    const env = {...p.env, TMPDIR:process.env.TMPDIR};
+    const writer = fork(new URL("./fixtures/resume-open.js", import.meta.url), [p.work, dataDir], {env, execArgv:[]});
+    const died = once(writer, "exit");
+    const kill = async () => { writer.kill("SIGKILL"); await died; };
+    t.after(kill);
+    const [{sessionId:id}] = await Promise.race([once(writer, "message"), died.then(() => {throw new Error("tool did not dispatch");})]);
+
+    const serve = async (...flags:string[]) => {
+      const child = spawn(process.execPath, [cli, "--agui", "--listen", "127.0.0.1:0", "--token-file", tokenFile, "--runtime",runtime, ...flags],
+        {cwd:p.work, env, stdio:["ignore","pipe","pipe"]});
+      const closed = once(child, "close");
+      const stop = async () => {child.kill(); await closed;};
+      t.after(stop);
+      let stderr = ""; child.stderr.on("data", b => {stderr += b;});
+      const lines = createInterface({input:child.stdout});
+      const [url] = await Promise.race([once(lines, "line"), closed.then(() => {throw new Error("ma exited: " + stderr);})]);
+      return {stop, stderr:() => stderr, list:async () => {
+        const res = await fetch(url + "/agui/v1/threads", {headers:{authorization:"Bearer " + token}});
+        assert.equal(res.status, 200);
+        return (await res.json() as {threads:{threadId:string;waiting:{turn:string}}[]}).threads.find(row => row.threadId === id)?.waiting.turn;
+      }};
+    };
+
+    if (runtime === "durable") {
+      const held = await serve("--resume-open");
+      assert.equal(await held.list(), "running");
+      await held.stop();
+      assert.equal(held.stderr().trim(), "ma: skipped " + id);
+    }
+    await kill();
+    assert.deepEqual(await died, [null,"SIGKILL"]);
+
+    await p.put(join(p.work, ".modular-agent.json"), '{"resume_open":true}');
+    const off = await serve();
+    assert.equal(await off.list(), "interrupted");
+    await off.stop(); assert.equal(off.stderr().trim(), "");
+
+    await p.put(join(p.work, ".modular-agent.json"), '{"resume_open":false}');
+    if (runtime === "durable") await p.put(join(p.config, "settings.json"), '{"resume_open":true}');
+    const resumed = await serve(...(runtime === "transient" ? ["--resume-open"] : []));
+    // Inspect the committed record through the SDK. No client has connected to this listener.
+    const reader = await createAgent({project:p.work, dataDir, durability:"kept", providers:[scriptedProvider([])]});
+    try {
+      const actor = defaultAcpActor();
+      while ((await reader.sessionListing(id, {actor}))?.waiting.turn !== "none") await delay(10, undefined, {signal:t.signal});
+      await resumed.stop();
+      assert.equal(resumed.stderr().trim(), "ma: resumed " + id);
+      const s = await reader.openSession(id);
+      assert.equal((await s.lastTurn())?.outcome?.kind, runtime === "durable" ? "completed" : "failed");
+      if (runtime === "durable") assert.equal((await s.lastTurn())?.text, "carried on");
+      const history = await s.history();
+      for (const kind of ["turnStart","turnEnd","toolStarted","toolResult"]) assert.equal(history.filter(e => e.kind === kind).length, 1, kind);
+      assert.equal(await readFile(join(p.work, "effect"), "utf8"), "once\n");
+    } finally { await reader.close(); }
+  });
+}
 
 test("ma sends protobuf only to configured OTLP signals", async t => {
   const p = await project(t);

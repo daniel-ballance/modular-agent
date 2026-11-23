@@ -338,6 +338,8 @@ export interface HistoryStore {
 	create(meta: StoredSession): Promise<void>;
 	/** Refuses if the session is already open for writing elsewhere. */
 	openForWriting(sessionId: string, options?: { wait?: boolean }): Promise<void>;
+	/** Read-only liveness hint for a listing, when the store can observe another writer. */
+	writerActive?(sessionId: string): boolean;
 	checkWriter?(sessionId: string): void;
 	/** Stable for this writer's lifetime, including any transition from staged creation to a lease. */
 	writerSignal?(sessionId: string): AbortSignal | undefined;

@@ -1084,7 +1084,8 @@ export class Harness {
 		const rights = this.discoveryRights(s, viewer.actor, viewer.allowJoin);
 		if (!rights.includes("watch")) return;
 		const branch = s.branch(), start = this.unfinishedTurn(s, branch);
-		const turn = !start ? "none" : s.running?.turnId === start.turnId && !s.suspended ? "running" : "interrupted";
+		const running = start && (s === live ? s.running?.turnId === start.turnId && !s.suspended : store.writerActive?.(id));
+		const turn = !start ? "none" : running ? "running" : "interrupted";
 		const questions = this.recordedOpenQuestionEntries(s, branch).filter(e => {
 			if (s.copied.has(e.id)) return false;
 			const r = readRequest(e);

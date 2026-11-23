@@ -77,6 +77,16 @@ export class JsonlHistoryStore implements HistoryStore {
 		for (const batch of pending.batches) this.write(id, batch);
 	}
 
+	writerActive(id: string): boolean {
+		try {
+			const pid = Number(readFileSync(`${this.find(id)}.lock`, "utf8"));
+			return Number.isSafeInteger(pid) && pid > 0 && alive(pid);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			return false;
+		}
+	}
+
 	async openForWriting(id: string): Promise<void> {
 		if (this.held.has(id)) return;
 		if (this.unsaved.has(id)) {
