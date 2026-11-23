@@ -56,7 +56,7 @@ By default `ma` sends no telemetry. Set `OTEL_EXPORTER_OTLP_ENDPOINT` or a per-s
 
 ## What is checked
 
-- **Reference:** 25/25, including `telemetry-export`, including client identity validation, sandbox limits, ambient access, tool calls and result rendering.
+- **Reference:** 26 checks (25 checked here before `resume-open`), including `telemetry-export`, including client identity validation, sandbox limits, ambient access, tool calls and result rendering.
 - **Telemetry:** seven offline checks cover no endpoint, SDK disabled, per-signal overrides, sampling, headers, metadata privacy and the OTLP resource. A scripted turn reached local Phoenix as `invoke_agent ma`, `chat script` and `execute_tool codemode`. The OTLP resource for that trace carried `service.name=ma-python`.
 - **ACP:** 188/188 with `--crash-checks --probe-checks --job-checks`. The standard composition does not declare several actors, tenants or session limits.
 - **WebSocket kits:** 153/153 for the plugin binding and 14/14 for separate-listener isolation. The final ACP run passed 192/193; the connection closed during the remote-point preflight. A verbose probe run passed 166/166 and did not establish the cause.

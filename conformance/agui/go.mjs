@@ -18,7 +18,7 @@ const cfg = JSON.parse(await readFile(file, 'utf8'));
 if (['encoding', 'history', 'stock-conversation'].includes(cfg.name)) {
   const ma = join(bin, 'ma');
   launch(ma, ['--acp', '--agui', '--listen', process.env.MA_AGUI_LISTEN, '--token-file', cfg.tokenFiles.owner]);
-} else if (cfg.name === 'listener') {
+} else if (['listener', 'thread-listing'].includes(cfg.name)) {
   const rights = ['input', 'watch', 'tools', 'answer', 'approve'];
   const actors = Object.entries(cfg.tokenFiles).map(([role, tokenFile]) => ({
     tokenFile, clientId: ['owner', 'rotated'].includes(role) ? 'kit-primary' : role,

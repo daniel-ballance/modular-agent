@@ -1,6 +1,6 @@
 # Reference checks
 
-Checks that an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs and the telemetry it exports. So one set of checks covers all four implementations.
+The 26 checks test whether an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs, its AG-UI responses and the telemetry it exports. So one set of checks covers all four implementations.
 
 Install the shared OTLP receiver's dependencies from this directory: `npm ci --prefix ../telemetry`.
 
@@ -11,7 +11,7 @@ node run.mjs --all                          # every listed build that is built
 node run.mjs --only print,mcp -- /path/to/ma
 ```
 
-Each check runs in a fresh folder with its own `HOME`, project and `MODULAR_AGENT_DATA_DIR`, and passes the model script through `MODULAR_AGENT_SCRIPT` and logs requests through `MODULAR_AGENT_SCRIPT_LOG` ([hooks for testing](../../docs/reference/standard-configuration.md#hooks-for-testing)). A failed check keeps its folder and names it. Crash checks kill the agent's whole process group with `SIGKILL` once a command in the code has started, then reopen with `-c`. `MODULAR_AGENT_REF_REQUIRE` names languages, or `all`, whose build must be present with `--all`.
+Each check runs in a fresh folder with its own `HOME`, project and `MODULAR_AGENT_DATA_DIR`, and passes the model script through `MODULAR_AGENT_SCRIPT` and logs requests through `MODULAR_AGENT_SCRIPT_LOG` ([hooks for testing](../../docs/reference/standard-configuration.md#hooks-for-testing)). A failed check keeps its folder and names it. Crash checks kill the agent's whole process group with `SIGKILL` once a command in the code has started, then reopen with `-c` or restart the service. `MODULAR_AGENT_REF_REQUIRE` names languages, or `all`, whose build must be present with `--all`.
 
 Each implementation lists itself in `agents/<language>.json`: `language`, the `build` command, and the `command` that starts `ma`, with `{repo}` for the repository root.
 
@@ -33,6 +33,7 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 | `mcp` | An MCP server's tool is a function in `codemode` |
 | `continue` | `-c` reopens the folder's last session with its history |
 | `durable-crash` | After `kill -9` during a command in code, the turn carries on and nothing runs twice |
+| `resume-open` | Kill a served durable turn during a tool call. A separate listing reader observes the turn finish without connecting to the restarted writer. Without the flag the turn stays interrupted until a client opens it. Neither path repeats the effect. |
 | `transient-crash` | With `--runtime transient`, the turn fails and nothing runs twice |
 | `declaration` | `ma --declaration` prints the description's declaration as one JSON object |
 | `points-in-git` | In a git project a turn saves a point under `refs/modular-agent/`, without touching `HEAD`, the index or `git log` |
@@ -47,14 +48,14 @@ The default endpoint assertion listens on `127.0.0.1:4318` inside a private Linu
 
 ## Results
 
-With `MODULAR_AGENT_REF_REQUIRE=all`. The ACP kit ran against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` with `--crash-checks --probe-checks --job-checks`:
+The previous four-language run used `MODULAR_AGENT_REF_REQUIRE=all`. The TypeScript count includes the new `resume-open` check. The ACP kit ran against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` with `--crash-checks --probe-checks --job-checks`:
 
 | Implementation | Reference checks | ACP kit |
 |---|---|---|
-| Rust | 25/25 | 188/188 |
-| TypeScript | 25/25 | 188/188 |
-| Go | 25/25 | 188/188 |
-| Python | 25/25 | 188/188 |
+| Rust | 25 passed before `resume-open`; 26 required | 188/188 |
+| TypeScript | 26/26 | 188/188 |
+| Go | 25 passed before `resume-open`; 26 required | 188/188 |
+| Python | 25 passed before `resume-open`; 26 required | 188/188 |
 
 All four run the identical set of 188 ACP checks, including the four that check an undeclared feature is refused, so they present the same agent over ACP.
 

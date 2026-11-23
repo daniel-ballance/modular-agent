@@ -74,7 +74,7 @@ scripts/websocket-kits.sh go
 ```
 
 - **Telemetry:** a loopback OTLP receiver checks binary protobuf and `service.name`. No export provider is installed without an endpoint or when `OTEL_SDK_DISABLED=true`. Phoenix received `invoke_agent ma`, `chat script` and `execute_tool codemode` from an offline scripted prompt run with `OTEL_SERVICE_NAME=ma-go`.
-- **Reference checks:** 25/25 against Go `ma`, including `telemetry-export`, including client identity validation, tool function values, denied ambient access, codemode results and memory failure followed by recovery.
+- **Reference checks:** 26 in the suite (25 checked here before `resume-open`), including `telemetry-export`, including client identity validation, tool function values, denied ambient access, codemode results and memory failure followed by recovery.
 - **ACP with `--crash-checks --probe-checks --job-checks`:** 188/188 on stdio against Go `ma` with the SDK's Grok Provider. Earlier WebSocket runs passed 193/193 for ACP and 153/153 for plugins.
 - **Sandbox regressions:** the Go tests cover imports and function values, schema-order arguments, JSON and repr, terminal memory and time limits, which suspensions reset the active clock, a tool wait longer than the compute budget, 500 nested calls, recursion at 200 and 201, a UTF-8 print cut, worker death and cancellation, malformed messages, denied OS operations and seeded random.
 - **Go checks:** build, vet and formatting passed. The full Go suite passed 38 tested packages. The race run for `modular/...` and `cmd/ma/...` passed seven tested packages. `cmd/modular` takes several minutes; use the default package timeout.

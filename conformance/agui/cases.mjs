@@ -52,7 +52,35 @@ function acpPing(origin, token) {
   });
 }
 
+export async function checkWaiting(api, id, questions, toolCalls, turn) {
+  const row = (await api.list()).threads.find(row => row.threadId === id);
+  assert.deepEqual(row?.waiting, { questions, toolCalls, turn }, 'waits are counted for this client and turn');
+}
+
 export const cases = {
+  'thread-listing': { model: simple, async run({ api, origin, tokens }) {
+    await refused(await api.request('/threads?limit=bad', {auth:null}), 401, 'unauthenticated');
+    const firstThread = (await api.create()).threadId, other = (await api.create()).threadId;
+    await api.create(); // An unused provisional session never appears.
+    const view = answer(await api.run(input(blank(firstThread), [user('private listing prompt')])), first);
+    answer(await api.run(input(blank(other), [user('another prompt')])), first);
+    answer(await api.run(input(view, [user('change the older thread')])), second);
+    const all = await api.list();
+    assert.deepEqual(all.threads.map(r => r.threadId).sort(), [firstThread, other].sort(), 'only kept sessions');
+    assert.ok(Date.parse(all.threads[0].updatedAt) >= Date.parse(all.threads[1].updatedAt), 'most recently changed first');
+    assert.ok(Date.parse(all.threads.find(r => r.threadId === firstThread).updatedAt) >= Date.parse(all.threads.find(r => r.threadId === other).updatedAt), 'updated on subsequent turns');
+    for (const row of all.threads) assert.deepEqual(row.waiting, { questions:0, toolCalls:0, turn:'none' });
+    const one = await api.list('?limit=1');
+    assert.ok(one.next, 'next page exists'); assert.deepEqual(one.threads, all.threads.slice(0, 1), 'first page');
+    const two = await api.list('?limit=1&after=' + encodeURIComponent(one.next));
+    assert.deepEqual(two, { threads:all.threads.slice(1) }, 'second page ends the listing');
+    for (const query of ['?limit=0', '?limit=501', '?limit=1.5', '?after=' + randomUUID()]) {
+      await refused(await api.request('/threads' + query), 400, 'invalid_request');
+    }
+    for (const role of ['tenant', 'project']) assert.deepEqual(await at(origin, tokens[role]).list(), {threads:[]}, 'omit threads outside scope');
+    assert.deepEqual(await at(origin, tokens.watch).list(), all, 'watch is enough to list');
+  } },
+
   'listener': { model: simple, async run({ api, origin, tokens }) {
     const denied = response => refused(response, 401, 'unauthenticated');
     const missing = randomUUID();
@@ -174,12 +202,14 @@ export const cases = {
       await refused(await api.post({ ...r1, tools }, opts(start)), 403, 'refused');
     }
     const { id } = handoff(await api.run(r1, opts(start)));
+    await checkWaiting(api, start.threadId, 0, 1, 'none');
     const nextConnection = at(origin, tokens.rotated ?? tokens.owner);
     const view = await nextConnection.view(start.threadId);
     assert.deepEqual(view.waiting.toolCalls.map(call => call.toolCallId), [id], 'same executor route can reconnect to a wait');
     clean(view, 'draft-blue', 'dispatch-blue');
     for (const key of ['sibling', 'foreign']) if (tokens[key]) {
       const other = at(origin, tokens[key]);
+      await checkWaiting(other, start.threadId, 0, 0, 'none');
       const copy = await other.view(start.threadId);
       assert.deepEqual(copy.waiting.toolCalls, [], 'other actor or route does not inherit wait');
       clean(copy, 'dispatch-blue');

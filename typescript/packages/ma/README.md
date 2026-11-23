@@ -83,7 +83,7 @@ scripts/websocket-kits.sh typescript
 git diff --check
 ```
 
-- Reference checks: **25/25**, including `telemetry-export`, including `client-identity`, all four codemode profile checks, `sandbox-memory` and both crash-recovery modes.
+- Reference checks: **26/26**, including `resume-open`, `telemetry-export`, `client-identity`, all four codemode profile checks, `sandbox-memory` and both crash-recovery modes.
 - ACP with crash, probe and job checks: **188/188** on stdio. Over WebSocket, ACP passed **193/193**, the plugin kit passed **153/153**, and listener isolation passed **14/14**.
 - TypeScript workspace: **447 offline tests passed** in both normal and `MA_REMOTE` configurations. Five live tests skipped. That includes **51/51** shared scenario runs across embedded, TypeScript stdio and TypeScript WebSocket placements. The other SDK fixtures were not built for these runs. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
 - Claude sidecar: **51 offline tests passed** and one live check skipped. No real sign-ins or model requests ran, and no real credentials were read.
