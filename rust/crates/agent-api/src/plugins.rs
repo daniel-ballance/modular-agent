@@ -343,7 +343,20 @@ impl Registry {
         api: Api,
         point: &HookPoint,
         scope: &Scope,
+        value: Value,
+    ) -> Result<HookResult> {
+        self.invoke_checked(api, point, scope, value, |_, _| Ok(()))
+            .await
+    }
+
+    /// Validate each transform before it becomes the next handler's input.
+    pub async fn invoke_checked(
+        &self,
+        api: Api,
+        point: &HookPoint,
+        scope: &Scope,
         mut value: Value,
+        mut check: impl FnMut(&Value, &Value) -> Result<()> + Send,
     ) -> Result<HookResult> {
         let rule = self.definition(point)?.rule;
         let mut handlers = self.handlers.get(&point.name).cloned().unwrap_or_default();
@@ -384,6 +397,9 @@ impl Registry {
                     }
                 }
                 Rule::Transform => {
+                    if reply.answered && !(reply.stopped && reply.value.is_null()) {
+                        check(&value, &reply.value)?;
+                    }
                     if reply.answered {
                         value = reply.value;
                         answered = true;

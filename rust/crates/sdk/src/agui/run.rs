@@ -512,6 +512,9 @@ impl Exchange {
         if event.turn_id.as_ref() != Some(&turn) {
             return Ok((vec![], false));
         }
+        if event.event_type == "output.overflow" {
+            return Err(Fail::Withheld);
+        }
         let step = event.step_id.as_deref().unwrap_or("");
         let d = &event.data;
         let mut out = vec![];
