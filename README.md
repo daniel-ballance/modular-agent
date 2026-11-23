@@ -117,6 +117,10 @@ Each SDK's README lists its own gaps.
 - **A demonstration host** in `demos/`: one conversation, one inbox and one listener across two agents, to test what the framework must give an application that drives agents. The host itself stays outside the specification ([ADR 0012](docs/adr/0012-one-agent-is-the-scope.md)); see [Agent platform 2027](docs/research/agent-platform-2027.md) for the ideas it tests.
 - **Faster local checks.** The full `scripts/check.sh` takes about 70 minutes, one step at a time. Run the four languages in parallel lanes, after the tests that fail under load are fixed at their cause, and run tests within each suite in parallel where they share no state: pytest-xdist for Python, and Rust tests without `--test-threads=1`. `--quick` (about 10 minutes) stays the everyday check.
 
+## Planned for 0.3.0
+
+- **Approvals that wait past their turn** ([ADR 0034](docs/adr/0034-approvals-that-wait.md), accepted): a session can keep an unstarted call open for an approver who answers later, within an operator's maximum, rechecked in full before it runs.
+
 ## The specification
 
 The specification says **what** each part does, what passes between the parts, and what must always hold, not how a part works inside. Optional **bindings** fix the wire where two builds work together: ACP for hosts, a plugin protocol, and an HTTP history service. [AG-UI](docs/bindings/agui.md) is a proposed application binding, not yet implemented. The current edition is [edition 4](docs/adr/0027-sdk-0-1-and-edition-4.md).
