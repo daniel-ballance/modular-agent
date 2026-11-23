@@ -62,6 +62,17 @@ acp_kit() {
   (cd conformance/acp && MODULAR_AGENT_CONFORMANCE=1 node run.mjs --crash-checks --probe-checks --job-checks -- "${command[@]}" --acp)
 }
 
+# Language suites may discover peer fixture builds. Leave those placements for
+# the shared phase, where all builds are ready and nobody is rewriting them.
+only_lane_fixtures() {
+  rust_shared=() go_shared=() ts_options="${NODE_OPTIONS:-}"
+  if ! $serial; then
+    rust_shared=(--skip served_by_every_sdk --skip services_from_other_sdks)
+    go_shared=(-skip '^TestShared$')
+    ts_options+=' --test-skip-pattern=/[(](process|service):(rust|go|python)[)]$/'
+  fi
+}
+
 # The plan keeps the serial order. Each parallel worker follows only its own entries.
 plan() {
   local selection="$1" runtime binding language
@@ -82,16 +93,16 @@ plan() {
 
   if $quick; then
     step rust "rust: SDK tests" bash -c "cd rust && mise exec -- cargo test -q -p modular-agent -p standard -- --test-threads=1"
-    step typescript "typescript: tests" bash -c "cd typescript && npm test"
-    step go "go: SDK and ma tests" bash -c "cd go && mise exec -- go test -count=1 ./modular/... ./cmd/ma/..."
+    step typescript "typescript: tests" bash -c 'cd typescript && NODE_OPTIONS="$1" npm test' _ "$ts_options"
+    step go "go: SDK and ma tests" bash -c 'cd go && mise exec -- go test -count=1 "$@" ./modular/... ./cmd/ma/...' _ "${go_shared[@]}"
     step python "python: tests (transient)" bash -c "cd python && uv run --offline pytest -q --runtime transient"
   else
-    step rust "rust: workspace tests" bash -c "cd rust && mise exec -- cargo test -q --workspace --no-fail-fast -- --test-threads=1"
-    step typescript "typescript: tests" bash -c "cd typescript && npm test"
-    step typescript "typescript: tests with remote parts" bash -c "cd typescript && MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test"
+    step rust "rust: workspace tests" bash -c 'cd rust && mise exec -- cargo test -q --workspace --no-fail-fast -- --test-threads=1 "$@"' _ "${rust_shared[@]}"
+    step typescript "typescript: tests" bash -c 'cd typescript && NODE_OPTIONS="$1" npm test' _ "$ts_options"
+    step typescript "typescript: tests with remote parts" bash -c 'cd typescript && NODE_OPTIONS="$1" MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test' _ "$ts_options"
     step typescript "typescript: Claude sidecar tests" bash -c "cd typescript/sidecars/claude && npm ci --silent && npm test"
-    step go "go: all tests" bash -c "cd go && mise exec -- go test -count=1 ./..."
-    step go "go: race detector on SDK and ma" bash -c "cd go && mise exec -- go test -race -count=1 ./modular/... ./cmd/ma/..."
+    step go "go: all tests" bash -c 'cd go && mise exec -- go test -count=1 "$@" ./...' _ "${go_shared[@]}"
+    step go "go: race detector on SDK and ma" bash -c 'cd go && mise exec -- go test -race -count=1 "$@" ./modular/... ./cmd/ma/...' _ "${go_shared[@]}"
     for runtime in transient durable; do
       for binding in local process; do
         step python "python: tests ($runtime, $binding)" bash -c "cd python && uv run --offline pytest -q --runtime $runtime --binding $binding"
@@ -127,6 +138,7 @@ plan() {
   return 0
 }
 
+only_lane_fixtures
 failures=()
 if $serial; then
   plan serial

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export TMPDIR="$HOME/.cache/ma-std-tmp"
+export TMPDIR="${TMPDIR:-$HOME/.cache/ma-std-tmp}"
 mkdir -p "$TMPDIR"
 demo="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$demo/../.." && pwd)"

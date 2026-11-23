@@ -20,11 +20,17 @@ esac
 ma=$(node -e "const a=require('$repo/conformance/reference/agents/$language.json');console.log(a.command.map(x=>x.replaceAll('{repo}',process.argv[1])).join(' '))" "$repo")
 
 export TMPDIR="${TMPDIR:-$HOME/.cache/ma-std-tmp}"
+mkdir -p "$TMPDIR"
 work="$(mktemp -d "$TMPDIR/ws-kits-XXXXXX")"
+work="$(cd "$work" && pwd -P)"
 pids=()
 cleanup() { [ ${#pids[@]} -gt 0 ] && kill "${pids[@]}" 2>/dev/null; wait 2>/dev/null; rm -rf "$work"; }
 trap cleanup EXIT
-(umask 077 && openssl rand -hex 32 >"$work/token")
+trap 'exit 130' INT
+trap 'exit 143' TERM
+umask 077
+export TMPDIR="$work"
+openssl rand -hex 32 >"$work/token"
 
 # Start one plugin service on a free port; print its URL once it accepts connections.
 service() { # parts (or ""), name, token file, optional project and state directories
@@ -34,8 +40,14 @@ service() { # parts (or ""), name, token file, optional project and state direct
   if [ -n "${4:-}" ]; then
     settings+=("MODULAR_AGENT_PLUGIN_PROJECT=$4" "MODULAR_AGENT_PLUGIN_STATE_DIR=$5")
   fi
-  env -u MODULAR_AGENT_PLUGIN_PARTS -u MODULAR_AGENT_PLUGIN_PROJECT -u MODULAR_AGENT_PLUGIN_STATE_DIR \
-    "${settings[@]}" "${plugin[@]}" --listen 127.0.0.1:0 --token-file "$3" >"$out" 2>"$log" &
+  local home="$work/$2-home"
+  mkdir "$home"
+  (
+    cd "$home"
+    exec env -u MODULAR_AGENT_PLUGIN_PARTS -u MODULAR_AGENT_PLUGIN_PROJECT -u MODULAR_AGENT_PLUGIN_STATE_DIR \
+      HOME="$home" XDG_CONFIG_HOME="$home" XDG_DATA_HOME="$home" XDG_STATE_HOME="$home" XDG_CACHE_HOME="$home" \
+      "${settings[@]}" "${plugin[@]}" --listen 127.0.0.1:0 --token-file "$3"
+  ) >"$out" 2>"$log" &
   local pid=$!
   pids+=("$pid")
   for _ in $(seq 300); do
