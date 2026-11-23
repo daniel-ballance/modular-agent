@@ -12,6 +12,20 @@ fn ma(dir: &Path) -> Command {
 }
 
 #[test]
+fn trace_trust_on_work_requests() {
+    let test = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../conformance/reference/run.mjs");
+    assert!(
+        Command::new("node")
+            .arg(test)
+            .args(["--only", "trace-trust", "--"])
+            .arg(env!("CARGO_BIN_EXE_ma"))
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
 fn operator_policy_sets_counts_and_defaults_in_the_declaration() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("operator.json");
@@ -74,4 +88,6 @@ fn invalid_or_missing_explicit_policy_fails_startup() {
     fail("controlBytes exceeds storageBytes");
     std::fs::write(&path, json!({"stdio":{"actor":{"id":"editor","kind":"host","rights":["watch"]},"represents":["guest"]}}).to_string()).unwrap();
     fail("does not support representation");
+    std::fs::write(&path, json!({"stdio":{"actor":{"id":"editor","kind":"host","rights":["watch"]},"traceTrusted":null}}).to_string()).unwrap();
+    fail("traceTrusted must be a boolean");
 }

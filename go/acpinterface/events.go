@@ -432,10 +432,10 @@ func (s *server) askActor(st *attachment, q api.Question, who string) bool {
 		}
 		answer := api.Answer{Request: q.ID, Declined: true}
 		meta := map[string]json.RawMessage{Namespace: api.JSON(q), "modular-agent/answeringActor": api.JSON(who)}
-		meta = traceMeta(ctx, meta)
+		meta = s.traceMeta(ctx, meta)
 		switch q.Kind {
 		case "approval":
-			permission.Meta = traceMeta(ctx, permission.Meta)
+			permission.Meta = s.traceMeta(ctx, permission.Meta)
 			response, err := requestQuestion[acp.RequestPermissionResponse](ctx, st.ctx, s.peer, acp.ClientMethodSessionRequestPermission, permission)
 			if err == nil && response.Outcome.Selected != nil {
 				value := string(response.Outcome.Selected.OptionId)

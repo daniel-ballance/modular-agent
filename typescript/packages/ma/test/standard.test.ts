@@ -104,6 +104,16 @@ for (const runtime of ["durable", "transient"] as const) {
   });
 }
 
+test("trace trust on work requests", async () => {
+  await exec(process.execPath, [join(root, "conformance/reference/run.mjs"), "--only", "trace-trust", "--", process.execPath, cli]);
+});
+
+test("ma rejects a non-boolean traceTrusted in the policy", async t => {
+  const p = await project(t), policy = join(p.config, "policy.json");
+  await p.put(policy, JSON.stringify({stdio:{actor:defaultAcpActor(),traceTrusted:"false"}}));
+  await assert.rejects(p.run("--declaration"), (err: Error) => err.message.includes(policy) && err.message.includes("traceTrusted must be a boolean"));
+});
+
 test("ma sends protobuf only to configured OTLP signals", async t => {
   const p = await project(t);
   const requests: { path?: string; type?: string; header?: string; payload: Buffer }[] = [];

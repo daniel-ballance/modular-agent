@@ -60,6 +60,7 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         *,
         principal: AcpActor | None = None,
         stdio_actor: Actor | None = None,
+        stdio_trace_trusted: bool = True,
         connections: _AcpConnections | None = None,
         scope: Mapping[str, Any],
         rights: frozenset[str] | None = None,
@@ -70,7 +71,9 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         if configured is not None:
             self.principal = configured
         self.network = principal is not None
-        self.trace_trusted = principal is None or principal.get("trace_trusted") is True
+        self.trace_trusted = (
+            stdio_trace_trusted if principal is None else principal.get("trace_trusted") is True
+        )
         self._allowed_projects: frozenset[Path] | None = scope.get("projects")
         self._allowed_tenants: frozenset[str | None] = scope["tenants"]
         self.represents = scope["represents"]

@@ -23,6 +23,7 @@ Set `TMPDIR=$HOME/.cache/ma-std-tmp` and create that directory first. From the r
 ```sh
 (cd conformance/acp && npm ci)
 (cd conformance/tools && npm ci)
+(cd conformance/telemetry && npm ci)
 (cd python && uv sync --python 3.13)
 (cd python && uv run --offline pytest -q --runtime transient)
 (cd python && uv run --offline pytest -q --runtime durable)
@@ -55,7 +56,7 @@ The five [live checks](../docs/sdk/testing.md#live-checks) in `tests/test_sdk_li
 - **Shared scenarios:** 153/153 with `MODULAR_AGENT_SDK_REQUIRE=all` on the ADR 0030 branch: all 17 in process, all 17 with each SDK's fixture programs on stdio, and all 17 with each SDK's fixtures over WebSocket.
 - **Pytest:** 722 passed and five live checks skipped in each of four configurations: transient and durable Runtimes, with local and process bindings.
 - **Interface tools:** 35 public SDK cases cover in-process and served Runtimes. They check approvals, exact gated handoff, reconnect, competing reports, expiry, cancellation, erasure, trace links and SIGKILL recovery before and after the origin ends. No shared scenario was added: its format has no authenticated Interface connection or result-report operation.
-- **Reference `ma`:** 26/26 on Linux with the `resume-open` reference check, including `telemetry-export`. The stderr regression checks a dispatched `codemode` call, not `tool(null)`.
+- **Reference `ma`:** 27/27 on Linux, including `trace-trust`, `resume-open` and `telemetry-export`. The stderr regression checks a dispatched `codemode` call, not `tool(null)`.
 - **Telemetry:** eight offline SDK cases check span parentage and IDs, inference metrics, private sentinels, a job-linked report, both handshake omissions, exporter failure, and operation without the OpenTelemetry SDK. The crash fixture kills two durable segments and checks that the third span has the last saved parent and link. Fork copies have no trace checkpoint or turn trace field.
 - **Subscriptions:** Offline checks cover the shared catalog and login file, both ChatGPT sign-in flows, and Grok's device flow, including slow-down, denial, expiry and refusal of non-HTTPS verification addresses. Both Responses Providers are checked in process and over the plugin binding for request shape, encrypted reasoning replay and refused refresh. The Grok checks force two refreshers to contend for the login lock. Claude fixtures exercise account readiness, thinking settings, streaming and host tool dispatch.
 - **ACP kit against `ma`:** 188/188 on Linux stdio with crash, probe and job checks. The WebSocket run passed 193/193. Separate-listener plugin isolation passed 14/14. The base build takes the opt-in policy with `modular-agent --acp` in conformance mode, without changing the legacy `--mode acp` composition.
@@ -156,7 +157,7 @@ Call `await claude_provider.available()` before displaying account-specific mode
 
 ## Trace trust and spec findings
 
-The launcher of a stdio ACP host is trusted for per-request trace context. Set `trace_trusted=True` in an embedded network ACP `actors` entry only for a peer allowed to share trace IDs. Network principals are not trace-trusted by default. Configured history and plugin destinations get context per request. The SDK does not accept or send baggage. AG-UI can accept allowlisted vendor state on a trusted work POST.
+The launcher of a stdio ACP host is trusted for per-request trace context unless `serve_acp(trace_trusted=False)` disables it. Set `trace_trusted=True` in an embedded network ACP `actors` entry only for a peer allowed to share trace IDs. Network principals are not trace-trusted by default. Configured history and plugin destinations get context per request. The SDK does not accept or send baggage. AG-UI can accept allowlisted vendor state on a trusted work POST.
 
 ### ADR 0033 spec findings
 

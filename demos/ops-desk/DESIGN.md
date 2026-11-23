@@ -67,13 +67,13 @@ A plain page in `host/public/`, served by the host on the tailnet: the conversat
 
 ## Traces
 
-All three agents can export to Phoenix (`scripts/phoenix.sh`). The host starts a span for each event and passes `traceparent` on each AG-UI request. Triage and the verifier trust that parent. To find the coder's separate trace, match its thread ID to `gen_ai.conversation.id`.
+All three agents can export to Phoenix (`scripts/phoenix.sh`). The host saves the `desk.event` span context with the event. Each route uses it for AG-UI requests, including approval answers. All three agents trust the desk token for work requests. Startup discovery has no event parent.
 
 ## Checks
 
 `demos/ops-desk/run.py`, run by `scripts/check.sh` in the shared phase, with scripted models for all three agents:
 
-1. **Happy path:** an event, triage's post and hand-off, the coder's approval answered from the inbox, the change, the verifier's pass verdict. The conversation has the posts in order; the inbox is empty at the end.
+1. **Happy path:** an event, triage's post and hand-off, the coder's approval answered from the inbox, the change, the verifier's pass verdict. The conversation has the posts in order; the inbox is empty at the end. A loopback OTLP receiver checks that all three agents exported `invoke_agent` in the `desk.event` trace.
 2. **Refusal:** the coder's approval passes its deadline. The refusal reaches the inbox and the conversation, and no file changes.
 3. **Failing verification:** the verifier's first verdict fails; the coder gets one more try; the second verdict passes.
 4. **Restart:** the coder's process is killed with `SIGKILL` during its turn. The host restarts it, reopens the session, and the work completes or settles as the recovery rules say. No hand-off is delivered twice.
@@ -90,7 +90,7 @@ Expected findings (checked against the scripted desk):
 - **Finding and waking open work — resolved for a running desk.** At start-up and at each agent launch the host pages [the thread listing](../../docs/bindings/agui.md#listing-threads), then reads the gated snapshots of open work. SQLite still owns events, routes and debug links; it is not an index of agent waits. The coder starts with [`--resume-open`](../../docs/reference/standard-configuration.md#resuming-at-start-up). Triage uses the Python server's `resume_open` option. The Go verifier calls `ResumeInterrupted` on unfinished sessions before it accepts clients.
 - **Someone still has to start the processes and keep the answer route alive.** The local agent station owns the three processes, their tool listeners and the original presence streams. Killing the HTTP host does not move an approval to a new presence. If the station or agent dies, that approval cannot be restored; ordinary recovery settles the turn. A listed Interface call without a received handoff cannot be executed from its snapshot. Listing is not a wake-up signal for a stopped service.
 - **Posts during a turn — confirmed for Interface tools.** A frontend handoff ends the exchange; it cannot acknowledge a post and continue that step. A server tool can. A plugin can also emit a gated custom event, but that is a live notification, not a committed, acknowledged post. The desk authenticates each tool service separately and stores posts by session and call ID.
-- **Traces across agents — confirmed for hand-off links, not for propagation in general.** At a local OTLP/HTTP receiver, the triage and verifier `invoke_agent` spans had the desk event's trace ID. Neither had a link to the other agent's `hand_off` call. The host carried its own event parent across the queue; [telemetry v1](../../docs/telemetry.md#what-later-versions-add) does not do this for it. The Rust `ma` invocation arrived on a different trace: network parents require operator trust, and `ma`'s actor policy exposes `clientId` but no trace-trust option. Authentication alone is not trace trust.
+- **One trace across agents — resolved.** The coder's [policy entry](../../docs/reference/standard-configuration.md#connection-policy-and-limits) sets `traceTrusted: true` for the desk. The receiver sees triage, coder and verifier in the event's trace. The host still carries the parent across the queue. [Telemetry v1](../../docs/telemetry.md#what-later-versions-add) does not add a span link from a receiving turn to the previous agent's `hand_off` call.
 
 Additional findings:
 
@@ -123,7 +123,7 @@ Phoenix reported the following usage on the `chat` spans, selected by the three 
 | Verifier · `chatgpt/gpt-6.1-sol` | 4 | 1,444 / 73 | 4 | 1,504 / 73 |
 | **Total** | **9** | **18,474 / 656** | **10** | **23,207 / 797** |
 
-Triage and the verifier shared the event trace in both runs. The coder still had a different trace, as in the scripted check. Counting only the event trace would omit the most expensive turn.
+Triage and the verifier shared the event trace in both runs. Both runs predate the coder's trace trust policy. Their event traces omit the coder turn.
 
 ## Plan
 

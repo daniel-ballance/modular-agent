@@ -18,7 +18,10 @@ func (s *server) workTrace(ctx context.Context, meta map[string]json.RawMessage)
 	return telemetry.Extract(ctx, &telemetry.Wire{Parent: parent})
 }
 
-func traceMeta(ctx context.Context, meta map[string]json.RawMessage) map[string]json.RawMessage {
+func (s *server) traceMeta(ctx context.Context, meta map[string]json.RawMessage) map[string]json.RawMessage {
+	if s.principal == nil || !s.principal.TrustTrace {
+		return meta
+	}
 	if w := telemetry.Inject(ctx); w != nil {
 		if meta == nil {
 			meta = make(map[string]json.RawMessage)

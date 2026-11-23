@@ -25,7 +25,9 @@ function list<T>(value: unknown, valid: (item: unknown) => item is T, name: stri
 }
 
 async function principal(value: unknown, name: string, network = false) {
-  const config = object(value, ["actor", "tenants", "projects", "represents", ...(network ? ["tokenFile", "clientId"] : [])], name);
+  const config = object(value, ["actor", "tenants", "projects", "represents", "traceTrusted", ...(network ? ["tokenFile", "clientId"] : [])], name);
+  const { traceTrusted = !network } = config;
+  if (typeof traceTrusted !== "boolean") throw new Error(`${name}.traceTrusted must be a boolean`);
   const actor = object(config.actor, ["id", "kind", "rights"], `${name}.actor`);
   if (!id(actor.id) || !["host", "user", "agent", "program"].includes(String(actor.kind))) throw new Error(`Invalid ${name}.actor identity`);
   const allowed = list(actor.rights, (r): r is Actor["rights"][number] => rights.has(r), `${name}.actor.rights`);
@@ -35,7 +37,7 @@ async function principal(value: unknown, name: string, network = false) {
   const projects = list(config.projects, (item): item is string => id(item) && isAbsolute(item), `${name}.projects`);
   const tenants = list(config.tenants, (item): item is string | null => item === null || id(item), `${name}.tenants`);
   return {
-    actor: { id: actor.id, kind: actor.kind as Actor["kind"], rights: allowed }, tenants, represents,
+    actor: { id: actor.id, kind: actor.kind as Actor["kind"], rights: allowed }, tenants, represents, traceTrusted,
     projects: projects && await Promise.all(projects.map(async path => {
       try {
         const canonical = await realpath(path);

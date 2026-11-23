@@ -72,6 +72,7 @@ async fn acp_tokens_bind_independent_principals_and_scopes() {
         .unwrap();
     let allowed = AcpActor {
         token_file: editor.clone(),
+        trust_trace_context: false,
         actor: Actor {
             id: "editor".into(),
             kind: "user".into(),
@@ -83,6 +84,7 @@ async fn acp_tokens_bind_independent_principals_and_scopes() {
     };
     let denied = AcpActor {
         token_file: observer.clone(),
+        trust_trace_context: false,
         actor: Actor {
             id: "observer".into(),
             kind: "program".into(),
@@ -158,6 +160,7 @@ async fn acp_watch_token_caps_recorded_grants_without_rewriting_them() -> modula
             AcpServiceOptions {
                 actors: vec![AcpActor {
                     token_file: bearer.clone(),
+                    trust_trace_context: false,
                     actor: Actor {
                         id: "observer".into(),
                         kind: "user".into(),

@@ -12,7 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory, mkdtemp
 from urllib.error import HTTPError
@@ -130,6 +130,28 @@ def stop(proc):
 
 
 @contextmanager
+def check_traces():
+    with subprocess.Popen(['node', DEMO / 'scripts/trace-receiver.mjs'], stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE, text=True) as proc:
+        try:
+            endpoint = proc.stdout.readline().strip()
+            check(endpoint.startswith('http://127.0.0.1:'), 'trace receiver did not start on loopback')
+            yield endpoint
+            # The desk and its agents have stopped and flushed their exporters.
+            out, _ = proc.communicate(timeout=10)
+            check(proc.returncode == 0, 'trace receiver failed')
+            result = json.loads(out)
+            events, invocations = result['events'], result['invocations']
+            check(len(events) == 1 and len(events[0]) == 32 and int(events[0], 16), 'expected one desk.event trace')
+            check({s['service'] for s in invocations} == {'desk-triage', 'desk-coder', 'desk-verifier'},
+                  f'missing agent invocation: {invocations}')
+            for span in invocations:
+                check(span['trace'] == events[0], f"{span['service']} used trace {span['trace']}, expected {events[0]}")
+        finally:
+            stop(proc)
+
+
+@contextmanager
 def station(env, cwd, log):
     side = subprocess.Popen(['setpriv', '--pdeathsig', 'KILL', '--', 'node', HOST.with_name('station.js')],
                             env=env, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -142,11 +164,13 @@ def station(env, cwd, log):
 
 
 @contextmanager
-def start(temp, case):
+def start(temp, case, trace_endpoint=None):
     root = temp / 'desk'
     env = {'HOME': str(temp), 'PATH': os.environ['PATH'], 'TMPDIR': os.environ['TMPDIR'],
            'DESK_DATA': str(root), 'DESK_PORT': '0', 'DESK_IDLE_MS': '500',
            'DESK_APPROVAL_MS': '800' if case == 'refusal' else '180000'}
+    if trace_endpoint:
+        env['OTEL_EXPORTER_OTLP_ENDPOINT'] = trace_endpoint
     if case == 'live':
         env.update(live_environment())
     if case == 'restart':
@@ -396,8 +420,9 @@ def main():
         return
     for case in [args.only] if args.only else CASES:
         with TemporaryDirectory(prefix=f'ops-desk-{case}-', dir=temp) as directory:
-            with start(Path(directory), case) as desk:
-                run(desk, case)
+            with check_traces() if case == 'happy' else nullcontext() as endpoint:
+                with start(Path(directory), case, endpoint) as desk:
+                    run(desk, case)
         print(f'PASS {case}', flush=True)
 
 

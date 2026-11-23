@@ -46,6 +46,8 @@ pub trait AcpComposition: Send + Sync + 'static {
 #[derive(Clone, Default)]
 pub struct AcpOptions {
     pub compose: Option<Arc<dyn AcpComposition>>,
+    /// Trust the launching stdio peer unless explicitly disabled.
+    pub trust_trace_context: Option<bool>,
     pub actor: Option<crate::Actor>,
     pub projects: Option<Vec<std::path::PathBuf>>,
     pub tenants: Option<Vec<Option<String>>>,
@@ -58,6 +60,7 @@ impl AcpOptions {
         let mut identity = interface_acp::Identity::local();
         identity.projects = validate_scope(self.projects.clone(), &self.tenants, &self.represents)?;
         identity.tenants = self.tenants.clone();
+        identity.trust_trace_context = self.trust_trace_context;
         identity.represents = self.represents.clone();
         if let Some(actor) = self.actor.clone() {
             validate_actor(&actor)?;
@@ -82,6 +85,7 @@ impl AcpOptions {
 #[derive(Clone, Debug)]
 pub struct AcpActor {
     pub token_file: std::path::PathBuf,
+    pub trust_trace_context: bool,
     pub actor: crate::Actor,
     pub tenants: Option<Vec<Option<String>>>,
     pub projects: Option<Vec<std::path::PathBuf>>,
@@ -99,6 +103,7 @@ impl AcpActor {
     pub fn local(token_file: std::path::PathBuf) -> Self {
         Self {
             token_file,
+            trust_trace_context: false,
             actor: crate::Actor {
                 id: base::ACP_HOST_ACTOR.into(),
                 kind: "host".into(),
@@ -354,6 +359,7 @@ impl Agent {
                     explicit_rights: true,
                     join_on_open,
                     network: true,
+                    trust_trace_context: Some(token.trust_trace_context),
                 },
             ));
         }

@@ -194,5 +194,6 @@ fn identity(mut p: Principal) -> Result<Identity> {
         explicit_rights: true,
         join_on_open: true,
         network: false,
+        trust_trace_context: None,
     })
 }

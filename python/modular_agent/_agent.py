@@ -779,6 +779,7 @@ class Agent:
         rights: Sequence[str] | None = None,
         represents: Sequence[str] | None = None,
         actor: Actor | None = None,
+        trace_trusted: bool = True,
         resume_open: ResumeOpen | None = None,
     ) -> None: ...
 
@@ -811,6 +812,7 @@ class Agent:
         rights: Sequence[str] | None = None,
         represents: Sequence[str] | None = None,
         actor: Actor | None = None,
+        trace_trusted: bool = True,
         resume_open: ResumeOpen | None = None,
     ) -> WebSocketServer | None:
         """Serve ACP on stdio or start an authenticated WebSocket listener."""
@@ -823,7 +825,9 @@ class Agent:
             )
             if value is not None
         }
-        if listen is not None and (options or rights is not None or actor is not None):
+        if listen is not None and (
+            options or rights is not None or actor is not None or not trace_trusted
+        ):
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "Set network ACP scope on each token")
         stdio_scope = _acp_scope(options)
         stdio_rights = _acp_rights(rights) if rights is not None else None
@@ -888,6 +892,7 @@ class Agent:
                 scope=stdio_scope,
                 rights=stdio_rights,
                 stdio_actor=stdio_actor,
+                stdio_trace_trusted=trace_trusted,
             )
             await self._h.load(interface)
             await resume_sessions(self, resume_open, compose_reopen, project_mcp)

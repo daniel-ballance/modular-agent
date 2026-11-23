@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 from threading import Thread
 
@@ -13,6 +14,15 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTrace
 import pytest
 
 from ma_standard import telemetry
+
+
+@pytest.mark.loopback
+def test_trace_trust_on_work_requests():
+    driver = Path(__file__).resolve().parents[2] / "conformance/reference/run.mjs"
+    subprocess.run(
+        ["node", driver, "--only", "trace-trust", "--", Path(sys.executable).with_name("ma")],
+        check=True,
+    )
 
 
 @pytest.mark.parametrize("disabled", [False, True])

@@ -38,8 +38,10 @@ test('one listener owns a store; a replacement keeps the route, thread and input
 test('only the named agents can queue work; replay and failed verdicts have bounds', () => {
   const s = new Store(':memory:');
   try {
-    s.receive('evt', 'issue-opened', 'bad limit', null);
+    const parent = '00-302d57594ad64dcb934ef7efebee37fc-d0fa6719b3bf2017-01';
+    s.receive('evt', 'issue-opened', 'bad limit', parent);
     const triage = s.next('triage');
+    assert.equal(triage.parent, parent);
     assert.throws(() => s.handOff(triage, 'verifier', 'skip review', 'seed'));
     s.handOff(triage, 'coder', 'fix limit', 'seed');
     s.handOff(triage, 'coder', 'duplicate', 'seed');
@@ -47,10 +49,12 @@ test('only the named agents can queue work; replay and failed verdicts have boun
     for (let i = 0; i < 3; i++) {
       const coder = s.next('coder');
       assert.equal(coder.attempt, i);
+      assert.equal(coder.parent, parent);
       s.handOff(coder, 'verifier', 'run tests', revision);
       s.finish(coder, 'done');
       const verifier = s.next('verifier');
       assert.equal(verifier.revision, revision);
+      assert.equal(verifier.parent, parent);
       assert.throws(() => s.handOff(verifier, 'coder', 'wrong source', revision));
       assert.throws(() => s.post(verifier, 't', 'change', 'wrong kind'));
       s.post(verifier, 't', 'verdict', 'FAIL: test failed');

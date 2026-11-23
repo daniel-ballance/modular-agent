@@ -37,6 +37,8 @@ export class Agui {
   }
   private async request(path: string, parent: string | null, init: RequestInit = {}) {
     const span = operation('desk.agui', parent);
+    // The station can hold presence without installing its own exporter.
+    const traceparent = span.header ?? parent;
     try {
       const res = await fetch(this.origin + '/agui/v1' + path, {
         ...init,
@@ -44,7 +46,7 @@ export class Agui {
         signal: init.signal ?? this.signal,
         headers: {
           Authorization: 'Bearer ' + this.token,
-          ...(span.header ? { traceparent: span.header } : {}),
+          ...(traceparent ? { traceparent } : {}),
           ...init.headers
         }
       });
@@ -62,11 +64,11 @@ export class Agui {
     if (d.binding !== 'modular-agent-agui/1' || d.protocolVersion !== '1.0')
       throw Error('Unsupported AG-UI binding');
   }
-  async *threads(): AsyncGenerator<Listed> {
+  async *threads(parent: string | null): AsyncGenerator<Listed> {
     let after: string | undefined;
     do {
       const path = '/threads' + (after ? '?after=' + encodeURIComponent(after) : '');
-      const page = await (await this.request(path, null)).json();
+      const page = await (await this.request(path, parent)).json();
       for (const row of page.threads) yield row;
       after = page.next;
     } while (after);

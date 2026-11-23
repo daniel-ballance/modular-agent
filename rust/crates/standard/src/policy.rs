@@ -16,6 +16,8 @@ pub struct Policy {
 struct NetworkPrincipal {
     token_file: PathBuf,
     client_id: Option<String>,
+    #[serde(default, deserialize_with = "trace_trust")]
+    trace_trusted: bool,
     actor: PolicyActor,
     tenants: Option<Vec<Option<String>>>,
     projects: Option<Vec<PathBuf>>,
@@ -26,6 +28,12 @@ struct NetworkPrincipal {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Principal {
+    #[serde(
+        rename = "traceTrusted",
+        default = "trusted_stdio",
+        deserialize_with = "trace_trust"
+    )]
+    trace_trusted: bool,
     actor: PolicyActor,
     tenants: Option<Vec<Option<String>>>,
     projects: Option<Vec<PathBuf>>,
@@ -39,6 +47,14 @@ struct PolicyActor {
     id: String,
     kind: String,
     rights: Vec<String>,
+}
+
+fn trace_trust<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    bool::deserialize(d).map_err(|_| serde::de::Error::custom("traceTrusted must be a boolean"))
+}
+
+fn trusted_stdio() -> bool {
+    true
 }
 
 impl PolicyActor {
@@ -163,6 +179,7 @@ impl Policy {
         match self.stdio.take() {
             Some(p) => AcpOptions {
                 actor: Some(p.actor.into_actor()),
+                trust_trace_context: Some(p.trace_trusted),
                 tenants: p.tenants,
                 projects: p.projects,
                 ..Default::default()
@@ -197,6 +214,7 @@ impl Policy {
                 .into_iter()
                 .map(|p| AcpActor {
                     token_file: p.token_file,
+                    trust_trace_context: p.trace_trusted,
                     actor: p.actor.into_actor(),
                     tenants: p.tenants,
                     projects: p.projects,

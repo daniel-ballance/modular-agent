@@ -32,10 +32,10 @@ impl AguiActor {
     pub fn new(client_id: impl Into<String>, principal: AcpActor) -> Self {
         let join_on_open = principal.actor.id == base::ACP_HOST_ACTOR;
         Self {
+            trust_trace_context: principal.trust_trace_context,
             principal,
             client_id: client_id.into(),
             join_on_open,
-            trust_trace_context: false,
             trace_state_keys: vec![],
         }
     }
@@ -250,7 +250,7 @@ impl Agent {
                 let mut response=if req.method()==Method::OPTIONS && origin.is_some() {reply(204,"text/plain",Body::empty())} else if let Some(actor)=actor {
                     if req.uri().path()=="/" && let Some((compose,routes,open))=acp {
                         let p=&actor.principal;
-                        let identity=interface_acp::Identity{id:p.actor.id.clone(),kind:p.actor.kind.clone(),rights:p.actor.rights.clone(),tenants:p.tenants.clone(),projects:p.projects.clone(),represents:p.represents.clone(),explicit_rights:true,join_on_open:actor.join_on_open,network:true};
+                        let identity=interface_acp::Identity{id:p.actor.id.clone(),kind:p.actor.kind.clone(),rights:p.actor.rights.clone(),tenants:p.tenants.clone(),projects:p.projects.clone(),represents:p.represents.clone(),explicit_rights:true,join_on_open:actor.join_on_open,network:true,trust_trace_context:Some(actor.trust_trace_context)};
                         let factory=service.agent.connection_factory(compose,routes);
                         return upgrade.acp(req,move |conn| async move { let _=interface_acp::run_websocket(factory,identity,conn,open).await; }).unwrap_or_else(||Fail::Invalid.response());
                     }

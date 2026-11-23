@@ -16,7 +16,7 @@ This directory contains the TypeScript base, the public SDK, and [`ma`](packages
 
 ## Build and check
 
-Tested with Node.js 26. The kit tests need the ACP kit's dependencies: run `npm ci` in `../conformance/acp` first.
+Tested with Node.js 26. The tests need the ACP kit and the OTLP receiver. Run `npm ci` in `../conformance/acp` and `../conformance/telemetry` first.
 
 ```sh
 npm ci

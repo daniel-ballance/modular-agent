@@ -79,7 +79,7 @@ export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 python3 demos/ops-desk/run.py --serve
 ```
 
-Send an event, then open `http://127.0.0.1:6006`. The desk and all three agents export metadata, not the file or the event payload. The triage and verifier turns share the desk event's trace. Stock Rust `ma` exports the coder turn on a separate trace; match `gen_ai.conversation.id` to the coder snapshot's `threadId`. [Findings](DESIGN.md#findings) explains why. Stop the host, then run `scripts/phoenix.sh stop`. Phoenix is not needed for the checks.
+Send an event, then open `http://127.0.0.1:6006`. The desk and all three agents export metadata, not the file or the event payload. Open the `desk.event` trace to see the triage, coder and verifier turns together. Match each `invoke_agent` span's `gen_ai.conversation.id` to the agent's `threadId`. The coder trusts the desk token because its policy sets `traceTrusted: true`. Other tokens do not inherit that trust. Stop the host, then run `scripts/phoenix.sh stop`. The scripted happy-path check compares all three trace IDs with the event's ID at a disposable loopback OTLP receiver. It does not need Phoenix.
 
 ## Where to look
 

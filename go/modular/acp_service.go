@@ -95,7 +95,7 @@ func (a *Agent) ListenACP(ctx context.Context, opt ServeACPOptions) (*Service, e
 	if opt.Listen == "" || opt.Input != nil || opt.Output != nil {
 		return nil, &Error{Code: InvalidParams, Message: "ACP service requires Listen and no stdio streams"}
 	}
-	if opt.Projects != nil || opt.Tenants != nil || opt.Rights != nil || opt.Represents != nil || opt.StdioActor != nil {
+	if opt.Projects != nil || opt.Tenants != nil || opt.Rights != nil || opt.Represents != nil || opt.StdioActor != nil || opt.StdioTrustTrace != nil {
 		return nil, &Error{Code: InvalidComposition, Message: "WebSocket scope belongs to each ACP actor"}
 	}
 	iface, err := a.acpInterface()

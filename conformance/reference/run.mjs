@@ -362,6 +362,15 @@ const checks = [
     },
   },
   {
+    name: "trace-trust",
+    about: "ma continues work in the supplied trace only for a trace-trusted connection.",
+    script: Array.from({ length: 6 }, () => ({ text: "Hello." })),
+    async run(command, invoke, skip, t) {
+      const { checkTraceTrust } = await import("./trace-trust.mjs");
+      await checkTraceTrust(command, t, environment(t), invoke);
+    },
+  },
+  {
     name: "version",
     about: "ma --version names the implementation's language.",
     script: [],
