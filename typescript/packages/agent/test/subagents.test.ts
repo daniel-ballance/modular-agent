@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter, once } from "node:events";
 import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,18 +46,27 @@ async function settle(h: Harness, s: string) {
 	}
 }
 
-test("a background subagent: its result arrives as a job report and wakes the parent", async () => {
+test("a background subagent: its result arrives as a job report and wakes the parent", { timeout: 30_000 }, async t => {
 	const h = await agent(dirs(), router(() => fauxAssistantMessage([fauxText("one two three")]), { task: "count to three", label: "counter" }), [subagents()]);
+	t.after(() => h.stop());
 	const api = h.api("t");
 	const s = await api.startSession();
-	await api.input(s, { content: "please delegate", actorId: "user" });
-	await settle(h, s);
+	// Becoming idle after delegation says nothing about when the job will report.
+	const events = new EventEmitter();
+	let turns = 0;
+	const stop = api.follow(s, { recipient: "t", raw: true }, e => {
+		if (e.type === "turn.ended" && ++turns === 2) events.emit("reportTurnEnded");
+	});
+	t.after(stop);
+	await Promise.all([
+		once(events, "reportTurnEnded", { signal: t.signal }),
+		api.input(s, { content: "please delegate", actorId: "user" }),
+	]);
 	const report = api.history(s).find((e) => e.kind === "input" && e.jobId);
 	assert.ok(report, "the job reported back");
 	assert.match(lastText(h, s), /Parent got: Subagent "counter" completed\. one two three/);
 	const child = (api.history(s).find((e) => e.kind === "jobStarted")!.data as { detail: { childSessionId: string } }).detail.childSessionId;
 	assert.notEqual(child, s);
-	await h.stop();
 });
 
 test("a subagent with wait returns its answer in the call", async () => {
