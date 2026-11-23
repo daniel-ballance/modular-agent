@@ -7,6 +7,21 @@ import (
 
 type connectionRightsKey struct{}
 
+type inputWatermarkKey struct{}
+type inputWatermark struct {
+	session, position string
+	entries           int
+}
+
+// WithInputWatermark fences input whose admission depends on a reconciled history view.
+func WithInputWatermark(ctx context.Context, session, position string, entries int) context.Context {
+	return context.WithValue(ctx, inputWatermarkKey{}, inputWatermark{session, position, entries})
+}
+func InputWatermarkMatches(ctx context.Context, s Session) bool {
+	w, ok := ctx.Value(inputWatermarkKey{}).(inputWatermark)
+	return !ok || w == (inputWatermark{s.ID, s.Position, len(s.Entries)})
+}
+
 // A nil ceiling is unrestricted; a non-nil empty ceiling grants nothing.
 func WithConnectionRights(ctx context.Context, rights *[]string) context.Context {
 	return context.WithValue(ctx, connectionRightsKey{}, rights)

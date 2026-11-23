@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
@@ -17,6 +18,8 @@ func assistantID(step string) string { return "ma:assistant:" + step }
 func toolID(id string) string        { return "ma:tool:" + id }
 
 type agHistory struct {
+	position string
+	entries  int
 	messages []agObject
 	starts   map[string]api.Call
 	results  map[string]agObject
@@ -33,6 +36,7 @@ func (q *agRequest) history(beforeStepsOf ...string) (h agHistory, err error) {
 	if err != nil {
 		return h, err
 	}
+	h.position, h.entries = snap.Position, len(snap.Entries)
 	branch := snap.Branch()
 	if len(beforeStepsOf) > 0 {
 		for i, e := range branch {
@@ -224,9 +228,9 @@ func (q *agRequest) waitingQuestions() (map[string]agQuestion, error) {
 		}
 		d, ok := s.delivered[v.ID]
 		if ok && d.presence != nil && (s.presence != d.presence || d.presence.ctx.Err() != nil) {
-			continue
+			ok = false
 		}
-		if !ok {
+		if v.Defer || !ok {
 			if !v.Defer || v.Kind == "approval" {
 				continue
 			}
@@ -241,7 +245,9 @@ func (q *agRequest) waitingQuestions() (map[string]agQuestion, error) {
 					break
 				}
 			}
-			if !ended {
+			if ended {
+				d.presence = nil
+			} else if !ok {
 				continue
 			}
 		}
@@ -271,6 +277,9 @@ func agInterrupt(v api.Question) agObject {
 	switch v.Kind {
 	case "approval":
 		m["toolCallId"] = v.Call
+		if c := v.ApprovalCall; c != nil && (!strings.Contains(v.Prompt, c.Name) || !strings.Contains(v.Prompt, string(c.Input))) {
+			m["message"] = v.Prompt + " " + c.Name + " " + string(c.Input)
+		}
 		m["responseSchema"] = agObject{"type": "object", "properties": agObject{"allow": agObject{"type": "boolean"}}, "required": []string{"allow"}}
 	case "choice":
 		m["responseSchema"] = agObject{"type": "string", "enum": v.Options}
@@ -327,6 +336,15 @@ func (q *agRequest) snapshotHTTP() error {
 	}
 	if err = q.fresh(h.epoch); err != nil {
 		return err
+	}
+	// Waiting status and messages were read separately. Do not offer a cursor if
+	// either side of the snapshot crossed a commit while the gate was running.
+	snap, err := q.a.a.Snapshot(q.id)
+	if err != nil {
+		return err
+	}
+	if snap.Position != h.position || len(snap.Entries) != h.entries {
+		return stale
 	}
 	q.w.Header().Set("Content-Type", "application/json")
 	if n, err := q.w.Write(b); err == nil && n == len(b) {

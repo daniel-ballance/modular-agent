@@ -41,7 +41,7 @@ func (s *server) unlink(id string) bool {
 		return false
 	}
 	delete(s.shared.refs, id)
-	return true
+	return s.resources.RetainWriter == nil || !s.resources.RetainWriter(id)
 }
 
 // Principal is the operator's policy for an authenticated ACP connection.

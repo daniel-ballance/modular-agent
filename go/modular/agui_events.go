@@ -121,7 +121,7 @@ func (x *agExchange) project(e api.Event) error {
 			return err
 		}
 		id := api.Decode[api.Question](e.Data).ID
-		if d, ok := open[id]; ok && d.q.Turn == x.turn {
+		if d, ok := open[id]; ok && d.presence != nil && d.q.Turn == x.turn {
 			return x.finish(api.Outcome{Status: "completed"}, []agObject{d.view})
 		}
 	case "turn.end":

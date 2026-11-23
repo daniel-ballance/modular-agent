@@ -49,11 +49,12 @@ type agPrincipal struct {
 	tools  map[string]api.Tool
 }
 type agServer struct {
-	a      *Agent
-	opt    ServeAGUIOptions
-	mu     sync.Mutex
-	states map[[2]string]*agClient
-	openMu sync.Mutex
+	a       *Agent
+	opt     ServeAGUIOptions
+	mu      sync.Mutex
+	states  map[[2]string]*agClient
+	threads map[string]bool // HTTP threads keep their writer when an ACP connection goes away.
+	openMu  sync.Mutex
 }
 type agClient struct {
 	mu        sync.Mutex
@@ -120,7 +121,7 @@ func (a *Agent) serveAGUI(ctx context.Context, opt ServeAGUIOptions, wrap func(h
 		}
 		opt.JoinOnOpen = &singleLocal
 	}
-	srv := &agServer{a: a, opt: opt, states: map[[2]string]*agClient{}}
+	srv := &agServer{a: a, opt: opt, states: map[[2]string]*agClient{}, threads: map[string]bool{}}
 	tokens := map[string]agPrincipal{}
 	clients := map[string]acpinterface.Principal{}
 	for _, e := range opt.Actors {
@@ -167,6 +168,7 @@ func (a *Agent) serveAGUI(ctx context.Context, opt ServeAGUIOptions, wrap func(h
 		}
 		decl, projects := a.acpResources(ServeACPOptions{})
 		projects = acpinterface.ShareCompositions(projects)
+		projects.RetainWriter = func(id string) bool { srv.mu.Lock(); defer srv.mu.Unlock(); return srv.threads[id] }
 		ws = func(ctx context.Context, c *wswire.Conn, p agPrincipal) {
 			c.EnableACPControl(0)
 			_ = iface.ServePrincipal(ctx, c, c, decl, projects, p.Principal)
@@ -319,7 +321,8 @@ func (q *agRequest) attach(id string) error {
 	}
 	q.id = id
 	q.openMu.Lock()
-	defer q.openMu.Unlock()
+	releaseOpen := sync.OnceFunc(q.openMu.Unlock)
+	defer releaseOpen()
 	snap, err := q.a.a.Snapshot(id)
 	if err != nil {
 		if errors.Is(err, api.ErrErasureUnavailable) {
@@ -340,6 +343,7 @@ func (q *agRequest) attach(id string) error {
 		if err := q.host().OpenForHost(q.ctx, id, q.narrowed(snap.Tenant, snap.Limit)); err != nil {
 			return err
 		}
+		releaseOpen() // Other clients may attach and answer while recovery runs.
 		if _, err := q.a.a.Wait(q.ctx, id); err != nil {
 			return err
 		}
@@ -360,6 +364,7 @@ func (q *agRequest) attach(id string) error {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.threads[id] = true
 	key := [2]string{id, q.client}
 	q.state = q.states[key]
 	if q.state == nil {
@@ -372,8 +377,14 @@ func (q *agRequest) attach(id string) error {
 	return nil
 }
 func (q *agRequest) epoch() (int, error) {
-	if q.id != "" && !q.allowed("watch") {
-		return 0, missing
+	if q.id != "" {
+		snap, err := q.a.a.Snapshot(q.id)
+		if err != nil {
+			return 0, err
+		}
+		if !q.scope(snap.Project, snap.Tenant) || !q.allowed("watch") {
+			return 0, missing
+		}
 	}
 	return q.host().ErasureEpoch(q.id)
 }
@@ -456,6 +467,9 @@ func (q *agRequest) serve(r *http.Request) error {
 			return err
 		}
 		q.id = id
+		q.mu.Lock()
+		q.threads[id] = true
+		q.mu.Unlock()
 		if !q.allowed("watch") || !q.allowed("input") {
 			_ = q.a.a.StopSession(id)
 			return denied

@@ -972,6 +972,10 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (receipt a
 		s.mu.Unlock()
 		return api.Receipt{}, err
 	}
+	if !api.InputWatermarkMatches(ctx, s.data) {
+		s.mu.Unlock()
+		return api.Receipt{}, api.ErrInputConflict
+	}
 	if r, ok := duplicate(s.data, in); ok {
 		s.mu.Unlock()
 		return r, nil
@@ -998,6 +1002,9 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (receipt a
 	defer s.mu.Unlock()
 	if !api.SessionScopeAllows(ctx, s.data.Project, s.data.Tenant) || !c.canAdmit(s.data, in) {
 		return api.Receipt{}, api.ErrAuthority
+	}
+	if !api.InputWatermarkMatches(ctx, s.data) {
+		return api.Receipt{}, api.ErrInputConflict
 	}
 	if r, ok := duplicate(s.data, in); ok {
 		return r, nil

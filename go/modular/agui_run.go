@@ -268,7 +268,8 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 		}
 	}
 	if p.user != nil {
-		receipt, err := q.a.a.Submit(q.ctx, q.id, api.Input{Actor: q.Actor.ID, When: "now", Key: p.key, Content: p.user})
+		ctx := api.WithInputWatermark(q.ctx, q.id, h.position, h.entries)
+		receipt, err := q.a.a.Submit(ctx, q.id, api.Input{Actor: q.Actor.ID, When: "now", Key: p.key, Content: p.user})
 		if err != nil {
 			return err
 		}
@@ -453,7 +454,7 @@ func (x *agExchange) offerQuestion(e api.Event) {
 			continue
 		}
 		intended := agInterrupt(v)
-		if !agEqual(intended, agInterrupt(candidate)) {
+		if !agEqual(intended, agInterrupt(candidate)) || v.Kind == "approval" && !agEqual(v.ApprovalCall, candidate.ApprovalCall) {
 			return
 		}
 		if _, err := x.encode("agui.interrupt", intended); err != nil {
@@ -535,7 +536,8 @@ func (x *agExchange) finish(out api.Outcome, interrupts []agObject) error {
 		terminal = agObject{"type": "interrupt", "interrupts": interrupts}
 	} else if out.Status != "completed" {
 		terminal = agObject{"type": "cancelled"}
-	} else if len(out.Open) > 0 {
+	}
+	if out.Status == "completed" && len(out.Open) > 0 {
 		snap, err := x.a.a.Snapshot(x.id)
 		if err != nil {
 			return err
@@ -577,7 +579,7 @@ func (x *agExchange) finish(out api.Outcome, interrupts []agObject) error {
 			calls = append(calls, actual)
 			ids = append(ids, actual.ID)
 		}
-		if len(ids) > 0 {
+		if len(ids) > 0 && len(interrupts) == 0 {
 			terminal["pendingToolCallIds"] = ids
 		}
 	}
@@ -611,6 +613,18 @@ func (x *agExchange) finish(out api.Outcome, interrupts []agObject) error {
 		}
 	}
 	for i, b := range frames {
+		if i == len(frames)-1 && len(interrupts) > 0 {
+			live, err := x.waitingQuestions()
+			if err != nil {
+				return err
+			}
+			for _, v := range interrupts {
+				d, ok := live[agString(v, "id")]
+				if !ok || !agEqual(v, d.view) {
+					return stale
+				}
+			}
+		}
 		if i == len(frames)-1 && len(calls) > 0 {
 			if err = x.conn.connection.ReleaseGroup(x.ctx, x.turn, calls); err != nil {
 				return err
@@ -625,7 +639,7 @@ func (x *agExchange) finish(out api.Outcome, interrupts []agObject) error {
 	}
 	s.cursor, s.digest = cursor, h.digest
 	x.terminal = true
-	x.interrupted = len(interrupts) > 0
+	x.interrupted = len(interrupts) > 0 && len(out.Open) == 0
 	return nil
 }
 func (x *agExchange) toolFrames(c api.Call, h agHistory, result agObject) ([][]byte, error) {
