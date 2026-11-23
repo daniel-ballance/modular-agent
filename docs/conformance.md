@@ -62,7 +62,7 @@ A component claiming a role MUST follow the rules for that side of the connectio
 |---|---|---|
 | [ACP](bindings/acp.md) | Agent | ACP kit, including checks for declared features |
 | [ACP](bindings/acp.md) | Client host | No standalone client kit |
-| [AG-UI](bindings/agui.md) | Agent | No kit yet; see the [planned checks](sdk/testing.md#planned-ag-ui-kit) |
+| [AG-UI](bindings/agui.md) | Agent | [Node kit](../conformance/agui/README.md); self-tested against a fake, pending SDK implementations |
 | [Plugin](bindings/plugin.md) | Plugin | Plugin kit for its registered roles |
 | [Plugin](bindings/plugin.md) | Host | Plugin-host probes driven through the ACP kit where applicable |
 | [WebSocket transport](bindings/websocket.md) | Plugin service, agent service | The plugin and ACP kits in their `--connect` modes |
