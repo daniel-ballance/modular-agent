@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 from pathlib import Path
 
 from ma_plugin.websocket import wait_for_stop
 
-from . import AgentError, ErrorCode, JsonObject, Plugin, Registrar, ToolContext, serve, tool
+from . import AgentError, ErrorCode, JsonObject, Plugin, Registrar, Tool, ToolContext, serve, tool
 
 
 @tool(read_only=True)
@@ -22,13 +23,16 @@ async def tide(harbour: str) -> str:
     return f"High tide at {harbour} is 14:02."
 
 
-@tool
-async def confirm(question: str, cx: ToolContext) -> str:
-    """Ask whether to go ahead."""
-    answer = await cx.ask({"kind": "choice", "question": question, "options": ["yes", "no"]})
-    if answer.kind == "value":
-        return str(answer.value)
-    return "allow" if answer.kind == "allow" else "declined"
+def _confirm(choice: str) -> Tool:
+    @tool
+    async def confirm(question: str, cx: ToolContext) -> str:
+        """Ask whether to go ahead."""
+        answer = await cx.ask({"kind": "choice", "question": question, "options": [choice, "no"]})
+        if answer.kind == "value":
+            return str(answer.value)
+        return "allow" if answer.kind == "allow" else "declined"
+
+    return confirm
 
 
 @tool
@@ -89,12 +93,12 @@ def _gate(payload: JsonObject) -> JsonObject | None:
     return None
 
 
-def fixture(name: str, *, config: JsonObject | None = None) -> Plugin:
+def fixture(name: str, *, config: JsonObject | None = None, choice: str = "yes") -> Plugin:
     match name:
         case "tide":
             return Plugin(name, tools=[tide])
         case "confirm":
-            return Plugin(name, tools=[confirm])
+            return Plugin(name, tools=[_confirm(choice)])
         case "note":
             return Plugin(name, tools=[note])
         case "counter":
@@ -118,7 +122,16 @@ def main() -> None:
     if (args.listen is None) != (args.token_file is None):
         parser.error("--listen and --token-file must be used together")
     if args.listen is None:
-        serve(fixture(args.fixture))
+        plugin = fixture(args.fixture)
+        if endpoint := os.environ.get("MODULAR_AGENT_TELEMETRY_OTLP"):
+            from ._scenario_telemetry import exporter
+            from ._serve import _serve
+
+            accept = os.environ.get("MODULAR_AGENT_TELEMETRY_HANDSHAKE") != "no-acceptance"
+            with exporter(endpoint):
+                asyncio.run(_serve(plugin, trace_context=accept))
+        else:
+            serve(plugin)
         return
 
     async def run() -> None:

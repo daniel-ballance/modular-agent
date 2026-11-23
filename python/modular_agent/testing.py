@@ -127,7 +127,7 @@ async def restart(agent: Agent) -> Agent:
 
 
 class _Options(TypedDict, total=False):
-    agent_name: str
+    agent_name: str | None
     several_actors: bool
     session_limits: bool
     data_dir: str | PathLike[str] | None
