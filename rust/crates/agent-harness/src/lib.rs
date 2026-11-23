@@ -35,6 +35,7 @@ struct OpenSession {
     journal_uncertain: bool,
     environment_work: usize,
     steer_closed: bool,
+    continuation_waiters: BTreeMap<String, Weak<CancellationToken>>,
     cancel: CancellationToken,
 }
 impl Drop for OpenSession {
@@ -72,6 +73,13 @@ type HeldOutput = BTreeMap<(String, String, String), Option<HeldPieces>>;
 
 #[derive(Debug)]
 struct OutputOverflow;
+#[derive(Debug)]
+struct ContinuationRefused;
+impl std::fmt::Display for ContinuationRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("continuation start refused")
+    }
+}
 impl std::fmt::Display for OutputOverflow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("output exceeds the gate or buffer limit")
@@ -376,6 +384,7 @@ impl Harness {
                         journal_uncertain: false,
                         environment_work: 0,
                         steer_closed: false,
+                        continuation_waiters: Default::default(),
                         cancel: CancellationToken::new(),
                     },
                 );
@@ -514,6 +523,7 @@ impl Harness {
                     journal_uncertain: false,
                     environment_work: 0,
                     steer_closed: false,
+                    continuation_waiters: Default::default(),
                     cancel: CancellationToken::new(),
                 },
             );
@@ -705,6 +715,26 @@ impl Harness {
         )
     }
 
+    /// Subscribe before committing a report or answer. This signal carries no
+    /// output and names no other origin.
+    pub fn watch_continuation(&self, id: &str, origin: &str) -> Result<Arc<CancellationToken>> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let open = sessions
+            .get_mut(id)
+            .ok_or_else(|| anyhow!("session not open"))?;
+        open.continuation_waiters
+            .retain(|_, w| w.strong_count() > 0);
+        let slot = open
+            .continuation_waiters
+            .entry(origin.to_owned())
+            .or_default();
+        if let Some(existing) = slot.upgrade() {
+            return Ok(existing);
+        }
+        let signal = Arc::new(CancellationToken::new());
+        *slot = Arc::downgrade(&signal);
+        Ok(signal)
+    }
     pub fn open_session_ids(&self) -> Vec<String> {
         self.sessions.lock().unwrap().keys().cloned().collect()
     }
@@ -1588,6 +1618,7 @@ impl Harness {
         self.check_writer(session)?;
         let result = match result {
             Ok(r) => r,
+            Err(e) if e.is::<ContinuationRefused>() => return Err(e),
             Err(e) => {
                 let mut r = TurnResult {
                     outcome: if cancel.is_cancelled() {
@@ -1847,6 +1878,7 @@ impl Harness {
         if let Some(interface) = interface {
             sources.extend(interface.sources.iter().cloned());
         }
+        let continuation_origin = start["continuesTurnId"].as_str().map(str::to_owned);
         entries.push(Draft::new("turn.start", false, start).copying(sources));
         let mut taken = json!({"text":input.text,"inputId":input_id,"key":input.key,"authority":cap,"context":context});
         if let Some(value) = source.and_then(|s| s.content.as_ref()) {
@@ -1864,7 +1896,27 @@ impl Harness {
             entries.push(Draft::new("input", true, taken).copying(vec![input.id]));
         }
         op.run(async {
-            self.publish(scope, "harness", entries, None, None)?;
+            if let Err(err) = self.publish(scope, "harness", entries, None, None) {
+                if let Some(origin) = continuation_origin
+                    && matches!(
+                        err.downcast_ref::<OperationError>(),
+                        Some(OperationError::Busy(_))
+                    )
+                {
+                    if let Some(signal) = self
+                        .sessions
+                        .lock()
+                        .unwrap()
+                        .get_mut(&scope.session)
+                        .and_then(|s| s.continuation_waiters.remove(&origin))
+                        .and_then(|s| s.upgrade())
+                    {
+                        signal.cancel();
+                    }
+                    return Err(err.context(ContinuationRefused));
+                }
+                return Err(err);
+            }
             if budget_reached {
                 let result = TurnResult {
                     outcome: Outcome::Limit,
@@ -2932,6 +2984,7 @@ impl AgentApi for Harness {
                 journal_uncertain: false,
                 environment_work: 0,
                 steer_closed: false,
+                continuation_waiters: Default::default(),
                 cancel: CancellationToken::new(),
             },
         );

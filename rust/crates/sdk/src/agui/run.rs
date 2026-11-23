@@ -217,6 +217,11 @@ impl Service {
         };
         // Subscribe before making any decision runnable, including a report whose
         // commit wakes a driver on a different Tokio task.
+        let capacity = if let Some(origin) = origin.as_deref().filter(|_| live.is_none()) {
+            self.h().watch_continuation(id, origin)?
+        } else {
+            Arc::new(base::CancellationToken::new())
+        };
         let events = self.agent.inner.hub.events.subscribe();
         let interruption = self.h().writer_interruption(id)?;
         let initial = self.snapshot_pair(&a, id, &c, &d).await?;
@@ -370,6 +375,7 @@ impl Service {
                 }else{tokio::select! {
                     biased;
                     _=ex.interruption.cancelled() => Err(Fail::Lost),
+                    _=capacity.cancelled() => Err(Fail::Busy),
                     event=ex.events.recv() => match event {Ok(e)=>ex.event(e).await,Err(_)=>Err(Fail::Lost)},
                     _=async{driver.as_mut().unwrap().await}, if driver.is_some() => {
                         driver=None;
