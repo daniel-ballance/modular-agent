@@ -684,6 +684,7 @@ export class AcpInterface implements InterfaceCapability {
 			...(scoped.telemetry === 1 ? { telemetry: 1 } : {}),
 			...(d.confinesFiles === undefined ? {} : { confinesFiles: bool("confinesFiles") }),
 			...(d.nestedToolCalls === undefined ? {} : { nestedToolCalls: bool("nestedToolCalls") }),
+			...(scoped.interfaceTools === true ? { interfaceTools: true } : {}),
 			...(d.resourceReservations === undefined ? {} : { resourceReservations: d.resourceReservations }),
 		};
 	}

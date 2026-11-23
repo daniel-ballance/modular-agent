@@ -9,6 +9,8 @@ export { advanceSecretSlot, secretStaging, withCredentialLock } from "@modular-a
 export type * from "./parts.js";
 export type { ReservationOptions, ReservationLimits, ReservationDeclaration } from "@modular-agent/harness";
 export { Session } from "./session.js";
+export type { InterfaceToolSource, InterfaceToolConnection, InterfaceToolHandoff, InterfaceToolReceipt, InterfaceToolReport } from "@modular-agent/harness";
+export type { InterfaceToolConnectionOptions } from "./agent.js";
 export type { Event, EventData, PromptOptions, PromptResult, Proposal, ToolResult } from "./session.js";
 export { AgentError } from "./errors.js";
 export type { ErrorCode } from "./errors.js";

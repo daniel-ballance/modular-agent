@@ -1,5 +1,7 @@
 import { type ContentPart, type HistoryEntry, type InterruptedTurn, type ModelMessage, type ResumedStep, type ToolCall, isToolCall, text } from "./types.js";
 
+import { INTERFACE_HANDOFF } from "./interface-tools.js";
+
 /** Restore the last real answer and prove whether its gate committed. */
 export function restoreAnsweredStep(branch: HistoryEntry[], turnId: string, kept = branch): { lastStep: ResumedStep; response: HistoryEntry } | undefined {
 	const attempts = new Map(branch.filter((e) => e.kind === "modelRequest" && e.turnId === turnId).map((e) => [e.stepId, e]));
@@ -45,7 +47,7 @@ export function interruptedCalls(history: HistoryEntry[], turnId: string): Inter
 /** Committed calls left open by this turn, in their original call order. */
 export function pendingToolCalls(branch: HistoryEntry[], turnId: string, kept = branch): string[] {
 	const terminal = new Set(kept.filter((e) => e.kind === "toolResult").map((e) => e.toolCallId));
-	const pending = new Set(branch.flatMap((e) => e.kind === "toolPending" && e.turnId === turnId &&
+	const pending = new Set(branch.flatMap((e) => (e.kind === "toolPending" || e.kind === INTERFACE_HANDOFF) && e.turnId === turnId &&
 		!e.erased && e.toolCallId && !terminal.has(e.toolCallId) ? [e.toolCallId] : []));
 	if (!pending.size) return [];
 	const ordered: string[] = [];

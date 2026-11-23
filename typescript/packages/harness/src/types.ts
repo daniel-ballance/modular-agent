@@ -440,7 +440,7 @@ export interface TurnSettings { maxSteps?: number; reasoning?: string; maxOutput
 export interface TurnInput {
 	sessionId: string;
 	turnId: string;
-	startedBy: { kind: "actor" | "job" | "plugin" | "answer"; id: string };
+	startedBy: { kind: "actor" | "job" | "plugin" | "answer" | "toolResult"; id: string };
 	model: ModelAccess;
 	settings: TurnSettings;
 	resultShape?: Record<string, unknown>;

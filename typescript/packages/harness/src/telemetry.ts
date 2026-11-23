@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { context, isSpanContextValid, metrics, ROOT_CONTEXT, SpanKind, SpanStatusCode, trace,
 	type Attributes, type Context, type Span, type SpanContext } from "@opentelemetry/api";
 import type { AssistantMessage, HistoryEntry, ToolCall } from "./types.js";
+import { INTERFACE_HANDOFF } from "./interface-tools.js";
 
 export { SpanKind };
 export interface TraceContext { traceparent: string }
@@ -107,7 +108,7 @@ export function toolAttributes(call: Pick<ToolCall, "id" | "name" | "startedBy" 
 }
 
 export function historyForPeer(entry: HistoryEntry): HistoryEntry {
-	if (entry.kind === TURN_TRACE) { const { data: _data, ...envelope } = entry; return envelope; }
+	if (entry.kind === TURN_TRACE || entry.kind === INTERFACE_HANDOFF) { const { data: _data, ...envelope } = entry; return envelope; }
 	if (entry.kind !== "turnStart" || !entry.data || typeof entry.data !== "object") return entry;
 	const { traceContext: _traceContext, ...data } = entry.data as Record<string, unknown>;
 	return { ...entry, data };

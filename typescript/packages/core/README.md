@@ -16,6 +16,10 @@ try {
 
 ## What is checked
 
+The Interface tool tests use the public SDK with embedded and served Runtimes. They check exact offers, denied approval, output withholding, delayed release, reconnect, racing reports, early reports, expiry before and after turn end, checked results, cancellation, erasure, branch and close guards, and metadata-only spans. The crash tests kill the agent process group with `SIGKILL` before or after the originating turn ends and reopen kept or durable history. No Runtime executes the same handoff twice. The existing shared-scenario format has no operations for advertising or reporting through an authenticated executor route, so these tests are TypeScript-only.
+
+The Interface tool change passed all 26 feature tests. The full suite passed 473 tests with 5 skipped in each of the default and `MA_REMOTE` builds. The Claude sidecar passed 51 tests with 1 skipped. The reference checks passed 25/25 and the stdio ACP kit passed 188/188. The WebSocket kits passed 153/153 plugin checks, 14/14 separate-listener checks and 193/193 ACP checks. The project-notes demo passed both the scripted and crash-and-reopen runs.
+
 The telemetry tests use an OpenTelemetry in-memory span exporter and metric reader. They check the span tree, overlapping nested calls, question and refusal events, one measurement per inference, metadata-only export, both plugin handshake omissions, exporter failure, and a `SIGKILL` over durable history. The crash check matches the resumed trace, parent, link and checkpoint against the saved segment. A turn also completes with no registered OpenTelemetry SDK.
 
 The subscription tests use loopback fixtures and the public SDK. They cover both ChatGPT sign-ins and the Grok device sign-in, including polling backoff and rejection of a non-HTTPS address. The request tests run in process and over the plugin binding. They check the shared catalog, headers, output limits, encrypted reasoning replay, refresh under the lock and a refused refresh. The `ma` tests cover both old ids at each accepted entry point. See [the `ma` check results](../ma/README.md#what-is-checked). No live checks ran.
@@ -98,8 +102,31 @@ The SDK adds Ajv 8 (its [2020-12 entry point](https://ajv.js.org/json-schema.htm
 | 16. Reservations | `createAgent({ resourceReservations })` sets finite `session`, `tenant` and `agent` bounds. Each has `inputs`, `calls`, `jobs`, `bufferedBytes`, `storageBytes` and `controlBytes`. `entryBytes`, `batchBytes` and `settlementBytes` bound write and result sizes. `agent.resourceLimits()` reports configured bounds, not occupancy. The count ceilings are included in the declaration. A backed-up admission returns `busy`; a model attempt or call list that does not fit ends the turn at `capacity`. |
 | 17. Pending erasure | `httpHistory(url, tokenFile)` discovers the [pending-erasure registry profile](../../../docs/bindings/history-http.md#pending-erasure-registry-profile-pendingerasure-1). Without version `1` the composition declares `erasure: false`. With it, the agent checks plans before handoff and a later writer completes them under its lease. `Session.erase()` reports confirmed and pending pairs and out-of-reach descriptions. Local history still uses its own SQLite registry. `fileHistory(dir, { pendingErasureDir })` can keep that local registry outside history backups. |
 | 18. ma policy | `ma` reads the default `policy.json` or `--policy FILE` before protected project setup, applies principals and exact scope on both ACP transports, and keeps the one-token shorthand. `ma --declaration` prints operator byte bounds under `limits`. |
-
 | 19. Telemetry | The Harness declares `telemetry: 1` on the agent and session. It records metadata only through `@opentelemetry/api`. Set `createAgent({ agentName })` to a stable, non-sensitive name. The app registers its tracer and meter providers and an async context manager before composition, and owns export and shutdown. The SDK installs none of them. |
+| 20. Interface-run tools | `createAgent({ interfaceTools })` registers model-only sources for configured actors and routes. An embedded Interface attaches to an open session, advertises exact definitions and receives executable calls only after the Harness commits the start and checkpoint. A valid report settles once through `tool.after` and queues a continuation without a new input. Embedded and served Runtimes opt in. ACP projects `interfaceTools: true` when supported but has no executor or reporting methods. The AG-UI adapter is not part of this change. |
+
+### Interface-run tools
+
+Use `agent.connectInterfaceTools(sessionId, { actor, routeId, onHandoff, defer? })` in a trusted embedding binding. Authenticate each connection independently, apply its rights ceiling in `actor.rights`, and check access to the session's project and tenant before attaching. Do not accept an actor or route from a result body. The handle is bound to that session, actor and route. It does not join the actor or grant rights.
+
+- Call `connection.advertise(definitions)` with the exact registered definitions. An empty list clears the advertisement. An advertisement is not authority.
+- `onHandoff({ sessionId, turnId, call, deadline })` is the synchronous delivery boundary, not a queue for later delivery. For a delayed send set `defer: true` and call `connection.release(callId)` when ready; the Harness checks the request again before calling `onHandoff`. Do not execute calls copied from events or history.
+- Call `connection.reportInterfaceToolResult({ callId, status, content, value? })` after the originating turn ends. It returns `{ status: "accepted" }`, `{ status: "alreadySettled" }` or `{ status: "refused", reason?: "notReady" }`. An early report can be sent again after turn end. If result processing fails, the SDK commits a minimal result and raises the processing error. A report does not run a tool or grant authority.
+- Call `connection.disconnect()` when the connection ends. This clears the advertisement without settling the call. A new authenticated connection to the same actor and route may report without advertising, but it cannot receive the executable request again. No reconnect changes the deadline.
+
+#### Proposed specification text
+
+[`docs/sdk/api.md`, The Agent](../../../docs/sdk/api.md#the-agent) names the composition option but omits the protocol-neutral connection and report operation. Add this operation row:
+
+> | `connectInterfaceTools(sessionId, { actor, routeId, onHandoff, defer? })` | a handle for a trusted binding's authenticated executor in an open session. The binding checks project and tenant scope before connecting. The handle does not join an actor or grant rights. |
+
+After the table, add:
+
+> The Interface tool handle supports `advertise(definitions)`, `release(callId)`, `reportInterfaceToolResult(report)` and `disconnect()`. Definitions must exactly match the registered offer; an empty list clears it. Without `defer`, the Harness calls `onHandoff({ sessionId, turnId, call, deadline })` synchronously at delivery. With `defer`, `release(callId)` rechecks permission and returns whether it delivered. A report uses the shared Interface result shape and returns `accepted`, `alreadySettled` or `refused`; `notReady` is a retryable refusal before the originating turn ends. Disconnect clears presence without settling an open call.
+
+[`docs/bindings/plugin.md`, Runtime outcomes](../../../docs/bindings/plugin.md#the-host-asks-the-runtime) does not say how a Runtime can account for expiry after it receives `pending`. After the outcome validation rule, add:
+
+> If the host settles an Interface call after returning `pending`, the Runtime may still list that call in its reply. The host MUST check the list against the dispositions it issued and the terminal results it committed, reject any other mismatch, and omit the settled call from the committed `turnEnd`.
 
 ### Telemetry context
 
