@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, TypedDict
 
 from ma_core.wire import recorded_as
-from ma_harness.interface_tools import branch_entries
+from ma_harness.interface_tools import branch_entries, unfinished_turn
 from ma_questions import eligible_question, question_state
 
 
@@ -36,7 +36,7 @@ def summarize(
 ) -> SessionSummary:
     branch = [e for e in branch_entries(state) if not e.get("fork_source")]
     ended = {e.get("turn") for e in branch if recorded_as(e, "turn_end")}
-    unfinished = any(e["kind"] == "turn_start" and e["turn"] not in ended for e in branch)
+    unfinished = unfinished_turn(branch, ended)
     responders = {actor: rights}
     for represented in represents:
         responders[represented] = rights.intersection(harness.permissions(state, represented))

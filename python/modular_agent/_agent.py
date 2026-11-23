@@ -53,6 +53,7 @@ from ._credentials import CredentialStore, _CredentialAdapter, environment_crede
 from ._environment import LocalEnvironment, MemoryEnvironment
 from ._history import HistoryStore
 from ._listing import SessionSummary, summarize
+from ._resume import ResumeOpen, resume_sessions
 from ._history_port import HistoryPort, _PortHistory
 from ._interface_tools import InterfaceToolConnection, InterfaceToolHandoff, InterfaceToolSource
 from ._runtime_port import _LocalRuntime
@@ -253,6 +254,7 @@ class Agent:
         self._scratch = scratch
         self._test_project: TemporaryDirectory[str] | None = None
         self._sessions: dict[str, Session] = {}
+        self._resumed: dict[str, Agent] = {}
         self._question_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
@@ -659,6 +661,7 @@ class Agent:
         state_snapshot: Callable[[str], Awaitable[JsonObject | None]] | None = None,
         raw_sources: Mapping[str, str] | None = None,
         trace_state_keys: Sequence[str] = (),
+        resume_open: ResumeOpen | None = None,
     ) -> AguiServer:
         """Serve HTTP + SSE for this project, optionally alongside ACP at /."""
         from ._agui import Binding
@@ -684,7 +687,9 @@ class Agent:
             handle = None
             if acp:
                 _, handle = await self._network_acp(binding.actors, None, None, None, None)
-            server = await listen_agui(listen, tls, origins, binding, handle)
+            server = await listen_agui(
+                listen, tls, origins, binding, handle, lambda: resume_sessions(self, resume_open)
+            )
             self._acp_server = server
             return server
 
@@ -763,6 +768,7 @@ class Agent:
         rights: Sequence[str] | None = None,
         represents: Sequence[str] | None = None,
         actor: Actor | None = None,
+        resume_open: ResumeOpen | None = None,
     ) -> None: ...
 
     @overload
@@ -776,6 +782,7 @@ class Agent:
         compose_reopen: Callable[[Path, str], Awaitable[Agent]] | None = None,
         project_settings: Callable[[Path], JsonObject] | None = None,
         project_mcp: Callable[[Path], Sequence[JsonObject]] | None = None,
+        resume_open: ResumeOpen | None = None,
     ) -> WebSocketServer: ...
 
     async def serve_acp(
@@ -793,6 +800,7 @@ class Agent:
         rights: Sequence[str] | None = None,
         represents: Sequence[str] | None = None,
         actor: Actor | None = None,
+        resume_open: ResumeOpen | None = None,
     ) -> WebSocketServer | None:
         """Serve ACP on stdio or start an authenticated WebSocket listener."""
         options = {
@@ -845,9 +853,13 @@ class Agent:
                 principals, handle = await self._network_acp(
                     deepcopy(actors), compose, compose_reopen, project_settings, project_mcp
                 )
+                tokens = [(entry["token_file"], entry) for entry in principals]
+                for filename, _ in tokens:
+                    read_token(filename)
+                await resume_sessions(self, resume_open, compose_reopen, project_mcp)
                 self._acp_server = await listen_websocket(
                     listen,
-                    [(entry["token_file"], entry) for entry in principals],
+                    tokens,
                     ACP_PROTOCOL,
                     handle,
                     tls,
@@ -867,6 +879,7 @@ class Agent:
                 stdio_actor=stdio_actor,
             )
             await self._h.load(interface)
+            await resume_sessions(self, resume_open, compose_reopen, project_mcp)
         try:
             await interface.serve()
         finally:
@@ -917,6 +930,9 @@ class Agent:
                         await session.close()
                     except Exception as exc:
                         failure = failure or exc
+                for owner in self._resumed.values():
+                    await owner.close()
+                self._resumed.clear()
                 await self._h.stop()
             finally:
                 self._closed = True

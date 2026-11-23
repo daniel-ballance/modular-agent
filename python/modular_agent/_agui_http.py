@@ -149,6 +149,7 @@ async def listen_agui(
     origins: Sequence[str],
     binding: Binding,
     upgrade: Callable[[Any, AcpActor], Awaitable[None]] | None,
+    before_listen: Callable[[], Awaitable[None]],
 ) -> AguiServer:
     scheme = "https" if tls else "http"
     addr = urlsplit(listen if "://" in listen else "//" + listen)
@@ -288,4 +289,5 @@ async def listen_agui(
         await asyncio.gather(*running, return_exceptions=True)
         binding.close()
 
+    await before_listen()
     return await listen_asgi(host, addr.port, handle, shutdown, tls)

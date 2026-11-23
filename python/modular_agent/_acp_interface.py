@@ -171,6 +171,13 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
             raise protocol_error("forbidden", "Actor cannot create this session")
         return sorted(rights)
 
+    def _owner(self, sid: str) -> Agent | None:
+        return (
+            self._agents.get(sid)
+            or (self._connections.composition(sid) if self._connections else None)
+            or self._agent._resumed.get(sid)
+        )
+
     async def visible_sessions(self, project: str | None) -> list[dict[str, Any]]:
         canonical = str(Path(project).resolve()) if project is not None else None
         rows = cast(list[dict[str, Any]], await super().visible_sessions(canonical))
@@ -180,10 +187,7 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
             if not self._project_allowed(Path(row["project"])):
                 continue
             sid = row["id"]
-            owner = self._agents.get(sid)
-            if owner is None and self._connections is not None:
-                owner = self._connections.composition(sid)
-            summary = await (owner or agent).session_summary(
+            summary = await (self._owner(sid) or agent).session_summary(
                 sid,
                 actor=self.actor,
                 local=not self.network,
@@ -195,8 +199,7 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         return visible
 
     async def require_visible_session(self, project: str | None, sid: str) -> None:
-        owner = self._connections.composition(sid) if self._connections else None
-        agent = owner or self._agent
+        agent = self._owner(sid) or self._agent
         session = agent._h.sessions.get(sid)
         if session is None:
             session = await self._agent._api.call("history", "read", {"session": sid})
@@ -252,9 +255,7 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
 
     async def select_project(self, project: str, session_id: str | None = None) -> None:
         folder = Path(project)
-        selected = self._agents.get(session_id or "")
-        if selected is None and session_id is not None and self._connections is not None:
-            selected = self._connections.composition(session_id)
+        selected = self._owner(session_id) if session_id is not None else None
         if selected is None:
             if self._compose_reopen is not None and session_id is not None:
                 selected = await self._compose_reopen(folder, session_id)
@@ -274,7 +275,7 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
             try:
                 if first:
                     await selected._install_acp_mcp(self._project_mcp)
-                if self.network:
+                if self.network or selected._h.sessions:
                     await selected._h.attach_interface(_AcpProject(selected, self))
                 else:
                     await selected._h.load(_AcpProject(selected, self))
@@ -394,4 +395,7 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
                 if clients:
                     continue
                 del self._connections.projects[agent]
+            for sid, owner in list(self._agent._resumed.items()):
+                if owner is agent:
+                    del self._agent._resumed[sid]
             await agent.close()

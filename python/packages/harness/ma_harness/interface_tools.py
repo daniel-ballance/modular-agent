@@ -87,6 +87,13 @@ def branch_entries(s):
     return branch[::-1]
 
 
+def unfinished_turn(branch, ended):
+    return any(
+        e["kind"] == "turn_start" and not e.get("fork_source") and e["turn"] not in ended
+        for e in branch
+    )
+
+
 def handoff_fold(entries):
     starts, checkpoints, terminal = {}, {}, {}
     for e in entries:

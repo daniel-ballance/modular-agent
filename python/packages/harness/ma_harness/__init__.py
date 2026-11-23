@@ -9,7 +9,14 @@ from ma_core.wire import provider_projection, recorded_as
 
 from .authority import Authority, PERMISSIONS, read_tenants
 from .erasure import Erasure
-from .interface_tools import HANDOFF, SOURCE, InterfaceTools, branch_entries, handoff_fold
+from .interface_tools import (
+    HANDOFF,
+    SOURCE,
+    InterfaceTools,
+    branch_entries,
+    handoff_fold,
+    unfinished_turn,
+)
 from .output import SEGMENT_BYTES, OutputOverflow, encoded_size, gate, project
 from .reservations import Reservations, size
 
@@ -1283,6 +1290,17 @@ class Harness(Authority, Erasure, InterfaceTools):
             s = await self.call("@harness", "history", "open", d)
             if s is None:
                 raise AgentError("Unknown session", "unknown_session")
+            if d.get("if_interrupted"):
+                # The history list was a read. Another writer could have finished
+                # the turn or revoked access before we acquired this lease.
+                branch = branch_entries(s)
+                ended = {e.get("turn") for e in branch if recorded_as(e, "turn_end")}
+                if not (
+                    self.can_open(s, d["actor"], kind=d.get("actor_kind"))
+                    and unfinished_turn(branch, ended)
+                ):
+                    await self.call("@harness", "history", "close", {"session": sid})
+                    return None
             self.capacity.restore(s)
             s["plugins"] = list(self.plugins)
             s.setdefault("authority", sorted(self.admin & self.tenant))

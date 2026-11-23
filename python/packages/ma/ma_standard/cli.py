@@ -26,6 +26,7 @@ from modular_agent import (
     ProviderContext,
     Question,
     QuestionContext,
+    ResumeOpen,
     Session,
     ModelRef,
     OutcomeKind,
@@ -105,6 +106,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--history", action="store_true")
     parser.add_argument("--declaration", action="store_true")
     parser.add_argument("--acp", action="store_true")
+    parser.add_argument(
+        "--resume-open", action="store_true", help="reopen interrupted service turns at startup"
+    )
     parser.add_argument("--agui", action="store_true", help="serve AG-UI over HTTP and SSE")
     parser.add_argument("--listen", metavar="ADDR", help="agent service loopback address")
     parser.add_argument("--policy", type=Path, metavar="FILE", help="operator policy JSON")
@@ -556,6 +560,23 @@ async def _run(args: argparse.Namespace) -> int:
             old = cast(JsonObject, saved["settings"]).get("model")
             if isinstance(old, dict):
                 saved_model = f"{old['provider']}/{old['id']}"
+    recovery: ResumeOpen | None = None
+    if (args.acp or args.agui) and (paths.resume_open() or args.resume_open):
+        recovery = {
+            "report": lambda sid, status: print(
+                f"resume-open: {status} {sid}", file=sys.stderr, flush=True
+            )
+        }
+        if local := policy.stdio:
+            recovery["actor"] = local["actor"]
+            recovery["projects"] = local.get("projects", [project])
+            recovery["tenants"] = local.get("tenants", [None])
+        elif not args.listen:
+            recovery["actor"] = {
+                "id": os.environ.get("MODULAR_AGENT_ACTOR", "user"),
+                "kind": "host",
+                "rights": list(ACP_RIGHTS),
+            }
     async with await _agent(paths, project, args, saved_model=saved_model) as agent:
         if args.agui:
             principals = policy.actors
@@ -572,7 +593,9 @@ async def _run(args: argparse.Namespace) -> int:
                     }
                 ]
             )
-            service = await agent.serve_agui(listen=args.listen, actors=agui_actors, acp=args.acp)
+            service = await agent.serve_agui(
+                listen=args.listen, actors=agui_actors, acp=args.acp, resume_open=recovery
+            )
             try:
                 print(service.url, flush=True)
                 stop = asyncio.Event()
@@ -614,6 +637,7 @@ async def _run(args: argparse.Namespace) -> int:
                     compose=compose,
                     compose_reopen=reopen,
                     project_mcp=paths.mcp,
+                    resume_open=recovery,
                     **(policy.stdio or {}),
                 )
             else:
@@ -629,6 +653,7 @@ async def _run(args: argparse.Namespace) -> int:
                     compose=compose,
                     compose_reopen=reopen,
                     project_mcp=paths.mcp,
+                    resume_open=recovery,
                 )
                 stop = asyncio.Event()
                 loop = asyncio.get_running_loop()

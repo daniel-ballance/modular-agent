@@ -15,6 +15,7 @@ from ._agent import (
     transient_runtime as transient_runtime,
 )
 from ._acp_policy import AcpPolicy as AcpPolicy
+from ._resume import ResumeOpen as ResumeOpen
 from ._context import CallContext as CallContext, HookContext as HookContext
 from ._credentials import (
     CredentialStore as CredentialStore,
