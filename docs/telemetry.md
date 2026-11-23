@@ -41,11 +41,11 @@ A [Usage](bindings/data.md#messages) keeps `input`, `cacheRead` and `cacheWrite`
 | Attribute | Value |
 |---|---|
 | `gen_ai.usage.input_tokens` | `input + cacheRead + cacheWrite` |
-| `gen_ai.usage.cache_read.input_tokens` | `cacheRead`, when the Provider reports it |
-| `gen_ai.usage.cache_write.input_tokens` | `cacheWrite`, when the Provider reports it |
+| `gen_ai.usage.cache_read.input_tokens` | `cacheRead`, omitted when zero |
+| `gen_ai.usage.cache_write.input_tokens` | `cacheWrite`, omitted when zero |
 | `gen_ai.usage.output_tokens` | `output` |
 
-A Provider that reports no usage leaves all four absent; zeros a sender filled in for missing fields are not reported as counts.
+A reply that carries no `usage` leaves all four absent.
 
 Record `gen_ai.client.inference.duration` in seconds once per model attempt, with the operation, Provider, model when known, and `error.type` on failures. Report known positive token usage with the `gen_ai.client.inference.usage.input_tokens` and `gen_ai.client.inference.usage.output_tokens` counters in `{token}`. Use the reported modality or `unknown`, and billable counts if available. Unknown usage is absent from the counters. Optional per-attempt distributions use `gen_ai.client.inference.operation.input_tokens` and `.output_tokens` with the upstream zero-for-missing-usage rule. Do not also emit the older generic inference metrics. Apply this accounting once at the Harness boundary, independent of trace sampling. Do not count history replay or add the same usage a second time at the turn or plugin boundary. Telemetry is not the usage ledger and does not promise exactly-once delivery across failures.
 
