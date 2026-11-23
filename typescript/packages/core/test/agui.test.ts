@@ -39,6 +39,22 @@ test("an allowlisted browser can preflight without a token; closing the listener
   await listener.close(); assert.equal((await session.prompt("Still open")).text,"one");
 });
 
+test("listing returns only kept threads, with a timestamp and no content", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "agui-list-")); t.after(() => rm(dir, {recursive:true, force:true}));
+  for (const kept of [true, false]) {
+    const {thread, run, request} = await setup(t, kept ? {dataDir:dir, durability:"kept"} : {});
+    const id = await thread();
+    await events(await run(id, [prompt("private message")]));
+    await thread(); // provisional
+    const res = await request("/threads");
+    assert.equal(res.status, 200);
+    const page = await res.json() as { threads: { updatedAt: string }[] };
+    const updatedAt = page.threads[0]?.updatedAt;
+    if (kept) assert.ok(Number.isFinite(Date.parse(updatedAt)));
+    assert.deepEqual(page, { threads: kept ? [{ threadId:id, updatedAt, waiting:{questions:0, toolCalls:0, turn:"none"} }] : [] });
+  }
+});
+
 test("a withheld HTTP snapshot retires its cursor, even if the gate later opens",async t=>{
   let blocked=false;
   const plugin=definePlugin({name:"privacy", hooks:{output:({events})=> {if (blocked && events.some(e=>(e.data as any)?.method==="agui.snapshot")) return "block";}}});

@@ -3,11 +3,11 @@ export { HistoryServiceError, parseHistoryJson, encodeHistoryJson, equalHistoryJ
   type HistoryServiceStore, type HistoryServiceErrorCode, type HistoryReadOptions, type HistoryPage,
   type HistorySessionPage, type HistoryJson, type HistoryJsonObject } from "@modular-agent/services";
 export { MemoryHistory } from "./history.js";
-export type { AgentOptions, Approval, Durability, ProcessPlugin, ServicePlugin, SessionInfo, SessionSummary, SessionOptions, ServeAguiOptions, ServeAcpOptions, ServeAcpServiceOptions, AcpActorToken } from "./agent.js";
+export type { AgentOptions, Approval, Durability, ProcessPlugin, ServicePlugin, SessionInfo, SessionListingOptions, SessionSummary, SessionOptions, ServeAguiOptions, ServeAcpOptions, ServeAcpServiceOptions, AcpActorToken } from "./agent.js";
 export { durableRuntime, transientRuntime, localEnvironment, environmentCredentials, fileCredentials } from "./parts.js";
 export { advanceSecretSlot, secretStaging, withCredentialLock } from "@modular-agent/harness";
 export type * from "./parts.js";
-export type { ReservationOptions, ReservationLimits, ReservationDeclaration } from "@modular-agent/harness";
+export type { WaitingSummary, SessionListing, ReservationOptions, ReservationLimits, ReservationDeclaration } from "@modular-agent/harness";
 export { Session } from "./session.js";
 export type { InterfaceToolSource, InterfaceToolConnection, InterfaceToolHandoff, InterfaceToolReceipt, InterfaceToolReport } from "@modular-agent/harness";
 export type { InterfaceToolConnectionOptions } from "./agent.js";

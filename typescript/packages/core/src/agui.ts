@@ -6,6 +6,7 @@ import type { Actor, Declaration, Harness, HistoryEntry, InputRequest, Interface
 import type { Agent } from "./agent.js";
 import { PATH, body, encode, errorCode, fail, frame, hash, httpError, json, object, parts, runInput, same, sse, type Code, type WireEvent } from "./agui-wire.js";
 import { checkedMessages, current, interrupt, messages, pending, reply, rights, watch, type InterruptView, type Principal } from "./agui-view.js";
+import { ThreadListing } from "./agui-list.js";
 import { Exchange } from "./agui-exchange.js";
 
 export interface AguiProjectionOptions {
@@ -21,6 +22,7 @@ export interface Target { h: Harness; api: PluginApi; agent: Agent; sources: rea
 interface Host extends AguiProjectionOptions {
   principalScope<T>(actor: Actor, work: () => T): T;
   root: Target; project: string; tenant?: string; origins?: readonly string[]; tls?: unknown;
+  owner(id: string): Target;
   locate(p: Principal, id?: string): Promise<Target>; associate(id: string, agent: Agent): void;
 }
 export interface Presence { response: ServerResponse; questions: Set<string>; rejected: Set<string> }
@@ -32,6 +34,7 @@ export interface Client {
 export class AguiBinding {
   clients = new Map<string, Client>();
   streams = new Set<ServerResponse>();
+  readonly listing = new ThreadListing();
   constructor(readonly host: Host) {}
   warn = (key: string) => { if (this.host.onWarning) this.host.onWarning(key); else console.warn(`AG-UI: ${key}`); };
   allowOrigin = (req: IncomingMessage) => {
@@ -53,6 +56,10 @@ export class AguiBinding {
       if (path === PATH && method === "GET") {
         const data = await reply(this.host.root.api, "", p, "discovery", { binding: "modular-agent-agui/1", protocolVersion: "1.0", declaration: this.host.root.agent.declaration() });
         return json(res, 200, data);
+      }
+      if (method === "GET" && path?.split("?", 1)[0] === PATH + "/threads") {
+        const page = await this.listing.page(new URLSearchParams(path.slice((PATH + "/threads?").length)), this, p);
+        return json(res, 200, page);
       }
       if (path === PATH + "/threads" && method === "POST") {
         if (Object.keys(await body(req)).length) fail("invalid_request");

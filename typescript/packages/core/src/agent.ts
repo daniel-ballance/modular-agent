@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { ALL_AUTHORITY, Harness, parseModel, type CredentialStore, type Runtime, type InterfaceToolSource, type InterfaceToolConnection, type InterfaceToolConnectionOptions as HarnessToolConnection, type PluginApi, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider, type ReservationOptions, type ReservationLimits } from "@modular-agent/harness";
+import { ALL_AUTHORITY, Harness, parseModel, type CredentialStore, type Runtime, type ListingViewer, type SessionListing, type InterfaceToolSource, type InterfaceToolConnection, type InterfaceToolConnectionOptions as HarnessToolConnection, type PluginApi, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider, type ReservationOptions, type ReservationLimits } from "@modular-agent/harness";
 import { JsonlHistoryStore } from "@modular-agent/history-jsonl";
 import { localEnvironment } from "@modular-agent/env-local";
 import { contextCompaction } from "@modular-agent/context-compaction";
@@ -106,6 +106,7 @@ export interface ServeAguiOptions extends ServeAcpServiceOptions, AguiProjection
   actors: readonly (AcpActorToken & { clientId: string })[];
   acp?: boolean; tenant?: string; origins?: readonly string[];
 }
+export type SessionListingOptions = Omit<ListingViewer, "actor" | "allowJoin"> & { actor: Actor };
 export interface SessionSummary { id: string; project: string; updated: number; model?: ModelRef; title?: string }
 export interface SessionInfo { id: string; project: string; created: number; updated: number; settings: Settings; tenant?: string }
 const local = { id: "user", kind: "user" as const, authority: ALL_AUTHORITY };
@@ -522,6 +523,13 @@ export class Agent {
       }));
     });
   }
+  /** Inspect committed waits without opening a session, joining an actor or supplying presence. */
+  async sessionListing(id: string, viewer: SessionListingOptions): Promise<SessionListing | undefined> {
+    this.#check();
+    if (!/^[\w-]+$/.test(id)) throw new AgentError("invalid_params", "Invalid session id");
+    const { rights, ...actor } = viewer.actor;
+    return checked(() => this.#api.sessionListing(id, { ...viewer, actor:{...actor, authority:rights}, allowJoin:this.#authority.severalActors }));
+  }
   /** Read saved session metadata without opening it or starting recovery. */
   async sessionInfo(id: string): Promise<SessionInfo> {
     this.#check();
@@ -752,7 +760,7 @@ export class Agent {
           throw new AgentError("invalid_composition", "Invalid browser origin");
         }
         const target = (agent: Agent): Target => ({ h: agent.#h, api: agent.#api, agent, sources: agent.#sources });
-        http = new AguiBinding({ ...agui, root: target(this), project: this.#project, principalScope: (actor, fn) => this.#h.withConnectionActor(actor, fn),
+        http = new AguiBinding({ ...agui, root: target(this), project: this.#project, owner: id => target(sessions.get(id) ?? this), principalScope: (actor, fn) => this.#h.withConnectionActor(actor, fn),
           associate: (id, agent) => sessions.set(id, agent),
           locate: async (p, id) => {
             if (!id && !p.allowProject(this.#project)) fail("not_found");
