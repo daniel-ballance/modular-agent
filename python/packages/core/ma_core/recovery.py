@@ -1,5 +1,7 @@
 """Read the portable step gate checkpoint without relying on private records."""
 
+HANDOFF = "modular-agent.interfaceHandoff"
+
 STEP_AFTER = "modular-agent.stepAfter"
 
 

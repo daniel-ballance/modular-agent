@@ -9,11 +9,12 @@ from ma_core.wire import provider_projection, recorded_as
 
 from .authority import Authority, PERMISSIONS, read_tenants
 from .erasure import Erasure
+from .interface_tools import HANDOFF, InterfaceTools, branch_entries, handoff_fold
 from .output import gate
 from .reservations import Reservations, size
 
 
-class Harness(Authority, Erasure):
+class Harness(Authority, Erasure, InterfaceTools):
     MAX_TOOL_DEPTH = 4
 
     def __init__(
@@ -59,6 +60,7 @@ class Harness(Authority, Erasure):
         self.trace = []
         self.agent_name = agent_name
         self.provider_trace_ids = {}
+        self.init_interface_tools()
         self.define_hook("@harness", "plugin.load", "gate")
         self.define_hook("@harness", "session.prepare", "observe")
         self.define_hook("@harness", "session.join", "observe")
@@ -233,6 +235,7 @@ class Harness(Authority, Erasure):
             self.followers = [f for f in self.followers if f[0] != name]
 
     async def suspend_session(self, sid):
+        self.forget_interface_session(sid)
         self.sessions[sid]["suspending"] = True
         try:
             await self.fire("@harness", "session.suspend", {"session": sid})
@@ -250,6 +253,7 @@ class Harness(Authority, Erasure):
             elif sid in self.sessions:
                 await self.fire("@harness", "session.suspend", {"session": sid})
         for sid in list(self.sessions):
+            self.forget_interface_session(sid)
             if "history" in self.capabilities:
                 await self.call("@harness", "history", "close", {"session": sid})
             del self.sessions[sid]
@@ -350,6 +354,16 @@ class Harness(Authority, Erasure):
             )
             and (target != "runtime" and target != "history")
         )
+        if target == "tools" and operation == "definitions":
+            definitions = await method(data, emit)
+            if self.interface_tools:
+                names = {t["name"] for t in definitions}
+                if names & self.interface_tools.keys():
+                    raise AgentError(
+                        "A tool conflicts with a registered Interface tool", "conflict"
+                    )
+                definitions = [*definitions, *self.interface_definitions(sid, data.get("turn"))]
+            return clone(definitions)
         if target != "tools" or operation != "run" or "call" not in data:
             if effect:
                 return clone(
@@ -364,6 +378,8 @@ class Harness(Authority, Erasure):
                 )
             return clone(await method(data, emit))
         call = data["call"]
+        if call["name"] in self.interface_tools:
+            raise AgentError("Use the Interface handoff boundary", "forbidden")
         if call.get("parentCallId") and (definition := data.get("definition")):
             tools = await self.call("@harness", "tools", "definitions", {"session": sid})
             current = next((t for t in tools if t["name"] == call["name"]), None)
@@ -898,7 +914,8 @@ class Harness(Authority, Erasure):
             "writer": d.get("writer", "plugin"),
             **(
                 {}
-                if d["kind"] == "actor_joined" and d.get("data", {}).get("operatorAdmission")
+                if (d["kind"] == "actor_joined" and d.get("data", {}).get("operatorAdmission"))
+                or ("actor" in d and d["actor"] is None)
                 else {"actor": d.get("actor", s["actor"])}
             ),
             "time": now(),
@@ -939,6 +956,19 @@ class Harness(Authority, Erasure):
                         if kind == "input"
                         else {"job": e["job"], "copies": [e["id"]]}
                     ),
+                }
+            )
+        if handoff := d.get("interface_handoff"):
+            batch.append(
+                {
+                    **{k: e[k] for k in ("session", "time", "writer", "turn", "step", "call")},
+                    "id": identity(),
+                    "parent": e["id"],
+                    "kind": HANDOFF,
+                    "visible": False,
+                    "content": [],
+                    "copies": [e["id"]],
+                    "data": {**handoff, "toolStartedId": e["id"]},
                 }
             )
         updated = clone(s)
@@ -985,6 +1015,8 @@ class Harness(Authority, Erasure):
             raise
 
     async def _emit(self, event):
+        if event.get("kind") == "history_entry" and event["entry"]["kind"] == HANDOFF:
+            event = {**event, "entry": ot.project_entry(event["entry"])}
         event = provider_projection(event)
         sid = event.get("session")
         for owner, recipient, handler in list(self.followers):
@@ -1173,6 +1205,7 @@ class Harness(Authority, Erasure):
                     connection_host=bool(d.get("connection_host") and d.get("actor")),
                 )
                 if recover:
+                    await self.interface_recover(sid)
                     await self._settle_nested(sid)
                     if "runtime" in self.capabilities:
                         await self.call(
@@ -1234,6 +1267,8 @@ class Harness(Authority, Erasure):
                 return await self.erasure_revision(d["session"])
             return 0
         if op == "view":
+            if d.get("type") == "entry" and d["value"].get("kind") == HANDOFF:
+                d = {**d, "value": ot.project_entry(d["value"])}
             delivery_sid = d.get("session")
             guarded = delivery_sid in self.sessions and d.get("method") != "_modular-agent/erase"
             revision = await self.erasure_revision(delivery_sid) if guarded else 0
@@ -1344,13 +1379,16 @@ class Harness(Authority, Erasure):
             await self.fire("@harness", "session.invalidate", d)
             return {}
         if op == "branch":
-            by_id = {e["id"]: e for e in s["entries"]}
-            branch, pos = [], s["position"]
-            while pos:
-                entry = by_id[pos]
-                branch.append(entry)
-                pos = entry["parent"]
-            return branch[::-1]
+            return branch_entries(s)
+        if op == "interface_dispatch":
+            return await self.interface_dispatch(d)
+        if op == "interface_settle":
+            await self.interface_settle(sid, d["reason"], turn=d.get("turn"))
+            return {}
+        if op == "interface_work_rights":
+            return sorted(self.interface_work_rights(s, d["turn"], d["actor"]))
+        if op == "interface_ready":
+            return await self.interface_ready(sid)
         if op == "append":
             async with self.append_locks.setdefault(sid, asyncio.Lock()):
                 entries = await self._append(d)
@@ -1372,8 +1410,10 @@ class Harness(Authority, Erasure):
             return {}
         if op == "move":
             self._require_materialized(s)
-            if s.get("busy"):
-                raise AgentError("Cannot move during a turn", "busy")
+            if s.get("busy") or any(
+                not ended for _, _, ended in handoff_fold(s["entries"]).values()
+            ):
+                raise AgentError("Cannot move with unfinished work", "busy")
             if d.get("rewind"):
                 if not any(p.get("rewind") for p in self.declarations(s["project"]).values()):
                     raise AgentError("Working environment does not support rewind", "not_supported")
@@ -1498,7 +1538,9 @@ class Harness(Authority, Erasure):
             )
             if self.supports_erasure():
                 branch = [e for e in branch if not e.get("data", {}).get("erased")]
-            branch = [e for e in branch if e["kind"] != ot.TURN_TRACE]
+            branch = [
+                e for e in branch if not recorded_as(e, HANDOFF) and e["kind"] != ot.TURN_TRACE
+            ]
             mapping = {e["id"]: identity() for e in branch}
             entries = list(child["entries"])
             for e in branch:
@@ -1573,7 +1615,8 @@ class Harness(Authority, Erasure):
             # would stop work still needs cancel, just like an explicit cancel.
             started = {e["job"] for e in s["entries"] if e["kind"] == "job_start"}
             ended = {e["job"] for e in s["entries"] if e["kind"] == "job_end"}
-            if "actor" in d and (s.get("busy") or started - ended):
+            open_interface = any(not result for _, _, result in handoff_fold(s["entries"]).values())
+            if "actor" in d and (s.get("busy") or started - ended or open_interface):
                 self.require(s, d["actor"], "cancel")
                 if represented_by := d.get("acting_for"):
                     self.require(s, represented_by, "cancel")
@@ -1588,6 +1631,7 @@ class Harness(Authority, Erasure):
             )
             if "history" in self.capabilities:
                 await self.call("@harness", "history", "close", {"session": sid})
+            self.forget_interface_session(sid)
             del self.sessions[sid]
             return {}
         if op == "declaration":

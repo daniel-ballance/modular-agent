@@ -60,6 +60,7 @@ class Erasure:
                 return False
             token = CONNECTION_AUTHORITY.set(None)
             try:
+                await self.interface_settle(sid, "Interface handoff erased", affected=affected)
                 return await self._apply_erasure(sid, pending)
             finally:
                 CONNECTION_AUTHORITY.reset(token)
@@ -68,11 +69,11 @@ class Erasure:
         groups = defaultdict(list)
         for p in pending:
             groups[p["intent"], p.get("recordId")].append(p["id"])
-        s = self.sessions[sid]
         for key in [k for k in self.output_streams if k[2] == sid]:
             for reservation, _ in self.output_streams.pop(key):
                 self.capacity.release(reservation)
         for (operation, record_id), targets in groups.items():
+            s = self.sessions[sid]
             if not any(
                 e["kind"] == "erase"
                 and (e["id"] == record_id if record_id else e["data"].get("operation") == operation)
@@ -125,7 +126,7 @@ class Erasure:
         loaded = await self.call("@harness", "history", "read", {"session": sid})
         if not loaded:
             return False
-        self.sessions[sid] = {**s, **loaded}
+        self.sessions[sid] = {**self.sessions[sid], **loaded}
         self.capacity.restore(self.sessions[sid])
         await self.fire("@harness", "session.invalidate", {"session": sid, "reason": "erasure"})
         return not await self._pending_erasure(sid)
@@ -146,7 +147,8 @@ class Erasure:
         self._require_materialized(s)
         request = {"session": sid, "entries": ids}
         await self._assert_writable(sid)
-        progress = await self.call("@harness", "history", "publish_erasure", request)
+        async with self.interface_lock(sid):
+            progress = await self.call("@harness", "history", "publish_erasure", request)
         for destination in dict.fromkeys(p["sessionId"] for p in progress if not p["confirmed"]):
             if destination in self.sessions:
                 await self._reconcile_erasure(destination)
