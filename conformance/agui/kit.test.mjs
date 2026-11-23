@@ -46,11 +46,13 @@ async function run(name, fault) {
 for (const name of Object.keys(cases)) test(`fake passes ${name}`, () => run(name));
 for (const [name, fault, diagnosis] of [
   ['listener', 'anonymous', /HTTP status/],
+  ['tls', 'tls-client-only', /does not replace bearer/],
   ['listener', 'outside-scope', /HTTP status/],
   ['encoding', 'duplicate-member', /HTTP status/],
   ['encoding', 'echo-input', /must omit input/],
   ['history', 'stale-cursor', /HTTP status/],
   ['history', 'changed-history', /HTTP status/],
+  ['history', 'duplicate-run', /HTTP status/],
   ['history', 'sse-id', /no SSE id/],
   ['history', 'unbalanced', /open sequence/],
   ['frontend', 'pending-ids', /terminal pending IDs/],
@@ -66,6 +68,7 @@ for (const [name, fault, diagnosis] of [
   ['report-cutoffs', 'lost-expiry', /report is refused/],
   ['state-and-gate', 'stale-state-base', /suppress stale\/gated patches/],
   ['state-and-gate', 'leak-gate', /committed assistant response/],
+  ['output-size', 'oversized-event', /encoded SSE event exceeds 64 MiB/],
   ['error-gate', 'leak-error', /sentinel escaped/],
   ['trace', 'untrusted-trace', /untrusted header ignored/],
   ['crash-after-handoff', 'extend-deadline', /without extending it/],

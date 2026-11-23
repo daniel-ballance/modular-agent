@@ -2,7 +2,7 @@
 
 This kit checks [the Modular Agent AG-UI binding](../../docs/bindings/agui.md). It sends HTTP requests and checks SSE before handing JSON to the assertions. Two cases also run the official `@ag-ui/client` `HttpAgent` without a cursor or a presence stream. The app replaces provisional messages with each final snapshot. It waits for the terminal outcome before reporting a frontend result. It does not run anything from a snapshot.
 
-Use Node.js 22.12 or later. Use a disposable agent, tokens and store. Do not point the kit at a production listener.
+Use Node.js 22.12 or later. The TLS self-test also uses OpenSSL 3 to generate a disposable CA and certificates. Use a disposable agent, tokens and store. Do not point the kit at a production listener.
 
 ```sh
 export TMPDIR="$HOME/.cache/ma-std-tmp"
@@ -51,6 +51,7 @@ The control URL is a separate loopback-only, bearer-authenticated test endpoint.
 
 | Operation | Behavior |
 |---|---|
+| `tls` | Return `{ ca, cert, key, servername }` for the disposable test client only. This operation has no `threadId`. |
 | `inspect` | Flush captured telemetry. Return `{ batches, model, dispatches, warnings, spans, erasure }`. `batches` contains committed shared entries grouped in store-write order; `model` is the parsed request log; `dispatches` lists executable handoff call IDs at release. `warnings` is a list of field names. `spans` contains `{ name, traceId, spanId, parentSpanId?, attributes, links }` with links `{ traceId, spanId }`. `erasure` is the last erasure report (or `{ outOfReach: [] }`). Inspect actual records and spans, not a fixture's predicted result. |
 | `barrier` | Wait for the named boundary on this session, even if it has already happened. Use a latch in the relevant store, gate or fixture hook. |
 | `advance` | Advance a controlled clock by `milliseconds`; run resulting closures, settlements and ready work to completion before responding. Do not wait for a wall clock timeout. |
@@ -63,11 +64,13 @@ Controlled cases add these behaviors:
 
 | Case | Fixture behavior |
 |---|---|
+| `tls` | Use HTTPS with a disposable server certificate and mandatory client authentication. A trusted client certificate alone must not authorize discovery. The kit checks unknown CA and mismatched server name as well. |
 | `approval*` | Ask for approval of the transformed call, with a closing deadline in 5,000 ms. In `approval-redacted`, change the arguments in the intended approval view. Signal `presenceLost` after disconnect and approval reconciliation. |
 | `questions` | Ask the choice `yes` or `no` with a 5,000 ms closing deadline before completing the first turn. Record declines and time limits. |
 | `mixed` | Stage the frontend tool and open an in-turn choice before `turnEnd`. The answer completes that turn, then the adapter can release the handoff. |
 | `release-gate` | Pause at `beforeRelease` after the start/checkpoint and originating turn end commits, before executable framing. |
 | `state-and-gate` | Use one state plugin with `{counter:0}`, valid patch to 1, stale patch to 2, and a patch to 3 that the output gate withholds. Suppress any replacement snapshot before `{counter:4}`, then deliver a patch to 5. Include a same-named event from an unconfigured plugin with `wrong-plugin-sentinel`. Offer visible `kit.visible` and a visible nonstandard entry, a withheld `withheld-extension-sentinel`, and a raw foreign event `{type:"fixture.foreign"}` from source `kit`. Give the Provider private data containing `provider-only-sentinel`. Redact the scripted output to `Gated text.` for the owner; withhold sibling snapshot replies. |
+| `output-size` | Offer a gated optional custom event named `kit.oversized` whose encoded size exceeds 64 MiB. Configure a sibling snapshot view that would exceed 64 MiB and cannot be delivered as a complete snapshot; refuse it with `result_too_large`. Keep the owner's ordinary conversation deliverable. |
 | `error-gate` | Block discovery and the scripted Provider diagnostic at the output gate. |
 | `trace` | Capture real OpenTelemetry spans with an always-on sampler and metadata-only export. Allow the vendor key `kit` and ignore the other trace state and all baggage. |
 | `crash-before-handoff` | Pause at `beforeHandoff` before committing `toolStarted`. Use a transient Runtime for interrupted turns. |

@@ -107,9 +107,12 @@ export function fakeFixture(name, fault, script) {
     push('STEP_STARTED', { stepName });
     record(s, 'response', { text: stored }, { stepId: stepName });
     if (reasoning) {
-      push('REASONING_START'); push('REASONING_MESSAGE_START', { messageId: 'ma:reasoning:' + stepName, role: 'reasoning' });
-      push('REASONING_MESSAGE_CONTENT', { messageId: 'ma:reasoning:' + stepName, delta: 'readable reasoning' });
-      push('REASONING_MESSAGE_END', { messageId: 'ma:reasoning:' + stepName }); push('REASONING_END');
+      const id = { messageId: 'ma:reasoning:' + stepName };
+      push('REASONING_START', id);
+      push('REASONING_MESSAGE_START', { ...id, role: 'reasoning' });
+      push('REASONING_MESSAGE_CONTENT', { ...id, delta: 'readable reasoning' });
+      push('REASONING_MESSAGE_END', id);
+      push('REASONING_END', id);
     }
     if (text) {
       push('TEXT_MESSAGE_START', { messageId, role: 'assistant' });

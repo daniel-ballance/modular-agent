@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { HttpAgent } from '@ag-ui/client';
+import { EventSchema, MessageSchema } from '@ag-ui/core/schemas';
 
 export const MAX = 64 * 1024 * 1024;
 export const VERSION = '1.0';
@@ -160,6 +161,7 @@ export async function* sse(response) {
 function history(messages, { cursor, lastMessageId }) {
   assert.ok(Array.isArray(messages), 'messages array');
   const ids = messages.map(message => {
+    assert.ok(MessageSchema.safeParse(message).success, 'message matches the AG-UI 1.0 schema');
     assert.ok(['user', 'assistant', 'tool'].includes(message.role), 'only committed conversation roles');
     assert.match(message.id, /^ma:.+$/, 'stable ma: message ID');
     return message.id;
@@ -193,7 +195,7 @@ export async function exchange(response, { threadId, runId }) {
   const texts = new Map();
   for (const [i, event] of events.entries()) {
     const { type } = event;
-    assert.ok(typeof type === 'string', 'event type');
+    assert.ok(EventSchema.safeParse(event).success, 'event matches the AG-UI 1.0 schema');
     assert.ok(i === 0 || type !== 'RUN_STARTED', 'duplicate RUN_STARTED');
     assert.ok(i === events.length - 1 || !['RUN_FINISHED', 'RUN_ERROR'].includes(type), 'event after terminal');
     assert.ok(!/^(ACTIVITY|SUBAGENT)_|^REASONING_ENCRYPTED_VALUE$/.test(type), 'event outside the binding projection');
@@ -261,6 +263,6 @@ export function finalView(run) {
 export function clean(value, ...sentinels) {
   const wire = JSON.stringify(value);
   for (const forbidden of ['"traceparent"', '"tracestate"', '"baggage"', 'modular-agent.interfaceHandoff', '"traceContext"', ...sentinels]) {
-    assert.ok(!wire.includes(forbidden), `private field or fixture sentinel escaped: ${forbidden}`);
+    assert.ok(!wire.includes(forbidden), 'private field or fixture sentinel escaped');
   }
 }

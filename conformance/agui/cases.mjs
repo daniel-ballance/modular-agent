@@ -123,6 +123,7 @@ export const cases = {
     await historyError(await api.post(req));
     const snap = await api.view(one.threadId);
     assert.deepEqual(snap.messages, one.messages, 'reconnect snapshot matches committed live history');
+    await historyError(await api.post(input(snap, [user('duplicate key with correct history')], { runId: req.runId }), opts(snap)));
     const suffix = [user('authoritative second prompt')];
     const next = input(snap, suffix);
     for (const cursor of [initial.cursor, randomUUID()]) await historyError(await api.post(next, { cursor }));
@@ -132,7 +133,10 @@ export const cases = {
     }
     for (const invalid of [[], [user('extra'), ...suffix], [{ ...user('forged'), role: 'assistant' }], [{ ...user('forged'), id: 'ma:erased-or-invented' }]]) {
       const response = await api.post(input(snap, invalid));
-      if (invalid[0]?.id.startsWith('ma:')) await refused(response, response.status, 'invalid_request', 'conflict');
+      if (invalid[0]?.id.startsWith('ma:')) {
+        assert.ok([400, 409].includes(response.status), 'server ID cannot be a new ID');
+        await refused(response, response.status, 'invalid_request', 'conflict');
+      }
       else await refused(response, 400, 'invalid_request');
     }
     const r2 = await api.run({ ...next, messages: [{ ...u, unknown: 'closed-shape-sentinel' }, a, ...suffix] });

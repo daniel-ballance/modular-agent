@@ -1,5 +1,7 @@
 // This peer exercises the kit, not the Harness. It does not implement an SDK.
 import { createServer } from 'node:http';
+import { createServer as createSecureServer } from 'node:https';
+import { disposableTls } from './tls-fixture.mjs';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { WebSocketServer } from 'ws';
@@ -26,11 +28,13 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault, sc
   const fixture = scenario && fakeFixture(scenario, fault, model);
   const sockets = new WebSocketServer({ noServer: true, handleProtocols: protocols => protocols.has('modular-agent-acp-1') ? 'modular-agent-acp-1' : false });
   const peer = request => Object.keys(tokens).find(key => request.headers.authorization === `Bearer ${tokens[key]}`);
-  const server = createServer(async (req, res) => {
+  const tls = scenario === 'tls' ? await disposableTls() : undefined;
+  const listenHttp = tls ? handler => createSecureServer(tls.server, handler) : createServer;
+  const server = listenHttp(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://test.invalid');
       const auth = peer(req);
-      if (!auth && !(fault === 'anonymous' && url.pathname === PATH)) return error(res, 401, 'unauthenticated');
+      if (!auth && !(['anonymous', 'tls-client-only'].includes(fault) && url.pathname === PATH)) return error(res, 401, 'unauthenticated');
       const client = auth === 'rotated' ? 'owner' : auth;
       const path = url.pathname.slice(PATH.length);
       if (req.method === 'GET' && path === '') {
@@ -82,6 +86,7 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault, sc
       if (req.method === 'GET') {
         const toolCalls = session.open && (client === 'owner' || fault === 'foreign-wait') ? [{ toolCallId: session.open, expiresAt: session.expiresAt,
           ...(fault === 'snapshot-args' ? { args: dispatch } : {}) }] : [];
+        if (scenario === 'output-size' && client === 'sibling') return error(res, 413, 'result_too_large');
         if (scenario === 'state-and-gate' && client === 'sibling') return error(res, 403, 'output_withheld');
         if (fault === 'keep-presence' && scenario === 'approval-lost' && client === 'owner') return json(res, 200, { threadId, declaration, ...snapshot(), waiting: { questions: [session.question], toolCalls } });
         const questions = fixture?.eligible(session, client) ? [session.question] : [];
@@ -119,6 +124,22 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault, sc
         }
         session.runs.add(`${client}:${runId}`);
         sseHeaders();
+        if (scenario === 'output-size' && fault === 'oversized-event') {
+          res.write('data: {"type":"CUSTOM","name":"modular-agent.event","value":"');
+          const chunk = Buffer.alloc(1024 * 1024, 120);
+          for (let i = 0; i < 64; i++) {
+            if (res.destroyed) return;
+            if (!res.write(chunk)) {
+              const signaled = await new Promise(resolve => {
+                function done(writable) { res.off('close', closed); res.off('drain', drained); resolve(writable); }
+                const closed = () => done(false), drained = () => done(true);
+                res.once('close', closed); res.once('drain', drained);
+              });
+              if (!signaled) return;
+            }
+          }
+          return res.end('"}\n\n');
+        }
         return res.end(events.map(e => `data: ${JSON.stringify(e)}\n\n`).join(''));
       }
       if (!suffix.length && resume.length) return conflict(res);
@@ -196,8 +217,9 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault, sc
   }
   await listen();
   return {
-    get origin() { return `http://127.0.0.1:${server.address().port}`; }, tokens,
+    get origin() { return `${tls ? 'https' : 'http'}://127.0.0.1:${server.address().port}`; }, tokens,
     async control(operation, args) {
+      if (operation === 'tls' && tls) return tls.client;
       const session = sessions.get(args.threadId);
       if (!fixture || !session) throw new Error('fixture session unavailable');
       return fixture.control(operation, session, args);

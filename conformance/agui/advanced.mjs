@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { checkTls } from './tls.mjs';
 import { answer, dispatch, draft, first, frontend, handoff, historyError, offer, options, opts, rawReport, reportRefused, second, simple, success, transformed } from './cases.mjs';
 import { at, clean, finalView, input, refused, threadPath, tool, user } from './wire.mjs';
 
@@ -80,6 +81,7 @@ function settled(evidence, callId, status, { continuation = true, report = statu
 }
 
 export const advanced = {
+  tls: scenario(simple, checkTls),
   'approval-absent': scenario(frontend, async ({ api, control }) => {
     const { view, request } = await prompt(api, options);
     // A snapshot and the run stream are not the separate presence route.
@@ -277,6 +279,15 @@ export const advanced = {
     assert.deepEqual(copy.messages, final.messages, 'gated replay matches live view');
     await refused(await at(origin, tokens.sibling).request(threadPath(view.threadId)), 403, 'output_withheld');
     assert.ok(entries(await evidenceFor(control, view.threadId), 'response').some(e => e.data.text === hidden), 'redaction does not change the authoritative response');
+  }),
+
+  'output-size': scenario(simple, async ({ api, origin, tokens }) => {
+    const { view, request } = await prompt(api);
+    const run = await api.run(request, opts(view));
+    answer(run, first);
+    assert.ok(!run.events.some(e => e.name === 'modular-agent.event' && e.value?.type === 'kit.oversized'), 'oversized optional event must not go on the wire');
+    const sibling = at(origin, tokens.sibling);
+    await refused(await sibling.request(threadPath(view.threadId)), 413, 'result_too_large');
   }),
 
   'error-gate': scenario([{ error: { kind: 'other', message: modelError } }], async ({ api }) => {
