@@ -28,7 +28,7 @@ class Selection(Plugin):
         return result
 
     async def access(self, d, emit=None):
-        s = await self.api.session("get", session=d["session"])
+        s = await self.api.session("get", session=d["session"], include_entries=False)
         model = d.get("model") or s["settings"].get("model")
         if not model:
             raise AgentError("No model selected", "invalid_request")

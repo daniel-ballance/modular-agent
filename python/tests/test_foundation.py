@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 import sys
 
 import pytest
@@ -145,6 +146,22 @@ async def test_history_tree_move_fork_restart_list_and_unknown_content(base):
     assert (await a.session("get", session=sid))["position"] == reopened["position"]
 
 
+async def test_session_reads_can_leave_unrelated_history_in_the_harness(base):
+    _, api, root = base
+    sid = (await api.session("create", project=str(root)))["id"]
+    for turn in ("earlier", "current"):
+        await api.session("append", session=sid, kind="input", turn=turn, content=content(turn))
+
+    metadata = await api.session("get", session=sid, include_entries=False)
+    assert metadata["id"] == sid and "entries" not in metadata
+    (entry,) = await api.session("entries", session=sid, turn="current")
+    assert entry["content"] == content("current")
+    entry["content"].clear()
+    # The shorter read still returns an isolated value, not a live log entry.
+    (again,) = await api.session("entries", session=sid, id=entry["id"])
+    assert again["content"] == content("current")
+
+
 async def test_history_idempotent_and_lock_in_second_process(base):
     h, a, root = base
     s = await a.session("create", project=str(root))
@@ -179,6 +196,44 @@ asyncio.run(main())
     assert p.returncode == 0 and out.strip() == b"locked"
     with pytest.raises(AgentError, match="different"):
         await a.call("history", "keep", {"session": s, "entries": [{**e, "content": []}]})
+
+
+async def test_erasure_checks_reuse_the_store_but_not_a_read_snapshot(base, monkeypatch):
+    _, api, root = base
+    sid = (await api.session("create", project=str(root)))["id"]
+    entry = await api.session("append", session=sid, kind="input", content=content("private"))
+    connect = sqlite3.connect
+    opened = []
+
+    def count(*args, **kwargs):
+        opened.append(args[0])
+        return connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", count)
+
+    async def revision():
+        return await api.call("history", "erasure_revision", {"session": sid})
+
+    assert await revision() == 0
+    db = connect(root / "store/history.sqlite3")
+    try:
+        with db:
+            db.execute("INSERT INTO erase_copies VALUES (?,?,?,0)", ("intent", sid, entry["id"]))
+        with pytest.raises(AgentError, match="pending erasure"):
+            await revision()
+        with db:
+            db.execute("UPDATE erase_copies SET confirmed=1 WHERE intent='intent'")
+        assert await revision() == 1
+    finally:
+        db.close()
+    assert not opened
+
+    # A live writer must not keep serving the old inode after replacement.
+    path = root / "store/history.sqlite3"
+    path.rename(path.with_suffix(".old"))
+    path.touch()
+    with pytest.raises(AgentError, match="replaced"):
+        await revision()
 
 
 async def test_erasure_follows_summary_fork_and_copies_of_copies(base):

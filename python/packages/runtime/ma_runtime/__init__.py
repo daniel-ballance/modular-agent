@@ -60,8 +60,8 @@ class Runtime(Turns, Plugin):
         api.on("session.moving", self._close)
         api.on("session.invalidate", self._invalidated)
 
-    async def _entries(self, sid):
-        return (await self.api.session("get", session=sid))["entries"]
+    async def _entries(self, sid, **match):
+        return await self.api.session("entries", session=sid, **match)
 
     @staticmethod
     def _input_id(e):
@@ -115,7 +115,10 @@ class Runtime(Turns, Plugin):
         sid = d["session"]
         await self.api.session("assert_writable", session=sid)
         s = await self.api.session(
-            "get", session=sid, **({"actor": d["actor"]} if "actor" in d else {})
+            "get",
+            session=sid,
+            include_entries=d.get("key") is not None,
+            **({"actor": d["actor"]} if "actor" in d else {}),
         )
         actor = d.get("actor", s["actor"])
         authority = await self.api.session(
@@ -173,7 +176,7 @@ class Runtime(Turns, Plugin):
             raise AgentError("Unknown input timing")
         if (mode == "propose") != (permission == "propose"):
             raise AgentError("Input hook changed the proposal boundary", "forbidden")
-        current = await self.api.session("get", session=sid)
+        current = await self.api.session("get", session=sid, include_entries=False)
         if current.get("busy") and mode == "now":
             mode = "after"
         if mode == "steer" and (
@@ -456,7 +459,7 @@ class Runtime(Turns, Plugin):
 
     async def cancel(self, d, emit):
         sid = d["session"]
-        await self.api.session("get", **d)
+        await self.api.session("get", **{**d, "include_entries": False})
         self.cancelled.add(sid)
         task = self.tasks.get(sid)
         if task and not task.done():

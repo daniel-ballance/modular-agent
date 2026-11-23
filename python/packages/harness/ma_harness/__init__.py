@@ -1035,8 +1035,9 @@ class Harness(Authority, Erasure, InterfaceTools):
                     "data": {**handoff, "toolStartedId": e["id"]},
                 }
             )
-        updated = clone(s)
-        updated["entries"].extend(batch)
+        # A commit builds a new list. Previously committed entries do not change.
+        updated = clone({k: v for k, v in s.items() if k != "entries"})
+        updated["entries"] = [*s["entries"], *batch]
         updated["position"] = batch[-1]["id"]
         if e["kind"] == "limit":
             actor = e["actor"]
@@ -1418,7 +1419,16 @@ class Harness(Authority, Erasure, InterfaceTools):
         if permission and "actor" in d:
             self.require(s, d["actor"], permission)
         if op == "get":
-            return s
+            if d.get("include_entries", True):
+                return s
+            return {k: v for k, v in s.items() if k != "entries"}
+        if op == "entries":
+            # Select before call() copies the result across the plugin boundary.
+            entries = s["entries"]
+            for key in ("turn", "step", "call", "id", "kind"):
+                if key in d:
+                    entries = [e for e in entries if e.get(key) == d[key]]
+            return entries
         if op == "children":
             return [
                 child["id"]

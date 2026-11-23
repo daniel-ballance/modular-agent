@@ -7,7 +7,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from ma_core import AgentError, Plugin, clone
+from ma_core import AgentError, Plugin
 from ma_core.wire import entry_out
 
 from . import pending
@@ -29,29 +29,42 @@ class History(Plugin):
         self.root = Path(root)
         self.db = self.root / "history.sqlite3"
         self.locks = {}
+        self.connection = None
+        self.file_stat = None
 
     async def start(self, api):
         await super().start(api)
         api.provide("history", self)
 
-    @contextmanager
-    def _connect(self):
+    def _open(self):
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         db = sqlite3.connect(self.db)
-        os.chmod(self.db, 0o600)
-        db.execute("PRAGMA secure_delete=ON")
-        db.execute(
-            "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, project TEXT, meta TEXT)"
-        )
-        db.execute(
-            "CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, session TEXT, record TEXT)"
-        )
-        pending.schema(db)
         try:
-            with db:
-                yield db
-        finally:
+            os.chmod(self.db, 0o600)
+            db.execute("PRAGMA secure_delete=ON")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, project TEXT, meta TEXT)"
+            )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, session TEXT, record TEXT)"
+            )
+            pending.schema(db)
+            self.file_stat = self.db.stat()
+        except BaseException:
             db.close()
+            raise
+        return db
+
+    @contextmanager
+    def _connect(self):
+        if self.connection is None:
+            self.connection = self._open()
+        elif not os.path.samestat(self.file_stat, self.db.stat()):
+            raise AgentError("History database was replaced", "unavailable")
+        # Each operation ends its transaction before yielding the event loop.
+        # Reuse the connection, not a read snapshot or an erasure revision.
+        with self.connection:
+            yield self.connection
 
     def _lock(self, sid):
         if sid in self.locks:
@@ -85,9 +98,8 @@ class History(Plugin):
         return {}
 
     async def keep(self, d, emit):
-        s = clone(d["session"])
+        s = {k: v for k, v in d["session"].items() if k != "entries"}
         self._lock(s["id"])
-        s.pop("entries")
         for flag in ("busy", "suspending", "closing", "moving", "writer_lost"):
             s.pop(flag, None)
         with self._connect() as db:
@@ -221,3 +233,6 @@ class History(Plugin):
         for fd in self.locks.values():
             os.close(fd)
         self.locks.clear()
+        if self.connection is not None:
+            self.connection.close()
+            self.connection = None
