@@ -735,18 +735,12 @@ class ACP(Plugin):
                 for e in records
             ):
                 raise protocol_error("conflict", "Input was handed back")
-            result = self.input_result(records, receipt)
-            if result is None:
-                results = await self.api.call(
-                    "runtime", "wait", {"session": session_id, "actor": self.actor}
-                )
-                if session_id in self.sessions:
-                    result = self.input_result((await self.get(session_id))["entries"], receipt)
-                if result is None:
-                    result = next(
-                        (r for r in results if r.get("input") == receipt["input"]),
-                        {"outcome": "cancelled", "handed_back": []},
-                    )
+            results = await self.api.call(
+                "runtime",
+                "wait",
+                {"session": session_id, "actor": self.actor, "input": receipt["input"]},
+            )
+            result = next(iter(results), {"outcome": "cancelled", "handed_back": []})
             metadata = {
                 "inputId": receipt["input"],
                 "duplicate": receipt.get("duplicate", False),
@@ -775,26 +769,6 @@ class ACP(Plugin):
         await self.get(session_id)
         await self.api.call("runtime", "cancel", {"session": session_id, "actor": self.actor})
         await self._cancel_requests(session_id)
-
-    @staticmethod
-    def input_result(entries, receipt):
-        taken = next(
-            (
-                e
-                for e in entries
-                if e["kind"] in {"input", "turn_start"}
-                and e.get("data", {}).get("input") == receipt["input"]
-            ),
-            None,
-        )
-        return next(
-            (
-                e["data"]
-                for e in entries
-                if e["kind"] == "turn_end" and taken and e.get("turn") == taken.get("turn")
-            ),
-            None,
-        )
 
     async def declaration(self, sid=None):
         plugins = await self.api.session(
