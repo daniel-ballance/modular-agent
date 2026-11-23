@@ -120,6 +120,23 @@ func TestServeACPResumeDoesNotWaitForRecovery(t *testing.T) {
 	if _, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: 1}); err != nil {
 		t.Fatal(err)
 	}
+	assertTurn := func(want string) {
+		t.Helper()
+		list, err := conn.ListSessions(ctx, acp.ListSessionsRequest{})
+		if err != nil || len(list.Sessions) != 1 {
+			t.Fatalf("list: %+v (%v)", list, err)
+		}
+		var meta struct {
+			Waiting struct {
+				Turn                 string
+				Questions, ToolCalls *int
+			}
+		}
+		if err := json.Unmarshal(list.Sessions[0].Meta["modular-agent"], &meta); err != nil || meta.Waiting.Turn != want || meta.Waiting.Questions == nil || *meta.Waiting.Questions != 0 || meta.Waiting.ToolCalls == nil || *meta.Waiting.ToolCalls != 0 {
+			t.Fatalf("listed waiting: %+v (%v), want %s and zero counts", meta.Waiting, err, want)
+		}
+	}
+	assertTurn("interrupted")
 	if _, err := conn.ResumeSession(ctx, acp.ResumeSessionRequest{Cwd: project, SessionId: acp.SessionId(session.ID())}); err != nil {
 		t.Fatalf("resume did not reply while recovery blocked: %v", err)
 	}
@@ -128,6 +145,7 @@ func TestServeACPResumeDoesNotWaitForRecovery(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("interrupted request did not enter recovery")
 	}
+	assertTurn("running")
 }
 
 func TestServeACPComposesProjects(t *testing.T) {

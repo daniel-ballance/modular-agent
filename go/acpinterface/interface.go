@@ -698,7 +698,17 @@ func (s *server) ListSessions(ctx context.Context, p acp.ListSessionsRequest) (a
 		if snap.Parent != "" || !s.discoverable(snap) {
 			continue
 		}
-		info := acp.SessionInfo{SessionId: acp.SessionId(snap.ID), Cwd: snap.Project}
+		host := s.sessionHost(snap.ID)
+		// ACP has no executor route. It never claims a different Interface's calls.
+		waiting, err := s.listingAPI(snap).WaitingForHost(host.acting(ctx, snap.ID, s.actor), snap, s.hostActor(), "")
+		if errors.Is(err, api.ErrAuthority) {
+			continue
+		}
+		if err != nil {
+			return acp.ListSessionsResponse{}, outputReplyError(err)
+		}
+		info := acp.SessionInfo{SessionId: acp.SessionId(snap.ID), Cwd: snap.Project,
+			Meta: map[string]json.RawMessage{Namespace: api.JSON(map[string]any{"waiting": waiting})}}
 		if len(snap.Entries) > 0 {
 			info.UpdatedAt = acp.Ptr(snap.Entries[len(snap.Entries)-1].Time.Format("2006-01-02T15:04:05Z"))
 		}

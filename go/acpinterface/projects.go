@@ -50,15 +50,7 @@ func (p *projectPool) acquire(ctx context.Context, key projectKey, id string, co
 	var selected *sharedProject
 	var selectedKey projectKey
 	if id != "" {
-		for k, part := range p.parts {
-			if k.project != key.project {
-				continue
-			}
-			if _, err := part.part.API.Snapshot(id); err == nil {
-				selected, selectedKey = part, k
-				break
-			}
-		}
+		selected, selectedKey = p.writer(key.project, id)
 	}
 	if selected == nil {
 		selected, selectedKey = p.parts[key], key
@@ -90,6 +82,47 @@ func (p *projectPool) acquire(ctx context.Context, key projectKey, id string, co
 			_ = selected.part.Close()
 		}
 	}, nil
+}
+
+// writer finds an existing composition without taking a lease or opening
+// a project merely to inspect it. The caller holds the pool lock.
+func (p *projectPool) writer(project, id string) (*sharedProject, projectKey) {
+	for k, part := range p.parts {
+		if k.project == project && hasWriter(part.part.API, id) {
+			return part, k
+		}
+	}
+	return nil, projectKey{}
+}
+
+func hasWriter(a api.API, id string) bool {
+	w, ok := a.(interface {
+		SessionInterruption(string) (<-chan struct{}, <-chan struct{}, error)
+	})
+	if !ok {
+		return false
+	}
+	_, _, err := w.SessionInterruption(id)
+	return err == nil
+}
+
+func (s *server) listingAPI(row api.Session) api.API {
+	if p := s.resources.pool; p != nil {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if part, _ := p.writer(row.Project, row.ID); part != nil {
+			return part.part.API
+		}
+	} else if h := s.projects; h != nil {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		for k, host := range h.hosts {
+			if k.project == row.Project && hasWriter(host.a, row.ID) {
+				return host.a
+			}
+		}
+	}
+	return s.a
 }
 
 // Project transfers ownership of one project composition to the connection.
