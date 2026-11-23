@@ -130,10 +130,4 @@ A repeated publication returns the original intent ID and destinations in publis
 
 ### Specification findings
 
-`docs/sdk/api.md` lists Interface tool composition and declaration, but not the report operation. In the Sessions and turns table, replace the `callTool` row with these two rows:
-
-```markdown
-| `callTool(name, input)` | a ToolResult; a direct call by this actor, through every gate |
-| report an Interface tool result (authenticated Interface connection, session, report) | `accepted`, `alreadySettled`, or `refused`; never dispatches. The connection supplies the actor and stable route. The report contains `{ callId, status: "completed" \| "failed", content, value? }` as in [Interface handoff records](../bindings/data.md#interface-handoff-records). A report before the originating turn ends can be retried. |
-```
-
+None open. The report operation is in `docs/sdk/api.md` as `connectInterfaceTools` and its handle; Go spells them `Agent.ConnectInterfaceTools`, `NextHandoff` and `ReportToolResult`.

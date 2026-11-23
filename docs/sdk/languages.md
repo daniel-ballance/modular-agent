@@ -89,6 +89,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - Errors are values. `errors.As(err, &modularErr)` gives the code.
 - Minimum Go version: the one pinned in `go/mise.toml`.
 - Subscription Providers are in package `subscription`: `SubscriptionLogins(path)`, `SignIn`, `SignOut`, `ChatGPT`, `Grok` and `Claude`. `Grok(subscription.GrokOptions{Logins: logins})` returns a Provider; `SignIn(ctx, "grok", logins, options)` runs its device sign-in. `Claude` starts the TypeScript Claude program as a process plugin; it needs Node.js 22 or later.
+- Interface-run tools: `modular.WithInterfaceTools(...)` registers them. A binding attaches an executor with `Agent.ConnectInterfaceTools`, then pulls handoffs with `NextHandoff` (Go's form of `onHandoff`) and reports with `ReportToolResult`.
 
 ## Python
 
