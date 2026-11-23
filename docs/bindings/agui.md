@@ -94,9 +94,9 @@ A configured plugin owns the document. Subscribe to its `modular-agent.agui.stat
 A client that lost track of its threads, or a host that was restarted, finds open work with `GET /agui/v1/threads`. Each `Thread` is `{ threadId, updatedAt, waiting: { questions: Count, toolCalls: Count, turn: "none" | "running" | "interrupted" } }`, with `updatedAt` in ISO 8601.
 
 - The server MUST list only kept sessions the authenticated client may discover with `watch`, using the same test as `GET /agui/v1/threads/{threadId}`, and MUST omit the rest without saying they exist. It lists no ephemeral sessions.
-- `questions` counts open questions this client is eligible to answer, and `toolCalls` counts open Interface-run calls on this client's route, both from committed records. `turn` is `running` while a turn runs, `interrupted` when a turn was cut off and waits for the session to be reopened, and `none` otherwise. The counts carry no content; read the thread's snapshot for details under the output gate.
+- `questions` counts open questions this client is eligible to answer, and `toolCalls` counts open Interface-run calls on this client's route, both from committed records. For an unfinished turn on the current branch, `turn` is `running` if the service observes a running turn or can confirm a live writer, and `interrupted` otherwise; it is `none` when no turn is unfinished. Listing MUST NOT acquire a writer to test liveness. The counts carry no content; read the thread's snapshot for details under the output gate.
 - `limit` is 1 to 500, default 100. `next` is an opaque cursor for the following page; pass it as `after`. An unknown or expired cursor is `400 invalid_request`. A listing is not a consistent snapshot across pages.
-- The server MAY compute `waiting` lazily but MUST NOT report `none` for a thread whose committed records show an open question, open call or unfinished turn.
+- The server MAY compute `waiting` lazily. It MUST count committed open questions and Interface-run calls for which this client is eligible, even when `turn` is `none`, and MUST NOT report `turn: "none"` for an unfinished turn.
 
 ## Output gate, errors and reconnect
 

@@ -191,8 +191,6 @@ Use `encodeHistoryJson`, `parseHistoryJson` and `equalHistoryJson` to preserve o
 
 These are proposed documentation replacements, not changes to the specification.
 
-- **Waits after a turn.** In [Listing threads](../../../docs/bindings/agui.md#listing-threads), replace the last bullet with: “The server MAY compute `waiting` lazily. It MUST count committed open questions and Interface-run calls for which this client is eligible, even when `turn` is `none`. It MUST NOT report `turn: "none"` for an unfinished turn.”
-- **Observing a writer.** A start without an end looks the same in a live writer's history and after a crash. The JSONL store can check its writer's process; history HTTP `/1` has no read-only lease query. In the second bullet of [Listing threads](../../../docs/bindings/agui.md#listing-threads), replace the sentence defining `turn` with: “For an unfinished turn on the current branch, report `running` if the service observes a running turn or can confirm a live writer; otherwise report `interrupted`. Report `none` when no turn is unfinished. Listing MUST NOT acquire a writer to test liveness.”
 
 - **Availability diagnostics.** In [Providers](../../../docs/sdk/api.md#providers), replace the `available` description with: “Whether the Provider can take requests now, for example whether it has credentials. A Provider may expose a separate diagnostic in process. The `/1` plugin binding reports only a boolean.” Claude can name an API-key source locally without extending the wire reply.
 
