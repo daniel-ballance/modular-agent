@@ -41,7 +41,8 @@ ma sessions [--all]          list saved sessions
 | `--history` | print the session's history, in the shared format |
 | `--declaration` | print the declaration (below) as one JSON object |
 | `--acp` | serve ACP on stdio, for an editor or host. With no operator project restriction this local mode serves any project the client names, each with its own trust. |
-| `--listen ADDR` | with `--acp`, serve ACP on a WebSocket instead ([an agent service](../bindings/websocket.md#an-agent-service)). `ADDR` is a loopback `HOST:PORT` or `ws:` URL; `ma` has no TLS options. `ma` serves until stopped. |
+| `--listen ADDR` | with `--acp` or `--agui`, serve ACP on a WebSocket instead ([an agent service](../bindings/websocket.md#an-agent-service)). `ADDR` is a loopback `HOST:PORT` or `ws:` URL; `ma` has no TLS options. `ma` serves until stopped. |
+| `--agui` | `--agui` serves the AG-UI HTTP and SSE binding on `--listen ADDR`. It requires a listener and never uses stdio. With `--acp`, the same listener accepts ACP WebSocket upgrades at `/`. `ma` prints the HTTP origin when ready. `ma` has no TLS options; bind to loopback. Use `--token-file FILE` for the local user with client ID `ma-local`, or supply policy `actors` with a nonempty `clientId` on every entry. Tokens that share a client ID must bind the same principal and scope. The operator's `--project` selects the AG-UI creation project; the single-user configuration creates sessions without a tenant. See the [AG-UI binding](../bindings/agui.md). |
 | `--token-file FILE` | with `--listen`, shorthand for one token acting as the local user. Do not combine with a policy `actors` list. |
 | `--policy FILE` | read this operator policy instead of `policy.json` in the configuration folder. |
 | `-h`, `--help`; `-V`, `--version` | help; the version, which names the implementation's language |
@@ -236,6 +237,7 @@ Each implementation passes:
 
 - the [reference checks](../../conformance/reference/README.md), which run `ma` with a scripted model and look only at its output and its effects on files;
 - the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp`, and with `--connect` against `ma --acp --listen`;
+- the [AG-UI kit](../../conformance/agui/README.md) against `ma --agui --listen`;
 - its own tests, including that it depends only on its SDK's public API.
 
 The reference check `telemetry-export` runs a scripted turn without endpoints and checks that it sends nothing to the default OTLP endpoint. The check uses a private network namespace for this assertion and skips only this assertion if it cannot create one. With a loopback endpoint and always-on sampler, check the invocation and inference spans, `gen_ai.agent.name=ma` and no content, and check the configured `service.name` on the OTLP resource as the receiver gets it; a backend's span query may not return resource attributes. Repeat with `OTEL_SDK_DISABLED=true`; export stops and the declaration stays the same.
