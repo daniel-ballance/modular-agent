@@ -3884,7 +3884,7 @@ export class Harness {
 			const decisions = ids.map(id => {
 				const item = handoffs.get(id);
 				if (item) {
-					if (!item.data || !item.checkpoint || !visible.has(item.checkpoint.id) || item.result?.erased) return undefined;
+					if (!this.interfaceSources.size || this.runtime()?.supports.interfaceTools !== true || !item.data || !item.checkpoint || !visible.has(item.checkpoint.id) || item.result?.erased) return undefined;
 					return item.result && visible.get(item.result.id);
 				}
 				const answer = branch.findLast(e => e.kind === "inputAnswer" && !e.erased && e.toolCallId === id);

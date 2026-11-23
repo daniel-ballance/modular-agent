@@ -302,7 +302,7 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 		await setup;
 		const agreed = p.traceContext === 1 && options.acceptTraceContext !== false;
 		peer.configureTracing(options.name, agreed);
-		const { inputDuringTurn, waitingThroughRestart, continuesAfterRestart } = runtime?.supports ?? {};
+		const { inputDuringTurn, waitingThroughRestart, continuesAfterRestart, interfaceTools } = runtime?.supports ?? {};
 		return {
 			binding: PLUGIN_BINDING,
 			name: options.name,
@@ -310,7 +310,7 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 			...(providers.length ? { providers: providers.map((x) => ({ id: x.id, supports: x.supports, models: toWire(x.models()) })) } : {}),
 			...(toolSources.length ? { toolSources: toolSources.map((t) => ({ id: t.id, tools: toWire(t.tools()) })) } : {}),
 			...(environment ? { workingEnvironment: { containment: environment.containment ?? options.containment ?? "none", platforms: [process.platform], ...(environment.points && environment.save && environment.hasPoint && environment.restore ? { points: true } : {}), ...(environment.confinesFiles === true ? { confinesFiles: true } : {}) } } : {}),
-			...(runtime ? { runtime: { id: runtime.id, supports: { inputDuringTurn, waitingThroughRestart, continuesAfterRestart } } } : {}),
+			...(runtime ? { runtime: { id: runtime.id, supports: { inputDuringTurn, waitingThroughRestart, continuesAfterRestart, ...(interfaceTools === true ? { interfaceTools: true } : {}) } } } : {}),
 			...(handlers.size ? { hooks: [...handlers].map(([handlerId, h]) => ({ hook: h.hook, handlerId, order: h.order })) } : {}),
 			...(commands.size ? { commands: [...commands].map(([name, c]) => ({ name, description: c.description })) } : {}),
 			...(options.replaces?.length ? { replaces: options.replaces } : {}),
@@ -612,7 +612,12 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 	});
 	peer.handle("runtime/continueOpenCalls", async (p, ctx) => {
 		const { input, host } = turnFor(p, ctx);
-		return outcome(await needRuntime().continueOpenCalls(input, host, ctx.signal, fromWire(p.calls) as InterruptedTurn["calls"]));
+		const calls = fromWire(p.calls) as InterruptedTurn["calls"];
+		const runtime = needRuntime();
+		if (!Array.isArray(calls) || (input.startedBy.kind === "toolResult" || !calls.length) && runtime.supports.interfaceTools !== true) {
+			throw new WireError("invalid_request", "Runtime did not register Interface tool support");
+		}
+		return outcome(await runtime.continueOpenCalls(input, host, ctx.signal, calls));
 	});
 
 	let stopping: Promise<void> | undefined;

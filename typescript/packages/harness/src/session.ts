@@ -39,7 +39,6 @@ export interface QueuedInput {
 	startedBy: { kind: "actor" | "job" | "plugin" | "answer" | "toolResult"; id: string };
 	kind: string;
 	/** Set when this is not input but a continuation of tool calls left open past an earlier turn. */
-	continueCalls?: string[];
 	continueTurnId?: string;
 }
 export interface InputReceipt { inputId: string; taken: "now" | "inTurn" | "after" | "proposed" | "handedBack"; duplicate?: boolean; erased?: true }

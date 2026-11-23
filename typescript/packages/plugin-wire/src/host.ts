@@ -507,11 +507,12 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				api.provide("working-environment", new WireEnvironment(peer, api.project, matches ? containment : "none", points === true, undefined, confinesFiles === true));
 			}
 			if (reg.runtime) {
-				const { inputDuringTurn, waitingThroughRestart, continuesAfterRestart } = reg.runtime.supports;
+				const { inputDuringTurn, waitingThroughRestart, continuesAfterRestart, interfaceTools } = reg.runtime.supports;
 				api.provide("runtime", new WireRuntime(peer, reg.runtime.id, {
 					inputDuringTurn: inputDuringTurn === true,
 					waitingThroughRestart: waitingThroughRestart === true,
 					continuesAfterRestart: continuesAfterRestart === true,
+					...(interfaceTools === true ? { interfaceTools: true } : {}),
 					// The host bridge settles the model's calls before returning to any /1 Runtime.
 					nestedToolCalls: true,
 				}, track));
@@ -857,9 +858,21 @@ class WireRuntime implements Runtime {
 			if (signal.aborted) return { outcome: { kind: "cancelled" }, result: { openToolCalls: [] }, entries: [...t.entries], usage: t.usage };
 			if (t.limit && (reply.outcome.kind !== "limit" || reply.outcome.limit !== t.limit)) throw invalidState("Runtime did not report the signalled limit");
 			if (method === "runtime/runTurn" && (!wireEqual(reply.usage, t.usage) || !wireEqual(reply.entries, [...t.entries]))) throw invalidState("Runtime outcome does not match its committed work");
-			const pending = reply.outcome.kind === "cancelled" ? [] :
-				pendingToolCalls(await host.history(), input.turnId, await host.history({ all: true }));
-			if (!wireEqual(reply.result.openToolCalls, pending)) throw invalidState("Runtime outcome has invalid open calls");
+			const branch = await host.history();
+			const kept = await host.history({ all: true });
+			const pending = reply.outcome.kind === "cancelled" ? [] : pendingToolCalls(branch, input.turnId, kept);
+			if (!wireEqual(reply.result.openToolCalls, pending)) {
+				// Expiry can commit after the Runtime received pending. Permit only that
+				// stale disposition, not a claim that any other call was left open.
+				const handoffs = new Set(branch.filter(e => e.kind === "modular-agent.interfaceHandoff" && e.turnId === input.turnId).map(e => e.toolCallId));
+				const reported = new Set(reply.result.openToolCalls);
+				const possible = pendingToolCalls(branch, input.turnId, kept.filter(e =>
+					e.kind !== "toolResult" || e.turnId !== input.turnId || !handoffs.has(e.toolCallId)));
+				if (this.supports.interfaceTools !== true || reply.outcome.kind === "cancelled" ||
+					!pending.every(id => reported.has(id)) || !wireEqual(reply.result.openToolCalls, possible.filter(id => reported.has(id)))) {
+					throw invalidState("Runtime outcome has invalid open calls");
+				}
+			}
 			if (t.refusal !== undefined && !t.limit) return { ...reply, outcome: { kind: "failed", error: t.refusal } };
 			return reply;
 		} finally {
@@ -880,6 +893,9 @@ class WireRuntime implements Runtime {
 		return this.turn("runtime/resumeTurn", input, host, signal, { interrupted });
 	}
 	continueOpenCalls(input: TurnInput, host: RuntimeHost, signal: AbortSignal, calls: InterruptedTurn["calls"]): Promise<TurnOutcome> {
+		if (this.supports.interfaceTools !== true && (input.startedBy.kind === "toolResult" || !calls.length)) {
+			throw invalidState("Runtime did not register Interface tool support");
+		}
 		return this.turn("runtime/continueOpenCalls", input, host, signal, { calls });
 	}
 }
