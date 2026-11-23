@@ -23,12 +23,13 @@ ma models
 ma -p 'Summarize the files in this folder.'
 ma -c                          # continue the last session in this folder
 ma --acp                       # ACP over stdio
+ma --acp --resume-open         # start interrupted turns before accepting ACP requests
 ma --acp --listen 127.0.0.1:7401 --token-file /path/to/token  # ACP over WebSocket
 ma --agui --listen 127.0.0.1:7401 --token-file /path/to/token # AG-UI over HTTP and SSE
 ma --agui --acp --listen 127.0.0.1:7401 --policy /path/to/policy.json
 ```
 
-With `--agui`, ma prints the HTTP origin. Send authorized requests to `/agui/v1`. Add `--acp` for ACP on the same port. Policy actors need a stable `clientId`; the single-token shorthand uses `ma-local`. The AG-UI creation project is the operator's project. See [Serving AG-UI](../core/README.md#serving-ag-ui) for the SDK and the proposed standard configuration text.
+With `--agui`, ma prints the HTTP origin. Send authorized requests to `/agui/v1`. Add `--acp` for ACP on the same port. Policy actors need a stable `clientId`; the single-token shorthand uses `ma-local`. The AG-UI creation project is the operator's project. List kept threads with `GET /agui/v1/threads`; the counts identify open work without opening the thread. ACP returns the same waiting summary for its own connection on `session/list`. See [Serving AG-UI](../core/README.md#serving-ag-ui).
 
 The WebSocket listener requires a loopback address and an owner-only bearer token file. It acts as `ma`'s local ACP user, irrespective of `MODULAR_AGENT_ACTOR`.
 
@@ -37,6 +38,12 @@ The WebSocket listener requires a loopback address and an owner-only bearer toke
 `openai-codex` and `xai` still work in `--model`, `ma login`, `ma logout`, `settings.json`, `models.json`, and saved sessions. `ma` moves old login keys to `chatgpt` and `grok` on the next write. If old and new keys coexist, the new key wins. `ma models` prints only the new ids.
 
 Configuration is shared in `$XDG_CONFIG_HOME/modular-agent`, or `~/.config/modular-agent`. State is kept in `$XDG_STATE_HOME/modular-agent/typescript`, or `~/.local/state/modular-agent/typescript`. `MODULAR_AGENT_DATA_DIR` sets the configuration directory and puts state under its `state/` subdirectory. Use `--runtime transient` to keep history without resuming a turn cut off by a crash.
+
+### Resuming at startup
+
+Pass `--resume-open` with `--acp` or `--agui`, or put `{"resume_open":true}` in the global `settings.json`. The default is false. A project file cannot turn it on or off. The option has no effect in print or interactive mode.
+
+Before accepting connections, ma checks kept sessions in the operator's project. It reopens interrupted turns as a local actor with watch authority. A durable turn carries on under ordinary recovery rules; a transient turn ends as failed. A session held by another writer is skipped. Stderr gets one line per resumed or skipped session, with the session ID and no conversation content. Open questions and Interface calls left by a finished turn wait for a client.
 
 ## Built so far
 
@@ -74,18 +81,21 @@ From the repository root:
 ```sh
 npm ci --prefix conformance/acp
 npm ci --prefix conformance/tools
+npm ci --prefix conformance/telemetry
 (cd typescript && npm ci && npm run build && npm test)
 (cd typescript && MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test)
 (cd typescript/sidecars/claude && npm ci && npm test)
 node conformance/reference/run.mjs --agent typescript
 MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- node "$PWD/typescript/packages/ma/dist/src/main.js" --acp
 scripts/websocket-kits.sh typescript
+typescript/scripts/check-agui.sh
 git diff --check
 ```
 
 - Reference checks: **26/26**, including `resume-open`, `telemetry-export`, `client-identity`, all four codemode profile checks, `sandbox-memory` and both crash-recovery modes.
 - ACP with crash, probe and job checks: **188/188** on stdio. Over WebSocket, ACP passed **193/193**, the plugin kit passed **153/153**, and listener isolation passed **14/14**.
-- TypeScript workspace: **447 offline tests passed** in both normal and `MA_REMOTE` configurations. Five live tests skipped. That includes **51/51** shared scenario runs across embedded, TypeScript stdio and TypeScript WebSocket placements. The other SDK fixtures were not built for these runs. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
+- TypeScript workspace: **490 offline tests passed** in both normal and `MA_REMOTE` configurations. Five live tests skipped. That includes **51/51** shared scenario runs across embedded, TypeScript stdio and TypeScript WebSocket placements. The other SDK fixtures were not built for these runs. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
+- AG-UI: **26/26** cases. The kit passed **65/65** self-tests, including rejection of faulty listing implementations.
 - Claude sidecar: **51 offline tests passed** and one live check skipped. No real sign-ins or model requests ran, and no real credentials were read.
 - `tsc -b` and `git diff --check` pass. The workspace has no separate lint or formatting command.
 
