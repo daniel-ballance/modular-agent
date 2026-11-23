@@ -271,11 +271,23 @@ class TelemetryRun:
             question = next(e["data"]["request"] for e in rows if e["kind"] == "inputRequest")
             report["question"] = {"id": question["id"], "kind": question["kind"]}
         if self.count_before is not None:
+            # Also include checkpoints committed after the effect. A kept turn
+            # never dispatches the Provider on reopen, but can still be checked
+            # for an unexpected checkpoint.
+            observed_ids = {row.get("id") for row in [*self.before, *self.after]}
+            timeline = [
+                *self.after,
+                *(
+                    row
+                    for row in _records(self.directory, session.id)
+                    if row["kind"] == "modular-agent.turnTrace" and row["id"] not in observed_ids
+                ),
+            ]
             report["crash"] = {
                 "signal": "SIGKILL",
                 "countBefore": self.count_before,
                 "countAfter": count_after,
                 "turnStart": next(e for e in self.before if e["kind"] == "turnStart"),
-                "afterRestart": self.after,
+                "afterRestart": timeline,
             }
         return report

@@ -139,7 +139,22 @@ for (const kept of [false, true]) {
   test(`accepts ${kept ? "kept" : "durable"} recovery without old exports`, () => compareTrace(crash(kept)));
 }
 
+function restoredStep() {
+  const example = crash();
+  example.received.spans.push(
+    makeSpan(2, 1, "modular_agent.step", step("step-1")),
+    attempt(3, 2, "step-1"),
+    makeSpan(7, 4, "modular_agent.step", step("step-1")),
+  );
+  return example;
+}
+
+test("accepts both segments of a restored step without counting another inference", () => compareTrace(restoredStep()));
+
 const violations = [
+  ["duplicate restored step", restoredStep, s => {
+    s.received.spans.push(makeSpan(8, 4, "modular_agent.step", step("step-1")));
+  }, /Duplicate restored step/],
   ["wrong parent", firstTurn, s => { s.received.spans[0].parentSpanId = spanId(1); }, /wrong parent/],
   ["missing attribute", firstTurn, s => { s.received.spans[0].attributes.pop(); }, /modular_agent.provider.id/],
   ["resource content sentinel", firstTurn, s => { s.received.payloads[0].resourceSpans[0].resource.attributes[0].value.stringValue = "prefix FIXTURE-PROMPT suffix"; }, /Fixture content/],
