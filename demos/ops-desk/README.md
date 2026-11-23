@@ -33,13 +33,14 @@ The default approval deadline is three minutes (`DESK_APPROVAL_MS=180000`). Agen
 
 ### Tailnet
 
-Bind **only** to the machine's Tailscale address. For example, set these in the host terminal **and** the sending terminal:
+Keep the desk on loopback and let Tailscale forward the port. A firewall that admits only SSH from the tailnet, as Fedora Server's default does, blocks a direct bind to the Tailscale address. Raw TCP forwarding needs no MagicDNS:
 
 ```sh
-export DESK_BIND=100.65.51.20 DESK_PORT=8080
+python3 demos/ops-desk/run.py --serve        # page on 127.0.0.1:8080
+tailscale serve --bg --tcp=8080 tcp://127.0.0.1:8080
 ```
 
-Start `python3 demos/ops-desk/run.py --serve` as above and open `http://100.65.51.20:8080` on your phone. The agents and their tool services still listen only on loopback. The page login can read every post and approve writes. The separate `events.token` can only submit events. Both are generated under `DESK_DATA`. Keep that directory private. The page and webhook use plain HTTP; use loopback or a trusted, access-controlled tailnet, not a public network.
+Open `http://TAILSCALE-IP:8080` on your phone (`tailscale ip -4` gives the address). `tailscale serve --tcp=8080 off` stops the forwarding. The agents and their tool services listen only on loopback. The page login can read every post and approve writes. The separate `events.token` can only submit events. Both are generated under `DESK_DATA`. Keep that directory private. The page and webhook use plain HTTP; Tailscale encrypts the tailnet hop, but do not expose the port on a public network.
 
 ### Phoenix
 
