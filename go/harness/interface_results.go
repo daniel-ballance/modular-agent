@@ -179,6 +179,23 @@ func (i *InterfaceConnection) checkReportLocked(ctx context.Context, id string) 
 	return cp, call, InterfaceNotReady, nil
 }
 
+// WatchContinuation registers before an Interface commits an answer or report.
+// No history entry or turn exists for a capacity refusal.
+func (c *client) WatchContinuation(id, origin string) (<-chan struct{}, func(), error) {
+	s, err := c.find(id)
+	if err != nil {
+		return nil, nil, err
+	}
+	ch := make(chan struct{})
+	s.mu.Lock()
+	if s.continuationWaiters == nil {
+		s.continuationWaiters = make(map[chan struct{}]string)
+	}
+	s.continuationWaiters[ch] = origin
+	s.mu.Unlock()
+	return ch, func() { s.mu.Lock(); delete(s.continuationWaiters, ch); s.mu.Unlock() }, nil
+}
+
 // Interface and question completions use the same session run queue. Derive
 // readiness from committed records; an in-memory queue entry is not admission.
 func (h *Harness) queueInterfaceContinuationsLocked(s *session) {

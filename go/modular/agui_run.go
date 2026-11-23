@@ -265,6 +265,15 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 	if err = q.fresh(h.epoch); err != nil {
 		return err
 	}
+	var capacity <-chan struct{}
+	if p.continued {
+		var detach func()
+		capacity, detach, err = q.host().WatchContinuation(q.id, p.origin)
+		if err != nil {
+			return err
+		}
+		defer detach()
+	}
 	if c != nil && !keep {
 		if err = c.connection.AdvertiseFor(p.names, p.key, p.origin); err != nil {
 			return denied
@@ -354,6 +363,8 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 			select {
 			case <-q.ctx.Done():
 				return nil
+			case <-capacity:
+				err = api.ErrCapacity
 			case <-lost:
 				err = unavailable
 			case <-interrupted:

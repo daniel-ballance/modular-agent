@@ -301,6 +301,7 @@ type agHost interface {
 	OutputValueFor(context.Context, string, api.Event) (api.Event, error)
 	ErasureEpoch(string) (int, error)
 	SubscribeOutput(func(api.Event) string, func(api.Event)) func()
+	WatchContinuation(string, string) (<-chan struct{}, func(), error)
 	SessionInterruption(string) (<-chan struct{}, <-chan struct{}, error)
 }
 
