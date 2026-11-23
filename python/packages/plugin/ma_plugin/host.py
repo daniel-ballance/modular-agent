@@ -190,7 +190,7 @@ class Environment:
         self.plugin = plugin
 
     async def invoke(self, op, d, emit=silent):
-        s = await self.plugin.api.session("get", session=d["session"])
+        s = await self.plugin.api.session("get", session=d["session"], include_entries=False)
         params = {"cwd": d.get("cwd", s["project"]), "sessionId": s["id"]}
         if op in {"read", "exists", "list"}:
             params["path"] = d["path"]
@@ -1338,7 +1338,7 @@ class ToolSource:
         self.plugin, self.source = plugin, source
 
     async def run(self, d, emit):
-        s = await self.plugin.api.session("get", session=d["session"])
+        s = await self.plugin.api.session("get", session=d["session"], include_entries=False)
         result = await self.plugin.request(
             "tools/call",
             {

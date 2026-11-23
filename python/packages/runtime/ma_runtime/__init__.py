@@ -68,33 +68,7 @@ class Runtime(Turns, Plugin):
         return e["data"].get("input", e["id"])
 
     async def _pending(self, sid, *, proposals=False):
-        settled, accepted = set(), {}
-        entries = await self._entries(sid)
-        for e in entries:
-            if e.get("fork_source"):
-                continue
-            if e["kind"] == "input_queued":
-                accepted[self._input_id(e)] = e
-            elif recorded_as(e, "input"):
-                settled.add(e["data"].get("inputId", self._input_id(e)))
-            elif recorded_as(e, "input_withdrawn"):
-                d = e["data"]
-                settled.update(d.get("inputIds", [d.get("inputId", self._input_id(e))]))
-        pending = [
-            e
-            for iid, e in accepted.items()
-            if iid not in settled
-            and (proposals or (e["data"]["when"] != "propose" and not e["data"].get("parked")))
-        ]
-        if not proposals and any(e["kind"] == HANDOFF for e in entries):
-            ready = await self.api.session("interface_ready", session=sid)
-            if ready:
-                order = {e["id"]: index for index, e in enumerate(entries)}
-                pending = sorted(
-                    [*ready, *pending],
-                    key=lambda e: e.get("ready_order", order.get(e["id"], len(entries))),
-                )
-        return pending
+        return await self.api.session("pending_inputs", session=sid, proposals=proposals)
 
     async def _restart_pending(self, d):
         pending = await self._pending(d["session"])
@@ -117,7 +91,7 @@ class Runtime(Turns, Plugin):
         s = await self.api.session(
             "get",
             session=sid,
-            include_entries=d.get("key") is not None,
+            include_entries=False,
             **({"actor": d["actor"]} if "actor" in d else {}),
         )
         actor = d.get("actor", s["actor"])
@@ -138,7 +112,11 @@ class Runtime(Turns, Plugin):
         if key is not None:
             if key.startswith(("job:", "continue:")) and not d.get("source"):
                 raise AgentError("Input key prefix is reserved", "invalid_request")
-            entries = [e for e in s["entries"] if not e.get("fork_source")]
+            entries = [
+                e
+                for e in await self._entries(sid, kinds=["erase", "input_queued"])
+                if not e.get("fork_source")
+            ]
             for e in entries:
                 if e["kind"] != "erase":
                     continue
@@ -253,7 +231,7 @@ class Runtime(Turns, Plugin):
             if d.get("declined"):
                 await self._return(sid, proposed)
                 return {"input": d["input"], "when": "handedBack"}
-            s = await self.api.session("get", session=sid)
+            s = await self.api.session("get", session=sid, include_entries=False)
             if s.get("busy") and mode == "now":
                 mode = "after"
             shared = rights & set(
@@ -413,7 +391,7 @@ class Runtime(Turns, Plugin):
             )
             if boundary is not None:
                 try:
-                    entries = await self._entries(sid)
+                    outcome = await self.api.session("input_outcome", session=sid, input=input_id)
                 except AgentError:
                     if sid in self.suspending:
                         raise AgentError("Session suspended", "lost") from None
@@ -422,21 +400,11 @@ class Runtime(Turns, Plugin):
                 if sid in self.suspending:
                     raise AgentError("Session suspended", "lost")
             if closing.done():
-                entries = closing.result()
-            taken = next(
-                (
-                    e
-                    for e in entries
-                    if e["kind"] in {"input", "turn_start"} and e["data"].get("input") == input_id
-                ),
-                None,
-            )
-            if taken and (
-                not task or task.done() or self.unsettled_turns.get(sid) != taken["turn"]
+                outcome = closing.result().get(input_id)
+            if outcome and (
+                not task or task.done() or self.unsettled_turns.get(sid) != outcome["turn"]
             ):
-                for e in entries:
-                    if e["kind"] == "turn_end" and e["turn"] == taken["turn"]:
-                        return [e["data"]]
+                return [outcome["result"]]
             if closing.done() or boundary is None:
                 return []
             if task is not self.tasks.get(sid) or boundary.is_set():
@@ -574,7 +542,7 @@ class Runtime(Turns, Plugin):
 
     async def run_tool(self, d, emit):
         sid = d["session"]
-        s = await self.api.session("get", session=sid)
+        s = await self.api.session("get", session=sid, include_entries=False)
         if s.get("busy"):
             raise AgentError("UI tool calls require an idle turn")
         self.cancelled.discard(sid)
@@ -604,7 +572,7 @@ class Runtime(Turns, Plugin):
 
     async def _ui_call(self, d, emit):
         sid = d["session"]
-        s = await self.api.session("get", session=sid)
+        s = await self.api.session("get", session=sid, include_entries=False)
         actor = d.get("actor", s["actor"])
         authority = await self.api.session("authority", session=sid, actor=actor)
         if acting := d.get("acting_for"):
@@ -620,7 +588,7 @@ class Runtime(Turns, Plugin):
             "authority": authority,
             "initiator": "interface",
         }
-        es = await self._entries(sid)
+        es = await self._entries(sid, call=c["id"])
         prior = next((e for e in es if e["kind"] == "tool_call" and e["call"] == c["id"]), None)
         if prior:
             if any(prior["data"].get(k) != c[k] for k in ("name", "input", "actor")):
@@ -663,7 +631,7 @@ class Runtime(Turns, Plugin):
         await self.cancel(d, None)
         if closing := self.closing_history.get(sid):
             # Waiting prompts may wake after the Harness removes the session.
-            closing.set_result(await self._entries(sid))
+            closing.set_result(await self.api.session("input_outcomes", session=sid))
             self.closing_history.pop(sid)
         self.tasks.pop(sid, None)
         self._turn_boundary(sid)

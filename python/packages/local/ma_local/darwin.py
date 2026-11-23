@@ -57,7 +57,7 @@ class DarwinLocal(Local):
 
     async def bash(self, d, emit):
         session = d["session"]
-        s = await self.api.session("get", session=session)
+        s = await self.api.session("get", session=session, include_entries=False)
         with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as status_file:
             lifetime_read, lifetime = os.pipe()
             try:

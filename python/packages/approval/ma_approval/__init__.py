@@ -15,7 +15,7 @@ class Approval(Plugin):
         api.on("tool.before", self.check, "last")
 
     async def check(self, d):
-        s = await self.api.session("get", session=d["session"])
+        s = await self.api.session("get", session=d["session"], include_entries=False)
         policy = s["settings"].get("approval", "off")
         tool = d.get("definition") or {}
         if policy == "off" or (

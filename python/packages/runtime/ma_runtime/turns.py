@@ -8,9 +8,8 @@ from referencing import Registry
 
 from ma_core import TOOL_RESULT_BYTES, lower_reasoning, AgentError, content, identity
 from ma_core import telemetry as ot
-from ma_core.recovery import HANDOFF, STEP_AFTER, step_checkpoint
+from ma_core.recovery import HANDOFF, STEP_AFTER
 from ma_core.wire import (
-    entry_out,
     model_out,
     model_request_fields,
     recorded_as,
@@ -237,8 +236,7 @@ class Turns:
         if recovering:
             prior_starts = {
                 e["call"]
-                for e in await self._entries(sid)
-                if e.get("turn") == turn and e["kind"] == "tool_started"
+                for e in await self._entries(sid, turn=turn, kind="tool_started", fields=["call"])
             }
         open_calls, additions, problem = [], None, None
         if not recovering:
@@ -267,7 +265,7 @@ class Turns:
             )
         result, usage, structured = [], {}, {}
         tenant_limit = capacity_limit = False
-        es = await self._entries(sid, turn=turn)
+        es = await self._entries(sid, turn=turn, kinds=["input", "turn_start"])
         start = next(e for e in es if e["kind"] == "turn_start")
         actor = start["actor"]
         schema = start["data"].get("result_schema")
@@ -305,7 +303,7 @@ class Turns:
                     },
                 ]
             if recovering:
-                _, last = await self._step_checkpoint(sid, turn)
+                last = await self._step_checkpoint(sid, turn)
                 if last and last.get("decision") is not None:
                     raise AgentError(last["decision"]["refuse"], "refused")
             else:
@@ -334,7 +332,12 @@ class Turns:
             # Replay journal decisions, not model requests or completed effects.
             while not open_calls:
                 tools = await self._definitions(sid, turn)
-                es = await self._entries(sid, turn=turn)
+                es = await self._entries(
+                    sid,
+                    turn=turn,
+                    kinds=["step_start", "model_started", "response", "step_end"],
+                    omit_replay=True,
+                )
                 responses = [e for e in es if e["kind"] == "response"]
                 usage = {}
                 for response in responses:
@@ -400,7 +403,16 @@ class Turns:
                 calls = response.get("calls", [])
                 # Response plus full call list is a single history-store transaction.
                 # A crash during call admission is repaired from that immutable list.
-                existing = {e["call"] for e in await self._entries(sid, kind="tool_call")}
+                existing = (
+                    {
+                        e["call"]
+                        for e in await self._entries(
+                            sid, kind="tool_call", calls=[c["id"] for c in calls], fields=["call"]
+                        )
+                    }
+                    if calls
+                    else set()
+                )
                 for c in calls:
                     if c["id"] not in existing:
                         definition = next((t for t in tools if t["name"] == c["name"]), None)
@@ -478,8 +490,10 @@ class Turns:
                     step=step,
                     copies=[
                         e["id"]
-                        for e in await self._entries(sid)
-                        if e.get("turn") == turn and e["kind"] in {"response", "tool_result"}
+                        for e in await self._entries(
+                            sid, turn=turn, kinds=["response", "tool_result"], fields=["id", "kind"]
+                        )
+                        if e["kind"] in {"response", "tool_result"}
                     ],
                     data={
                         "continue": more,
@@ -524,15 +538,22 @@ class Turns:
                     prior_starts=prior_starts,
                     preserve_interface=True,
                 )
-                done = {
-                    e.get("call") for e in await self._entries(sid) if recorded_as(e, "tool_result")
-                }
+                done = (
+                    {
+                        e.get("call")
+                        for e in await self._entries(
+                            sid, calls=open_calls, kinds=["tool_result"], fields=["call"]
+                        )
+                    }
+                    if open_calls
+                    else set()
+                )
                 open_calls = [cid for cid in open_calls if cid not in done]
         # Include the final response in usage even if the turn ended by an exception.
         usage = {}
-        es = await self._entries(sid)
+        es = await self._entries(sid, turn=turn, kinds=["response", "tool_result"])
         for e in es:
-            if e.get("turn") == turn and e["kind"] == "response":
+            if e["kind"] == "response":
                 for key, value in e["data"].get("usage", {}).items():
                     usage[key] = usage.get(key, 0) + value
         handed_back = []
@@ -579,32 +600,23 @@ class Turns:
         return answer
 
     async def _recovered_handoffs(self, sid, turn):
-        entries = await self._entries(sid)
-        done = {e.get("call") for e in entries if recorded_as(e, "tool_result")}
-        return [
-            e["call"]
-            for e in entries
-            if e["kind"] == HANDOFF and e.get("turn") == turn and e["call"] not in done
+        calls = [
+            e["call"] for e in await self._entries(sid, turn=turn, kind=HANDOFF, fields=["call"])
         ]
+        if not calls:
+            return []
+        done = {
+            e["call"]
+            for e in await self._entries(sid, calls=calls, kinds=["tool_result"], fields=["call"])
+        }
+        return [cid for cid in calls if cid not in done]
 
     async def _step_checkpoint(self, sid, turn, step=None):
-        branch = await self.api.session("branch", session=sid)
-        branch_ids = {e["id"] for e in branch}
-        branch.extend(
-            e
-            for e in await self._entries(sid)
-            if e["id"] not in branch_ids and recorded_as(e, STEP_AFTER)
-        )
-        try:
-            return step_checkpoint(
-                [entry_out(e) for e in branch if not e.get("fork_source")], turn, step
-            )
-        except ValueError as exc:
-            raise AgentError(str(exc), "lost") from exc
+        return await self.api.session("step_checkpoint", session=sid, turn=turn, step=step)
 
     async def _step_after(self, sid, turn, response):
         step = response["step"]
-        _, saved = await self._step_checkpoint(sid, turn, step)
+        saved = await self._step_checkpoint(sid, turn, step)
         if "decision" in saved:
             previous = saved["decision"]
             return {"refused": True, "reason": previous["refuse"]} if previous is not None else {}
@@ -624,7 +636,7 @@ class Turns:
         return value
 
     async def _turn_authority(self, sid, turn, actor):
-        entries = await self._entries(sid, turn=turn)
+        entries = await self._entries(sid, turn=turn, kinds=["turn_start", "input"])
         if any(e["kind"] == "turn_start" and "continuationCalls" in e["data"] for e in entries):
             return await self.api.session(
                 "interface_work_rights", session=sid, turn=turn, actor=actor
@@ -726,7 +738,8 @@ class Turns:
                 request["close_attempt"] = {"id": outstanding["id"], "step": outstanding["step"]}
             wire_provider = access["provider"].get("wire_provider")
             if not wire_provider:
-                request = await self.api.session("prepare_model_request", **request)
+                if access.get("_host_prepares", True):
+                    request = await self.api.session("prepare_model_request", **request)
                 model = self._model_record(access)
                 final = request.get("_shared_request") or request_out(request)
                 await self._record(
@@ -811,8 +824,10 @@ class Turns:
         )
         calls = response.get("calls", [])
         ids = [c["id"] for c in calls]
-        existing = {e["call"] for e in await self._entries(sid, kind="tool_call")}
-        if len(ids) != len(set(ids)) or existing.intersection(ids):
+        existing = (
+            await self._entries(sid, calls=ids, kind="tool_call", fields=["call"]) if ids else []
+        )
+        if len(ids) != len(set(ids)) or existing:
             raise AgentError("Provider returned duplicate tool call IDs")
         return await self._record(
             sid,
@@ -831,8 +846,7 @@ class Turns:
         )
 
     async def _retry_step(self, sid, turn, prior, settings):
-        branch = await self._entries(sid)
-        count = sum(e.get("turn") == turn and e["kind"] == "model_started" for e in branch)
+        count = len(await self._entries(sid, turn=turn, kind="model_started", fields=["id"]))
         await self._record(
             sid, turn, "step_end", step=prior, data={"continue": True, "outcome": "completed"}
         )
@@ -888,7 +902,14 @@ class Turns:
         )
 
     async def _tools(self, sid, turn, step, calls, tools, *, continuation_of=None):
-        es = await self._entries(sid)
+        if not calls:
+            return []
+        offered = (
+            None
+            if step.startswith("late:")
+            else await self.api.session("step_offer", session=sid, step=step)
+        )
+        es = await self._entries(sid, calls=[c["id"] for c in calls])
         done = {e.get("call") for e in es if recorded_as(e, "tool_result")}
         receipts = {e["call"]: e["data"] for e in es if e["kind"] == "tool_finished"}
         started = {e["call"]: e for e in es if e["kind"] == "tool_started"}
@@ -927,22 +948,13 @@ class Turns:
                 # A pending disposition ends this invocation. It does not cover
                 # a later start or give the continuation new gate authority.
                 old = None
-            if not step.startswith("late:"):
-                offered = next(
-                    (
-                        e["data"].get("tools", [])
-                        for e in es
-                        if e["kind"] == "model_started" and e.get("step") == step
-                    ),
-                    [],
-                )
-                if c["name"] not in offered:
-                    if not old:
-                        ot.tool_disposition(sid, turn, step, c, None, {"status": "refused"})
-                    return {
-                        "status": "outcome_unknown" if old else "refused",
-                        "content": content(UNKNOWN if old else "not offered"),
-                    }
+            if offered is not None and c["name"] not in offered:
+                if not old:
+                    ot.tool_disposition(sid, turn, step, c, None, {"status": "refused"})
+                return {
+                    "status": "outcome_unknown" if old else "refused",
+                    "content": content(UNKNOWN if old else "not offered"),
+                }
             definition = next((t for t in tools if t["name"] == c["name"]), None)
             if old:
                 prior = old.get("data", {})
@@ -1157,8 +1169,11 @@ class Turns:
         return answer
 
     async def _receipt(self, sid, turn, step, call, answer):
-        es = await self._entries(sid)
-        sources = [e["id"] for e in es if e.get("call") == call["id"] and e["kind"] == "tool_call"]
+        es = await self._entries(sid, kinds=["question_open", "question_answer"])
+        sources = [
+            e["id"]
+            for e in await self._entries(sid, call=call["id"], kind="tool_call", fields=["id"])
+        ]
         requests = {
             e["data"]["id"]
             for e in es
@@ -1176,7 +1191,21 @@ class Turns:
     async def _settle(
         self, sid, turn, cancelled=False, *, prior_starts=(), preserve_interface=False
     ):
-        es = await self._entries(sid)
+        async def call_records():
+            # Results can settle in a later turn. Select by the original call
+            # IDs, not by the terminal record's turn.
+            responses = await self._entries(sid, turn=turn, kind="response")
+            ids = {c["id"] for e in responses for c in e["data"].get("calls", [])}
+            ids.update(
+                e["call"]
+                for e in await self._entries(
+                    sid, turn=turn, kinds=["tool_call", HANDOFF], fields=["call"]
+                )
+            )
+            records = await self._entries(sid, calls=list(ids)) if ids else []
+            return [*responses, *records]
+
+        es = await call_records()
         handed_off = {e["call"] for e in es if recorded_as(e, HANDOFF) and e.get("turn") == turn}
         if handed_off and not preserve_interface:
             await self.api.session(
@@ -1185,7 +1214,7 @@ class Turns:
                 turn=turn,
                 reason="Originating turn was interrupted",
             )
-            es = await self._entries(sid)
+            es = await call_records()
         done = {e.get("call") for e in es if recorded_as(e, "tool_result")}
         started = {e["call"] for e in es if e["kind"] == "tool_started"}
         receipts = {e["call"]: e["data"] for e in es if e["kind"] == "tool_finished"}

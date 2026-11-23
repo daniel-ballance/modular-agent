@@ -13,7 +13,7 @@ HINTS = {"read_only": "readOnly", "safe_to_repeat": "safeToRepeat", "external": 
 
 def tool_out(t):
     return {
-        **t,
+        **{k: v for k, v in t.items() if k not in {"schema", "target"}},
         "parameters": t.get("schema", t.get("parameters", {})),
         "hints": {HINTS.get(k, k): v for k, v in t.get("hints", {}).items()},
         "callers": [
@@ -75,7 +75,12 @@ def result_in(r, call=None):
 def model_out(m, provider=None):
     owner, _, name = m["id"].partition("/")
     return {
-        **m,
+        **{
+            k: v
+            for k, v in m.items()
+            if k
+            not in {"context_window", "output_limit", "input_types", "target", "_host_prepares"}
+        },
         "provider": provider or owner,
         "id": name or owner,
         "contextWindow": m.get("context_window", m.get("contextWindow", 1_000_000)),
@@ -212,6 +217,15 @@ def messages_out(messages):
     names = {}
     for m in messages:
         kind = m.get("kind")
+        if kind is None and "role" in m:
+            # Already a shared message, not a native record to project.
+            result.append(m)
+            continue
+        # Keep additive members supplied by a shared request. Native context
+        # records instead carry a history envelope and private tool bookkeeping.
+        shared = (
+            {k: v for k, v in m.items() if k not in {"kind", "data", "call"}} if "role" in m else {}
+        )
         if kind == "tool_call":
             names[m["call"]] = m["data"]["name"]
         elif kind == "response":
@@ -223,15 +237,26 @@ def messages_out(messages):
         elif kind == "tool_result":
             result.append(
                 {
-                    **m,
+                    **shared,
+                    **({"id": m["id"]} if m.get("id") else {}),
+                    "content": m["content"],
                     "role": "toolResult",
                     "toolCallId": m["call"],
-                    "toolName": m.get("data", {}).get("toolName", names.get(m["call"], "unknown")),
+                    "toolName": m.get("data", {}).get(
+                        "toolName", m.get("toolName", names.get(m["call"], "unknown"))
+                    ),
                     "isError": m.get("data", {}).get("status") != "completed",
                 }
             )
         elif kind != "waiting":
-            result.append({**m, "role": m.get("role", "user"), "content": m.get("content", [])})
+            result.append(
+                {
+                    **shared,
+                    **({"id": m["id"]} if m.get("id") else {}),
+                    "role": m.get("role", "user"),
+                    "content": m.get("content", []),
+                }
+            )
     return result
 
 
@@ -241,7 +266,14 @@ def request_out(d):
         "systemPrompt": d.get("system", ""),
         "messages": messages_out(d.get("messages", [])),
         "tools": [tool_out(t) for t in d.get("tools", [])],
-        "settings": settings_out(d.get("settings", {})),
+        "settings": {
+            **d.get("_shared_request", {}).get("settings", {}),
+            **{
+                k: v
+                for k, v in settings_out(d.get("settings", {})).items()
+                if k in {"reasoning", "maxOutput"}
+            },
+        },
     }
 
 

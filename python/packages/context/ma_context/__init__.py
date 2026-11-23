@@ -33,12 +33,12 @@ class Context(Plugin):
         api.on("model.failed", self.failed)
         api.command("compact", "Summarize older history without deleting it", self.command)
 
-    async def _view(self, sid):
-        branch = await self.api.session("branch", session=sid)
+    @staticmethod
+    def _view(branch):
         visible = [
             e
             for e in branch
-            if e["visible"]
+            if e.get("visible")
             and not (
                 e["kind"] == "response"
                 and e["data"].get("stop") in {"failed", "aborted"}
@@ -95,11 +95,13 @@ class Context(Plugin):
 
     async def prepare(self, d):
         sid = d["session"]
-        view = await self._view(sid)
+        branch = await self.api.session("context_records", session=sid, turn=d.get("turn"))
+        view = self._view(branch)
         budget = d["settings"].get("context_budget", int(d["access"]["context_window"] * 0.75))
         if len(json.dumps(view)) // 4 > budget:
             await self.compact({"session": sid, "access": d["access"]}, None)
-            view = await self._view(sid)
+            branch = await self.api.session("context_records", session=sid, turn=d.get("turn"))
+            view = self._view(branch)
         messages = [
             {"kind": "context", "content": a["context"], "data": {}}
             for a in d["additions"]
@@ -115,7 +117,7 @@ class Context(Plugin):
                     **({"call": e["call"]} if "call" in e else {}),
                 }
             )
-        for entry in reversed(await self.api.session("branch", session=sid)):
+        for entry in reversed(branch):
             if entry.get("turn") != d.get("turn"):
                 continue
             if entry["kind"] == "model_started":
@@ -136,7 +138,7 @@ class Context(Plugin):
 
     async def compact(self, d, emit):
         sid = d["session"]
-        view = await self._view(sid)
+        view = self._view(await self.api.session("context_records", session=sid))
         if not view:
             return {"summary": None}
         await self.api.hook("context.compacting", {"session": sid})
@@ -188,7 +190,7 @@ class Context(Plugin):
         return None
 
     async def command(self, d):
-        s = await self.api.session("get", session=d["session"])
+        s = await self.api.session("get", session=d["session"], include_entries=False)
         if s.get("busy"):
             raise AgentError("Compact only between turns")
         return await self.compact(d, None)

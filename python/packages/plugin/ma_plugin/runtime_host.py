@@ -8,7 +8,7 @@ from ma_runtime import Runtime
 from ma_runtime.turns import UNKNOWN, checked_tool_result, require_processed_result
 
 from . import hooks
-from ma_core.recovery import HANDOFF, STEP_AFTER, step_checkpoint
+from ma_core.recovery import HANDOFF, STEP_AFTER
 from ma_core.wire import (
     STATUS_IN,
     call_out,
@@ -84,9 +84,9 @@ class HostedRuntime(Runtime):
         }
 
     async def _run_turn(self, sid, queued, turn, recovering, segment):
-        entries = await self.api.session("branch", session=sid)
         additions, problem = None, None
         if recovering:
+            entries = await self.api.session("branch", session=sid)
             start = next(e for e in entries if e.get("turn") == turn and e["kind"] == "turn_start")
             queued = next(
                 (
@@ -432,18 +432,15 @@ class TurnHost:
         return {"turnId": self.turn, "calls": eligible, **({"lastStep": last} if last else {})}
 
     async def step_checkpoint(self, step=None):
-        entries = await self.entries()
-        # Detect a duplicate gate record even on an alternate branch.
-        branch_ids = {e["id"] for e in entries}
-        all_entries = (await self.api.session("get", session=self.sid))["entries"]
-        entries.extend(
-            e for e in all_entries if e["id"] not in branch_ids and recorded_as(e, STEP_AFTER)
-        )
         try:
-            return step_checkpoint(
-                [entry_out(e) for e in entries if not e.get("fork_source")], self.turn, step
+            return await self.api.session(
+                "step_checkpoint",
+                session=self.sid,
+                turn=self.turn,
+                step=step,
+                include_response=True,
             )
-        except ValueError as exc:
+        except AgentError as exc:
             raise WireError(str(exc), "invalid_request") from exc
 
     async def checked_end_data(self, value):

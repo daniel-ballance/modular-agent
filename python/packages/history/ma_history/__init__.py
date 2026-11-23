@@ -110,7 +110,7 @@ class History(Plugin):
         return {}
 
     async def keep(self, d, emit):
-        s = {k: v for k, v in d["session"].items() if k != "entries"}
+        s = dict(d["session"])
         self._lock(s["id"])
         for flag in ("busy", "suspending", "closing", "moving", "writer_lost"):
             s.pop(flag, None)

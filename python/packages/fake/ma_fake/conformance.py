@@ -51,15 +51,19 @@ class Echo(Plugin):
 
     async def generate(self, d, emit):
         # Read authoritative turn entries, not a compacted context or old tool results.
-        entries = await self.api.session("branch", session=d["session"])
-        inputs = [e for e in entries if e["kind"] == "input"]
+        inputs = await self.api.session(
+            "branch", session=d["session"], kind="input", fields=["content"], last=True
+        )
         text = plain(inputs[-1]["content"]) if inputs else ""
         turn = d.get("turn")
-        results = [
-            e
-            for e in entries
-            if e["kind"] == "tool_result" and e.get("turn") == turn and e.get("visible")
-        ]
+        results = await self.api.session(
+            "branch",
+            session=d["session"],
+            turn=turn,
+            kind="tool_result",
+            visible=True,
+            fields=["content"],
+        )
         calls = []
         if text.startswith("fail:"):
             return {
