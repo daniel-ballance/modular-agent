@@ -1,6 +1,6 @@
 # Ops desk: design
 
-Status: accepted by the owner, 2026-11-23. The scripted desk implements plan steps 1–3.
+Status: accepted by the owner, 2026-11-23. Steps 1–4 ran with scripted models and with three subscription Providers.
 
 ## Purpose
 
@@ -67,7 +67,7 @@ A plain page in `host/public/`, served by the host on the tailnet: the conversat
 
 ## Traces
 
-All three agents export to Phoenix (`scripts/phoenix.sh`). The host starts a span for each event and passes `traceparent` on each AG-UI request, from a trusted peer, so one event can be followed from the webhook through all three agents.
+All three agents can export to Phoenix (`scripts/phoenix.sh`). The host starts a span for each event and passes `traceparent` on each AG-UI request. Triage and the verifier trust that parent. To find the coder's separate trace, match its thread ID to `gen_ai.conversation.id`.
 
 ## Checks
 
@@ -86,7 +86,7 @@ With real models (`--live`) the same flow runs against your sign-ins; it is not 
 Expected findings (checked against the scripted desk):
 
 - **Approvals cannot wait past a turn — confirmed.** The [interrupt rules](../../docs/bindings/agui.md#interrupts-and-frontend-tools) require an existing presence and forbid extending an approval past its turn. In the deadline check the question disappeared from `waiting.questions`, the change tool was refused, and the file and commit stayed unchanged. A stored inbox row did not make a late answer valid.
-- **Waking an agent — confirmed.** AG-UI discovery needs a running listener. There is no wake or list-threads operation. The host launches each executable, reads its ready origin and keeps the thread ID. Opening a post's snapshot after idle shutdown starts the process and reopens the same session.
+- **Finding work is not starting a process.** [AG-UI now specifies a thread list](../../docs/bindings/agui.md#listing-threads) with counts of waits for this client; ACP `session/list` may supply the same summary. Both need a running agent. The desk launches the executable and keeps the thread ID for each route. Opening a post's snapshot after idle shutdown reopens the same session. The desk does not use [`--resume-open`](../../docs/reference/standard-configuration.md#resuming-at-start-up): that option (off by default) starts recovery of interrupted turns when `ma` starts, not when `ma` is stopped.
 - **Posts during a turn — confirmed for Interface tools.** A frontend handoff ends the exchange; it cannot acknowledge a post and continue that step. A server tool can. A plugin can also emit a gated custom event, but that is a live notification, not a committed, acknowledged post. The desk authenticates each tool service separately and stores posts by session and call ID.
 - **Traces across agents — confirmed for hand-off links, not for propagation in general.** At a local OTLP/HTTP receiver, the triage and verifier `invoke_agent` spans had the desk event's trace ID. Neither had a link to the other agent's `hand_off` call. The host carried its own event parent across the queue; [telemetry v1](../../docs/telemetry.md#what-later-versions-add) does not do this for it. The Rust `ma` invocation arrived on a different trace: network parents require operator trust, and `ma`'s actor policy exposes `clientId` but no trace-trust option. Authentication alone is not trace trust.
 
@@ -99,6 +99,29 @@ Additional findings:
 - **Identifying callers of the desk service takes three listeners.** The public [plugin service API](../../docs/sdk/placement.md#services) takes one `tokenFile`, not a token-to-principal map. `tools/call` has a session and a call, not an authenticated agent name. Each listener closes over the identity whose token it accepts. Neither model text nor plugin initialization config selects that identity.
 
 All three real AG-UI adapters ran. The implementation-status sentences at the top of the binding and under SDK placement's “Serving AG-UI” are out of date.
+
+### Two live events
+
+On 2026-11-23, `run.py --live --approve auto` sent the same build failure to two fresh desks. Both posted an event, a summary that `percentage(37)` returned zero, a change and `PASS: 2 percentage checks passed`. Each needed one approval and one verifier checkout. No turn failed or needed a second fix.
+
+| Run | Approved replacement for `0` in `limits.py` | Commit tested | Event to last agent finish |
+|---|---|---|---:|
+| 1 | `min(100, max(0, value))` | `d12db232` | 17.4 s |
+| 2 | `max(0, min(100, value))` | `13203281` | 19.0 s |
+
+- Grok called `post` and `hand_off` in one model step; the script uses separate steps. Both live approvals named the literal `0`, not the whole `return` line. The page client used the interrupt ID and exact prompt rather than matching the scripted edit text.
+- Claude read files in one `codemode` call before proposing the edit. In run 1 it grouped the edit, post and hand-off in the next call. In run 2 it waited for the commit result and made another model request before posting. The host routed the committed revision in both cases. The runner checked the verdict against the verifier's `exec` result in the snapshot, not against an expected sentence from the model.
+
+Phoenix reported the following usage on the `chat` spans, selected by the three thread IDs of each run. Input includes cached tokens; these are token counts, not prices.
+
+| Agent and model | Run 1 requests | Input / output | Run 2 requests | Input / output |
+|---|---:|---:|---:|---:|
+| Triage · `grok/grok-4.7` | 2 | 5,609 / 189 | 2 | 6,007 / 218 |
+| Coder · `claude/claude-sonnet-5-5` | 3 | 11,421 / 394 | 4 | 15,696 / 506 |
+| Verifier · `chatgpt/gpt-6.1-sol` | 4 | 1,444 / 73 | 4 | 1,504 / 73 |
+| **Total** | **9** | **18,474 / 656** | **10** | **23,207 / 797** |
+
+Triage and the verifier shared the event trace in both runs. The coder still had a different trace, as in the scripted check. Counting only the event trace would omit the most expensive turn.
 
 ## Plan
 
