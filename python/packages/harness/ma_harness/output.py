@@ -59,7 +59,7 @@ def overlay(native, before, after, *, normalized=False):
 
 def project(event):
     kind, data = event["type"], event["data"]
-    if kind in {"reply", "entry", "request"}:
+    if kind in {"reply", "entry", "request", "toolCall"}:
         return [(event, lambda _, after: overlay(data, data, after))]
     if kind == "model_output":
         event_type = data.get("stream_type", "text")

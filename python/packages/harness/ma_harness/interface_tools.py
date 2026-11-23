@@ -488,10 +488,12 @@ class InterfaceTools:
                     "actor": actor,
                     "kind": "tool_result",
                     "writer": "@harness",
-                    "visible": True,
+                    "visible": not suppress_continuation,
                     "copies": [e["id"] for e in ([start] if start else []) + checkpoints],
-                    "content": result["content"],
-                    "data": {
+                    "content": [] if suppress_continuation else result["content"],
+                    "data": {"erased": True, "originalKind": "toolResult"}
+                    if suppress_continuation
+                    else {
                         "status": result["status"],
                         "toolName": (start or {})
                         .get("data", {})
@@ -596,6 +598,9 @@ class InterfaceTools:
                                 },
                             )
                         )["result"]
+                        if answer.get("callId", cid) != cid:
+                            raise ValueError("Invalid tool.after call ID")
+                        answer = {k: v for k, v in answer.items() if k != "callId"}
                         if not same_json(
                             {k: v for k, v in answer.items() if k not in {"content", "value"}},
                             {"call": cid, "status": proposed["status"]},
