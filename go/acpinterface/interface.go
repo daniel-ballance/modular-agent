@@ -600,7 +600,9 @@ func (s *server) LoadSession(ctx context.Context, p acp.LoadSessionRequest) (acp
 		if err != nil {
 			return acp.LoadSessionResponse{}, err
 		}
-		return host.LoadSession(ctx, p)
+		if host != s {
+			return host.LoadSession(ctx, p)
+		}
 	}
 	lifecycle := s.sessionLifecycle()
 	if !lifecycle.TryLock() {
@@ -616,7 +618,9 @@ func (s *server) ResumeSession(ctx context.Context, p acp.ResumeSessionRequest) 
 		if err != nil {
 			return acp.ResumeSessionResponse{}, err
 		}
-		return host.ResumeSession(ctx, p)
+		if host != s {
+			return host.ResumeSession(ctx, p)
+		}
 	}
 	lifecycle := s.sessionLifecycle()
 	if !lifecycle.TryLock() {
@@ -701,7 +705,7 @@ func (s *server) ListSessions(ctx context.Context, p acp.ListSessionsRequest) (a
 		}
 		host := s.sessionHost(snap.ID)
 		// ACP has no executor route. It never claims a different Interface's calls.
-		waiting, err := s.listingAPI(snap).WaitingForHost(host.acting(ctx, snap.ID, s.actor), snap, s.hostActor(), "")
+		waiting, err := s.listingAPI(snap).WaitingForHost(host.acting(ctx, snap.ID, s.actor), snap, s.hostActor(), api.WaitingRoute{})
 		if errors.Is(err, api.ErrAuthority) {
 			continue
 		}

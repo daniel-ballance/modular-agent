@@ -211,6 +211,13 @@ func (s Session) Branch() []Entry {
 	return out
 }
 
+// WaitingRoute names the authenticated executor and any additional answer
+// restrictions of the Interface, such as exact delivery on a presence stream.
+type WaitingRoute struct {
+	Executor  string
+	CanAnswer func(Question) bool
+}
+
 // WaitingSummary contains counts, never question or tool content.
 type WaitingSummary struct {
 	Questions int    `json:"questions"`
@@ -332,7 +339,7 @@ type API interface {
 	List(string) ([]Session, error)
 	// WaitingForHost summarizes a listed record without opening it or joining the actor.
 	// An empty executor route cannot receive Interface-run calls.
-	WaitingForHost(context.Context, Session, Actor, string) (WaitingSummary, error)
+	WaitingForHost(context.Context, Session, Actor, WaitingRoute) (WaitingSummary, error)
 	Snapshot(string) (Session, error)
 	View(context.Context, string) (Session, error)
 	Record(context.Context, string, Entry) (Entry, error)

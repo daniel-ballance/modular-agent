@@ -213,48 +213,54 @@ func agPending(c *InterfaceToolConnection) ([]harness.PendingInterfaceCall, erro
 	}
 	return c.connection.Pending()
 }
+func agEndedTurns(snap api.Session) map[string]bool {
+	ended := map[string]bool{}
+	for _, e := range snap.Branch() {
+		if e.WasKind("turn.end") {
+			ended[e.Turn] = true
+		}
+	}
+	return ended
+}
+
+// questionDelivery only inspects a route. A listing may have no client state
+// at all. A late question can outlast that state; an in-turn offer cannot.
+func (s *agClient) questionDelivery(v api.Question, ended bool) (agDelivery, bool) {
+	var d agDelivery
+	var delivered bool
+	if s != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		d, delivered = s.delivered[v.ID]
+		if d.presence != nil && (s.presence != d.presence || d.presence.ctx.Err() != nil) {
+			delivered = false
+		}
+	}
+	if delivered && sha256.Sum256(api.JSON(agInterrupt(v))) != d.digest {
+		return agDelivery{}, false
+	}
+	if v.Defer && v.Kind != "approval" && ended {
+		return agDelivery{}, true
+	}
+	return d, delivered && d.presence != nil && !(v.Defer && v.Kind == "approval")
+}
+
 func (q *agRequest) waitingQuestions() (map[string]agQuestion, error) {
-	list, err := q.a.q.manager().List(q.id)
+	snap, err := q.a.a.Snapshot(q.id)
 	if err != nil {
 		return nil, err
 	}
-	s := q.state
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	ended := agEndedTurns(snap)
 	out := map[string]agQuestion{}
-	for _, v := range list {
+	for _, v := range q.a.q.manager().Recorded(snap) {
 		if !q.eligible(v) {
 			continue
 		}
-		d, ok := s.delivered[v.ID]
-		if ok && d.presence != nil && (s.presence != d.presence || d.presence.ctx.Err() != nil) {
-			ok = false
-		}
-		if v.Defer || !ok {
-			if !v.Defer || v.Kind == "approval" {
-				continue
-			}
-			ended := false
-			snap, err := q.a.a.Snapshot(q.id)
-			if err != nil {
-				return nil, err
-			}
-			for _, e := range snap.Branch() {
-				if e.Turn == v.Turn && e.Kind == "turn.end" {
-					ended = true
-					break
-				}
-			}
-			if ended {
-				d.presence = nil
-			} else if !ok {
-				continue
-			}
-		}
-		view := agInterrupt(v)
-		if ok && sha256.Sum256(api.JSON(view)) != d.digest {
+		d, ok := q.state.questionDelivery(v, ended[v.Turn])
+		if !ok {
 			continue
 		}
+		view := agInterrupt(v)
 		if _, err := q.encode("agui.interrupt", view); err != nil {
 			continue
 		}

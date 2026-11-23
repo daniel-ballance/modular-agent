@@ -69,6 +69,18 @@ func (q *agRequest) listParams(raw string) (offset, limit int, err error) {
 	return offset, limit, nil
 }
 
+func (q *agRequest) waitingFor(row api.Session) (api.WaitingSummary, error) {
+	q.mu.Lock()
+	state := q.states[[2]string{row.ID, q.client}]
+	q.mu.Unlock()
+	ended := agEndedTurns(row)
+	route := api.WaitingRoute{Executor: q.client, CanAnswer: func(v api.Question) bool {
+		_, ok := state.questionDelivery(v, ended[v.Turn])
+		return ok
+	}}
+	return q.a.a.WaitingForHost(q.ctx, row, q.Actor, route)
+}
+
 func (q *agRequest) listed(row api.Session) bool {
 	return row.Tenant == q.opt.Tenant && slices.Contains(q.rights, "watch") && q.member(row)
 }
@@ -113,7 +125,7 @@ func (q *agRequest) listThreads(raw string) error {
 		if epochs[info.ID], err = q.host().ErasureEpoch(info.ID); err != nil {
 			return err
 		}
-		info.Waiting, err = q.a.a.WaitingForHost(q.ctx, records[info.ID], q.Actor, q.client)
+		info.Waiting, err = q.waitingFor(records[info.ID])
 		if err != nil {
 			return err
 		}
@@ -142,7 +154,7 @@ func (q *agRequest) listThreads(raw string) error {
 			if !ok || !q.listed(row) {
 				return stale
 			}
-			w, err := q.a.a.WaitingForHost(q.ctx, row, q.Actor, q.client)
+			w, err := q.waitingFor(row)
 			if err != nil {
 				return err
 			}

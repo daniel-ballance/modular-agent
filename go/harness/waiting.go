@@ -24,7 +24,7 @@ func (c *client) turnState(row api.Session) string {
 	return "interrupted"
 }
 
-func (c *client) WaitingForHost(ctx context.Context, row api.Session, host api.Actor, route string) (api.WaitingSummary, error) {
+func (c *client) WaitingForHost(ctx context.Context, row api.Session, host api.Actor, route api.WaitingRoute) (api.WaitingSummary, error) {
 	view := viewForHost(row, host)
 	allowed := func(right string) bool {
 		return slices.Contains(host.Rights, right) && api.ConnectionAllows(ctx, right) && c.authorized(view, host.ID, right)
@@ -41,18 +41,21 @@ func (c *client) WaitingForHost(ctx context.Context, row api.Session, host api.A
 			if !q.Answerable || q.Kind == "secret" || len(q.Allowed) != 0 && !slices.Contains(q.Allowed, host.ID) {
 				continue
 			}
+			if route.CanAnswer != nil && !route.CanAnswer(q) {
+				continue
+			}
 			if q.Kind == "approval" && allowed("approve") || q.Kind != "approval" && allowed("answer") {
 				w.Questions++
 			}
 		}
 	}
-	if route != "" && allowed("tools") {
+	if route.Executor != "" && allowed("tools") {
 		for id, cp := range api.InterfaceHandoffs(row) {
 			if interfaceTerminal(row, id).ID != "" {
 				continue
 			}
 			_, saved, ok := c.h.restoreInterface(row, cp)
-			if ok && saved.Actor == host.ID && saved.Route == route && slices.Contains(saved.Rights, "tools") && slices.Contains(saved.Rights, "watch") && saved.Deadline > worktime.Now().UnixMilli() {
+			if ok && saved.Actor == host.ID && saved.Route == route.Executor && slices.Contains(saved.Rights, "tools") && slices.Contains(saved.Rights, "watch") && saved.Deadline > worktime.Now().UnixMilli() {
 				w.ToolCalls++
 			}
 		}
