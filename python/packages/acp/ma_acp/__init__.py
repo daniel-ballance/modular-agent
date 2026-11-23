@@ -97,7 +97,7 @@ def rpc(fn):
         scope = self.project_scope()
         try:
             metadata = params.get("_meta") if fn.__name__ == "ext_method" else kwargs
-            trusted = not self.network or getattr(self, "trace_trusted", False)
+            trusted = self.trace_trusted
             parent = ot.extract(metadata if trusted and fn.__name__ != "initialize" else None)
             with ot.use(parent):
                 return await gated(self, *args, **kwargs)
@@ -235,6 +235,7 @@ class ACP(Plugin):
         self.actor = actor
         self.principal = {"id": actor, "kind": "host", "rights": sorted(PERMISSIONS)}
         self.network = False
+        self.trace_trusted = True
         self.represents = frozenset()
         self.project = str(Path(project).resolve())
         self.settings = settings or {}
@@ -1008,7 +1009,7 @@ class ACP(Plugin):
                     session_id=sid,
                     tool_call=tool_call,
                     options=options,
-                    **{**params["_meta"], **ot.inject()},
+                    **{**params["_meta"], **(ot.inject() if self.trace_trusted else {})},
                 )
                 if response.outcome.outcome == "selected" and response.outcome.option_id in {
                     "allow",
@@ -1036,7 +1037,7 @@ class ACP(Plugin):
                                 properties={"answer": prop}, required=["answer"]
                             ),
                         ),
-                        **ot.inject(),
+                        **(ot.inject() if self.trace_trusted else {}),
                     )
                     if response.action == "accept":
                         submitted = (response.content or {}).get("answer")

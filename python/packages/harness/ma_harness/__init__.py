@@ -384,6 +384,8 @@ class Harness(Authority, Erasure):
         attributes = ot.tool_attrs(
             sid, data.get("turn"), data.get("step"), call, data["definition"]["name"]
         )
+        if agent := ot.name(self.agent_name):
+            attributes["gen_ai.agent.name"] = agent
         provider_id = ot.name(self.provider_trace_ids.pop((sid, call["id"]), None))
         if provider_id:
             attributes["gen_ai.tool.call.id"] = provider_id
@@ -926,7 +928,7 @@ class Harness(Authority, Erasure):
             batch.append(
                 {
                     **d[field],
-                    "id": identity(),
+                    "id": d[field].get("id") or identity(),
                     "parent": e["id"],
                     "session": sid,
                     "writer": e["writer"],
@@ -1215,6 +1217,10 @@ class Harness(Authority, Erasure):
             finally:
                 self.capacity.release(reservation)
         if op == "event":
+            if d.get("kind") == "turn_ended":
+                for key in list(self.provider_trace_ids):
+                    if key[0] == d.get("session"):
+                        del self.provider_trace_ids[key]
             if d.get("kind") == "plugin_failed" and "session" not in d and self.sessions:
                 for sid in list(self.sessions):
                     await self._emit({"time": now(), **d, "session": sid})

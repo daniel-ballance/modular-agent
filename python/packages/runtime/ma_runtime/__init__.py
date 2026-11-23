@@ -184,12 +184,15 @@ class Runtime(Turns, Plugin):
             },
             **({"job": d["source"]["job"]} if d.get("source", {}).get("job") else {}),
         )
-        if ot.valid(ot.current()):
-            self.input_traces[sid, e["id"]] = ot.current()
+        self._remember_input(sid, e["id"])
         await self.api.event("input_accepted", session=sid, input=e["id"], when=mode)
         if mode != "propose":
             await self._schedule(sid)
         return {"input": e["id"], "when": mode, "duplicate": False}
+
+    def _remember_input(self, sid, input_id):
+        if ot.valid(parent := ot.current()):
+            self.input_traces[sid, input_id] = parent
 
     async def kick(self, d, emit):
         sid = d["session"]
@@ -560,6 +563,9 @@ class Runtime(Turns, Plugin):
         await self.cancel(d, None)
         self.tasks.pop(d["session"], None)
         self.cancelled.discard(d["session"])
+        for key in list(self.input_traces):
+            if key[0] == d["session"]:
+                del self.input_traces[key]
 
     async def _drain(self, sid):
         results = []

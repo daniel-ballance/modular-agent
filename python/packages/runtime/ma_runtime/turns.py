@@ -98,7 +98,7 @@ class Turns:
                     )
                 )
         label = "invoke_agent"
-        agent = ot.name(self.api._harness.agent_name)
+        agent = ot.name(getattr(getattr(self.api, "_harness", None), "agent_name", None))
         if agent:
             label += " " + agent
         with (

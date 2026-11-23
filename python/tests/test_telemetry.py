@@ -17,7 +17,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from ma_core import telemetry as ot
 from ma_plugin.rpc import Peer, trace_offer
 from ma_plugin.server import PluginServer
-from modular_agent import ToolContext, create_agent, tool
+from modular_agent import Plugin, ToolContext, create_agent, tool
 from modular_agent.testing import memory_environment, scripted_provider
 
 
@@ -121,6 +121,40 @@ async def test_mapping_and_metadata_only(tmp_path, recorded):
     assert summary["gen_ai.client.inference.usage.input_tokens"].value == 16
     assert summary["gen_ai.client.inference.usage.output_tokens"].value == 4
     assert "SENTINEL" not in repr(summary)
+
+
+async def test_job_report_admission_links_to_one_job(tmp_path, recorded):
+    exporter, _ = recorded
+
+    class Owner:
+        async def cancel(self, job, cx):
+            await job.end("cancelled")
+
+    async def command(value, cx):
+        job = await cx.jobs.start("sample", {"private": "JOB_DETAIL_SENTINEL"}, key="one")
+        assert (await cx.jobs.start("sample", {}, key="one")).id == job.id
+        await job.end("completed", "JOB_REPORT_SENTINEL", report=True)
+        return job.id
+
+    def setup(registrar):
+        registrar.jobs(Owner())
+        registrar.command("sample", "Start a sample job", command)
+
+    async with create_agent(
+        project=tmp_path,
+        plugins=[Plugin("job-test", setup=setup)],
+        providers=[scripted_provider([])],
+    ) as agent:
+        session = await agent.session()
+        job_id = await session.run_command("/sample")
+    spans = exporter.get_finished_spans()
+    [job] = [s for s in spans if s.name == "modular_agent.job"]
+    [admit] = [s for s in spans if s.name == "modular_agent.input.admit"]
+    assert job.attributes["modular_agent.job.id"] == job_id
+    assert job.attributes["modular_agent.job.outcome"] == "completed"
+    assert [link.context for link in admit.links] == [job.context]
+    assert admit.attributes["modular_agent.input.id"]
+    assert "SENTINEL" not in job.to_json() + admit.to_json()
 
 
 class BrokenExporter(SpanExporter):

@@ -18,7 +18,6 @@ class Jobs(Plugin):
 
     def __init__(self):
         self.spans = {}
-        self.report_links = {}
         self.signals = {}
         self.locks = {}
 
@@ -27,6 +26,7 @@ class Jobs(Plugin):
         api.provide("jobs", self)
         api.on("session.ready", self.recover)
         api.on("session.end", self.close)
+        api.on("session.suspend", self.suspend)
         api.on("session.moving", self.close)
         api.command("jobs", "List session-owned jobs", self.command_list)
         api.command("job_cancel", "Cancel one job by ID", self.command_cancel)
@@ -205,11 +205,36 @@ class Jobs(Plugin):
                 "parked": not self.declarations["job_reports_start_turns"],
             },
         }
+        job_span = self.spans.get((job["session"], job["id"]))
+        if end["report"]:
+            sid = job["session"]
+            report["id"] = identity()
+            with ot.span(
+                "modular_agent.input.admit",
+                ot.attrs(sid, **{"modular_agent.input.id": report["id"]}),
+                links=ot.link(ot.own_context(job_span)) if job_span else [],
+            ):
+                await self._commit_end(job, end, d, report)
+                harness = getattr(self.api, "_harness", None)
+                runtime = harness.capabilities.get("runtime") if harness else None
+                if runtime is not None:
+                    remember = getattr(type(runtime[1]), "_remember_input", None)
+                    if remember:
+                        remember(runtime[1], sid, report["id"])
+        else:
+            await self._commit_end(job, end, d, None)
+        job.update(end)
+        self.signals.setdefault((job["session"], job["id"]), asyncio.Event()).set()
+        self._end_span(job["session"], job["id"], state)
+        await self.api.event("job_ended", session=job["session"], job=job)
+        return job
+
+    async def _commit_end(self, job, end, d, report):
         await self.api.session(
             "append",
             session=job["session"],
             kind="job_end",
-            **({"job_report": report} if end["report"] else {}),
+            **({"job_report": report} if report is not None else {}),
             job=job["id"],
             writer=job["owner"],
             actor=job["actor"],
@@ -223,18 +248,18 @@ class Jobs(Plugin):
                 *d.get("copies", []),
             ],
         )
-        job.update(end)
-        self.signals.setdefault((job["session"], job["id"]), asyncio.Event()).set()
-        operation = self.spans.pop((job["session"], job["id"]), None)
+
+    def _end_span(self, sid, jid, outcome):
+        operation = self.spans.pop((sid, jid), None)
         if operation is not None:
-            if end["report"]:
-                self.report_links[job["session"], job["id"]] = ot.own_context(operation)
-            ot.set_attrs(operation, {"modular_agent.job.outcome": state})
-            if state == "failed":
+            ot.set_attrs(operation, {"modular_agent.job.outcome": outcome})
+            if outcome == "failed":
                 ot.error(operation, "job_failed")
             ot.end(operation)
-        await self.api.event("job_ended", session=job["session"], job=job)
-        return job
+
+    def _trace_context(self, sid, jid):
+        operation = self.spans.get((sid, jid))
+        return ot.own_context(operation) if operation is not None else ot.extract(None)
 
     async def _deliver(self, job):
         session = await self.api.session("get", session=job["session"])
@@ -325,6 +350,7 @@ class Jobs(Plugin):
                 await self.api.session(
                     "append", **args, kind="job_cleanup_unconfirmed", writer="@harness", data={}
                 )
+                self._end_span(job["session"], job["id"], "interrupted")
             elif job["state"] != "cleanupUnconfirmed":
                 return job
         raise AgentError("Job cleanup not confirmed", "lost")
@@ -343,18 +369,15 @@ class Jobs(Plugin):
                 await self._deliver(job)
 
     async def close(self, d):
-        sid = d["session"]
-        for key in list(self.spans):
-            if key[0] == sid:
-                operation = self.spans.pop(key)
-                ot.set_attrs(operation, {"modular_agent.job.outcome": "interrupted"})
-                ot.end(operation)
-        for key in list(self.report_links):
-            if key[0] == sid:
-                del self.report_links[key]
         for job in await self.list(d, None):
             if job["state"] == "running":
                 try:
                     await self.cancel({"session": d["session"], "job": job["id"]}, None)
                 except AgentError:
                     continue  # An absent owner cannot take instructions.
+        await self.suspend(d)
+
+    async def suspend(self, d):
+        for sid, jid in list(self.spans):
+            if sid == d["session"]:
+                self._end_span(sid, jid, "interrupted")

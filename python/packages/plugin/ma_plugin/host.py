@@ -98,7 +98,10 @@ class Provider:
                 content=response_in(r)["content"],
                 data=response_in(r),
             )
-        return response_in(r)
+        response = response_in(r)
+        for call in response["calls"]:
+            self.plugin.h.provider_trace_ids[d["session"], call["id"]] = call["id"]
+        return response
 
     async def discard(self, d, emit):
         return await self.plugin.request(
@@ -674,10 +677,13 @@ class External(Plugin):
         }:
             return None
 
+        fallback = (
+            self.peer.outgoing_traces.get(key, parent["trace"]) if parent is not None else None
+        )
+
         async def deliver():
-            if parent is None:
+            if fallback is None:
                 return await self.notification(method, p, parent)
-            fallback = parent["trace"]
             received = (
                 ot.extract(p.get("traceContext")) if self.peer.trace_agreed else ot.extract(None)
             )
@@ -761,7 +767,7 @@ class External(Plugin):
                         method, p, key, notification_parent=notification_parent
                     )
             d = parent["context"]
-            fallback = parent["trace"]
+            fallback = self.peer.outgoing_traces.get(p["parentRequestId"], parent["trace"])
             received = (
                 ot.extract(p.get("traceContext")) if self.peer.trace_agreed else ot.extract(None)
             )
@@ -797,6 +803,48 @@ class External(Plugin):
                 "internal": "internal",
             }.get(exc.code, "invalid_request")
             raise WireError(str(exc), code) from exc
+
+    async def _job_callback(self, method, p, args):
+        if method == "host/jobs/end":
+            outcome = p["outcome"]
+            if (
+                outcome["kind"] not in {"completed", "failed", "cancelled"}
+                or type(p["report"]) is not bool
+                or (p["report"] and "result" not in p)
+            ):
+                raise WireError("Invalid job outcome", "invalid_request")
+            try:
+                await self.api.call(
+                    "jobs",
+                    "report",
+                    {
+                        **args,
+                        "state": outcome["kind"],
+                        "error": outcome.get("error"),
+                        "result": p.get("result") or [],
+                        "report": p["report"],
+                        "usage": p.get("usage", {}),
+                        "strict": True,
+                    },
+                )
+            except AgentError as exc:
+                if exc.code != "result_too_large":
+                    raise
+                raise WireError(str(exc), "result_too_large") from exc
+        elif method == "host/jobs/progress":
+            await self.api.call("jobs", "progress", {**args, "content": p["content"]})
+            return None
+        else:
+            jid = p["jobId"]
+            if jid in self.claimed_jobs:
+                raise WireError("Job was already taken up on this connection", "invalid_request")
+            self.claimed_jobs.add(jid)
+            try:
+                await self.api.call("jobs", "take_up", args)
+            except BaseException:
+                self.claimed_jobs.discard(jid)
+                raise
+        return {}
 
     async def host_call(self, method, p, key, *, notification_parent=None):
         direct = {
@@ -872,48 +920,20 @@ class External(Plugin):
             )
         if method in job_only:
             args = await self.owned_job(p["jobId"])
-            if method == "host/jobs/end":
-                outcome = p["outcome"]
-                if (
-                    outcome["kind"] not in {"completed", "failed", "cancelled"}
-                    or type(p["report"]) is not bool
-                    or (p["report"] and "result" not in p)
-                ):
-                    raise WireError("Invalid job outcome", "invalid_request")
-                try:
-                    await self.api.call(
-                        "jobs",
-                        "report",
-                        {
-                            **args,
-                            "state": outcome["kind"],
-                            "error": outcome.get("error"),
-                            "result": p.get("result") or [],
-                            "report": p["report"],
-                            "usage": p.get("usage", {}),
-                            "strict": True,
-                        },
-                    )
-                except AgentError as exc:
-                    if exc.code != "result_too_large":
-                        raise
-                    raise WireError(str(exc), "result_too_large") from exc
-            elif method == "host/jobs/progress":
-                await self.api.call("jobs", "progress", {**args, "content": p["content"]})
-                return None
-            else:
-                jid = p["jobId"]
-                if jid in self.claimed_jobs:
-                    raise WireError(
-                        "Job was already taken up on this connection", "invalid_request"
-                    )
-                self.claimed_jobs.add(jid)
-                try:
-                    await self.api.call("jobs", "take_up", args)
-                except BaseException:
-                    self.claimed_jobs.discard(jid)
-                    raise
-            return {}
+            jobs = self.h.capabilities["jobs"][1]
+            trace_context = getattr(type(jobs), "_trace_context", None)
+            fallback = (
+                trace_context(jobs, args["session"], args["job"])
+                if trace_context
+                else ot.extract(None)
+            )
+            received = (
+                ot.extract(p.get("traceContext")) if self.peer.trace_agreed else ot.extract(None)
+            )
+            if parent is None and ot.valid(fallback):
+                with ot.use(received if ot.same_trace(fallback, received) else fallback):
+                    return await self._job_callback(method, p, args)
+            return await self._job_callback(method, p, args)
         if method == "host/credentials/read":
             if p.get("provider") not in {x["id"] for x in self.registration.get("providers", [])}:
                 raise WireError("Provider is not owned by this plugin", "invalid_request")

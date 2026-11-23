@@ -300,7 +300,15 @@ def tool_disposition(sid, turn, step, call, definition, result):
 
 
 # Only known metadata values are exported. Never export diagnostics or exceptions.
-_FINISH = {"finished", "tool_calls", "output_limit", "refused", "failed", "aborted", "cancelled"}
+_FINISH = {
+    "finished": "stop",
+    "tools": "tool_calls",
+    "output_limit": "length",
+    "refused": "content_filter",
+    "failed": "error",
+    "aborted": "aborted",
+    "cancelled": "cancelled",
+}
 _ERRORS = {"temporary", "credentials", "contextTooLarge", "other", "invalidRequest", "rateLimit"}
 _VENDOR = {"chatgpt": "openai", "claude": "anthropic", "grok": "xai"}
 
@@ -330,8 +338,8 @@ async def inference(provider, data, invoke, *, local=False):
                 code = (result.get("error") or {}).get("kind")
                 dimensions["error.type"] = code if code in _ERRORS else "provider_failed"
                 error(operation, dimensions["error.type"])
-            if result.get("stop") in _FINISH:
-                set_attrs(operation, {"gen_ai.response.finish_reasons": (result["stop"],)})
+            if reason := _FINISH.get(result.get("stop")):
+                set_attrs(operation, {"gen_ai.response.finish_reasons": (reason,)})
             for key in (
                 "input_tokens",
                 "output_tokens",
