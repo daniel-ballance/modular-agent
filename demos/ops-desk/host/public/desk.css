@@ -1,1 +1,48 @@
-:root {color-scheme:light dark;font: 1rem/1.5 system-ui,sans-serif}main {max-width:48rem;margin:auto;padding:.7rem}section {border-top:1px solid gray}li,form {margin:.6rem 0;padding:.5rem;overflow-wrap:anywhere}ol,ul {padding-left:1.5rem}button,input,select {font:inherit;padding:.5rem;max-width:100%}button {cursor:pointer;margin:.3rem}label {display:block;white-space:pre-wrap}small {display:block}p {white-space:pre-wrap}a {color:LinkText}
+:root {
+  color-scheme: light dark;
+  font:
+    1rem/1.5 system-ui,
+    sans-serif;
+}
+main {
+  max-width: 48rem;
+  margin: auto;
+  padding: 0.7rem;
+}
+section {
+  border-top: 1px solid gray;
+}
+li,
+form {
+  margin: 0.6rem 0;
+  padding: 0.5rem;
+  overflow-wrap: anywhere;
+}
+ol,
+ul {
+  padding-left: 1.5rem;
+}
+button,
+input,
+select {
+  font: inherit;
+  padding: 0.5rem;
+  max-width: 100%;
+}
+button {
+  cursor: pointer;
+  margin: 0.3rem;
+}
+label {
+  display: block;
+  white-space: pre-wrap;
+}
+small {
+  display: block;
+}
+p {
+  white-space: pre-wrap;
+}
+a {
+  color: LinkText;
+}

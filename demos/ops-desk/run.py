@@ -135,6 +135,16 @@ def start(temp, case):
 
 
 def run(d, case):
+    initial = d.state()
+    check(not initial['posts'] and all(v == 'stopped' for v in initial['agents'].values()),
+          'desk started work before an event')
+    if case == 'duplicate':
+        try:
+            d.request('/events', {'id': 'no-grant', 'kind': 'build-failed', 'payload': {}}, d.page)
+        except HTTPError as error:
+            check(error.code == 401, 'page login should not authorize the webhook')
+        else:
+            raise RuntimeError('webhook accepted the page credential')
     check(d.event(), 'first event not accepted')
     if case == 'duplicate':
         check(not d.event('issue-opened', 'different payload'), 'duplicate event accepted as new work')
