@@ -42,8 +42,9 @@ function spansIn(body) {
   return spans;
 }
 
-export async function startReceiver() {
+export async function startReceiver({ port = 0 } = {}) {
   const spans = [], payloads = [], errors = [];
+  let connections = 0;
   const events = new EventEmitter();
   events.setMaxListeners(0);
   const snapshot = () => structuredClone({ spans, payloads, errors });
@@ -87,7 +88,8 @@ export async function startReceiver() {
       events.emit("change");
     }
   });
-  server.listen(0, "127.0.0.1");
+  server.on("connection", () => { connections++; });
+  server.listen(port, "127.0.0.1");
   await once(server, "listening");
 
   function waitFor(predicate, { timeoutMs = 5_000 } = {}) {
@@ -117,6 +119,7 @@ export async function startReceiver() {
   return {
     endpoint: `http://127.0.0.1:${server.address().port}/v1/traces`,
     snapshot,
+    get connections() { return connections; },
     waitFor,
     async close() {
       events.emit("close");

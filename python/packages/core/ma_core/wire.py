@@ -160,7 +160,7 @@ def response_out(r):
         }
         for c in r.get("calls", [])
     ]
-    usage = r.get("usage", {})
+    usage = r.get("usage") or {}
     return {
         **{k: v for k, v in r.items() if k != "calls"},
         "role": "assistant",
@@ -182,7 +182,7 @@ def response_out(r):
 
 
 def response_in(r):
-    usage = r.get("usage") or {}
+    usage = r.get("usage")
     return {
         **r,
         "calls": [
@@ -190,14 +190,20 @@ def response_in(r):
         ],
         "content": [p for p in r["content"] if p.get("type") != "toolCall"],
         "stop": STOP_IN.get(r["stop"], r["stop"]),
-        "usage": {
-            **usage,
-            "input_tokens": usage.get("input", 0),
-            "output_tokens": usage.get("output", 0),
-            "cache_read": usage.get("cacheRead", 0),
-            "cache_write": usage.get("cacheWrite", 0),
-            "cost": usage.get("cost", 0),
-        },
+        **(
+            {
+                "usage": {
+                    **usage,
+                    "input_tokens": usage.get("input", 0),
+                    "output_tokens": usage.get("output", 0),
+                    "cache_read": usage.get("cacheRead", 0),
+                    "cache_write": usage.get("cacheWrite", 0),
+                    "cost": usage.get("cost", 0),
+                }
+            }
+            if isinstance(usage, dict)
+            else {}
+        ),
     }
 
 
@@ -654,7 +660,7 @@ def entry_in(e, sid, default_actor="user"):
     elif kind == "response":
         response = response_in(message)
         result.update(data={**d, **response}, content=response["content"])
-        result["data"]["usage"] = {k: response["usage"].get(k, 0) for k in USAGE}
+        result["data"]["usage"] = {k: (response.get("usage") or {}).get(k, 0) for k in USAGE}
     elif kind == "turnStart" and not e.get("actorId"):
         started_by = d.get("startedBy") or {}
         if started_by.get("kind") == "actor":

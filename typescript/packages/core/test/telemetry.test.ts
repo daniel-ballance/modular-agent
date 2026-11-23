@@ -68,9 +68,9 @@ test("the Harness exports metadata, parentage, nested work and one metric per in
       tool({ name: "inner", description: "A nested tool", input: { type: "object" }, run() { nestedCalls++; return "RESULT_SENTINEL"; } }),
       tool({ name: "deny", description: "Never runs", input: { type: "object" }, run() { assert.fail("denied tool ran"); } }),
     ],
-    script: [{ text: "MODEL_TEXT_SENTINEL", reasoning: "REASONING_SENTINEL", usage: { input: 7, output: 3 }, toolCalls: [
+    script: [{ text: "MODEL_TEXT_SENTINEL", reasoning: "REASONING_SENTINEL", usage: { input: 7, cacheRead: 11, cacheWrite: 13, output: 3 }, toolCalls: [
       { name: "outer", input: { data: "ARGUMENT_SENTINEL" } }, { name: "deny", input: {} },
-    ] }, { text: "done", usage: { input: 11, output: 2 } }],
+    ] }, { text: "done" }],
   });
   t.after(() => a.close());
   const s = await a.session();
@@ -94,7 +94,14 @@ test("the Harness exports metadata, parentage, nested work and one metric per in
   const chats = byName("chat script");
   assert.equal(chats.length, 2);
   assert.ok(chats.every(x => steps.some(step => parent(x) === id(step)) && x.kind === SpanKind.INTERNAL && x.attributes["gen_ai.provider.name"] === "scripted"));
-  assert.deepEqual(chats.map(x => x.attributes["gen_ai.usage.input_tokens"]).sort(), [11, 7]);
+  const usage = (x: ReadableSpan) => Object.fromEntries(Object.entries(x.attributes).filter(([k]) => k.startsWith("gen_ai.usage.")));
+  assert.deepEqual(usage(chats[0]), {
+    "gen_ai.usage.input_tokens": 31,
+    "gen_ai.usage.cache_read.input_tokens": 11,
+    "gen_ai.usage.cache_write.input_tokens": 13,
+    "gen_ai.usage.output_tokens": 3,
+  });
+  assert.deepEqual(usage(chats[1]), {});
   const [outer] = byName("execute_tool outer"), children = byName("execute_tool inner");
   assert.ok(steps.some(x => id(x) === parent(outer)));
   assert.equal(outer.attributes["gen_ai.tool.call.id"], "call-0-0");
@@ -126,8 +133,8 @@ test("the Harness exports metadata, parentage, nested work and one metric per in
   const points = exporter.getMetrics().at(-1)!.scopeMetrics.flatMap(x => x.metrics);
   const point = (name: string) => points.find(x => x.descriptor.name === `gen_ai.client.inference.${name}`)!.dataPoints[0];
   assert.equal((point("duration").value as { count: number }).count, 2);
-  assert.equal(point("usage.input_tokens").value, 18);
-  assert.equal(point("usage.output_tokens").value, 5);
+  assert.equal(point("usage.input_tokens").value, 31);
+  assert.equal(point("usage.output_tokens").value, 3);
   assert.equal(point("usage.input_tokens").attributes["gen_ai.token.modality"], "unknown");
   const exported = JSON.stringify(all.map(x => ({ name: x.name, attributes: x.attributes, resource: x.resource.attributes,
     status: x.status, events: x.events, links: x.links, context: x.spanContext(), parent: x.parentSpanContext })));

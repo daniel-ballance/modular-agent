@@ -9,6 +9,10 @@ use opentelemetry::{
 };
 use opentelemetry_sdk::{
     error::{OTelSdkError, OTelSdkResult},
+    metrics::{
+        InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
+        data::{AggregatedMetrics, MetricData},
+    },
     trace::{InMemorySpanExporter, Sampler, SdkTracerProvider, SpanData, SpanExporter},
 };
 use serde_json::{Value, json};
@@ -75,6 +79,11 @@ async fn metadata_only_work_and_recovery() -> Result<()> {
         .with_simple_exporter(failing)
         .build();
     global::set_tracer_provider(provider.clone());
+    let metric_exporter = InMemoryMetricExporter::default();
+    let meter = SdkMeterProvider::builder()
+        .with_reader(PeriodicReader::builder(metric_exporter.clone()).build())
+        .build();
+    global::set_meter_provider(meter.clone());
     let dir = tempfile::tempdir()?;
     let store = history_fs::FileHistory::new(dir.path())?;
     let started = Arc::new(Notify::new());
@@ -95,7 +104,7 @@ async fn metadata_only_work_and_recovery() -> Result<()> {
     let agent = test_agent().agent_name("fixture").data_dir(dir.path()).durability(Durability::Durable)
         .history(modular_agent::History::from_store(history_fs::FileHistory::new(dir.path())?, true))
         .tool(hold).script(json!([
-            {"toolCalls":[{"name":"hold","input":{"value":"argument-sentinel"}}], "usage":{"input":9,"output":2}},
+            {"toolCalls":[{"name":"hold","input":{"value":"argument-sentinel"}}], "usage":{"input":9,"cacheRead":11,"cacheWrite":13,"output":2}},
             {"text":"completion-sentinel"}
         ])).build().await?;
     let session = agent.session().await?;
@@ -191,7 +200,52 @@ async fn metadata_only_work_and_recovery() -> Result<()> {
         admission.parent_span_id,
         SpanId::from_hex("1122334455667788").unwrap()
     );
-    let chat = spans.iter().find(|s| s.name.starts_with("chat ")).unwrap();
+    let chats: Vec<_> = spans
+        .iter()
+        .filter(|s| s.name.starts_with("chat "))
+        .collect();
+    let [chat, no_usage] = chats.as_slice() else {
+        panic!("expected two inference spans")
+    };
+    for (key, value) in [
+        ("gen_ai.usage.input_tokens", 33_i64),
+        ("gen_ai.usage.cache_read.input_tokens", 11),
+        ("gen_ai.usage.cache_write.input_tokens", 13),
+        ("gen_ai.usage.output_tokens", 2),
+    ] {
+        assert_eq!(attr(chat, key), Some(&value.into()), "{key}");
+    }
+    assert!(
+        !no_usage
+            .attributes
+            .iter()
+            .any(|a| a.key.as_str().starts_with("gen_ai.usage."))
+    );
+
+    meter.force_flush().unwrap();
+    let batches = metric_exporter.get_finished_metrics().unwrap();
+    let counters: std::collections::BTreeMap<_, _> = batches
+        .last()
+        .unwrap()
+        .scope_metrics()
+        .flat_map(|scope| scope.metrics())
+        .filter_map(|metric| {
+            let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
+                return None;
+            };
+            let points: Vec<_> = sum.data_points().map(|p| p.value()).collect();
+            Some((metric.name(), points))
+        })
+        .collect();
+    assert_eq!(
+        counters.get("gen_ai.client.inference.usage.input_tokens"),
+        Some(&vec![33])
+    );
+    assert_eq!(
+        counters.get("gen_ai.client.inference.usage.output_tokens"),
+        Some(&vec![2])
+    );
+    meter.shutdown().unwrap();
     let step = spans
         .iter()
         .find(|s| s.span_context.span_id() == chat.parent_span_id)

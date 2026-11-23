@@ -466,8 +466,20 @@ pub struct ModelResponse {
     pub opaque: Value,
     pub stop: String,
     pub usage: Usage,
+    /// True when the Provider reported usage, even if all counts were zero.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub usage_reported: bool,
 }
 impl ModelResponse {
+    pub fn has_usage(&self) -> bool {
+        self.usage_reported
+            || self.usage.input_tokens > 0
+            || self.usage.output_tokens > 0
+            || self.usage.cached_tokens > 0
+            || self.usage.cache_write_tokens > 0
+            || self.usage.cost != 0.0
+    }
+
     pub fn text(text: &str) -> Self {
         Self {
             parts: vec![Part::Text { text: text.into() }],

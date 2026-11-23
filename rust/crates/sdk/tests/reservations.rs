@@ -148,7 +148,12 @@ impl modular_agent::RuntimePart for SingleStep {
             outcome: Outcome::Completed,
             result: json!({"text":"","openToolCalls":[]}),
             entries: vec![entry["id"].as_str().unwrap().into()],
-            usage: serde_json::from_value(response.0["usage"].clone())?,
+            usage: response
+                .get("usage")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()?
+                .unwrap_or_default(),
         })
     }
 }

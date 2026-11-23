@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // The reference checks: run an implementation of the standard configuration (`ma`) with a
 // scripted model and check only what it prints, its exit status, the files it leaves and the
-// model requests it logs. See README.md and docs/reference/standard-configuration.md.
+// model requests it logs, plus telemetry at a receiver. See README.md and the standard configuration.
 //
 //   node run.mjs [--only NAME[,NAME]] -- <ma command...>
 //   node run.mjs [--only ...] --agent LANGUAGE     (from agents/LANGUAGE.json)
@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "../..");
 const fixture = join(here, "mcp-fixture.mjs");
+const telemetryReply = "reference-telemetry-reply-sentinel";
 
 // ---------- the checks ----------
 
@@ -343,6 +344,15 @@ const checks = [
     runs: [{ args: ["models"], expect: { exit: 0, stdoutContains: "scripted/script" } }],
   },
   {
+    name: "telemetry-export",
+    about: "Telemetry is off by default, exports metadata to a configured endpoint, and can be disabled again.",
+    script: [{ text: telemetryReply }],
+    async run(command, invoke, skip) {
+      const { checkTelemetryExport } = await import("./telemetry-export.mjs");
+      await checkTelemetryExport(command, invoke, skip, telemetryReply);
+    },
+  },
+  {
     name: "version",
     about: "ma --version names the implementation's language.",
     script: [],
@@ -410,7 +420,7 @@ function runOnce(command, t, run) {
   });
 }
 
-async function runCheck(command, check) {
+async function runCheck(command, check, skip) {
   const dir = mkdtempSync(join(process.env.TMPDIR || tmpdir(), "ma-ref-"));
   const t = { dir, home: join(dir, "home"), data: join(dir, "data"), project: join(dir, "project"), scriptFile: join(dir, "script.json"), logFile: join(dir, "requests.jsonl") };
   for (const d of [t.home, t.data, t.project]) mkdirSync(d, { recursive: true });
@@ -422,7 +432,11 @@ async function runCheck(command, check) {
   writeFileSync(t.scriptFile, JSON.stringify(check.script));
   const failures = [];
   const ok = (cond, what, got) => { if (!cond) failures.push(got === undefined ? what : `${what}: got ${JSON.stringify(got)}`); };
-  for (const [i, run] of check.runs.entries()) {
+  if (check.run) {
+    try { await check.run(command, (cmd, run) => runOnce(cmd, t, run), skip); }
+    catch (error) { failures.push(error.message); }
+  }
+  for (const [i, run] of (check.runs ?? []).entries()) {
     const r = await runOnce(command, t, run);
     const where = `run ${i + 1} (ma ${run.args.join(" ")})`;
     ok(!r.timeoutDetail, `${where}: timed out after 60 s`, r.timeoutDetail);
@@ -456,7 +470,7 @@ async function runCheck(command, check) {
 async function runAgent(name, command, only) {
   let failed = 0, passed = 0;
   for (const check of checks.filter((c) => !only || only.includes(c.name))) {
-    const failures = await runCheck(command, check);
+    const failures = await runCheck(command, check, reason => console.log(`SKIP ${name} ${check.name}: ${reason}`));
     if (failures.length) { failed++; console.log(`FAIL ${name} ${check.name}: ${check.about}`); for (const f of failures) console.log(`     ${f}`); }
     else { passed++; console.log(`PASS ${name} ${check.name}`); }
   }

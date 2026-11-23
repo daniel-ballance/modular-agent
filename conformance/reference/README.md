@@ -1,6 +1,8 @@
 # Reference checks
 
-Checks that an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves and the model requests it logs. So one set of checks covers all four implementations.
+Checks that an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs and the telemetry it exports. So one set of checks covers all four implementations.
+
+Install the shared OTLP receiver's dependencies from this directory: `npm ci --prefix ../telemetry`.
 
 ```sh
 node run.mjs -- /path/to/ma                 # one build
@@ -38,7 +40,10 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 | `prompt-tail` | The prompt ends with `<cwd>` and then `<date>` |
 | `json-events` | `--json` prints SDK-shaped events, ending with `turnEnded` |
 | `models` | `ma models` lists the scripted model |
+| `telemetry-export` | Export is off without an endpoint. With one, invocation and inference spans carry metadata only. Disabling the SDK stops export but leaves `telemetry: 1` in the declaration. |
 | `version` | `ma --version` names the implementation's language |
+
+The default endpoint assertion listens on `127.0.0.1:4318` inside a private Linux network namespace. It needs unprivileged `unshare -rn` and `ip` to bring up loopback. The runner reports a reason if it skips this assertion and still runs the rest of `telemetry-export`.
 
 ## Results
 
@@ -46,10 +51,10 @@ With `MODULAR_AGENT_REF_REQUIRE=all`. The ACP kit ran against `MODULAR_AGENT_CON
 
 | Implementation | Reference checks | ACP kit |
 |---|---|---|
-| Rust | 15/15 | 188/188 |
-| TypeScript | 15/15 | 188/188 |
-| Go | 15/15 | 188/188 |
-| Python | 15/15 | 188/188 |
+| Rust | 25/25 | 188/188 |
+| TypeScript | 25/25 | 188/188 |
+| Go | 25/25 | 188/188 |
+| Python | 25/25 | 188/188 |
 
 All four run the identical set of 188 ACP checks, including the four that check an undeclared feature is refused, so they present the same agent over ACP.
 

@@ -374,10 +374,11 @@ type Message struct {
 	Result  *ToolResult
 }
 type Response struct {
-	Wire    json.RawMessage
-	Content Content
-	Stop    string
-	Usage   Usage
+	Wire          json.RawMessage
+	Content       Content
+	Stop          string
+	Usage         Usage
+	UsageReported bool // The Provider reported usage, even if all counts were zero.
 }
 type ModelError struct{ Kind, Message string }
 

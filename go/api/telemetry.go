@@ -2,8 +2,9 @@ package api
 
 import (
 	"context"
-	"go.opentelemetry.io/otel/attribute"
 	"strings"
+
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
 )
@@ -14,7 +15,10 @@ func ObserveInference(ctx context.Context, access ModelAccess, request Request, 
 	id := strings.TrimPrefix(m.ID, m.Provider+"/")
 	internal := m.Provider == "fake" || m.Provider == "conformance" || m.Provider == "scripted"
 	ctx, end := telemetry.Inference(ctx, m.Provider, id, internal)
-	defer func() { end(err, res.Stop, res.Usage.Input, res.Usage.Output) }()
+	defer func() {
+		u := res.Usage
+		end(err, res.Stop, res.UsageReported || u != (Usage{}), u.Input, u.Output, u.Cached, u.CacheWrite)
+	}()
 	return access.Generate(ctx, request, emit)
 }
 

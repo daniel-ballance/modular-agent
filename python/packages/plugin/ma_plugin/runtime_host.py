@@ -199,7 +199,10 @@ class HostedRuntime(Runtime):
         if sid in self.cancelled and answer["outcome"] != "completed":
             answer.update(
                 scope.end_data(
-                    {"outcome": {"kind": "cancelled"}, "usage": usage_out(answer["usage"])}
+                    {
+                        "outcome": {"kind": "cancelled"},
+                        "usage": usage_out(answer.get("usage") or {}),
+                    }
                 )
             )
         if answer["outcome"] != "cancelled" and (

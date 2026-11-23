@@ -55,9 +55,9 @@ async def test_mapping_and_metadata_only(tmp_path, recorded):
     script = [
         {
             "toolCalls": [{"name": "parent", "input": {"value": "ARGUMENT_SENTINEL"}}],
-            "usage": {"input": 14, "output": 4},
+            "usage": {"input": 14, "cacheRead": 16, "cacheWrite": 18, "output": 4},
         },
-        {"text": "RESPONSE_SENTINEL", "usage": {"input": 2, "output": 0}},
+        {"text": "RESPONSE_SENTINEL"},
     ]
     async with create_agent(
         project=tmp_path,
@@ -98,7 +98,17 @@ async def test_mapping_and_metadata_only(tmp_path, recorded):
     assert [s.parent for s in models] == [first.context, second.context]
     assert models[0].kind == trace.SpanKind.INTERNAL
     assert models[0].attributes["gen_ai.provider.name"] == "scripted"
-    assert models[0].attributes["gen_ai.usage.input_tokens"] == 14
+
+    def usage(span):
+        return {k: v for k, v in span.attributes.items() if k.startswith("gen_ai.usage.")}
+
+    assert usage(models[0]) == {
+        "gen_ai.usage.input_tokens": 48,
+        "gen_ai.usage.cache_read.input_tokens": 16,
+        "gen_ai.usage.cache_write.input_tokens": 18,
+        "gen_ai.usage.output_tokens": 4,
+    }
+    assert usage(models[1]) == {}
     assert all(s.attributes.get("gen_ai.conversation.id") == session.id for s in spans)
     assert [s.name for s in spans if s.name.startswith("modular_agent.session.")] == [
         "modular_agent.session.open",
@@ -118,7 +128,7 @@ async def test_mapping_and_metadata_only(tmp_path, recorded):
         for m in scope.metrics
     }
     assert summary["gen_ai.client.inference.duration"].count == 2
-    assert summary["gen_ai.client.inference.usage.input_tokens"].value == 16
+    assert summary["gen_ai.client.inference.usage.input_tokens"].value == 48
     assert summary["gen_ai.client.inference.usage.output_tokens"].value == 4
     assert "SENTINEL" not in repr(summary)
 

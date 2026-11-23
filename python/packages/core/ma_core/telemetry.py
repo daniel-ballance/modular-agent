@@ -340,25 +340,27 @@ async def inference(provider, data, invoke, *, local=False):
                 error(operation, dimensions["error.type"])
             if reason := _FINISH.get(result.get("stop")):
                 set_attrs(operation, {"gen_ai.response.finish_reasons": (reason,)})
-            for key in (
-                "input_tokens",
-                "output_tokens",
-                "cache_read",
-                "cache_write",
-                "reasoning_tokens",
-            ):
-                value = (result.get("usage") or {}).get(key)
-                if type(value) is int and 0 <= value < 2**63:
-                    usage[key] = value
-            usage_attributes = {
-                "cache_read": "cache_read.input_tokens",
-                "cache_write": "cache_creation.input_tokens",
-                "reasoning_tokens": "reasoning.output_tokens",
-            }
-            set_attrs(
-                operation,
-                {f"gen_ai.usage.{usage_attributes.get(k, k)}": v for k, v in usage.items()},
-            )
+            if isinstance(reported := result.get("usage"), dict):
+
+                def tokens(key):
+                    value = reported.get(key)
+                    return value if type(value) is int and 0 <= value < 2**63 else 0
+
+                cache_read, cache_write = tokens("cache_read"), tokens("cache_write")
+                usage = {
+                    "input_tokens": min(
+                        tokens("input_tokens") + cache_read + cache_write, 2**63 - 1
+                    ),
+                    "output_tokens": tokens("output_tokens"),
+                }
+                set_attrs(operation, {f"gen_ai.usage.{k}": v for k, v in usage.items()})
+                for key, value in (
+                    ("cache_read.input_tokens", cache_read),
+                    ("cache_write.input_tokens", cache_write),
+                    ("reasoning.output_tokens", tokens("reasoning_tokens")),
+                ):
+                    if value:
+                        set_attrs(operation, {f"gen_ai.usage.{key}": value})
             response_model = result.get("model")
             if isinstance(response_model, dict):
                 response_model = response_model.get("id")

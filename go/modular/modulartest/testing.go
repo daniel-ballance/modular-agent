@@ -21,7 +21,7 @@ type Reply struct {
 		Input json.RawMessage `json:"input"`
 	} `json:"toolCalls,omitempty"`
 	Error *modular.ModelError `json:"error,omitempty"`
-	Usage modular.Usage       `json:"usage,omitempty"`
+	Usage *modular.Usage      `json:"usage,omitempty"`
 }
 
 func ScriptedProvider(script []Reply) modular.Provider {
@@ -48,7 +48,10 @@ func ScriptedProvider(script []Reply) modular.Provider {
 			if reply.Error != nil {
 				return modular.AssistantMessage{}, reply.Error
 			}
-			res := modular.AssistantMessage{Stop: "finished", Usage: reply.Usage}
+			res := modular.AssistantMessage{Stop: "finished"}
+			if reply.Usage != nil {
+				res.Usage, res.UsageReported = *reply.Usage, true
+			}
 			if reply.Reasoning != "" {
 				p.Piece("reasoning", reply.Reasoning)
 				res.Content = append(res.Content, modular.Part{Type: "reasoning", Text: reply.Reasoning})

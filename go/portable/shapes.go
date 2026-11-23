@@ -298,13 +298,16 @@ func responseOut(r api.Response) object {
 	v["role"] = "assistant"
 	v["content"] = contentOut(r.Content)
 	v["stop"] = stopOut(r.Stop)
-	usage := asObject(v["usage"])
-	usage["input"], usage["output"], usage["cacheRead"], usage["cacheWrite"], usage["cost"] = r.Usage.Input, r.Usage.Output, r.Usage.Cached, r.Usage.CacheWrite, r.Usage.Cost
-	v["usage"] = usage
+	if r.UsageReported || r.Usage != (api.Usage{}) {
+		usage := asObject(v["usage"])
+		usage["input"], usage["output"], usage["cacheRead"], usage["cacheWrite"], usage["cost"] = r.Usage.Input, r.Usage.Output, r.Usage.Cached, r.Usage.CacheWrite, r.Usage.Cost
+		v["usage"] = usage
+	}
 	return v
 }
 func responseIn(v object) api.Response {
 	u := asObject(v["usage"])
+	_, reported := v["usage"].(map[string]any)
 	cost := real(u, "cost")
-	return api.Response{Content: contentIn(v["content"]), Stop: stopIn(str(v, "stop")), Usage: api.Usage{Input: number(u, "input"), Output: number(u, "output"), Cached: number(u, "cacheRead"), CacheWrite: number(u, "cacheWrite"), Cost: cost}, Wire: api.JSON(v)}
+	return api.Response{Content: contentIn(v["content"]), Stop: stopIn(str(v, "stop")), Usage: api.Usage{Input: number(u, "input"), Output: number(u, "output"), Cached: number(u, "cacheRead"), CacheWrite: number(u, "cacheWrite"), Cost: cost}, UsageReported: reported, Wire: api.JSON(v)}
 }

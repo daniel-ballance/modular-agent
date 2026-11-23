@@ -52,6 +52,7 @@ async function preparedScenario(scenarioName) {
       if (name === "confirm") input.question += ` ${values.question}`;
     }
   }
+  if (scenarioName === "first-turn") scenario.model[0].usage = { input: 2, cacheRead: 5, cacheWrite: 11, output: 13 };
   if (scenarioName === "question-answered") scenario.agent.answers[0].value = values.answer;
   return { scenario, values };
 }
@@ -106,7 +107,7 @@ export async function runCase(testCase, command) {
     const received = receiver.snapshot();
     const report = await load(reportPath);
     const connections = fixtures.map(({ name, wire }) => ({ plugin: name, frames: readWire(wire) }));
-    compareTrace({ testCase, report, received, connections, sentinels: Object.values(values) });
+    compareTrace({ testCase, report, received, connections, scriptedReplies: scenario.model, sentinels: Object.values(values) });
     passed = true;
     return { spans: received.spans.length, exports: received.payloads.length };
   } catch (error) {

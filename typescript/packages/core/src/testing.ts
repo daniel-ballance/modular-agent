@@ -40,7 +40,7 @@ export function scriptedProvider(script: readonly ScriptStep[]): Provider {
         content.push({ type: "toolCall", id: `call-${index}-${i}`, name: call.name, arguments: structuredClone(call.input) });
       }
       return { role: "assistant", stop: step.toolCalls?.length ? "toolUse" : "finished", content,
-        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, ...step.usage } };
+        ...(step.usage && { usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, ...step.usage } }) };
     },
   };
 }
