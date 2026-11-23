@@ -41,12 +41,17 @@ Monty's [`max_memory`](https://github.com/pydantic/monty/blob/v1.6.0/docs/resour
 
 When the worker delivers more than 1 MiB of printed output, the call stops and returns `RuntimeError: printed output exceeded 1048576 bytes` followed by the printed UTF-8 prefix. The text result keeps up to 2,000 whole lines or 50 KB before a cut notice. If the traceback does not fit, its last line comes first. A memory or time limit ends the session with `MemoryError` or `TimeoutError`. A worker crash fails the call without replaying it, and cancellation stops the run. The next call starts with a fresh worker and no variables from the previous call.
 
+## Built so far: telemetry
+
+By default `ma` sends no telemetry. Set `OTEL_EXPORTER_OTLP_ENDPOINT` or a per-signal endpoint in the launch environment to export metadata. The default protocol is `http/protobuf`; `grpc` is also supported. The agent name is `ma`. `OTEL_SERVICE_NAME` sets the resource name and defaults to `ma`. `OTEL_SDK_DISABLED=true` disables recording and export without changing the declaration. See [standard telemetry settings](../../../docs/reference/standard-configuration.md#telemetry). Session content and credentials are not exported.
+
 ## What is checked
 
 - **Reference:** 24/24, including client identity validation, sandbox limits, ambient access, tool calls and result rendering.
+- **Telemetry:** seven offline checks cover no endpoint, SDK disabled, per-signal overrides, sampling, headers, metadata privacy and the OTLP resource. A scripted turn reached local Phoenix as `invoke_agent ma`, `chat script` and `execute_tool codemode`. The OTLP resource for that trace carried `service.name=ma-python`.
 - **ACP:** 188/188 with `--crash-checks --probe-checks --job-checks`. The standard composition does not declare several actors, tenants or session limits.
-- **WebSocket kits:** 153/153 for the plugin binding, 14/14 for separate-listener isolation, and 193/193 for ACP.
-- **Python suites:** 628 passed and five live checks skipped in each Runtime and binding combination (transient/local, transient/process, durable/local and durable/process). The sandbox tests cover memory and active time, waiting on the host, worker death, cancellation, the recursion and nested-call limits, ambient access, UTF-8 output and result rendering.
+- **WebSocket kits:** 153/153 for the plugin binding and 14/14 for separate-listener isolation. The final ACP run passed 192/193; the connection closed during the remote-point preflight. A verbose probe run passed 166/166 and did not establish the cause.
+- **Python suites:** 652 passed and five live checks skipped in each Runtime and binding combination (transient/local, transient/process, durable/local and durable/process). The sandbox tests cover memory and active time, waiting on the host, worker death, cancellation, the recursion and nested-call limits, ambient access, UTF-8 output and result rendering.
 - **Subscriptions:** offline SDK checks cover ChatGPT and Grok sign-in, model requests, refresh and reasoning replay, and Claude tool dispatch. Product checks cover client identity and former Provider ids in sign-in, settings, catalog overrides and saved sessions.
 - **Python static checks:** Ruff lint and format checks passed; strict mypy passed.
 

@@ -189,6 +189,7 @@ class AcpActor(TypedDict):
     tenants: NotRequired[Sequence[str | None]]
     projects: NotRequired[Sequence[str | PathLike[str]]]
     represents: NotRequired[Sequence[str]]
+    trace_trusted: NotRequired[bool]
 
 
 def _acp_list(value: Any, check: Callable[[Any], bool], name: str) -> list[Any]:
@@ -277,6 +278,7 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         if configured is not None:
             self.principal = configured
         self.network = principal is not None
+        self.trace_trusted = principal is None or principal.get("trace_trusted") is True
         self._allowed_projects: frozenset[Path] | None = scope.get("projects")
         self._allowed_tenants: frozenset[str | None] = scope["tenants"]
         self.represents = scope["represents"]
@@ -1204,6 +1206,7 @@ def create_agent(
     several_actors: bool = False,
     session_limits: bool = False,
     tenants: Mapping[str, Tenant] | None = None,
+    agent_name: str | None = None,
     job_reports_start_turns: bool = False,
     late_answers_start_turns: bool = False,
     resource_reservations: Mapping[str, Mapping[str, int]] | None = None,
@@ -1253,6 +1256,7 @@ def create_agent(
         try:
             h = Harness(
                 process_plugins=(),
+                agent_name=agent_name,
                 tenants=tenants or {},
                 reservations={k: dict(v) for k, v in resource_reservations.items()}
                 if resource_reservations is not None

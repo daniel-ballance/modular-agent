@@ -4,6 +4,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 
+from ma_core import telemetry as ot
 from ma_core import AgentError, Plugin, content, identity
 
 ASK_USER = {
@@ -274,6 +275,7 @@ class Questions(Plugin):
         }
         self.signals[(sid, q["id"])] = asyncio.Event()
         await self._record(sid, "question_open", q, actor)
+        ot.question_event("open", sid, q)
         q = (await self._state(sid))[q["id"]]
         await self._publish(sid, q)
         origin = s.get("origin") or {}
@@ -475,6 +477,21 @@ class Questions(Plugin):
     async def _accept(
         self, sid, q, actor, value, reason=None, *, declined=None, activation=False, acting_for=None
     ):
+        with ot.question_answer(sid, q):
+            return await self._accept_answer(
+                sid,
+                q,
+                actor,
+                value,
+                reason,
+                declined=declined,
+                activation=activation,
+                acting_for=acting_for,
+            )
+
+    async def _accept_answer(
+        self, sid, q, actor, value, reason=None, *, declined=None, activation=False, acting_for=None
+    ):
         if q["kind"] == "approval" and value == "refuse":
             value, declined = "declined", True
         if declined is None:
@@ -504,6 +521,7 @@ class Questions(Plugin):
                 return False
             raise
         self.signals.setdefault((sid, q["id"]), asyncio.Event()).set()
+        ot.question_event("close", sid, q, "declined" if declined else "answered")
         await self.api.event("input_request_answered", session=sid, answer=answer)
         child = q.get("child")
         if child:
@@ -609,6 +627,7 @@ class Questions(Plugin):
                 return
             raise
         self.signals.setdefault((sid, q["id"]), asyncio.Event()).set()
+        ot.question_event("close", sid, q, reason)
         await self.api.event("input_request_unanswerable", session=sid, request=q["id"])
         s = await self.api.session("get", session=sid)
         parent = (s.get("origin") or {}).get("parent")

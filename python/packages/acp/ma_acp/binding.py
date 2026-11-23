@@ -5,6 +5,7 @@ Source: docs/bindings/acp.md. Internal entries are retained as additional fields
 
 from datetime import datetime
 
+from ma_core import telemetry as ot
 from ma_core.wire import entry_out
 
 
@@ -70,7 +71,7 @@ def entry(value):
         "tool_result",
         "turn_end",
     }:
-        return entry_out(value)
+        return ot.project_entry(entry_out(value))
     result = {
         **value,
         "parentId": value["parent"],
@@ -149,6 +150,7 @@ def declaration(plugins, provider=None):
         "pluginsDuringSession": False,
         "erasure": any(p.get("erasure") and p.get("pending_erasure") for p in plugins.values()),
         "inputKeys": bool(runtime.get("keyed_input")),
+        "telemetry": 1,
         "questionsOutlastTurns": bool(runtime.get("open_calls")),
         "startsTurnsUnasked": "jobReports",
         "queuedInputAfterRestart": runtime.get("queued_input_after_restart", "handedBack"),

@@ -7,6 +7,7 @@ from jsonschema import Draft202012Validator, ValidationError
 from referencing import Registry
 
 from ma_core import TOOL_RESULT_BYTES, lower_reasoning, AgentError, content, identity
+from ma_core import telemetry as ot
 from ma_core.recovery import STEP_AFTER, step_checkpoint
 from ma_core.wire import (
     entry_out,
@@ -76,6 +77,65 @@ async def ordered_tools(calls, parallel, execute, record):
 
 
 class Turns:
+    async def _turn(self, sid, queued=None, turn=None):
+        recovering = turn is not None
+        turn = turn or identity()
+        parent = ot.extract(None)
+        if queued:
+            parent = self.input_traces.pop((sid, queued["id"]), parent)
+        links = []
+        if recovering:
+            parent = ot.saved_turn_context(await self.api.session("branch", session=sid), sid, turn)
+            links = ot.link(parent)
+        elif queued:
+            origin = (queued["data"].get("source") or {}).get("continuesTurnId")
+            if origin:
+                links = ot.link(
+                    ot.saved_turn_context(
+                        await self.api.session("branch", session=sid),
+                        sid,
+                        origin,
+                    )
+                )
+        label = "invoke_agent"
+        agent = ot.name(getattr(getattr(self.api, "_harness", None), "agent_name", None))
+        if agent:
+            label += " " + agent
+        with (
+            ot.span(
+                label,
+                ot.attrs(
+                    sid,
+                    turn,
+                    **{
+                        "gen_ai.operation.name": "invoke_agent",
+                        "gen_ai.agent.name": agent,
+                        "modular_agent.turn.resumed": True if recovering else None,
+                    },
+                ),
+                parent=parent,
+                links=links,
+            ) as operation,
+            ot.Steps(sid, turn).track(),
+        ):
+            ot.set_attrs(operation, {"modular_agent.turn.outcome": "interrupted"})
+            segment = ot.segment(operation, parent) if self.declarations["durable"] else {}
+            if recovering and segment:
+                await self.api.session(
+                    "append",
+                    session=sid,
+                    turn=turn,
+                    kind=ot.TURN_TRACE,
+                    writer="@harness",
+                    visible=False,
+                    data=segment,
+                )
+            result = await self._run_turn(sid, queued, turn, recovering, segment)
+            ot.set_attrs(operation, {"modular_agent.turn.outcome": result["outcome"]})
+            if result["outcome"] == "failed":
+                ot.error(operation, "turn_failed")
+            return result
+
     async def _definitions(self, sid):
         try:
             return await self.api.call("tools", "definitions", {"session": sid})
@@ -154,11 +214,10 @@ class Turns:
             {**settings, **settings_in(snapshot.get("settings") or {})}, access
         )
 
-    async def _turn(self, sid, queued=None, turn=None):
+    async def _run_turn(self, sid, queued, turn, recovering, segment):
         outcome, error = "completed", None
         self.steering_closed.discard(sid)
         prior_starts = set()
-        recovering = turn is not None
         if recovering:
             prior_starts = {
                 e["call"]
@@ -166,8 +225,7 @@ class Turns:
                 if e.get("turn") == turn and e["kind"] == "tool_started"
             }
         open_calls, additions, problem = [], None, None
-        if turn is None:
-            turn = identity()
+        if not recovering:
             snapshot, additions, problem = await self._turn_snapshot(sid, turn, queued)
             await self._record(
                 sid,
@@ -179,6 +237,7 @@ class Turns:
                     "input": queued["id"],
                     "source": queued["data"].get("source"),
                     **snapshot,
+                    **segment,
                     **(
                         {"result_schema": queued["data"]["result_schema"]}
                         if "result_schema" in queued["data"]
@@ -296,11 +355,13 @@ class Turns:
                         if e["data"]["when"] == "steer":
                             await self._take(sid, e, turn)
                     step = identity()
+                    ot.step_start(step)
                     pending = await self._record(sid, turn, "step_start", step=step)
                     await self.api.event(
                         "step_started", session=sid, turn=turn, step=step, index=len(starts)
                     )
                 step = pending["step"]
+                ot.step_start(step)
                 response_entry = next(
                     (e for e in reversed(responses) if e.get("step") == step), None
                 )
@@ -406,6 +467,7 @@ class Turns:
                     },
                 )
                 await self.api.event("step_ended", session=sid, turn=turn, step=step, usage=usage)
+                ot.step_end()
         except asyncio.CancelledError:
             if sid in self.suspending:
                 raise
@@ -423,6 +485,7 @@ class Turns:
             if not tenant_limit:
                 await self.api.session("invalidate", session=sid, reason="failure")
         finally:
+            ot.step_end()
             if sid not in self.suspending:
                 await self._settle(sid, turn, outcome == "cancelled", prior_starts=prior_starts)
         # Include the final response in usage even if the turn ended by an exception.
@@ -721,6 +784,7 @@ class Turns:
         if count >= settings.get("max_steps", 16):
             raise AgentError("step limit", "stepLimit")
         step = identity()
+        ot.step_start(step)
         await self._record(sid, turn, "step_start", step=step)
         await self.api.event("step_started", session=sid, turn=turn, step=step, index=count)
         return step
@@ -830,6 +894,8 @@ class Turns:
                     [],
                 )
                 if c["name"] not in offered:
+                    if not old:
+                        ot.tool_disposition(sid, turn, step, c, None, {"status": "refused"})
                     return {
                         "status": "outcome_unknown" if old else "refused",
                         "content": content(UNKNOWN if old else "not offered"),
@@ -951,6 +1017,7 @@ class Turns:
                     if reply.get("declined"):
                         gate = {**gate, "refused": True, "reason": reply.get("reason", "Declined")}
             if gate.get("refused"):
+                ot.tool_disposition(sid, turn, step, call, definition, {"status": "refused"})
                 if replay:
                     return unknown
                 answer.update(status="refused", content=content(gate.get("reason", "Refused")))

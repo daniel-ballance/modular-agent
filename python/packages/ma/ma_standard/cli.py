@@ -44,6 +44,7 @@ from .code import code_tool
 from .config import PROVIDER_ALIASES, Paths, login_file, model_id, subscription_overrides
 from .identity import DEFAULT_CLIENT_IDENTITY, validate_client_identity
 from .prompt import discover, prompt_plugin
+from .telemetry import configured
 from modular_agent import AcpPolicy
 
 
@@ -341,6 +342,7 @@ async def _agent(
             history=history,
             durability=durability,
             local_process_groups=True,
+            agent_name="ma",
             resource_reservations=policy.limits,
             tenants=policy.tenants,
         )
@@ -451,6 +453,7 @@ async def _agent(
     return await create_agent(
         project=project,
         data_dir=paths.state,
+        agent_name="ma",
         history=history,
         durability=durability,
         local_process_groups=True,
@@ -631,7 +634,8 @@ def main() -> None:
         )
         args = _parser().parse_args()
         args.client_identity = client_identity
-        status = asyncio.run(_run(args))
+        with configured():
+            status = asyncio.run(_run(args))
     except (AgentError, OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         status = 1

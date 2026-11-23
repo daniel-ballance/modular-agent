@@ -10,6 +10,7 @@ import asyncio
 import json
 from contextvars import ContextVar
 
+from ma_core import telemetry as ot
 from ma_core import AgentError
 
 MAX_FRAME = 64 * 1024 * 1024
@@ -58,6 +59,22 @@ class WireError(AgentError):
         self.details = details or {}
 
 
+def work_method(method):
+    return (
+        "/" in method
+        and not method.startswith(("$", "plugin/"))
+        and method
+        not in {
+            "host/problem",
+            "host/credentials/read",
+        }
+    )
+
+
+def trace_offer(value):
+    return type(value) is int and value == 1
+
+
 class Peer:
     def __init__(
         self,
@@ -70,6 +87,7 @@ class Peer:
         frames=None,
         close_after_shutdown=False,
         prepare_notification=None,
+        trace_server=False,
     ):
         self.reader, self.writer = reader, writer
         self.frames = frames
@@ -86,6 +104,10 @@ class Peer:
         self.closed = asyncio.Event()
         self.prepare_notification = prepare_notification
         self.outgoing_methods = {}
+        self.trace_server = trace_server
+        self.trace_agreed = False
+        self.trace_name = label
+        self.outgoing_traces = {}
         self.request_notes = {}
         self.notes = asyncio.Queue(MAX_NOTIFICATIONS)
         self.note_bytes = 0
@@ -153,12 +175,75 @@ class Peer:
                 self.writer.write(raw + b"\n")
                 await self.writer.drain()
 
+    def _traced_params(self, method, params):
+        if method == "plugin/initialize":
+            return params
+        result = {k: v for k, v in params.items() if k != "traceContext"}
+        scoped = (
+            not method.startswith("host/")
+            or rpc_id(params.get("parentRequestId"))
+            or method in {"host/jobs/progress", "host/jobs/end", "host/jobs/resume"}
+        )
+        if self.trace_agreed and scoped and work_method(method) and (carrier := ot.inject()):
+            result["traceContext"] = carrier
+        return result
+
     async def notify(self, method, params):
-        await self.send({"method": method, "params": params})
+        await self.send({"method": method, "params": self._traced_params(method, params)})
+
+    def _incoming_context(self, method, params):
+        parent = params.get("parentRequestId")
+        tracked = self.outgoing_traces.get(parent) if rpc_id(parent) else None
+        received = ot.extract(params.get("traceContext")) if self.trace_agreed else ot.extract(None)
+        if not work_method(method):
+            return ot.extract(None)
+        if tracked is not None:
+            return received if ot.same_trace(tracked, received) else tracked
+        if self.trace_server and not method.startswith("host/"):
+            return received
+        return ot.extract(None)
+
+    async def _dispatch(self, method, params, key):
+        parent = self._incoming_context(method, params)
+        if not self.trace_server or not work_method(method):
+            return await self.dispatch(method, params, key)
+        work = params.get("turn") or {}
+        with ot.span(
+            "modular_agent.plugin.request",
+            ot.attrs(
+                params.get("sessionId") or work.get("sessionId"),
+                work.get("turnId"),
+                **{
+                    "modular_agent.plugin.name": self.trace_name,
+                    "modular_agent.plugin.method": method,
+                },
+            ),
+            parent=parent,
+            kind=ot.trace.SpanKind.SERVER,
+        ):
+            return await self.dispatch(method, params, key)
 
     async def request(
         self, method, params, *, key=None, return_on_cancel=False, cancel_on_interrupt=True
     ):
+        if not work_method(method):
+            return await self._request(method, params, key, return_on_cancel, cancel_on_interrupt)
+        work = params.get("turn") or {}
+        with ot.span(
+            "modular_agent.plugin.request",
+            ot.attrs(
+                params.get("sessionId") or work.get("sessionId"),
+                work.get("turnId"),
+                **{
+                    "modular_agent.plugin.name": self.trace_name,
+                    "modular_agent.plugin.method": method,
+                },
+            ),
+            kind=ot.trace.SpanKind.CLIENT,
+        ):
+            return await self._request(method, params, key, return_on_cancel, cancel_on_interrupt)
+
+    async def _request(self, method, params, key, return_on_cancel, cancel_on_interrupt):
         note = handling_notification.get()
         if method in STREAMS and note is not None and note is self.current_note:
             # A nested stream on this peer would need to deliver pieces behind
@@ -178,7 +263,10 @@ class Peer:
         if note is not None:
             self.request_notes[key] = note
         try:
-            await self.send({"id": key, "method": method, "params": params})
+            self.outgoing_traces[key] = ot.current()
+            await self.send(
+                {"id": key, "method": method, "params": self._traced_params(method, params)}
+            )
             return await asyncio.shield(future)
         except asyncio.CancelledError:
             self.cancelled_outbound.add(key)
@@ -204,6 +292,7 @@ class Peer:
             raise
         finally:
             self.pending.pop(key, None)
+            self.outgoing_traces.pop(key, None)
             self.activity.set()
             self.answered.discard(key)
             self.cancelled_outbound.discard(key)
@@ -233,7 +322,7 @@ class Peer:
             result = (
                 {}
                 if method == "$/ping"
-                else await self.dispatch(method, message.get("params") or {}, key)
+                else await self._dispatch(method, message.get("params") or {}, key)
             )
             answer = {"result": result}
         except BaseException as exc:
@@ -308,9 +397,11 @@ class Peer:
             if work is None:
                 return True
         else:
+            parent_context = self._incoming_context(method, params)
 
-            def work():
-                return self.notification(method, params)
+            async def work():
+                with ot.use(parent_context):
+                    return await self.notification(method, params)
 
         if self.notes.full() or self.note_bytes + size > 2 * MAX_FRAME:
             # Progress is expendable; a catalog invalidation is not.

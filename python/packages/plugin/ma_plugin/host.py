@@ -7,6 +7,7 @@ import os
 from functools import partial
 from pathlib import Path
 
+from ma_core import telemetry as ot
 from ma_core import AgentError, Plugin, identity, plain, silent
 
 from . import hooks
@@ -29,6 +30,7 @@ from ma_core.wire import (
     tool_out,
 )
 from .rpc import MAX_FRAME, Peer, WireError, rpc_id
+from .rpc import trace_offer, work_method
 from .runtime_host import HostedRuntime
 from .server import BINDING, DATA
 from .websocket import connect_plugin
@@ -60,6 +62,10 @@ class Provider:
         model = d["access"]["id"].removeprefix(self.id + "/")
         if d.get("session") and not d.get("attempt_id"):
             d.update(attempt_id=identity(), auxiliary_step=identity())
+        r = await ot.inference(self.id, d, lambda: self._request(d, model, emit))
+        return r
+
+    async def _request(self, d, model, emit):
         r = await self.plugin.request(
             "provider/request",
             {
@@ -92,7 +98,10 @@ class Provider:
                 content=response_in(r)["content"],
                 data=response_in(r),
             )
-        return response_in(r)
+        response = response_in(r)
+        for call in response["calls"]:
+            self.plugin.h.provider_trace_ids[d["session"], call["id"]] = call["id"]
+        return response
 
     async def discard(self, d, emit):
         return await self.plugin.request(
@@ -156,7 +165,15 @@ class NativeProvider:
             )
             await emit(event)
 
-        response = await self.service.generate(d, piece)
+        response = await ot.inference(
+            self.target,
+            d,
+            lambda: self.service.generate(d, piece),
+            local=self.target in {"fake", "scripted"},
+        )
+        for call in response.get("calls", []):
+            original = call.pop("_provider_call_id", call["id"])
+            self.h.provider_trace_ids[d["session"], call["id"]] = original
         await self.h.fire(
             "@harness",
             "provider.response",
@@ -245,6 +262,7 @@ class Environment:
 
 
 class External(Plugin):
+    trace_context = True
     """One process may register several different capability kinds."""
 
     role = "feature"
@@ -326,6 +344,7 @@ class External(Plugin):
                     "project": str(self.project),
                     "home": str(self.home),
                     "config": self.spec.get("config", {}),
+                    **({"traceContext": 1} if self.trace_context else {}),
                 },
                 cancel_on_interrupt=False,
             ),
@@ -333,6 +352,10 @@ class External(Plugin):
         )
         if self.registration.get("binding") != BINDING or not self.registration.get("name"):
             raise WireError("Invalid registration", "invalid_request")
+        self.peer.trace_agreed = self.trace_context and trace_offer(
+            self.registration.get("traceContext")
+        )
+        self.peer.trace_name = self.registration["name"]
         for source in self.registration.get("toolSources", []):
             if source["id"] in self.sources:
                 raise WireError("Duplicate tool source", "invalid_request")
@@ -485,6 +508,7 @@ class External(Plugin):
             "method": method,
             "params": params,
             "context": context or {},
+            "trace": ot.current(),
             "emit": emit,
             "questions": 0,
             "pending_questions": {},
@@ -652,7 +676,21 @@ class External(Plugin):
             "host/jobs/progress",
         }:
             return None
-        return partial(self.notification, method, p, parent)
+
+        fallback = (
+            self.peer.outgoing_traces.get(key, parent["trace"]) if parent is not None else None
+        )
+
+        async def deliver():
+            if fallback is None:
+                return await self.notification(method, p, parent)
+            received = (
+                ot.extract(p.get("traceContext")) if self.peer.trace_agreed else ot.extract(None)
+            )
+            with ot.use(received if ot.same_trace(fallback, received) else fallback):
+                return await self.notification(method, p, parent)
+
+        return deliver
 
     async def refresh_changed(self, source, sessions):
         for sid in sessions:
@@ -721,8 +759,40 @@ class External(Plugin):
         return None
 
     async def callback(self, method, p, key, *, notification_parent=None):
+        parent = notification_parent if notification_parent is not None else self.live_parent(p)
         try:
-            return await self.host_call(method, p, key, notification_parent=notification_parent)
+            if parent is None or not work_method(method):
+                with ot.use(ot.extract(None)):
+                    return await self.host_call(
+                        method, p, key, notification_parent=notification_parent
+                    )
+            d = parent["context"]
+            fallback = self.peer.outgoing_traces.get(p["parentRequestId"], parent["trace"])
+            received = (
+                ot.extract(p.get("traceContext")) if self.peer.trace_agreed else ot.extract(None)
+            )
+            trace_parent = received if ot.same_trace(fallback, received) else fallback
+            attributes = ot.attrs(
+                d.get("session") or d.get("sessionId"),
+                d.get("turn"),
+                d.get("step"),
+                **{
+                    "modular_agent.plugin.name": self.registration["name"],
+                    "modular_agent.plugin.method": method,
+                },
+            )
+            if key is None:
+                with ot.use(trace_parent):
+                    return await self.host_call(
+                        method, p, key, notification_parent=notification_parent
+                    )
+            with ot.span(
+                "modular_agent.plugin.request",
+                attributes,
+                parent=trace_parent,
+                kind=ot.trace.SpanKind.SERVER,
+            ):
+                return await self.host_call(method, p, key, notification_parent=notification_parent)
         except AgentError as exc:
             if isinstance(exc, WireError):
                 raise
@@ -733,6 +803,48 @@ class External(Plugin):
                 "internal": "internal",
             }.get(exc.code, "invalid_request")
             raise WireError(str(exc), code) from exc
+
+    async def _job_callback(self, method, p, args):
+        if method == "host/jobs/end":
+            outcome = p["outcome"]
+            if (
+                outcome["kind"] not in {"completed", "failed", "cancelled"}
+                or type(p["report"]) is not bool
+                or (p["report"] and "result" not in p)
+            ):
+                raise WireError("Invalid job outcome", "invalid_request")
+            try:
+                await self.api.call(
+                    "jobs",
+                    "report",
+                    {
+                        **args,
+                        "state": outcome["kind"],
+                        "error": outcome.get("error"),
+                        "result": p.get("result") or [],
+                        "report": p["report"],
+                        "usage": p.get("usage", {}),
+                        "strict": True,
+                    },
+                )
+            except AgentError as exc:
+                if exc.code != "result_too_large":
+                    raise
+                raise WireError(str(exc), "result_too_large") from exc
+        elif method == "host/jobs/progress":
+            await self.api.call("jobs", "progress", {**args, "content": p["content"]})
+            return None
+        else:
+            jid = p["jobId"]
+            if jid in self.claimed_jobs:
+                raise WireError("Job was already taken up on this connection", "invalid_request")
+            self.claimed_jobs.add(jid)
+            try:
+                await self.api.call("jobs", "take_up", args)
+            except BaseException:
+                self.claimed_jobs.discard(jid)
+                raise
+        return {}
 
     async def host_call(self, method, p, key, *, notification_parent=None):
         direct = {
@@ -808,48 +920,20 @@ class External(Plugin):
             )
         if method in job_only:
             args = await self.owned_job(p["jobId"])
-            if method == "host/jobs/end":
-                outcome = p["outcome"]
-                if (
-                    outcome["kind"] not in {"completed", "failed", "cancelled"}
-                    or type(p["report"]) is not bool
-                    or (p["report"] and "result" not in p)
-                ):
-                    raise WireError("Invalid job outcome", "invalid_request")
-                try:
-                    await self.api.call(
-                        "jobs",
-                        "report",
-                        {
-                            **args,
-                            "state": outcome["kind"],
-                            "error": outcome.get("error"),
-                            "result": p.get("result") or [],
-                            "report": p["report"],
-                            "usage": p.get("usage", {}),
-                            "strict": True,
-                        },
-                    )
-                except AgentError as exc:
-                    if exc.code != "result_too_large":
-                        raise
-                    raise WireError(str(exc), "result_too_large") from exc
-            elif method == "host/jobs/progress":
-                await self.api.call("jobs", "progress", {**args, "content": p["content"]})
-                return None
-            else:
-                jid = p["jobId"]
-                if jid in self.claimed_jobs:
-                    raise WireError(
-                        "Job was already taken up on this connection", "invalid_request"
-                    )
-                self.claimed_jobs.add(jid)
-                try:
-                    await self.api.call("jobs", "take_up", args)
-                except BaseException:
-                    self.claimed_jobs.discard(jid)
-                    raise
-            return {}
+            jobs = self.h.capabilities["jobs"][1]
+            trace_context = getattr(type(jobs), "_trace_context", None)
+            fallback = (
+                trace_context(jobs, args["session"], args["job"])
+                if trace_context
+                else ot.extract(None)
+            )
+            received = (
+                ot.extract(p.get("traceContext")) if self.peer.trace_agreed else ot.extract(None)
+            )
+            if parent is None and ot.valid(fallback):
+                with ot.use(received if ot.same_trace(fallback, received) else fallback):
+                    return await self._job_callback(method, p, args)
+            return await self._job_callback(method, p, args)
         if method == "host/credentials/read":
             if p.get("provider") not in {x["id"] for x in self.registration.get("providers", [])}:
                 raise WireError("Provider is not owned by this plugin", "invalid_request")
@@ -1177,7 +1261,7 @@ class External(Plugin):
                 raise WireError("Invalid history limit", "invalid_request")
             page, size = [], len(b'{"entries": []}')
             for e in entries[:limit]:
-                value = entry_out(e)
+                value = ot.project_entry(entry_out(e))
                 if value.get("message", {}).get("role") == "toolResult":
                     value["message"]["toolName"] = tool_names.get(e["call"], "unknown")
                 length = len(json.dumps(value, ensure_ascii=False).encode()) + (2 if page else 0)

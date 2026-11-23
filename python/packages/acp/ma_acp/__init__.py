@@ -9,6 +9,7 @@ from pathlib import Path
 
 import acp
 from acp import schema as s
+from ma_core import telemetry as ot
 from ma_core import AgentError, Plugin, content, lower_reasoning
 
 from ma_harness.authority import PERMISSIONS
@@ -95,7 +96,11 @@ def rpc(fn):
         )
         scope = self.project_scope()
         try:
-            return await gated(self, *args, **kwargs)
+            metadata = params.get("_meta") if fn.__name__ == "ext_method" else kwargs
+            trusted = self.trace_trusted
+            parent = ot.extract(metadata if trusted and fn.__name__ != "initialize" else None)
+            with ot.use(parent):
+                return await gated(self, *args, **kwargs)
         finally:
             self.reset_project_scope(scope)
             OUTPUT_SESSION.reset(token)
@@ -230,6 +235,7 @@ class ACP(Plugin):
         self.actor = actor
         self.principal = {"id": actor, "kind": "host", "rights": sorted(PERMISSIONS)}
         self.network = False
+        self.trace_trusted = True
         self.represents = frozenset()
         self.project = str(Path(project).resolve())
         self.settings = settings or {}
@@ -1003,7 +1009,7 @@ class ACP(Plugin):
                     session_id=sid,
                     tool_call=tool_call,
                     options=options,
-                    field_meta=params["_meta"],
+                    **{**params["_meta"], **(ot.inject() if self.trace_trusted else {})},
                 )
                 if response.outcome.outcome == "selected" and response.outcome.option_id in {
                     "allow",
@@ -1031,6 +1037,7 @@ class ACP(Plugin):
                                 properties={"answer": prop}, required=["answer"]
                             ),
                         ),
+                        **(ot.inject() if self.trace_trusted else {}),
                     )
                     if response.action == "accept":
                         submitted = (response.content or {}).get("answer")
@@ -1079,7 +1086,10 @@ class ACP(Plugin):
                 if point not in {e["id"] for e in es}:
                     raise AgentError("Unknown follow point")
                 es = es[next(i for i, e in enumerate(es) if e["id"] == point) + 1 :]
-            result = {"entries": es, "questions": await self.api.call("questions", "list", base)}
+            result = {
+                "entries": [ot.project_entry(e) for e in es],
+                "questions": await self.api.call("questions", "list", base),
+            }
         elif operation == "submit":
             result = await self.api.call(
                 "runtime",

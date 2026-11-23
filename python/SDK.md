@@ -53,10 +53,11 @@ The five [live checks](../docs/sdk/testing.md#live-checks) in `tests/test_sdk_li
 ## What is checked
 
 - **Shared scenarios:** 153/153 with `MODULAR_AGENT_SDK_REQUIRE=all` on the ADR 0030 branch: all 17 in process, all 17 with each SDK's fixture programs on stdio, and all 17 with each SDK's fixtures over WebSocket.
-- **Pytest:** 628 passed and five live checks skipped for transient and durable Runtimes, each with local and process bindings.
+- **Pytest:** 652 passed and five live checks skipped for transient and durable Runtimes, each with local and process bindings.
 - **Reference `ma`:** 24/24 on Linux. The stderr regression checks a dispatched `codemode` call, not `tool(null)`.
+- **Telemetry:** eight offline SDK cases check span parentage and IDs, inference metrics, private sentinels, a job-linked report, both handshake omissions, exporter failure, and operation without the OpenTelemetry SDK. The crash fixture kills two durable segments and checks that the third span has the last saved parent and link. Fork copies have no trace checkpoint or turn trace field.
 - **Subscriptions:** Offline checks cover the shared catalog and login file, both ChatGPT sign-in flows, and Grok's device flow, including slow-down, denial, expiry and refusal of non-HTTPS verification addresses. Both Responses Providers are checked in process and over the plugin binding for request shape, encrypted reasoning replay and refused refresh. The Grok checks force two refreshers to contend for the login lock. Claude fixtures exercise account readiness, thinking settings, streaming and host tool dispatch.
-- **ACP kit against `ma`:** 188/188 on Linux stdio with crash, probe and job checks; 193/193 over WebSocket. The base build takes the opt-in policy with `modular-agent --acp` in conformance mode, without changing the legacy `--mode acp` composition.
+- **ACP kit against `ma`:** 188/188 on Linux stdio with crash, probe and job checks. The final WebSocket run passed 192/193: the remote-point preflight connection closed. A verbose probe run passed 166/166 but did not reproduce the closure. The base build takes the opt-in policy with `modular-agent --acp` in conformance mode, without changing the legacy `--mode acp` composition.
 - **Plugin kit:** 146/146 on stdio and 153/153 over WebSocket, with both Runtime tiers.
 - **History kit:** 42/42 with restart and 42/42 with `--isolation-checks`, using two `serve_history(file_history(...))` services with different stores and tokens.
 - **Session publication:** six SDK cases cover file, HTTP and Registrar history with in-process and served Runtimes. Unused sessions leave no records on close or process loss. The first admission flushes setup in order, and forks publish the copied prefix and fresh setup together. A separate ACP case checks that `session/new` and close do not create an HTTP history record.
@@ -73,6 +74,7 @@ The five [live checks](../docs/sdk/testing.md#live-checks) in `tests/test_sdk_li
 | Area | State |
 |---|---|
 | Composition | Awaitable or async context manager; local, memory and file/HTTP-backed parts, three durability modes, explicit `transient_runtime()` and `durable_runtime()`, Provider and tool options, local, stdio and WebSocket plugins. `local_environment(root)` uses `root` as the project when none is given; if both are given they must match. |
+| Telemetry | The Harness declares `telemetry: 1` even if export is off. It records metadata through `opentelemetry-api` only. Register the app's tracer and meter providers before `create_agent`; the app chooses sampling and owns exporter shutdown. Use the fixed `agent_name` option for `gen_ai.agent.name`. Plugin propagation requires agreement. Durable turns checkpoint span context and resume in the same trace. |
 | Session and turn | Create, reopen, prompt and steer with shared Content, stream, gated last turn and history, send, cancel, settings, move, fork, erase and close. Direct calls use the Runtime's gates. Structured turn results are checked with feedback and retry. `events(from_entry)` replays kept entries, then follows typed live events, with `lost` and the last delivered entry cursor on lag. `SessionInterruptedEvent` is live only; a failed commit or lost writer fences dispatch and fails waiting prompts with `lost`. |
 | Authority | `several_actors`, `session_limits` and `tenants` opt in. Embedded actor and proposal operations use current effective rights. Stdio ACP accepts operator `actor`, `rights`, `projects`, `tenants` and `represents`; network scope and representation are set per token. A checked scope cannot enlarge the composition's reach. `ma` reads one policy file in all modes. |
 | Reservations | `create_agent(resource_reservations={scope: {name: count}})` sets bounds. Scopes are `session`, `tenant` and `agent`. Fields are `inputs`, `calls`, `jobs`, `bufferedBytes`, `storageBytes` and `controlBytes`. Omitted fields have finite defaults. `agent.reservation_limits()` returns configuration only. Count ceilings are in the declaration. Project compositions share the listener's reservations. |
@@ -106,7 +108,25 @@ Use `await sign_in("chatgpt", logins, on_step=show, paste=read_line, device=Fals
 
 Call `await claude_provider.available()` before displaying account-specific models. If it returns false, `claude_provider.unavailable_reason` explains why. Claude has no SDK sign-in. The Provider checks the account before sending a prompt, using Anthropic's [Python Agent SDK](https://github.com/anthropics/claude-agent-sdk-python). It maps `budgetTokens` in the shared table to `budget_tokens` in the Python options.
 
+## Trace trust and spec findings
+
+The launcher of a stdio ACP host is trusted for per-request trace context. Set `trace_trusted=True` in an embedded network ACP `actors` entry only for a peer allowed to share trace IDs. Network principals are not trace-trusted by default. Configured history and plugin destinations get context per request. The SDK does not accept or send baggage or vendor trace state.
+
+Suggested replacement for the ACP row in [Context on the wire](../docs/telemetry.md#context-on-the-wire), after the sentence about `initialize`:
+
+> Treat the launcher of an operator-configured stdio Interface as trusted for trace context unless the operator disables that trust. For authenticated network ACP, use the principal's operator-configured trace trust, which defaults to false. Authentication alone does not grant trace trust. Apply the same trust decision when injecting context into questions or permission requests.
+
+Suggested replacement for the endpoint timeout sentence in [Telemetry](../docs/reference/standard-configuration.md#telemetry):
+
+> Export request headers and timeout in milliseconds. Convert the timeout if the official exporter takes seconds as a constructor argument.
+
+Phoenix's `/v1/projects/default/spans` response does not return OpenTelemetry resources. Suggested replacement for a Phoenix verification instruction that asks for `service.name` from that response:
+
+> Match the trace ID and span names in Phoenix. Verify `service.name` in the OTLP resource for the same trace; the Phoenix spans response does not expose it.
+
 ## Remaining Python implementation gaps
+
+The older base build's private `MA_PLUGIN_PROCESSES` placement does not install OpenTelemetry in its worker processes. The SDK's public hosted Runtime placement records the invocation in the host and uses the plugin binding for propagation.
 
 Provider-owned tool dispatch, live sessions and late answers are outside the SDK 0.1 Provider port ([API, Providers](../docs/sdk/api.md#providers)).
 

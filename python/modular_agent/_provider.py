@@ -218,6 +218,7 @@ class _ProviderAdapter(_BasePlugin):  # type: ignore[misc]  # Untyped base adapt
         response = response_in({**reply, "model": {"provider": self.name, "id": model.id}})
         # Vendor ids can repeat across sessions/turns. Bind them to the recorded attempt.
         for call in response.get("calls", []):
+            call["_provider_call_id"] = call["id"]
             call["id"] = uuid5(NAMESPACE_URL, f"{d['attempt_id']}:{call['id']}").hex
         return cast(JsonObject, response)
 
