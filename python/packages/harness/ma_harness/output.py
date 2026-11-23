@@ -1,5 +1,8 @@
 """Translate recipient events at the shared output gate boundary."""
 
+import json
+
+from ma_core import AgentError, clone
 from ma_core.wire import STATUS_IN, call_in, entry_in, entry_out, turn_end_out
 
 
@@ -179,35 +182,85 @@ def project(event):
     return [({"type": event_type, "data": shape}, restore)]
 
 
+SEGMENT_BYTES = 4 * 1024 * 1024
+
+
+class OutputOverflow(AgentError):
+    def __init__(self):
+        super().__init__("Output exceeds the gate limit", "result_too_large")
+
+
+def encoded_size(value):
+    # Match the plugin peer's actual UTF-8 JSON separators and escaping.
+    return len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode())
+
+
 async def gate(harness, sid, recipient, events):
     if not harness.holds_output():
         return events
+    charges = []
     try:
         adapters = [project(item) for item in events]
         shared = [event for group in adapters for event, _ in group]
-        answer = await harness.fire(
-            "@harness",
-            "binding.output",
-            {
-                "sessionId": sid or "",
-                "recipient": recipient,
-                "events": shared,
-                "final": True,
-            },
-        )
-        if answer.get("refused") or len(answer["events"]) != len(shared):
-            return []
-        changed = iter(answer["events"])
+        handlers = [h for h in harness.handlers if h[1] == "binding.output"]
+        handlers.sort(key=lambda h: {"first": 0, "normal": 1, "last": 2}[h[3]])
+        checked = []
+        start = 0
+        while start < len(shared):
+            end, size = start, 2
+            while end < len(shared):
+                n = encoded_size(shared[end])
+                if n + 2 > SEGMENT_BYTES:
+                    raise OutputOverflow()
+                next_size = size + n + (2 if end > start else 0)
+                if next_size > SEGMENT_BYTES:
+                    break
+                end, size = end + 1, next_size
+            batch = shared[start:end]
+            for _, _, handler, _ in handlers:
+                answer = await handler(
+                    {
+                        "sessionId": sid or "",
+                        "recipient": recipient,
+                        "events": clone(batch),
+                        "final": True,
+                    }
+                )
+                if answer is None:
+                    continue
+                if answer.get("refused") or "events" not in answer:
+                    return []
+                after = answer["events"]
+                n = encoded_size(after)
+                if n > SEGMENT_BYTES:
+                    raise OutputOverflow()
+                if not safe_shape(batch, after):
+                    return []
+                if n > size and sid in harness.sessions:
+                    try:
+                        charges.append(
+                            harness.capacity.hold(harness.sessions[sid], bufferedBytes=n - size)
+                        )
+                    except AgentError as exc:
+                        raise OutputOverflow() from exc
+                    size = n
+                batch = after
+            checked.extend(batch)
+            start = end
+        changed = iter(checked)
         result = []
         for item, group in zip(events, adapters, strict=True):
             native = item["data"]
             for before, restore in group:
                 after = next(changed)
-                if not safe_shape(before, after):
-                    return []
                 if before["data"] != after["data"]:
                     native = restore(native, after["data"])
             result.append({**item, "data": native})
         return result
-    except (ValueError, TypeError, KeyError, AttributeError):
+    except OutputOverflow:
+        raise
+    except Exception:
         return []
+    finally:
+        for charge in charges:
+            harness.capacity.release(charge)

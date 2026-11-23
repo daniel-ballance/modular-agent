@@ -433,6 +433,8 @@ class Exchange:
         if kind == "state_invalidated":
             await self.refresh_state()
             return
+        if kind == "output_overflow" and d.get("turn") == self.turn:
+            raise Failure("output_withheld")
         if kind == "terminal_withheld" and (not d.get("turn") or d["turn"] == self.turn):
             raise Failure("output_withheld")
         if kind == "input_returned" and self.input_id and d.get("input") == self.input_id:
