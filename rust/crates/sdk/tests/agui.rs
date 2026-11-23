@@ -104,6 +104,44 @@ async fn service_rejects_an_ambiguous_route_before_listening() -> anyhow::Result
 }
 
 #[tokio::test]
+async fn tenant_without_input_never_starts_a_provisional_session() -> anyhow::Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = tempfile::tempdir()?;
+    let started = Arc::new(AtomicBool::new(false));
+    let seen = started.clone();
+    let agent = Agent::builder()
+        .project(dir.path())
+        .tenants(json!({"reader":{"rights":["watch"]}}))
+        .plugin(Plugin::new("observe-start").on_session_start(move |_| {
+            seen.store(true, Ordering::SeqCst);
+            async { Ok(()) }
+        }))
+        .build()
+        .await?;
+    let mut a = actor(dir.path(), "view", TOKEN)?;
+    a.principal.tenants = Some(vec![Some("reader".into())]);
+    let server = agent
+        .serve_agui(AguiOptions {
+            listen: "127.0.0.1:0".into(),
+            actors: vec![a],
+            tenant: Some("reader".into()),
+            ..Default::default()
+        })
+        .await?;
+    let result = reqwest::Client::new()
+        .post(url(&server, "/threads"))
+        .bearer_auth(TOKEN)
+        .json(&json!({}))
+        .send()
+        .await?;
+    assert_eq!(result.status(), 403);
+    assert!(!started.load(Ordering::SeqCst));
+    server.close().await;
+    agent.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_left_open_question_can_be_answered_without_presence() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let ask = modular_agent::Tool::new("choose", "Choose a label").run(|_: Value, cx| async move {

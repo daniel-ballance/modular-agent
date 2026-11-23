@@ -140,7 +140,11 @@ fn encode(v: &Value) -> R<Vec<u8>> {
     Ok(b)
 }
 fn warn(field: &str) {
-    log::warn!(target:"modular_agent::agui::warning", "{field}");
+    if log::log_enabled!(target:"modular_agent::agui::warning",log::Level::Warn) {
+        log::warn!(target:"modular_agent::agui::warning","{field}");
+    } else {
+        eprintln!("AG-UI: ignored {field}");
+    }
 }
 fn scope(id: &str, actor: &str) -> Scope {
     Scope {
@@ -447,10 +451,13 @@ impl Service {
                 if body(req).await? != json!({}) {
                     return Err(Fail::Invalid);
                 }
+                let mut rights = a.principal.actor.rights.clone();
+                if let Some(tenant) = &self.tenant {
+                    rights = rights
+                        .intersect(&self.h().tenant_rights(tenant).map_err(|_| Fail::Refused)?);
+                }
                 if !a.allows(&self.agent.inner.project, self.tenant.as_deref())
-                    || !["input", "watch"]
-                        .iter()
-                        .all(|r| a.principal.actor.rights.has(r))
+                    || !["input", "watch"].iter().all(|r| rights.has(r))
                 {
                     return Err(Fail::Refused);
                 }

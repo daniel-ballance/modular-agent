@@ -337,6 +337,9 @@ pub trait InputRequests: Send + Sync {
         self.presence(session, actor, present);
     }
     fn detach_presence(&self, _session: &str, _route: &str) {}
+    fn present_for_approval(&self, session: &str) -> Vec<String> {
+        self.present(session)
+    }
     fn present(&self, _session: &str) -> Vec<String> {
         vec![]
     }

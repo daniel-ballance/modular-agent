@@ -375,7 +375,7 @@ pub(crate) fn answerable(session: &Session, service: &dyn InputRequests, q: &Que
         )
         && (q.kind != RequestKind::Approval
             || service
-                .present(&session.id)
+                .present_for_approval(&session.id)
                 .iter()
                 .any(|a| a == connection_actor().as_str()))
 }

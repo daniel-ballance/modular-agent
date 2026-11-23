@@ -44,6 +44,7 @@ struct Exchange {
     reasoning: BTreeSet<String>,
     closed_text: BTreeSet<String>,
     initial_input: bool,
+    next_cursor: Option<Cursor>,
     epoch: Option<String>,
     presence_at_start: Option<String>,
     state_revision: Option<String>,
@@ -314,6 +315,16 @@ impl Service {
             }
             used.push_back(req.run.clone());
         }
+        struct RunPresence(Arc<dyn base::InputRequests>, String, String);
+        impl Drop for RunPresence {
+            fn drop(&mut self) {
+                self.0.detach_presence(&self.1, &self.2);
+            }
+        }
+        let presence = RunPresence(base::requests(self.h())?, id.clone(), base::id());
+        presence
+            .0
+            .connect_answer_route(id, a.id(), &presence.2, false);
         let mut ex = Exchange {
             server: self,
             a,
@@ -328,6 +339,7 @@ impl Service {
             reasoning: Default::default(),
             closed_text: Default::default(),
             initial_input: true,
+            next_cursor: None,
             epoch: view::epoch(&d),
             presence_at_start,
             state_revision: None,
@@ -336,10 +348,12 @@ impl Service {
         let mut driver = Some(session.drive());
         let stream = async_stream::stream! {
             let _guard = guard;
+            let _presence = presence;
             let mut next = ex.open(initial).await.map(|bytes|(bytes,false));
             loop {
                 match next.and_then(|(bytes,end)| {ex.check_delivery()?; Ok((ex.server.buffer(&ex.id,bytes)?,end))}) {
                     Ok((bytes,finished)) => {
+                        if let Some(cursor)=ex.next_cursor.take(){*ex.c.cursor.lock().unwrap()=Some(cursor);}
                         if !bytes.is_empty() {yield Ok::<_,std::convert::Infallible>(bytes);}
                         if finished {break;}
                     }
@@ -417,7 +431,7 @@ impl Exchange {
         self.initial_input = matches!(self.target, Target::Input(_));
         if !self.initial_input {
             v.extend(pair);
-            *self.c.cursor.lock().unwrap() = Some(cur);
+            self.next_cursor = Some(cur);
         }
         if let Some(s) = self.state_snapshot().await? {
             v.push(s);
@@ -516,7 +530,7 @@ impl Exchange {
                 .snapshot_pair(&self.a, &self.id, &self.c, &data)
                 .await?;
             out.extend(pair);
-            *self.c.cursor.lock().unwrap() = Some(cur);
+            self.next_cursor = Some(cur);
             self.initial_input = false;
         }
         let ty = event
@@ -873,7 +887,7 @@ impl Exchange {
                     Some((self.target.turn(&current).ok_or(Fail::Lost)?, conn));
             }
         }
-        *self.c.cursor.lock().unwrap() = Some(cursor);
+        self.next_cursor = Some(cursor);
         for call in pending {
             if let Some(id) = call.as_str() {
                 log::debug!(target:"modular_agent::agui::handoff","{} {}",self.id,id);

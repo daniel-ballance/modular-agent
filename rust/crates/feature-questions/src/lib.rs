@@ -356,6 +356,17 @@ impl InputRequests for Questions {
         self.present
             .lock()
             .unwrap()
+            .keys()
+            .filter(|(s, _, _)| s == session)
+            .map(|(_, a, _)| a.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+    fn present_for_approval(&self, session: &str) -> Vec<String> {
+        self.present
+            .lock()
+            .unwrap()
             .iter()
             .filter(|((id, _, _), approved)| **approved && id == session)
             .map(|((_, actor, _), _)| actor.clone())

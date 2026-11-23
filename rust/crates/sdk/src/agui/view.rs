@@ -248,7 +248,13 @@ impl Service {
                 _ => json!({"type":"string"}),
             };
             if v["kind"] == "link" {
-                interrupt["metadata"] = json!({"modular-agent.link":v["details"]});
+                let Some(uri) = v["details"]
+                    .as_str()
+                    .filter(|s| reqwest::Url::parse(s).is_ok())
+                else {
+                    continue;
+                };
+                interrupt["metadata"] = json!({"modular-agent.link":uri});
             }
             if q.extra["whenTimeLimit"] == "decline"
                 && let Some(ms) = q.timeout_ms
