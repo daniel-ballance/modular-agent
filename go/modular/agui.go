@@ -2,6 +2,7 @@ package modular
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -55,6 +56,7 @@ type agServer struct {
 	states  map[[2]string]*agClient
 	threads map[string]bool // HTTP threads keep their writer when an ACP connection goes away.
 	openMu  sync.Mutex
+	pageKey [32]byte
 }
 type agClient struct {
 	mu        sync.Mutex
@@ -122,6 +124,7 @@ func (a *Agent) serveAGUI(ctx context.Context, opt ServeAGUIOptions, wrap func(h
 		opt.JoinOnOpen = &singleLocal
 	}
 	srv := &agServer{a: a, opt: opt, states: map[[2]string]*agClient{}, threads: map[string]bool{}}
+	rand.Read(srv.pageKey[:])
 	tokens := map[string]agPrincipal{}
 	clients := map[string]acpinterface.Principal{}
 	for _, e := range opt.Actors {
@@ -217,7 +220,8 @@ func (s *agServer) http(w http.ResponseWriter, r *http.Request, p *agPrincipal) 
 		w.Header().Set("Access-Control-Allow-Origin", origins[0])
 		w.Header().Set("Vary", "Origin")
 	}
-	if r.URL.RawQuery != "" || r.URL.User != nil {
+	listing := r.Method == "GET" && r.URL.EscapedPath() == "/agui/v1/threads"
+	if !listing && r.URL.RawQuery != "" || r.URL.User != nil {
 		agHTTPError(w, invalid)
 		return
 	}
@@ -448,6 +452,8 @@ func (q *agRequest) serve(r *http.Request) error {
 	switch {
 	case r.Method == "GET" && path == base:
 		return q.jsonReply(200, "agui.discovery", agObject{"binding": "modular-agent-agui/1", "protocolVersion": "1.0", "declaration": q.a.Declaration()})
+	case r.Method == "GET" && path == base+"/threads":
+		return q.listThreads(r.URL.RawQuery)
 	case r.Method == "POST" && path == base+"/threads":
 		v, err := agRead(r)
 		if err != nil {

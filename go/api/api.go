@@ -192,6 +192,13 @@ func (s Session) Branch() []Entry {
 	return out
 }
 
+// WaitingSummary contains counts, never question or tool content.
+type WaitingSummary struct {
+	Questions int    `json:"questions"`
+	ToolCalls int    `json:"toolCalls"`
+	Turn      string `json:"turn"`
+}
+
 type Input struct {
 	Continuation         string          `json:"-"`
 	ContinuedBy          TurnStarter     `json:"-"`
@@ -304,6 +311,9 @@ type API interface {
 	New(context.Context, string) (string, error)
 	Open(context.Context, string) error
 	List(string) ([]Session, error)
+	// WaitingForHost summarizes a listed record without opening it or joining the actor.
+	// An empty executor route cannot receive Interface-run calls.
+	WaitingForHost(context.Context, Session, Actor, string) (WaitingSummary, error)
 	Snapshot(string) (Session, error)
 	View(context.Context, string) (Session, error)
 	Record(context.Context, string, Entry) (Entry, error)
