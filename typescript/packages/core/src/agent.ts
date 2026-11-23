@@ -77,6 +77,9 @@ export interface ServeAcpOptions {
   rights?: readonly Right[];
   represents?: readonly string[];
   compose?(project: string, saved?: SessionInfo): Promise<Agent>;
+  /** Start ordinary recovery before listening. Report only the session ID and disposition. */
+  resumeOpen?: boolean;
+  onResumeOpen?(sessionId: string, disposition: "resumed" | "skipped"): void;
   projectSettings?(project: string): Settings | Promise<Settings>;
   projectMcp?(project: string): Record<string, McpServerConfig> | Promise<Record<string, McpServerConfig>>;
   showApproval?: boolean;
@@ -727,6 +730,23 @@ export class Agent {
         attached.clear();
       } };
     };
+    const resumeOpen = async (scope?: Pick<Awaited<ReturnType<typeof makeScope>>, "allowProject" | "allowTenant">) => {
+      if (!options.resumeOpen || scope && !scope.allowProject(this.#project)) return;
+      // The embedded local opener is not a token or a future stdio connection.
+      // Its prospective grant is watch only. The turn keeps its own recorded authority.
+      const actor = { ...local, authority:["watch" as const] };
+      for (const {id, project} of await this.#api.listSessions(this.#project)) {
+        if (project !== this.#project) continue;
+        const row = await this.#api.sessionListing(id, {actor, allowJoin:true});
+        if (row?.waiting.turn !== "interrupted" || !(scope?.allowTenant(row.tenant ?? null) ?? (row.tenant === undefined))) continue;
+        const agent = await selectProject(project, id, await this.sessionInfo(id));
+        let resumed: boolean;
+        try { resumed = await agent.#h.withConnectionActor(actor, () => agent.#h.resumeInterruptedSession(id, actor)); }
+        catch (error) { if ((error as {code?: string}).code !== "held") throw error; resumed = false; }
+        if (resumed) sessions.set(id, agent);
+        options.onResumeOpen?.(id, resumed ? "resumed" : "skipped");
+      }
+    };
     let serving = false;
     try {
       if (options.listen === undefined) {
@@ -737,6 +757,7 @@ export class Agent {
           rights: list(options.rights, r => ALL_AUTHORITY.includes(r), "rights") ?? [...ALL_AUTHORITY] };
         const scope = await makeScope(localActor, options, options.actor !== undefined || options.rights !== undefined);
         await installMcp(this);
+        await resumeOpen(scope);
         const { binding, detach } = prepareConnection(scope, false);
         try { await binding.acp.serveStdio(); } finally { detach(); }
         return;
@@ -788,7 +809,7 @@ export class Agent {
             controlTimeoutMs, lose: () => ws.terminate(),
           });
         } finally { detach(); if (ws.readyState === ws.OPEN) ws.close(1000); }
-      }, http);
+      }, http, options.resumeOpen ? () => resumeOpen() : undefined);
       const stopListener = async () => { http?.close(); await server.close(); };
       this.#stopAcp = async () => { await stopListener(); await disposeProjects(); };
       if (agui) { serving = true; return { url: new URL(server.url.replace(/^ws/, "http")).origin, close: stopListener }; }

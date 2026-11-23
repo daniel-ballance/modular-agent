@@ -33,6 +33,11 @@ async function project(t: TestContext) {
   const env = { PATH: process.env.PATH, HOME: home, MODULAR_AGENT_DATA_DIR: config, MODULAR_AGENT_SCRIPT: script, MODULAR_AGENT_SCRIPT_LOG: log };
   return { dir, home, config, work, script, log, env, put, run: (...args: string[]) => exec(process.execPath, [cli, ...args], { cwd: work, env }) };
 }
+test("--resume-open has no effect in print mode", async t => {
+  const p = await project(t);
+  assert.equal((await p.run("--resume-open", "-p", "Hello")).stdout, "ok\n");
+});
+
 test("ma sends protobuf only to configured OTLP signals", async t => {
   const p = await project(t);
   const requests: { path?: string; type?: string; header?: string; payload: Buffer }[] = [];

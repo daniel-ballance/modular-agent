@@ -22,7 +22,7 @@ import { formerProviderIds, modelRef, providerId } from "./provider-ids.js";
 
 function parse(argv: string[]) {
   const opts: { command?: string; project: string; runtime: "durable" | "transient"; session?: string; prompt?: string;
-    resume?: boolean; verbose?: boolean; json?: boolean; history?: boolean; declaration?: boolean; acp?: boolean; agui?: boolean;
+    resume?: boolean; resumeOpen?: boolean; verbose?: boolean; json?: boolean; history?: boolean; declaration?: boolean; acp?: boolean; agui?: boolean;
     listen?: string; tokenFile?: string; policy?: string;
     trust?: boolean; all?: boolean; help?: boolean; version?: boolean; settings: Settings } = { project: process.cwd(), runtime: "durable", settings: {} };
   for (let i = 0; i < argv.length; i++) {
@@ -40,6 +40,7 @@ function parse(argv: string[]) {
       case "--trust-project": opts.trust = true; break;
       case "--acp": opts.acp = true; break;
       case "--agui": opts.agui = true; break;
+      case "--resume-open": opts.resumeOpen = true; break;
       case "--listen": opts.listen = value(); break;
       case "--token-file": opts.tokenFile = value(); break;
       case "--policy": opts.policy = value(); break;
@@ -245,7 +246,12 @@ async function main(argv: string[]) {
       return 0;
     }
     if (serving) {
-      const acp = { projectMcp, compose: (cwd: string, saved?: import("@modular-agent/core").SessionInfo) => {
+      const settingsPath = join(p.config, "settings.json");
+      const {resume_open} = await optionalJson(settingsPath);
+      if (resume_open !== undefined && typeof resume_open !== "boolean") throw new Error(`${settingsPath}: resume_open must be a boolean`);
+      const acp = { projectMcp, resumeOpen:opts.resumeOpen || resume_open === true,
+        onResumeOpen: (id: string, disposition: "resumed" | "skipped") => console.error(`ma: ${disposition} ${id}`),
+        compose: (cwd: string, saved?: import("@modular-agent/core").SessionInfo) => {
         if (!scoped && cwd === project && (!saved || agent.models().some(m => `${m.provider}/${m.id}` === modelRef(saved.settings.model)))) {
           return Promise.resolve(agent);
         }

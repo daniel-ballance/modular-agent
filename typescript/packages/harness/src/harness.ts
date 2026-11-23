@@ -957,22 +957,29 @@ export class Harness {
 
 	async openSession(id: string, actor?: Actor, prepare?: SessionPrepare, operation: "load" | "resume" = "resume"): Promise<string> {
 		return startOperation("modular_agent.session.open", { ...conversation(id), "modular_agent.session.operation": operation })
-			.observe(() => this.openSessionWithin(id, actor, prepare));
+			.observe(async () => (await this.openSessionWithin(id, actor, prepare))!);
 	}
 
-	private async openSessionWithin(id: string, actor?: Actor, prepare?: SessionPrepare): Promise<string> {
+	/** Startup recovery never waits for a writer and rechecks the record under the lease. */
+	async resumeInterruptedSession(id: string, actor: Actor): Promise<boolean> {
+		return startOperation("modular_agent.session.open", { ...conversation(id), "modular_agent.session.operation": "resume" })
+			.observe(async () => !!await this.openSessionWithin(id, actor, undefined, true));
+	}
+
+	private async openSessionWithin(id: string, actor?: Actor, prepare?: SessionPrepare, interruptedOnly = false) {
 		await this.rebuildReservations();
 		if (this.opening.has(id) || this.sessions.get(id)?.closing) {
 			throw Object.assign(new Error("Session is busy"), { code: "busy" });
 		}
 		this.opening.add(id);
-		try { return await this.openStoredSession(id, actor, prepare); }
+		try { return await this.openStoredSession(id, actor, prepare, interruptedOnly); }
 		finally { this.opening.delete(id); }
 	}
 
-	private async openStoredSession(id: string, actor?: Actor, prepare?: SessionPrepare): Promise<string> {
+	private async openStoredSession(id: string, actor?: Actor, prepare?: SessionPrepare, interruptedOnly = false) {
 		const opened = this.sessions.get(id);
 		if (opened && !opened.interruption.signal.aborted) {
+			if (interruptedOnly) return;
 			if (actor) await this.authorizeOpeningActor(opened, actor);
 			await this.reconcilePending(opened);
 			await prepare?.(id);
@@ -984,11 +991,15 @@ export class Harness {
 		}
 		const store = this.use<HistoryStore>("history-store");
 		if (!store) throw failure("not_supported", "No history store: sessions can't be reopened");
-		await store.openForWriting(id, { wait: true });
+		await store.openForWriting(id, { wait: !interruptedOnly });
 		const s = await this.loadInto(id).catch(async (error) => { await store.close(id); throw error; });
 		if (!s || (s.tenant !== undefined && !this.tenants.has(s.tenant))) {
 			await store.close(id);
 			throw s ? failure("forbidden", "Session tenant is unavailable") : failure("not_found", `Session ${id} not found`);
+		}
+		if (interruptedOnly && !this.unfinishedTurn(s, s.branch())) {
+			await store.close(id);
+			return;
 		}
 		const a = actor ?? this.defaultActor();
 		try { await this.authorizeOpeningActor(s, a); }
