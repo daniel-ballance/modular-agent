@@ -194,7 +194,10 @@ func main() {
 	interrupts := make(chan os.Signal, 1)
 	signal.Notify(interrupts, os.Interrupt)
 	defer signal.Stop(interrupts)
-	if err := run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, interrupts); err != nil {
+	stopTelemetry := startTelemetry(ctx)
+	err := run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, interrupts)
+	stopTelemetry()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
