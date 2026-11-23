@@ -29,7 +29,7 @@ fn shared_acp_conformance_kit() {
         "{stdout}\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(stdout.contains("116/116 checks passed"), "{stdout}");
+    assert!(stdout.contains("118/118 checks passed"), "{stdout}");
 }
 
 #[tokio::test]
