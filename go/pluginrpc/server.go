@@ -110,7 +110,12 @@ func (s *Server) serve(ctx context.Context, p *Peer) error {
 		s.ownedEnv = s.Environment
 	}
 	s.peer = p
-	p.Handle = s.handle
+	p.Handle = func(call context.Context, method string, raw json.RawMessage) (any, error) {
+		if method == "plugin/initialize" && !offersTraceContext(ctx) {
+			call = WithoutTraceHandshake(call)
+		}
+		return s.handle(call, method, raw)
+	}
 	p.admitNotification = func(ctx context.Context, m envelope) (string, bool) {
 		parent := capturedParent(ctx)
 		switch m.Method {
@@ -208,7 +213,14 @@ func (s *Server) Project() string { return s.project }
 func (s *Server) JobCall(ctx context.Context, method string, p Object, out any) error {
 	return s.peer.Call(ctx, method, p, out)
 }
-func (s *Server) JobNotify(method string, p Object) error { return s.peer.Send(method, p) }
+func (s *Server) JobNotify(method string, p Object) error {
+	return s.JobNotifyContext(context.Background(), method, p)
+}
+
+// JobNotifyContext sends job progress with the current observation context.
+func (s *Server) JobNotifyContext(ctx context.Context, method string, p Object) error {
+	return s.peer.sendWork(ctx, method, p)
+}
 
 // ToolsChanged announces a changed catalog, optionally within its causing request.
 func (s *Server) ToolsChanged(ctx context.Context, id string) error {
@@ -288,7 +300,7 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 		s.initialized = true
 		reg := s.Registration
 		reg.TraceContext = 0
-		if n, ok := v["traceContext"].(json.Number); ok && string(n) == "1" {
+		if n, ok := v["traceContext"].(json.Number); ok && string(n) == "1" && offersTraceContext(ctx) {
 			reg.TraceContext = 1
 		}
 		s.peer.traceName.Store(&reg.Name)

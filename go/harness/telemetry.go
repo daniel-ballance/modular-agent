@@ -36,6 +36,10 @@ func savedTurn(s api.Session, turn string) (sc trace.SpanContext) {
 }
 
 func (h *Harness) runTraced(ctx context.Context, p *turnPorts, t api.Turn, resume *api.Entry, snap api.Session, runtime api.Runtime) api.Outcome {
+	if resume != nil && !runtime.Declaration().Durable {
+		// Kept history settles interrupted work without resuming execution.
+		return runtime.Run(ctx, t)
+	}
 	attrs := []attribute.KeyValue{telemetry.String("gen_ai.operation.name", "invoke_agent")}
 	if n := telemetry.Name(h.agentName); n != "" {
 		attrs = append(attrs, telemetry.String("gen_ai.agent.name", n))
@@ -81,7 +85,7 @@ func (h *Harness) runTraced(ctx context.Context, p *turnPorts, t api.Turn, resum
 		}
 		span.End()
 	}()
-	if w := telemetry.Own(parent, span); w != nil && runtime.Declaration().Durable {
+	if w := telemetry.Own(parent, span); w != nil && (h.deferHistory || runtime.Declaration().Durable) {
 		ctx = context.WithValue(ctx, turnWireKey{}, w)
 		if resume != nil {
 			p.s.mu.Lock()
@@ -142,9 +146,18 @@ func toolDisposition(ctx context.Context, call api.Call, status string) {
 	telemetry.Event(ctx, "modular_agent.tool.disposition", append(toolAttrs(call), telemetry.String("modular_agent.tool.status", toolStatus(status)))...)
 }
 
+func (s *session) startJobSpan(ctx context.Context, id string) {
+	if s.jobSpans == nil {
+		s.jobSpans = make(map[string]context.Context)
+	}
+	ctx, _ = telemetry.Start(ctx, "modular_agent.job", trace.WithAttributes(telemetry.String("modular_agent.job.id", id)))
+	s.jobSpans[id] = telemetry.InTrace(context.Background(), ctx)
+}
+
 func (s *session) endJobSpan(id, status string) {
-	if span := s.jobSpans[id]; span != nil {
+	if ctx := s.jobSpans[id]; ctx != nil {
 		delete(s.jobSpans, id)
+		span := trace.SpanFromContext(ctx)
 		span.SetAttributes(telemetry.String("modular_agent.job.outcome", status))
 		if status == "failed" {
 			telemetry.Failed(span, "failed")
@@ -193,10 +206,13 @@ func (s *session) traceCommit(next api.Session, record bool, contexts []context.
 		return save(ctx)
 	}
 	count := len(next.Entries) - len(s.data.Entries)
-	if s.pendingStore != nil {
+	if s.provisional.Load() {
 		count = len(next.Entries)
 	}
-	ctx, span := telemetry.Start(ctx, "modular_agent.history.commit", trace.WithAttributes(attribute.Int("modular_agent.history.entry.count", max(count, 0))))
+	if count <= 0 {
+		return save(ctx)
+	}
+	ctx, span := telemetry.Start(ctx, "modular_agent.history.commit", trace.WithAttributes(attribute.Int("modular_agent.history.entry.count", count)))
 	defer func() {
 		status := "committed"
 		if err != nil {

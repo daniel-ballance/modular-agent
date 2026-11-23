@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
 	"github.com/daniel-ballance/modular-agent/go/pluginrpc"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 )
@@ -22,6 +23,7 @@ type Job struct {
 	Detail                            json.RawMessage
 	Started                           bool
 	jobs                              *jobAdapter
+	trace                             context.Context
 }
 
 type JobCalls struct {
@@ -98,7 +100,10 @@ func (c JobCalls) Start(ctx context.Context, kind string, detail any, key ...str
 			}
 			j.ID, j.Started = job.ID, fresh
 		}
-		adapter.active.LoadOrStore(j.ID, j)
+		j.trace = telemetry.InTrace(context.Background(), ctx)
+		if existing, loaded := adapter.active.LoadOrStore(j.ID, j); loaded {
+			j.trace = existing.(*Job).trace
+		}
 		return nil
 	})
 	return j, appError(err, InvalidRequest)
@@ -109,7 +114,7 @@ func (j *Job) Progress(ctx context.Context, content Content) error {
 		return &Error{Code: InvalidRequest, Message: "job has ended"}
 	}
 	if j.jobs.server != nil {
-		return appError(j.jobs.server.JobNotify("host/jobs/progress", pluginrpc.Object{"jobId": j.ID, "content": content}), InvalidRequest)
+		return appError(j.jobs.server.JobNotifyContext(telemetry.InTrace(ctx, j.trace), "host/jobs/progress", pluginrpc.Object{"jobId": j.ID, "content": content}), InvalidRequest)
 	}
 	jobs, err := j.jobs.local()
 	if err != nil {
@@ -136,7 +141,7 @@ func (j *Job) End(ctx context.Context, outcome Outcome, result Content, report b
 		if result != nil {
 			p["result"] = result
 		}
-		err = j.jobs.server.JobCall(ctx, "host/jobs/end", p, nil)
+		err = j.jobs.server.JobCall(telemetry.InTrace(ctx, j.trace), "host/jobs/end", p, nil)
 	} else {
 		var jobs api.ExternalJobs
 		jobs, err = j.jobs.local()
@@ -209,6 +214,7 @@ func (j *jobAdapter) resume(ctx context.Context, session string) error {
 		if err != nil {
 			return err
 		}
+		job.trace = telemetry.InTrace(context.Background(), ctx)
 		j.active.Store(job.ID, job)
 		if err = j.owner.Resume(ctx, job); err != nil {
 			return err

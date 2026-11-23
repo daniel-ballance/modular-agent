@@ -71,6 +71,9 @@ func TestTelemetryMapping(t *testing.T) {
 			if mode != "in memory" {
 				return
 			}
+			if err := s.Close(ctx); err != nil {
+				t.Fatal(err)
+			}
 			got := mem.GetSpans()
 			byName := map[string][]tracetest.SpanStub{}
 			for _, s := range got {
@@ -101,6 +104,17 @@ func TestTelemetryMapping(t *testing.T) {
 			parentIs("modular_agent.step", "invoke_agent fixture")
 			parentIs("chat script", "modular_agent.step")
 			parentIs("execute_tool check", "modular_agent.step")
+			for name, operation := range map[string]string{"modular_agent.session.open": "new", "modular_agent.session.close": "close"} {
+				spans := byName[name]
+				if len(spans) != 1 || spanAttr(spans[0], "modular_agent.session.operation") != operation || spanAttr(spans[0], "gen_ai.conversation.id") != s.ID() {
+					t.Errorf("wrong %s span: %v", name, spans)
+				}
+			}
+			for _, commit := range byName["modular_agent.history.commit"] {
+				if !commit.Parent.IsValid() || spanAttr(commit, "modular_agent.history.commit.status") != "committed" {
+					t.Errorf("history commit lacks its recorded status or parent: %v", commit)
+				}
+			}
 			if byName["chat script"][0].SpanKind != trace.SpanKindInternal {
 				t.Error("scripted inference should be internal")
 			}
