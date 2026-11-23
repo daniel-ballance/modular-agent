@@ -209,6 +209,13 @@ pub trait AgentApi: Send + Sync {
         Ok(false)
     }
     fn is_running(&self, session: &str) -> bool;
+    /// Lost writer access is an interruption even before the driver has exited.
+    fn is_driving_turn(&self, session: &str) -> bool {
+        self.is_running(session)
+            && self
+                .writer_interruption(session)
+                .is_ok_and(|w| !w.is_cancelled())
+    }
     fn settings(&self, scope: &Scope, patch: Value) -> Result<Value>;
     fn move_position(&self, scope: &Scope, position: Option<String>) -> Result<()>;
     async fn rewind(&self, _scope: &Scope, _position: String) -> Result<Vec<String>> {
@@ -279,6 +286,11 @@ pub trait HistoryStore: Send + Sync {
     /// replace a whole snapshot, and `acquire` must exclude another server,
     /// even before the first `save`.
     fn supports_service_snapshots(&self) -> bool {
+        false
+    }
+    /// Positive, read-only evidence of a live writer. Do not acquire a lease
+    /// to probe it. Stores without a reader-visible lease signal return false.
+    fn confirms_writer(&self, _session: &str) -> bool {
         false
     }
     fn acquire(&self, session: &str) -> Result<Box<dyn Lease>>;

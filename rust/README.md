@@ -81,13 +81,17 @@ ma --agui --acp --listen 127.0.0.1:7401 --token-file /path/to/owner-only-token
 
 With `--agui`, `ma` prints the HTTP origin when ready. The app presents its bearer token on every request, including discovery at `GET /agui/v1`. Threads use the operator's project, not a directory from the request. `--acp` adds WebSocket upgrades at the same address. There is no TLS option in `ma`; use loopback. For multiple tokens, supply a policy `actors` list with a stable `clientId` per AG-UI client instead of `--token-file`. The [SDK README](crates/sdk/README.md#serving-ag-ui) describes reconciliation, presence and Interface tools.
 
+Use `GET /agui/v1/threads` to find kept threads without opening them. The reply has IDs, update times and waiting counts for that client, not messages or tool arguments. The [binding](../docs/bindings/agui.md#listing-threads) defines the fields and paging.
+
+By default a restart leaves an interrupted turn alone. Add `--resume-open` to `--acp` or `--agui`, or set `{"resume_open": true}` in global `settings.json`. Before serving, `ma` reopens interrupted turns in the operator's project under local `watch` authority. A durable turn carries on without repeating an unsafe call. With `--runtime transient`, the interrupted turn ends as failed. A held writer is skipped. Stderr names each resumed or skipped session without its content. Sessions with only questions or Interface calls left open wait for a client. Print and interactive mode ignore the option.
+
 `ma --help` lists the rest. With no `--model` and none in settings, `ma` uses the first Provider that is signed in.
 
 ### Files
 
 | File | Purpose |
 |---|---|
-| `~/.config/modular-agent/settings.json` | Session defaults: `model`, `thinking`, `step_limit`, `output_limit`, `model_tools` |
+| `~/.config/modular-agent/settings.json` | Session defaults: `model`, `thinking`, `step_limit`, `output_limit`, `model_tools`. `resume_open` is a global boolean, not a session default; the project cannot set it. |
 | `~/.config/modular-agent/auth.json` | Sign-ins. Written by `ma login`. Mode 0600. |
 | `~/.config/modular-agent/mcp.json` | `{"mcpServers": {...}}` in the form Pi and other clients use. `${NAME}` takes a value from the environment. |
 | `~/.config/modular-agent/models.json` | Catalog additions or replacements: `{"chatgpt": [{"id", "name", "contextWindow", "maxTokens", "effort"}], "grok": [...]}` |
@@ -146,11 +150,11 @@ node ../conformance/telemetry/run.mjs rust -- "$PWD/target/debug/scenario-agent"
 
 Build the other three fixture programs before running the full Rust telemetry matrix. Their build commands are in the [fixture registry](../conformance/sdk/fixtures/).
 
-- **Standard reference checks:** 26 checks (25 checked here before `resume-open`), including `telemetry-export`, including client identity, tool values, denial of ambient access, result formatting, timeout and print-limit errors, memory limits, and both Runtime crash cases.
+- **Standard reference checks:** 26/26, including `resume-open` and `telemetry-export`. The startup check kills `ma` mid-call and observes recovery without connecting to the restarted writer.
 - **ACP with `--crash-checks --probe-checks --job-checks`:** `ma` passed 188/188 on stdio and 193/193 on its built-in loopback WebSocket listener. The base build passes 214/214 on stdio. The expanded run covers late answers and job report turns, including after a crash.
 - **Plugin binding:** The Rust conformance plugin passed 146/146 on stdio and 153/153 on WebSocket, including the transient and durable Runtime services. The separate-listener WebSocket isolation run passed 14/14. Neither WebSocket run used a bridge.
 - **Standard and codemode:** `ma` includes the five alias checks. The six `tools-code` tests are separate. These cover startup validation, tool results, sandbox limits, OS policy, worker death and cancellation, crash recovery, and the dependency boundary.
-- **Workspace:** 425 Rust tests passed, with no failures. Five opt-in live checks returned before accessing credentials. The locked history demo build passed. Formatting and Clippy with `-D warnings` passed. See the [SDK verification matrix](crates/sdk/README.md#what-is-checked) for shared scenarios.
+- **Workspace:** 467 Rust tests passed, with no failures. The ops-desk demo passed all five cases. Project-notes passed its scripted and crash-and-reopen runs. Formatting and Clippy with `-D warnings` passed. See the [SDK verification matrix](crates/sdk/README.md#what-is-checked) for shared scenarios.
 - **Subscriptions:** Offline checks use loopback OAuth and Responses fixtures and a fake Claude process plugin. The Grok SDK checks cover device sign-in, locked refresh, request shape and encrypted reasoning replay. The alias checks cover sign-in routing, sign-out, both model configuration files, `--model`, and reopening an old session. Live checks compile and skip without opt-in.
 
 To try the terminal without a login:

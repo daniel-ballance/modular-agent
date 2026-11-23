@@ -137,9 +137,13 @@ Set `acp: true` on an agent built with `plugin_host(true)` for WebSocket upgrade
 
 The client ID is not a credential. It selects the history view and executor route. The agent checks the token's actor, project, tenant and current rights. Open the optional presence stream before a run to answer a question while its turn is still running. Closing the listener detaches streams, not the admitted work. Reconnect by reading the thread snapshot. Send its ordered messages, followed by the new input or reports. The history cursor is optional.
 
+Call `GET /agui/v1/threads?limit=100` to list kept threads in this project and tenant. Each row has only `threadId`, `updatedAt` and `waiting`. The summary counts questions this client can answer and open calls on its executor route. `turn` is `running`, `interrupted` or `none`; a finished turn can still have an open question or call. Listing does not open the session, join an actor or establish presence. Pass `next` back as `after` on the same client. If the server returns HTTP 400 `invalid_request` for an expired cursor, list again without it. The SDK's ACP `session/list` also returns `_meta["modular-agent"].waiting`. ACP is not an executor route.
+
+Both adapters fold the current branch with `SessionData::waiting_summary`. The Harness checks recorded or prospective rights without joining. The store's optional `HistoryStore::confirms_writer` operation supplies read-only evidence of a live writer; Linux file history checks its kernel lease socket. For a trusted local application, `Agent::sessions` exposes `SessionInfo.unfinished_turn` without taking a lease. `Agent::open_interrupted_session(id, &local_options)` checks the local operator's scope and `watch` under the writer lease before starting ordinary recovery. It returns `None` if the turn already ended.
+
 `AguiState` names the document plugin and supplies its current revision and snapshot. Only that plugin's state events update the projection. `raw_events` maps an emitting plugin and event name to a configured foreign source. The actor's output gate still applies. For final AG-UI frames the gate's recipient is the nonsecret client ID, so two clients of one actor can have different views.
 
-Run `conformance/agui/rust.sh` from the repository root for the offline kit: three ordinary cases use `ma`; the other 22 use the separate SDK fixture, including four real process restarts. All 25 run; none are skipped.
+Run `conformance/agui/rust.sh` from the repository root for the offline kit. Ordinary conversations use `ma`; the remaining cases use the SDK fixture. All 26 cases passed with the thread-listing check.
 
 ## Built so far
 
@@ -173,6 +177,8 @@ The Harness declares `telemetry: 1`, whether export is installed or not. Set `Ag
 
 ## Findings for the SDK specification
 
+- **[Waits after turn end](../../../docs/bindings/agui.md#listing-threads):** Replace the last bullet with: “The server MAY compute `waiting` lazily. It MUST count eligible open questions and open Interface calls on the client's route even when `turn` is `none`. It MUST NOT report `turn: "none"` for an unfinished turn.”
+- **[Writer liveness](../../../docs/bindings/agui.md#listing-threads):** A committed start without an end does not say whether another process is still running the turn. History HTTP has no read-only lease query. Replace the sentence defining `turn` with: “For an unfinished turn on the current branch, report `running` if the service observes a running turn or can confirm a live writer; otherwise report `interrupted`. Report `none` when no turn is unfinished. Listing MUST NOT acquire a writer to test liveness.”
 
 - **[Placement, plugin environment scope](../../../docs/sdk/placement.md):** Add “In Rust a WebSocket plugin listener serves one operator-assigned host trust scope. Use `serve_websocket_factory` for a working environment and set `ServeOptions.projects` to its exact canonical roots. Use independent factories, retained state, credentials and confinement for isolated hosts. A callback invoked by two connections may share captured state only if the operator intentionally provided shared trusted code.” The base conformance plugin also accepts `--serve-plugin --listen ADDR --host-policy FILE`. Give it a JSON list of `{ "tokenFile": "…", "project": "…", "state": "…" }` entries with distinct credentials and nonoverlapping existing project and state directories. Relative paths resolve beside the policy. The host's `home` does not choose retained state.
 

@@ -63,6 +63,19 @@ impl ConnectionCeiling {
         }
     }
 
+    /// Discovery can consult an existing attachment, not pin a first grant.
+    pub fn for_discovery(session: &str, actor: &str, recorded: Authority) -> Authority {
+        CONNECTION_CEILING
+            .try_with(|ceiling| {
+                if actor != ceiling.actor {
+                    return recorded.clone();
+                }
+                let grants = ceiling.grants.lock().unwrap();
+                recorded.intersect(grants.get(session).unwrap_or(&ceiling.token))
+            })
+            .unwrap_or(recorded)
+    }
+
     pub fn narrow(session: &str, actor: &str, recorded: Authority) -> Authority {
         CONNECTION_CEILING
             .try_with(|ceiling| {
@@ -228,13 +241,16 @@ pub enum RequestReply {
     Declined,
 }
 pub fn questions(data: &SessionData) -> Result<Vec<Question>> {
+    questions_in(&data.branch())
+}
+pub(crate) fn questions_in(branch: &[Entry]) -> Result<Vec<Question>> {
     let mut result: Vec<Question> = vec![];
-    for e in data.branch() {
-        let Some(v) = e.content else { continue };
+    for e in branch {
+        let Some(v) = &e.content else { continue };
         match e.kind.as_str() {
-            "request.open" => result.push(serde_json::from_value(v)?),
+            "request.open" => result.push(serde_json::from_value(v.clone())?),
             "request.answer" => {
-                let a: Answer = serde_json::from_value(v)?;
+                let a: Answer = serde_json::from_value(v.clone())?;
                 if let Some(q) = result.iter_mut().find(|q| q.id == a.request) {
                     q.answer = Some(a);
                     q.answerable = false;

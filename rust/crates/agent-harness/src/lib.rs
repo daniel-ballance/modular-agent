@@ -216,6 +216,49 @@ impl Harness {
     pub fn tenant_rights(&self, name: &str) -> Result<Authority> {
         Ok(self.check_tenant(name)?.rights)
     }
+    /// Effective rights for discovery, without joining a prospective member.
+    pub fn discovery_rights(
+        &self,
+        data: &SessionData,
+        actor: &str,
+        ceiling: &Authority,
+        join: bool,
+    ) -> Result<Authority> {
+        let rights = data.recorded_rights(actor)?.unwrap_or_else(|| {
+            if join {
+                ceiling.clone()
+            } else {
+                Authority::default()
+            }
+        });
+        self.limit_rights(
+            data,
+            ConnectionCeiling::for_discovery(&data.id, actor, rights.intersect(ceiling)),
+        )
+    }
+    fn limit_rights(&self, data: &SessionData, mut rights: Authority) -> Result<Authority> {
+        if let Some(cap) = data
+            .entries
+            .iter()
+            .rev()
+            .find(|e| e.kind == "limit")
+            .and_then(|e| e.content.as_ref())
+            .and_then(|v| wire::optional(v, "rights"))
+        {
+            rights = rights.intersect(&serde_json::from_value(cap.clone())?);
+        }
+        if let Some(tenant) = data.tenant_id() {
+            rights = rights.intersect(&self.check_tenant(tenant)?.rights);
+        }
+        if let Some(cap) = data.settings.get("_authority") {
+            rights = rights.intersect(&serde_json::from_value(cap.clone())?);
+        }
+        if let Some(parent) = data.settings["_parent"]["session"].as_str() {
+            let parent_actor = data.settings["_parent"]["actor"].as_str().unwrap_or("user");
+            rights = rights.intersect(&self.authority(parent, parent_actor)?);
+        }
+        Ok(rights)
+    }
     fn check_tenant(&self, name: &str) -> Result<tenants::Tenant> {
         self.tenants
             .read()
@@ -444,12 +487,29 @@ impl Harness {
     }
 
     async fn install_recovery(&self, id: &str) -> Result<Vec<Input>> {
-        let op = Operation::internal("modular_agent.session.open", &Scope::session(id));
-        op.attr("modular_agent.session.operation", "load");
-        op.run(self.install_recovery_inner(id)).await
+        Ok(self
+            .install_recovery_if(id, |_| Ok(true))
+            .await?
+            .expect("unconditional open"))
     }
 
-    async fn install_recovery_inner(&self, id: &str) -> Result<Vec<Input>> {
+    /// Recheck a discovery predicate under the writer lease, before preparing
+    /// plugins or recovering work. A false result leaves the session unopened.
+    pub async fn install_recovery_if(
+        &self,
+        id: &str,
+        select: impl FnOnce(&SessionData) -> Result<bool> + Send + 'static,
+    ) -> Result<Option<Vec<Input>>> {
+        let op = Operation::internal("modular_agent.session.open", &Scope::session(id));
+        op.attr("modular_agent.session.operation", "load");
+        op.run(self.install_recovery_inner(id, select)).await
+    }
+
+    async fn install_recovery_inner(
+        &self,
+        id: &str,
+        select: impl FnOnce(&SessionData) -> Result<bool> + Send + 'static,
+    ) -> Result<Option<Vec<Input>>> {
         let _erasure = self
             .erasure
             .try_read()
@@ -460,17 +520,23 @@ impl Harness {
         );
         let store = self.store().ok_or_else(|| anyhow!("no history store"))?;
         let session_id = id.to_owned();
-        let (lease, mut data, erased) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let loaded = tokio::task::spawn_blocking(move || -> Result<_> {
             let lease = store.acquire(&session_id)?;
             let loaded = store.load(&session_id)?;
+            if !select(&loaded)? {
+                return Ok(None);
+            }
             let (data, erased) = match store.reconcile_erasure(&session_id)? {
                 Some((data, _)) => (data, true),
                 None => (loaded, false),
             };
             store.check_erasure(&data)?;
-            Ok((lease, data, erased))
+            Ok(Some((lease, data, erased)))
         })
         .await??;
+        let Some((lease, mut data, erased)) = loaded else {
+            return Ok(None);
+        };
         if erased {
             self.invalidate_providers(id)?;
         }
@@ -571,13 +637,8 @@ impl Harness {
         let branch = snapshot.branch();
         self.recover_interface_tools(id, &snapshot)?;
         let mut interrupted = Vec::new();
-        for start in branch.iter().filter(|e| e.kind == "turn.start") {
-            if !branch
-                .iter()
-                .any(|e| e.kind == "turn.end" && e.scope.turn == start.scope.turn)
-            {
-                interrupted.push((session_runtime(self, &snapshot)?, start.scope.clone()));
-            }
+        for scope in unfinished_turns(&branch) {
+            interrupted.push((session_runtime(self, &snapshot)?, scope.clone()));
         }
         let mut handed_back = Vec::new();
         for (input_id, entry) in snapshot.pending_inputs() {
@@ -637,7 +698,7 @@ impl Harness {
         open.active = (!interrupted.is_empty()).then_some(ActiveTurn::Recovery);
         open.steer_closed = open.active.is_some();
         open.interrupted = interrupted;
-        Ok(handed_back)
+        Ok(Some(handed_back))
     }
 
     async fn run_recovery(&self, id: &str) -> Result<()> {
@@ -2387,43 +2448,14 @@ impl AgentApi for Harness {
             }
             return Ok(cap);
         }
-        let mut authority = if actor == "user" {
-            Authority::full()
-        } else {
-            Authority::default()
-        };
-        // Grants are session security state, not a branch-local approval.
-        for e in &data.entries {
-            if let Some(v) = &e.content {
-                if e.kind == "actor.grant" && v["actor"] == actor {
-                    authority = serde_json::from_value(v["authority"].clone())?;
-                } else if e.kind == "actor.left" && v["actorId"] == actor {
-                    authority = Authority::default();
-                }
+        let rights = data.recorded_rights(actor)?.unwrap_or_else(|| {
+            if actor == "user" {
+                Authority::full()
+            } else {
+                Authority::default()
             }
-        }
-        authority = ConnectionCeiling::narrow(session, actor, authority);
-        if let Some(cap) = data
-            .entries
-            .iter()
-            .rev()
-            .find(|e| e.kind == "limit")
-            .and_then(|e| e.content.as_ref())
-            .and_then(|v| wire::optional(v, "rights"))
-        {
-            authority = authority.intersect(&serde_json::from_value(cap.clone())?);
-        }
-        if let Some(tenant) = tenants::name(&data) {
-            authority = authority.intersect(&self.check_tenant(tenant)?.rights);
-        }
-        if let Some(cap) = data.settings.get("_authority") {
-            authority = authority.intersect(&serde_json::from_value(cap.clone())?);
-        }
-        if let Some(parent) = data.settings["_parent"]["session"].as_str() {
-            let parent_actor = data.settings["_parent"]["actor"].as_str().unwrap_or("user");
-            authority = authority.intersect(&self.authority(parent, parent_actor)?);
-        }
-        Ok(authority)
+        });
+        self.limit_rights(&data, ConnectionCeiling::narrow(&data.id, actor, rights))
     }
     fn grant(&self, scope: &Scope, actor: &str, authority: Authority) -> Result<()> {
         require(self, scope, "grant")?;

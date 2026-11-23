@@ -1,6 +1,7 @@
 //! AG-UI 1.0 over authenticated HTTP. The adapter owns streams and reconciliation
 //! metadata. The Harness owns every admission, decision and settlement.
 mod input;
+mod listing;
 mod run;
 mod view;
 use crate::{AcpActor, Agent, Code, Error, InterfaceConnection, Rights, Session};
@@ -174,6 +175,8 @@ struct Service {
     state: Option<AguiState>,
     raw: BTreeMap<(String, String), String>,
     routes: Mutex<Routes>,
+    pages: Mutex<listing::Pages>,
+    acp_open: Arc<interface_acp::OpenRoutes>,
     opening: tokio::sync::Mutex<()>,
 }
 impl Agent {
@@ -232,6 +235,8 @@ impl Agent {
             state: options.state,
             raw: options.raw_events,
             routes: Mutex::default(),
+            pages: Mutex::default(),
+            acp_open: open_routes.clone(),
             opening: Default::default(),
         });
         let secure = options.tls.is_some();
@@ -280,12 +285,19 @@ impl Service {
         &self.agent.inner.harness
     }
     fn scope_ok(&self, a: &AguiActor, d: &SessionData) -> bool {
-        let tenant = d
-            .entries
-            .iter()
-            .find(|e| e.kind == "tenant")
-            .and_then(|e| e.content.as_ref()?["tenant"].as_str());
-        d.project == self.agent.inner.project && a.allows(&d.project, tenant)
+        d.project == self.agent.inner.project
+            && d.tenant_id() == self.tenant.as_deref()
+            && a.allows(&d.project, d.tenant_id())
+    }
+    fn discovery_rights(&self, a: &AguiActor, d: &SessionData) -> R<Rights> {
+        if !self.scope_ok(a, d) {
+            return Ok(Rights::default());
+        }
+        let join =
+            a.join_on_open && (self.agent.inner.several_actors || a.id() == base::ACP_HOST_ACTOR);
+        Ok(self
+            .h()
+            .discovery_rights(d, a.id(), &a.principal.actor.rights, join)?)
     }
     fn watch(&self, a: &AguiActor, id: &str) -> R<SessionData> {
         self.h().check_writer(id)?;
@@ -346,30 +358,12 @@ impl Service {
         Ok(r.clients.entry(key).or_default().clone())
     }
     fn grant(&self, a: &AguiActor, id: &str) -> R<()> {
-        // The operator's grant is narrowed by the session and tenant, before the actor joins.
-        let mut rights = a.principal.actor.rights.clone();
-        let tenant = self.h().tenant(id)?;
-        if tenant["rights"].is_array() {
-            rights = rights.intersect(
-                &serde_json::from_value(tenant["rights"].clone()).map_err(|_| Fail::Lost)?,
-            );
-        }
-        let data = self.h().snapshot(id)?;
-        for limit in [
-            data.entries
-                .iter()
-                .rev()
-                .find(|e| e.kind == "limit")
-                .and_then(|e| e.content.as_ref()?.get("rights")),
-            data.settings.get("_authority"),
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|v| v.is_array())
-        {
-            rights =
-                rights.intersect(&serde_json::from_value(limit.clone()).map_err(|_| Fail::Lost)?);
-        }
+        let rights = self.h().discovery_rights(
+            &self.h().snapshot(id)?,
+            a.id(),
+            &a.principal.actor.rights,
+            true,
+        )?;
         if !rights.has("watch") {
             return Err(Fail::Missing);
         }
@@ -397,23 +391,10 @@ impl Service {
                 .load(id)
                 .map_err(|_| Fail::Missing)?
         };
-        if !self.scope_ok(a, &data) {
+        if !self.discovery_rights(a, &data)?.has("watch") {
             return Err(Fail::Missing);
         }
         let member = base::actors(&data).contains_key(a.id());
-        if !member
-            && (!a.join_on_open
-                || !self.agent.inner.several_actors && a.id() != base::ACP_HOST_ACTOR
-                || data.entries.iter().any(|e| {
-                    e.kind == "actor.left"
-                        && e.content.as_ref().is_some_and(|v| v["actorId"] == a.id())
-                }))
-        {
-            return Err(Fail::Missing);
-        }
-        if member && !self.right(a, id, "watch")? {
-            return Err(Fail::Missing);
-        }
         let session = Session::new(self.agent.inner.clone(), id.into());
         if !open {
             self.h().install_recovery(id).await?;
@@ -436,6 +417,9 @@ impl Service {
     async fn handle(self: Arc<Self>, a: Arc<AguiActor>, req: Request) -> R<Response> {
         let path = req.uri().path().to_owned();
         let prefix = "/agui/v1";
+        if req.method() == Method::GET && path == "/agui/v1/threads" {
+            return self.list_threads(&a, req.uri().query()).await;
+        }
         if req.uri().query().is_some() {
             return Err(Fail::Invalid);
         }

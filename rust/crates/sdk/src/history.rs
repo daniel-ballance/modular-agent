@@ -78,6 +78,9 @@ pub struct SessionInfo {
     pub title: Option<String>,
     pub created_at: u64,
     pub last_active: u64,
+    /// A committed start on the active branch has no matching end.
+    pub unfinished_turn: bool,
+    pub tenant: Option<String>,
 }
 
 impl From<base::SessionData> for SessionInfo {
@@ -86,6 +89,8 @@ impl From<base::SessionData> for SessionInfo {
         Self {
             model: serde_json::from_value(settings["model"].clone()).ok(),
             title: settings["title"].as_str().map(str::to_owned),
+            unfinished_turn: base::unfinished_turns(&data.branch()).next().is_some(),
+            tenant: data.tenant_id().map(str::to_owned),
             id: data.id,
             project: data.project,
             settings,

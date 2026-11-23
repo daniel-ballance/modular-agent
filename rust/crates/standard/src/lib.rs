@@ -111,6 +111,19 @@ impl Standard {
     pub fn settings_file(&self) -> PathBuf {
         self.config.join("settings.json")
     }
+    pub fn resume_open(&self) -> Result<bool> {
+        self.configuration()
+            .global_settings()?
+            .get("resume_open")
+            .map_or(Ok(false), |v| {
+                v.as_bool().ok_or_else(|| {
+                    anyhow!(
+                        "{}: resume_open must be boolean",
+                        self.settings_file().display()
+                    )
+                })
+            })
+    }
     pub fn auth(&self) -> credentials_auth::AuthFile {
         credentials_auth::AuthFile::new(self.config.join("auth.json"), &PROVIDERS)
             .with_aliases(ALIASES)
