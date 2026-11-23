@@ -185,7 +185,25 @@ async fn held_then_interrupted_turn_resumes_once_without_a_client() -> Result<()
         2
     );
     on.kill().await?;
-    r.assert_end(&id, "completed").await
+    r.assert_end(&id, "completed").await?;
+    let (mut observer, url) = r.listener(&[], "observer").await?;
+    let snapshot: Value = reqwest::Client::new()
+        .get(format!("{url}/agui/v1/threads/{id}"))
+        .bearer_auth(TOKEN)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let messages = snapshot["messages"].as_array().unwrap();
+    assert_eq!(messages.last().unwrap()["content"], "Recovered.");
+    assert_eq!(
+        messages.iter().filter(|m| m["role"] == "tool").count(),
+        1,
+        "the nested command was not an assistant tool call"
+    );
+    observer.kill().await?;
+    Ok(())
 }
 
 #[tokio::test]
