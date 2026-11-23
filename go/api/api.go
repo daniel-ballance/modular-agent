@@ -150,6 +150,25 @@ type Session struct {
 	Entries     []Entry          `json:"entries"`
 }
 
+// UnfinishedTurn selects the start that recovery would resume. An end on
+// another branch still settles its turn; a fork's display prefix is not work.
+func (s Session) UnfinishedTurn() *Entry {
+	s.Entries = s.LiveEntries()
+	ended := map[string]bool{}
+	for _, e := range s.Entries {
+		if e.WasKind("turn.end") {
+			ended[e.Turn] = true
+		}
+	}
+	var start *Entry
+	for _, e := range s.Branch() {
+		if e.Kind == "turn.start" && !ended[e.Turn] {
+			start = &e
+		}
+	}
+	return start
+}
+
 // InputID reads the taken admission in both old and current in-process records.
 func (e Entry) InputID() string {
 	if e.InputRef != "" {
@@ -190,6 +209,20 @@ func (s Session) Branch() []Entry {
 		out[len(reverse)-1-i] = e
 	}
 	return out
+}
+
+// WaitingRoute names the authenticated executor and any additional answer
+// restrictions of the Interface, such as exact delivery on a presence stream.
+type WaitingRoute struct {
+	Executor  string
+	CanAnswer func(Question) bool
+}
+
+// WaitingSummary contains counts, never question or tool content.
+type WaitingSummary struct {
+	Questions int    `json:"questions"`
+	ToolCalls int    `json:"toolCalls"`
+	Turn      string `json:"turn"`
 }
 
 type Input struct {
@@ -304,6 +337,9 @@ type API interface {
 	New(context.Context, string) (string, error)
 	Open(context.Context, string) error
 	List(string) ([]Session, error)
+	// WaitingForHost summarizes a listed record without opening it or joining the actor.
+	// An empty executor route cannot receive Interface-run calls.
+	WaitingForHost(context.Context, Session, Actor, WaitingRoute) (WaitingSummary, error)
 	Snapshot(string) (Session, error)
 	View(context.Context, string) (Session, error)
 	Record(context.Context, string, Entry) (Entry, error)

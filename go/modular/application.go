@@ -26,9 +26,10 @@ func WithConformanceFixtures() Option {
 
 // SessionInfo identifies a stored session without opening or recovering it.
 type SessionInfo struct {
-	ID, Project, Model, Title string
-	Settings                  Settings
-	CreatedAt, LastActivity   time.Time
+	ID, Project, Model, Title, Tenant string
+	UnfinishedTurn                    bool // committed start without an end; a writer may still hold it
+	Settings                          Settings
+	CreatedAt, LastActivity           time.Time
 }
 
 // Sessions lists saved sessions. An empty project selects every project.
@@ -122,7 +123,7 @@ func storedSessions(open func() (api.Store, error), project string) ([]SessionIn
 func sessionInfos(snaps []api.Session) []SessionInfo {
 	sessions := make([]SessionInfo, 0, len(snaps))
 	for _, snap := range snaps {
-		info := SessionInfo{ID: snap.ID, Project: snap.Project, Model: snap.Settings.Model, Settings: sessionSettings(snap.Settings)}
+		info := SessionInfo{ID: snap.ID, Project: snap.Project, Tenant: snap.Tenant, UnfinishedTurn: snap.UnfinishedTurn() != nil, Model: snap.Settings.Model, Settings: sessionSettings(snap.Settings)}
 		var meta struct{ Title string }
 		_ = json.Unmarshal(snap.HistoryMeta, &meta)
 		info.Title = meta.Title

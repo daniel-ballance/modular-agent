@@ -639,6 +639,39 @@ func (a *Agent) OpenSession(ctx context.Context, id string) (*Session, error) {
 	}
 	return &Session{agent: a, id: id}, nil
 }
+
+// ResumeInterrupted takes a free writer for a kept session in this Agent's
+// project and installs recovery without waiting for the turn. The operator
+// must already have watch. This does not attach a client or create presence.
+func (a *Agent) ResumeInterrupted(ctx context.Context, id string, operator ACPActor) error {
+	if !a.persistent || id == "" || !validACPActor(operator.Actor) {
+		return &Error{Code: InvalidParams, Message: "expected kept history, a session ID and an operator actor"}
+	}
+	p, err := acpPolicy(operator.Projects, operator.Tenants, operator.Actor.Rights, nil)
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(operator.Actor.Rights, "watch") {
+		return appError(api.ErrAuthority, Forbidden)
+	}
+	ctx = api.WithConnectionRights(api.AsActor(ctx, operator.Actor.ID), &operator.Actor.Rights)
+	ctx = api.WithSessionScope(ctx, func(project, tenant string) bool {
+		return project == a.project && (p.Projects == nil || slices.Contains(p.Projects, project)) && (p.Tenants == nil && tenant == "" || slices.Contains(p.Tenants, tenant))
+	})
+	a.lifecycle.Lock()
+	defer a.lifecycle.Unlock()
+	if err := ctx.Err(); err != nil {
+		return appError(err, CancelledCode)
+	}
+	if a.closed.Load() {
+		return &Error{Code: NotOpen, Message: "agent is closed"}
+	}
+	err = a.a.(interface {
+		OpenInterruptedForHost(context.Context, string, api.Actor) error
+	}).OpenInterruptedForHost(ctx, id, operator.Actor)
+	return appError(err, Busy)
+}
+
 func (a *Agent) Declaration() Declaration {
 	d := acpinterface.Declaration(a.a, a.project, "")
 	delete(d, "projectRoot")
@@ -772,7 +805,7 @@ func (a *Agent) acpResources(opt ServeACPOptions) (func() map[string]any, acpint
 		}
 		return d
 	}
-	projects := acpinterface.Projects{MCP: opt.ProjectMCP, WarnMCP: opt.WarnMCP}
+	projects := acpinterface.Projects{MCP: opt.ProjectMCP, WarnMCP: opt.WarnMCP, RetainWriter: a.a.(interface{ StartupWriter(string) bool }).StartupWriter}
 	if opt.Compose != nil {
 		projects.Compose = func(ctx context.Context, project, id string) (acpinterface.Project, error) {
 			ctx = context.WithValue(ctx, servingCapacityKey{}, a.h.Capacity())

@@ -112,6 +112,7 @@ type Questions interface {
 	Ask(context.Context, Question) (Answer, error)
 	Answer(context.Context, string, Answer) error
 	List(string) ([]Question, error)
+	Recorded(Session) []Question
 	Connect(string, string) func()
 }
 type SecretReceipt struct {

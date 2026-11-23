@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the four standard-ma cases and the SDK fixture cases in disposable projects.
+# Run the standard-ma cases and the SDK fixture cases in disposable projects.
 set -euo pipefail
 repo=$(cd -- "$(dirname -- "$0")/../.." && pwd)
 export TMPDIR=${TMPDIR:-$HOME/.cache/ma-std-tmp}

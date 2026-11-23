@@ -22,6 +22,7 @@ Import `github.com/daniel-ballance/modular-agent/go/modular/modulartest` for tes
 - `modular/mcp.WithServers(servers, warn)` connects trusted MCP servers. A warning handler opts into skipping failed configured servers, while client-supplied ACP attachments remain scoped to their session.
 - `NewSchemaTool` accepts an explicit JSON Schema object. `OnSessionPrepare` installs per-session resources before recovery. The in-process `OnTurnBefore` payload includes the canonical project and plugin-callable tool definitions; inspecting them does not grant authority.
 - `Agent.Sessions` and `Agent.SessionInfo` read stored metadata without opening a session. Both are available on `HistoryStore` before composition. `Session.Busy` and `Session.WaitIdle` let a terminal distinguish active work from an idle session.
+- `SessionInfo.UnfinishedTurn` means a committed turn start has no end. It does not say the writer is free. `Agent.ResumeInterrupted(ctx, id, operator)` checks the recorded watch right in the configured project, tries the writer without waiting, and checks the turn again under the lease. It returns after installing ordinary recovery, not after the turn ends.
 - `Agent.ServeACP` takes `ServeACPOptions` with `Compose`, `ProjectSettings`, and `ProjectMCP` to serve several canonical projects on one connection. `WithCompaction` controls automatic context compaction and `/compact`.
 - `WithLateAnswersStartTurns` lets enabled tools leave a question open after a wait with `AskOptions{Then: "leaveOpen"}`. `WithJobReportsStartTurns` lets job reports start turns; otherwise the reports are parked.
 
@@ -48,6 +49,7 @@ export TMPDIR="$HOME/.cache/ma-std-tmp"
 mkdir -p "$TMPDIR"
 npm ci --prefix conformance/acp
 npm ci --prefix conformance/tools
+npm ci --prefix conformance/telemetry
 # Build the four fixture programs per conformance/sdk/fixtures/*.json.
 (cd go && ./scripts/build-monty.sh)
 export MODULAR_AGENT_SDK_REQUIRE=all
@@ -59,6 +61,7 @@ node conformance/reference/run.mjs --agent go
 ma="$PWD/go/.bin/ma"
 (cd conformance/acp && MODULAR_AGENT_CONFORMANCE=1 node run.mjs --crash-checks --probe-checks --job-checks -- "$ma" --acp)
 scripts/websocket-kits.sh go
+go/scripts/check-agui.sh
 ```
 
 On Linux, the base suites need unprivileged user, PID and mount namespaces. On macOS, the local working environment declares `processGroup` containment. The suite checks that scope rather than requiring cleanup of descendants that leave their process group. The history writer uses `CLOCK_BOOTTIME` on Linux and `CLOCK_MONOTONIC` on macOS. Both clocks advance during sleep, so neither platform needs a lease margin.
@@ -67,7 +70,7 @@ The scenario runner builds Go's fixture and discovers built peer programs. Build
 
 ### What is checked
 
-- **Interface-run tools:** public SDK tests cover advertisement, direct-dispatch refusal, approval denial, unchanged output gating, executor route and scope, early and late reports, reconnect, competing reports, cancellation, erasure, and metadata-only spans. The reconnect test also serves the Runtime in another process. Process tests use `SIGKILL` after handoff, both before durable turn end and after a kept turn ended. The shared scenario format has no Interface connection, advertisement, or report steps, so these checks live in Go's SDK suite. Build, vet and formatting passed. The full suite passed 38 packages and the race suite passed seven. The reference, ACP stdio and ACP WebSocket checks passed the then-current suites (now 26 reference checks, 188 stdio and 193 WebSocket). The WebSocket plugin checks passed 153/153 and separate-listener isolation passed 14/14. The project notes demo passed both the scripted and crash-and-reopen runs.
+- **Interface-run tools:** public SDK tests cover advertisement, direct-dispatch refusal, approval denial, unchanged output gating, executor route and scope, early and late reports, reconnect, competing reports, cancellation, erasure, and metadata-only spans. The reconnect test also serves the Runtime in another process. Process tests use `SIGKILL` after handoff, both before durable turn end and after a kept turn ended. The shared scenario format has no Interface connection, advertisement, or report steps, so these checks live in Go's SDK suite. Build, vet and formatting passed. The full suite passed 38 packages and the race suite passed seven. The reference, ACP stdio and ACP WebSocket checks passed 26/26, 188/188 and 193/193. The WebSocket plugin checks passed 153/153 and separate-listener isolation passed 14/14. The project notes demo passed both the scripted and crash-and-reopen runs.
 - **Telemetry:** the shared kit checks all 26 Go-hosted cases and the Go fixtures in all 18 cases hosted by other SDKs. It checks real OTLP/HTTP protobuf exports, both sides of plugin negotiation, and checkpoint order after `SIGKILL`. Go tests also check job-scoped callbacks, job report links, session open and close, lease renewal, capacity waits, and inference metrics. The same scripted turn completes with no SDK and with a failing exporter.
 
 - **Grok on Linux:** the Monty worker, `ma`, `modular` and the fixture program built. Build, vet and formatting passed. The full Go suite passed 38 tested packages, and the SDK and `ma` race run passed seven. The reference suite passed **24/24**, and the ACP stdio kit with crash, probe and job checks passed **188/188**.
@@ -129,6 +132,12 @@ Set `ClientID` on each `ACPActor`. Two tokens can share a client ID for rotation
 
 Use the [binding routes](../../docs/bindings/agui.md). Replace provisional messages with the final snapshot. After a conflict, GET the thread again. Only a live success terminal authorizes frontend execution. Never run a tool from a snapshot or a partial stream. To answer an in-turn question, open presence **before** sending the run. The question manager marks presence by session, actor and client. A run marks presence but cannot receive an in-turn interrupt without the same pre-existing presence stream. An approval route belongs to one client's unchanged question view. Presence cannot authorize handling a secret. Closing a stream detaches it; it does not cancel its turn.
 
+**Listing threads.** `GET /agui/v1/threads` returns kept threads this client may watch, newest change first. Each row has only `threadId`, `updatedAt` and `waiting`. The counts describe eligible questions and open Interface calls on this route, not their content. A turn can end with a question or call still open. Listing does not open a session, join an actor or mark presence.
+
+Pass `limit` (1–500, default 100). If the reply includes `next`, pass it as `after` on the next request. The cursor belongs to this client and listener. An unknown or expired cursor returns HTTP 400 with `invalid_request`. Each page reads current records.
+
+The adapter uses the public `Agent.ListThreads(ctx, ListThreadsOptions)` read. It returns a page of `ThreadInfo` and a boolean saying whether another page follows. Supply the authenticated `Actor`, `Tenant`, `Scope` and `RouteID`. `InTurn` identifies questions already offered on that live route. `Offset` counts only discoverable threads. Both AG-UI and ACP use the Harness operation `api.API.WaitingForHost` to count from committed records without acquiring the writer. ACP puts the summary in `_meta["modular-agent"].waiting` on each `session/list` row. ACP itself has no tool executor route.
+
 With a state plugin, set `StatePlugin` and supply its current revision and JSON document through `CurrentState`. Configure `RawSources` to project a named plugin's explicit `modular-agent.agui.raw` events. Other visible plugin events use `CUSTOM`. The output gate's recipient is the client ID. It can redact shared entries and streams; the adapter checks the final envelope again. A changed actionable envelope is withheld. No state plugin means no state events.
 
 ### Remaining ADR 0030 work
@@ -140,7 +149,7 @@ With a state plugin, set `StatePlugin` and supply its current revision and JSON 
 
 ### Specification findings
 
-None open. `--agui` is in the standard configuration.
+None open. Both listing findings are in the AG-UI binding.
 
 ### Known gaps
 

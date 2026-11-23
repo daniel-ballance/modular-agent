@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"maps"
 	"slices"
 )
 
@@ -27,12 +28,15 @@ func (c *client) Authorize(id, who, right string) bool {
 
 // DiscoverForHost applies the existing open admission check without joining.
 func (c *client) DiscoverForHost(snap api.Session, host api.Actor) bool {
+	return c.authorized(viewForHost(snap, host), host.ID, "watch")
+}
+
+func viewForHost(snap api.Session, host api.Actor) api.Session {
 	if !recordedHost(snap, host.ID) {
-		snap = clone(snap)
-		snap.Actors = actors(snap)
+		snap.Actors = maps.Clone(actors(snap))
 		snap.Actors[host.ID] = host
 	}
-	return c.authorized(snap, host.ID, "watch")
+	return snap
 }
 
 func (c *client) authorized(snap api.Session, who, right string) bool {

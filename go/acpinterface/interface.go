@@ -135,7 +135,8 @@ func (i *Interface) serve(ctx context.Context, in io.ReadCloser, out io.Writer, 
 	s := &server{declared: declared, a: i.a, project: project, actor: who, principal: principal, ctx: ctx, represents: represented, sessions: map[string]*attachment{}, resources: config}
 	if config.Compose != nil {
 		s.projects = &projectHosts{compose: config.Compose, hosts: map[projectKey]*server{}}
-	} else if principal != nil {
+	}
+	if principal != nil {
 		s.shared = &i.network
 	}
 	conn, err := acp.NewAgentSideConnectionWithOptions(s, out, in, acp.ConnectionOptions{MaxFrameSize: (64 << 20) + 2})
@@ -599,7 +600,9 @@ func (s *server) LoadSession(ctx context.Context, p acp.LoadSessionRequest) (acp
 		if err != nil {
 			return acp.LoadSessionResponse{}, err
 		}
-		return host.LoadSession(ctx, p)
+		if host != s {
+			return host.LoadSession(ctx, p)
+		}
 	}
 	lifecycle := s.sessionLifecycle()
 	if !lifecycle.TryLock() {
@@ -615,7 +618,9 @@ func (s *server) ResumeSession(ctx context.Context, p acp.ResumeSessionRequest) 
 		if err != nil {
 			return acp.ResumeSessionResponse{}, err
 		}
-		return host.ResumeSession(ctx, p)
+		if host != s {
+			return host.ResumeSession(ctx, p)
+		}
 	}
 	lifecycle := s.sessionLifecycle()
 	if !lifecycle.TryLock() {
@@ -698,7 +703,17 @@ func (s *server) ListSessions(ctx context.Context, p acp.ListSessionsRequest) (a
 		if snap.Parent != "" || !s.discoverable(snap) {
 			continue
 		}
-		info := acp.SessionInfo{SessionId: acp.SessionId(snap.ID), Cwd: snap.Project}
+		host := s.sessionHost(snap.ID)
+		// ACP has no executor route. It never claims a different Interface's calls.
+		waiting, err := s.listingAPI(snap).WaitingForHost(host.acting(ctx, snap.ID, s.actor), snap, s.hostActor(), api.WaitingRoute{})
+		if errors.Is(err, api.ErrAuthority) {
+			continue
+		}
+		if err != nil {
+			return acp.ListSessionsResponse{}, outputReplyError(err)
+		}
+		info := acp.SessionInfo{SessionId: acp.SessionId(snap.ID), Cwd: snap.Project,
+			Meta: map[string]json.RawMessage{Namespace: api.JSON(map[string]any{"waiting": waiting})}}
 		if len(snap.Entries) > 0 {
 			info.UpdatedAt = acp.Ptr(snap.Entries[len(snap.Entries)-1].Time.Format("2006-01-02T15:04:05Z"))
 		}

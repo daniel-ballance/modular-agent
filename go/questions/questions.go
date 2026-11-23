@@ -210,6 +210,11 @@ func (m *Manager) List(id string) ([]api.Question, error) {
 	if err != nil {
 		return nil, err
 	}
+	return m.Recorded(s), nil
+}
+
+// Recorded reads question state without opening the session or connecting a route.
+func (m *Manager) Recorded(s api.Session) []api.Question {
 	var out []api.Question
 	for _, st := range states(s) {
 		q := st.q.Question
@@ -217,7 +222,7 @@ func (m *Manager) List(id string) ([]api.Question, error) {
 		out = append(out, q)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out, nil
+	return out
 }
 func signature(q api.Question) string {
 	return fmt.Sprintf("%x", sha256.Sum256(api.JSON([]any{q.Call, q.Actor, q.Kind, q.Prompt, q.Options, q.Allowed, q.Credential, q.Details, q.Wait, q.Defer})))

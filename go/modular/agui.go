@@ -2,6 +2,7 @@ package modular
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -55,6 +56,7 @@ type agServer struct {
 	states  map[[2]string]*agClient
 	threads map[string]bool // HTTP threads keep their writer when an ACP connection goes away.
 	openMu  sync.Mutex
+	pageKey [32]byte
 }
 type agClient struct {
 	mu        sync.Mutex
@@ -122,6 +124,7 @@ func (a *Agent) serveAGUI(ctx context.Context, opt ServeAGUIOptions, wrap func(h
 		opt.JoinOnOpen = &singleLocal
 	}
 	srv := &agServer{a: a, opt: opt, states: map[[2]string]*agClient{}, threads: map[string]bool{}}
+	rand.Read(srv.pageKey[:])
 	tokens := map[string]agPrincipal{}
 	clients := map[string]acpinterface.Principal{}
 	for _, e := range opt.Actors {
@@ -168,7 +171,12 @@ func (a *Agent) serveAGUI(ctx context.Context, opt ServeAGUIOptions, wrap func(h
 		}
 		decl, projects := a.acpResources(ServeACPOptions{})
 		projects = acpinterface.ShareCompositions(projects)
-		projects.RetainWriter = func(id string) bool { srv.mu.Lock(); defer srv.mu.Unlock(); return srv.threads[id] }
+		startupWriter := projects.RetainWriter
+		projects.RetainWriter = func(id string) bool {
+			srv.mu.Lock()
+			defer srv.mu.Unlock()
+			return srv.threads[id] || startupWriter(id)
+		}
 		ws = func(ctx context.Context, c *wswire.Conn, p agPrincipal) {
 			c.EnableACPControl(0)
 			_ = iface.ServePrincipal(ctx, c, c, decl, projects, p.Principal)
@@ -217,7 +225,8 @@ func (s *agServer) http(w http.ResponseWriter, r *http.Request, p *agPrincipal) 
 		w.Header().Set("Access-Control-Allow-Origin", origins[0])
 		w.Header().Set("Vary", "Origin")
 	}
-	if r.URL.RawQuery != "" || r.URL.User != nil {
+	listing := r.Method == "GET" && r.URL.EscapedPath() == "/agui/v1/threads"
+	if !listing && r.URL.RawQuery != "" || r.URL.User != nil {
 		agHTTPError(w, invalid)
 		return
 	}
@@ -306,14 +315,7 @@ type agHost interface {
 }
 
 func (q *agRequest) member(s api.Session) bool {
-	if !q.scope(s.Project, s.Tenant) {
-		return false
-	}
-	_, recorded := s.Actors[q.Actor.ID]
-	if !recorded && q.Actor.ID != s.Actor && (!*q.opt.JoinOnOpen || !q.a.severalActors) {
-		return false
-	}
-	return q.host().DiscoverForHost(s, q.Actor)
+	return q.scope(s.Project, s.Tenant) && q.a.threadMember(s, q.Actor, *q.opt.JoinOnOpen)
 }
 func (q *agRequest) host() agHost { return q.a.a.(agHost) }
 func (q *agRequest) attach(id string) error {
@@ -448,6 +450,8 @@ func (q *agRequest) serve(r *http.Request) error {
 	switch {
 	case r.Method == "GET" && path == base:
 		return q.jsonReply(200, "agui.discovery", agObject{"binding": "modular-agent-agui/1", "protocolVersion": "1.0", "declaration": q.a.Declaration()})
+	case r.Method == "GET" && path == base+"/threads":
+		return q.listThreads(r.URL.RawQuery)
 	case r.Method == "POST" && path == base+"/threads":
 		v, err := agRead(r)
 		if err != nil {
