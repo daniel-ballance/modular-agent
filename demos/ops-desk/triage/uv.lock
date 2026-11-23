@@ -675,7 +675,7 @@ wheels = [
 [[package]]
 name = "modular-agent"
 version = "0.1.0"
-source = { directory = "../../../python" }
+source = { editable = "../../../python" }
 dependencies = [
     { name = "httpx2" },
     { name = "jsonschema" },
@@ -875,7 +875,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "modular-agent", directory = "../../../python" },
+    { name = "modular-agent", editable = "../../../python" },
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = "==1.45.2" },
     { name = "opentelemetry-sdk", specifier = "==1.45.2" },
 ]

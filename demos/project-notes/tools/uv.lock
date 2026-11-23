@@ -608,7 +608,7 @@ wheels = [
 [[package]]
 name = "modular-agent"
 version = "0.1.0"
-source = { directory = "../../../python" }
+source = { editable = "../../../python" }
 dependencies = [
     { name = "httpx2" },
     { name = "jsonschema" },
@@ -705,7 +705,7 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "modular-agent", directory = "../../../python" }]
+requires-dist = [{ name = "modular-agent", editable = "../../../python" }]
 
 [[package]]
 name = "pycparser"

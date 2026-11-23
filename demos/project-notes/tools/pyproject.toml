@@ -5,4 +5,4 @@ requires-python = ">=3.13,<3.14"
 dependencies = ["modular-agent"]
 
 [tool.uv.sources]
-modular-agent = { path = "../../../python" }
+modular-agent = { path = "../../../python", editable = true }
