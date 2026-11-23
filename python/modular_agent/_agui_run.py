@@ -46,6 +46,7 @@ class Exchange:
             e = d["entry"]
             if e["kind"] not in (
                 "turn_start",
+                "input",
                 "response",
                 "input_withdrawn",
                 "tool_result",
@@ -79,8 +80,8 @@ class Exchange:
         require(self.revision == await self.v.h.erasure_revision(self.v.sid), "conflict")
         await self.response.write(b)
 
-    async def snapshot(self) -> tuple[bytes, Cursor]:
-        snap, stamp = await self.v.snapshot(http=False)
+    async def snapshot(self, through: str | None = None) -> tuple[bytes, Cursor]:
+        snap, stamp = await self.v.snapshot(http=False, through=through)
         messages = snap["messages"]
         cursor = event(
             "CUSTOM",
@@ -369,6 +370,15 @@ class Exchange:
             self.turn = e["turn"]
         if not self.turn:
             return
+        if (
+            kind == "history_entry"
+            and e.get("turn") == self.turn
+            and (e["kind"] == "input" or self.origin and e["kind"] == "turn_start")
+        ):
+            # Introduce committed IDs in record order, before live assistant text.
+            snap, stamp = await self.snapshot(through=e["id"])
+            await self.write(snap)
+            v.remember(stamp)
         if kind == "input_request_opened":
             if not self.p or v.binding.presence.get(v.key) is not self.p:
                 return

@@ -103,6 +103,17 @@ Both WebSocket servers return a listener with `url` (the bound address including
 
 A plugin value gets a new registration and copy per connection. If the plugin carries state in function closures or holds noncopyable resources, pass a zero-argument factory to `serve` so each connection gets fresh state. ACP's `actors` entries are `{"token_file": path, "actor": {"id": ..., "kind": ..., "rights": [...]}, "tenants": [...], "projects": [...]}`. Tenant scope defaults to no tenant; include `None` to allow it alongside named tenants. An explicit project list contains canonical project roots; omitting it allows the projects the serving composition admits. Tokens for the same actor id must agree on kind, but can impose different rights ceilings on the same recorded grants. An authorized second connection can attach to an open session's existing writer without sharing the first connection's ACP handshake or leaving the session suspended on its disconnect.
 
+## Proposed standard configuration text
+
+Add these rows to the flags table in [Standard configuration](../docs/reference/standard-configuration.md), replacing the existing `--listen` row:
+
+> | `--agui` | Serve AG-UI for the selected project. Requires `--listen`. With `--acp`, serve ACP WebSocket upgrades at `/` on the same listener. |
+> | `--listen ADDR` | With `--acp` or `--agui`, listen on a loopback HOST:PORT. For ACP alone a `ws:` URL is also accepted. `ma` has no TLS options. With AG-UI, print the HTTP origin once ready. Serve until stopped. |
+
+Add to the policy's `actors` description:
+
+> For AG-UI, each token entry also requires a stable nonsecret `clientId`. The single-token shorthand uses client ID `ma-local`. The creation route uses the selected project and no tenant. It does not take project or tenant from a request.
+
 ## Interface-run tools
 
 Register definitions in shared ToolDefinition form (`parameters`, `callers: ["model"]`), without handlers. Use a finite positive integer timeout in milliseconds. After authenticating the peer, trusted adapter code calls `agent.connect_interface_tools(actor_id=..., route_id=..., on_handoff=...)`. It can supply `rights` to cap the connection and `tenants` to allow named tenants; the default is the agent's project with no tenant. The actor still needs recorded `watch` and `tools` rights.

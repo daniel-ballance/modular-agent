@@ -436,9 +436,16 @@ class View:
         gated = await self.gate("interrupt", i)
         return gated if same_json(i, gated) else None
 
-    async def snapshot(self, *, http: bool, cursor_id: str | None = None) -> tuple[Obj, Cursor]:
+    async def snapshot(
+        self, *, http: bool, cursor_id: str | None = None, through: str | None = None
+    ) -> tuple[Obj, Cursor]:
         rev = await self.h.erasure_revision(self.sid)
         branch = self.branch()
+        if through is not None:
+            stop = next((i for i, e in enumerate(branch) if e["id"] == through), None)
+            require(stop is not None, "conflict")
+            assert stop is not None
+            branch = branch[: stop + 1]
         pos = branch[-1]["id"] if branch else None
         messages = await self.messages(branch)
         cursor = cursor_id or uuid4().hex

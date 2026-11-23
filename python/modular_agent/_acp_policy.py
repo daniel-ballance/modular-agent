@@ -58,6 +58,11 @@ class AcpPolicy:
                     raise ValueError("actors must be a nonempty array")
                 for value in raw["actors"]:
                     item = _principal(value, network=True, several_actors=several_actors)
+                    if "clientId" in item:
+                        client = item.pop("clientId")
+                        if not isinstance(client, str) or not client:
+                            raise ValueError("clientId must be a nonempty string")
+                        item["client_id"] = client
                     filename = item.pop("tokenFile", None)
                     if not isinstance(filename, str) or not filename:
                         raise ValueError("actors requires a tokenFile path")
@@ -101,7 +106,13 @@ def _principal(
 ) -> dict[str, Any]:
     _shape(
         value,
-        {"actor", "projects", "tenants", "represents", *(["tokenFile"] if network else [])},
+        {
+            "actor",
+            "projects",
+            "tenants",
+            "represents",
+            *(["tokenFile", "clientId"] if network else []),
+        },
         "actors entry" if network else "stdio",
     )
     actor = value.get("actor")
