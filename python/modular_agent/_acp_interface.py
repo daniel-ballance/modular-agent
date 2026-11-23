@@ -234,8 +234,9 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
             response = await super()._open(
                 cwd, sid, mcp_servers, replay, additional_directories, kwargs
             )
-            if self.network:
-                self._bind(sid)
+            # A startup reopen already ran session.start. Bind this client to
+            # the owning composition for delivery even if no start hook ran here.
+            self._bind(sid)
             return response
         finally:
             self._release_claim(sid)

@@ -572,11 +572,7 @@ async def _run(args: argparse.Namespace) -> int:
             recovery["projects"] = local.get("projects", [project])
             recovery["tenants"] = local.get("tenants", [None])
         elif not args.listen:
-            recovery["actor"] = {
-                "id": os.environ.get("MODULAR_AGENT_ACTOR", "user"),
-                "kind": "host",
-                "rights": list(ACP_RIGHTS),
-            }
+            recovery["actor"] = os.environ.get("MODULAR_AGENT_ACTOR", "user")
     async with await _agent(paths, project, args, saved_model=saved_model) as agent:
         if args.agui:
             principals = policy.actors

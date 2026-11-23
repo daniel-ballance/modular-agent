@@ -8,10 +8,12 @@ from pathlib import Path
 from secrets import token_hex
 import sys
 
+import acp
 from httpx2 import AsyncClient, HTTPError
 import pytest
 
 from modular_agent import create_agent, file_history
+from acp_fixture import Client
 from test_sdk_agui import new, prompt
 
 pytestmark = pytest.mark.loopback
@@ -29,7 +31,12 @@ async def ma(root, log, *args, acp=False):
             *(
                 ["--acp"]
                 if acp
-                else ["--agui", "--listen", "127.0.0.1:0", "--token-file", str(root / "token")]
+                else [
+                    "--agui",
+                    "--listen",
+                    "127.0.0.1:0",
+                    *([] if "--policy" in args else ["--token-file", str(root / "token")]),
+                ]
             ),
             env={
                 **os.environ,
@@ -99,7 +106,28 @@ async def test_restart_during_tool_call(tmp_path, mode, runtime):
             project=project, data_dir=data / "state", history=history, durability="kept"
         ) as observer,
     ):
-        async with ma(root, "original", "--runtime", runtime) as (proc, writer):
+        launch = []
+        if mode == "acp":
+            policy = root / "policy.json"
+            policy.write_text(
+                json.dumps(
+                    {
+                        "actors": [
+                            {
+                                "clientId": "operator",
+                                "tokenFile": "token",
+                                "actor": {
+                                    "kind": "user",
+                                    "id": "user",
+                                    "rights": ["watch", "input", "tools", "settings"],
+                                },
+                            }
+                        ]
+                    }
+                )
+            )
+            launch = ["--policy", str(policy)]
+        async with ma(root, "original", "--runtime", runtime, *launch) as (proc, writer):
             sid = await new(writer)
             active = asyncio.create_task(writer.post("run", json=prompt(sid)))
             try:
@@ -126,7 +154,7 @@ async def test_restart_during_tool_call(tmp_path, mode, runtime):
             (project / ".modular-agent.json").write_text('{"resume_open":true}')
         args = ["--resume-open"] if mode in {"flag", "acp"} else []
         async with ma(root, "restart", "--runtime", runtime, *args, acp=mode == "acp") as (
-            _,
+            restarted,
             client,
         ):
             if mode == "off":
@@ -143,6 +171,15 @@ async def test_restart_during_tool_call(tmp_path, mode, runtime):
                 assert (root / "restart").read_text().splitlines() == [
                     f"resume-open: resumed {sid}"
                 ]
+            if mode == "acp":
+                conn = acp.connect_to_agent(Client(), restarted.stdin, restarted.stdout)
+                try:
+                    await conn.initialize(protocol_version=1)
+                    await conn.resume_session(cwd=str(project), session_id=sid, mcp_servers=[])
+                    [row] = (await conn.list_sessions(cwd=str(project))).sessions
+                    assert row.session_id == sid
+                finally:
+                    await conn.close()
         saved = await observer.open_session(sid)
         [end] = [r for r in await saved.history() if r["kind"] == "turnEnd"]
         assert end["data"]["outcome"]["kind"] == (

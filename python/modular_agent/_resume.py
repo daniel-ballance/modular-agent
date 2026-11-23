@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 class ResumeOpen(TypedDict):
     report: Callable[[str, Literal["resumed", "skipped"]], None]
-    actor: NotRequired[Actor]
+    actor: NotRequired[Actor | str]
     projects: NotRequired[Sequence[Path]]
     tenants: NotRequired[Sequence[str | None]]
 
@@ -29,10 +29,10 @@ async def resume_sessions(
 ) -> None:
     if options is None or root._project not in options.get("projects", (root._project,)):
         return
-    principal = options.get("actor")
-    actor = principal["id"] if principal else "user"
-    kind = principal["kind"] if principal else None
-    rights = frozenset(principal["rights"]) if principal else None
+    principal = options.get("actor", "user")
+    actor = principal if isinstance(principal, str) else principal["id"]
+    kind = None if isinstance(principal, str) else principal["kind"]
+    rights = None if isinstance(principal, str) else frozenset(principal["rights"])
     tenants = options.get("tenants", (None,))
 
     def scope(state: dict[str, Any]) -> bool:
