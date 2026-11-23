@@ -61,27 +61,36 @@ func supervise() {
 	}
 	cmd := exec.Command("bash", "-c", request.Command)
 	cmd.Dir = request.Project
-	// The wrapper forces os/exec to own the output pipes so WaitDelay can close
-	// descriptors inherited by background descendants without waiting for them.
-	// https://pkg.go.dev/os/exec#Cmd.WaitDelay
 	encoder := json.NewEncoder(results)
-	w := &commandOutput{encoder: encoder}
-	cmd.Stdout = w
-	cmd.Stderr = w
-	cmd.WaitDelay = 100 * time.Millisecond
-	done := make(chan error, 1)
-	if err := cmd.Start(); err != nil {
-		_ = json.NewEncoder(results).Encode(commandFrame{Error: err.Error()})
+	output, sender, err := os.Pipe()
+	if err != nil {
+		_ = encoder.Encode(commandFrame{Error: err.Error()})
 		return
 	}
-	go func() { done <- cmd.Wait() }()
+	defer output.Close()
+	cmd.Stdout, cmd.Stderr = sender, sender
+	err = cmd.Start()
+	_ = sender.Close()
+	if err != nil {
+		_ = encoder.Encode(commandFrame{Error: err.Error()})
+		return
+	}
+	waited := make(chan error, 1)
+	go func() {
+		err := cmd.Wait()
+		// Wake the reader at foreground exit, even if a background process
+		// still holds the pipe open. This is a signal, not an output deadline.
+		waited <- errors.Join(err, output.SetReadDeadline(time.Now()))
+	}()
+	done := make(chan error, 1)
+	go func() {
+		err := drainCommandOutput(output, &commandOutput{encoder: encoder})
+		done <- errors.Join(<-waited, err)
+	}()
 	select {
 	case <-gone:
 		return
 	case err := <-done:
-		if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState.Success() {
-			err = nil
-		}
 		code := cmd.ProcessState.ExitCode()
 		result := commandFrame{ExitCode: &code}
 		if err != nil {
@@ -92,4 +101,29 @@ func supervise() {
 		}
 	}
 	<-gone
+}
+
+func drainCommandOutput(output *os.File, destination io.Writer) error {
+	if _, err := io.Copy(destination, output); !errors.Is(err, os.ErrDeadlineExceeded) {
+		return err
+	}
+	// All foreground bytes are in the pipe or have already been forwarded.
+	// Drain the current buffer without waiting for descendants to close it
+	// or allowing ongoing background writes to keep this call running.
+	raw, err := output.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var pending int
+	var ioctlErr error
+	if err = raw.Control(func(fd uintptr) {
+		pending, ioctlErr = unix.IoctlGetInt(int(fd), unix.TIOCINQ)
+	}); err != nil || ioctlErr != nil {
+		return errors.Join(err, ioctlErr)
+	}
+	if err := output.SetReadDeadline(time.Time{}); err != nil {
+		return err
+	}
+	_, err = io.CopyN(destination, output, int64(pending))
+	return err
 }

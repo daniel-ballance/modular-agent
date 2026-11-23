@@ -4,45 +4,46 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/daniel-ballance/modular-agent/go/api"
-	"github.com/daniel-ballance/modular-agent/go/fake"
 	"github.com/daniel-ballance/modular-agent/go/internal/proctest"
 	"github.com/daniel-ballance/modular-agent/go/local"
-	"github.com/daniel-ballance/modular-agent/go/vanilla"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestSIGKILLStopsForegroundEscapedAndBackgroundCommands(t *testing.T) {
 	if root := os.Getenv("MODULAR_ENV_CRASH_ROOT"); root != "" {
 		marker := os.Getenv("MODULAR_ENV_MARKER")
-		command := "(exec -a " + marker + "-foreground sleep 60) & setsid bash -c 'exec -a " + marker + "-escaped sleep 60' &"
+		// Each marked process announces itself after exec. Use a separate pipe
+		// for readiness: background commands can outlive the tool's output.
+		command := "(exec -a " + marker + "-foreground bash -c 'printf F > crash-events; read -t 60 <> crash-hold') & " +
+			"setsid bash -c 'exec -a " + marker + `-escaped bash -c "printf E > crash-events; read -t 60 <> crash-hold"' &`
 		if os.Getenv("MODULAR_ENV_BACKGROUND") != "1" {
 			command += " wait"
 		}
-		p := fake.New(fake.Script{Response: api.Response{Stop: "tools", Content: api.Content{{Type: "tool_call", Call: &api.Call{ID: "bash", Name: "bash", Input: api.JSON(map[string]any{"command": command, "timeout_seconds": 60})}}}}}, fake.Script{Response: api.Response{Stop: "finished", Content: api.Text("background returned")}})
-		h, err := vanilla.New(vanilla.Options{History: filepath.Join(root, "history"), Global: filepath.Join(root, "absent"), Model: "fake", Provider: p.Plugin()})
-		if err != nil {
-			t.Fatal(err)
-		}
-		id, err := h.API().New(context.Background(), root)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = h.API().Submit(context.Background(), id, api.Input{Content: api.Text("run")})
-		if err != nil {
-			t.Fatal(err)
-		}
-		out, err := h.API().Wait(context.Background(), id)
-		if err != nil || out.Status != "completed" {
+		env := local.NewAt(filepath.Join(root, "commands"))
+		defer env.Close()
+		out, err := env.Exec(context.Background(), root, command, 60*time.Second, nil)
+		if err != nil || out.ExitCode == nil || *out.ExitCode != 0 {
 			t.Fatal(out, err)
 		}
-		if err = os.WriteFile(filepath.Join(root, "returned"), []byte("returned"), 0600); err != nil {
-			t.Fatal(err)
+		if os.Getenv("MODULAR_ENV_BACKGROUND") == "1" {
+			f, err := os.OpenFile(filepath.Join(root, "crash-events"), os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = f.WriteString("R"); err != nil {
+				t.Fatal(err)
+			}
+			f.Close()
 		}
 		for {
 			time.Sleep(time.Hour)
@@ -52,6 +53,21 @@ func TestSIGKILLStopsForegroundEscapedAndBackgroundCommands(t *testing.T) {
 	for _, scenario := range []string{"foreground", "background", "supervisor-killed", "supervisor-stopped"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := t.TempDir()
+			readyPath := filepath.Join(root, "crash-events")
+			for _, path := range []string{readyPath, filepath.Join(root, "crash-hold")} {
+				if err := unix.Mkfifo(path, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Open both ends so the shell writers can come and go independently.
+			ready, err := os.OpenFile(readyPath, os.O_RDWR|syscall.O_NONBLOCK, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ready.Close()
+			if err := ready.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
 			marker := "modular-crash-" + api.ID()
 			cmd := exec.Command(os.Args[0], "-test.run=^TestSIGKILLStopsForegroundEscapedAndBackgroundCommands$")
 			cmd.Env = append(os.Environ(), "MODULAR_ENV_CRASH_ROOT="+root, "MODULAR_ENV_MARKER="+marker)
@@ -59,7 +75,7 @@ func TestSIGKILLStopsForegroundEscapedAndBackgroundCommands(t *testing.T) {
 				cmd.Env = append(cmd.Env, "MODULAR_ENV_BACKGROUND=1")
 			}
 			var stderr strings.Builder
-			cmd.Stderr = &stderr
+			cmd.Stdout, cmd.Stderr = &stderr, &stderr
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
@@ -75,13 +91,34 @@ func TestSIGKILLStopsForegroundEscapedAndBackgroundCommands(t *testing.T) {
 					proctest.Reap(t, guardian)
 				}
 			}()
-			proctest.Await(t, func() bool {
-				return len(proctest.Find(marker+"-foreground")) == 1 && len(proctest.Find(marker+"-escaped")) == 1
-			})
-			pids := append(proctest.Find(marker+"-foreground"), proctest.Find(marker+"-escaped")...)
-			files, _ := filepath.Glob(filepath.Join(root, "history", "commands", "*.json"))
+			want := map[byte]bool{'F': true, 'E': true}
+			if scenario == "background" {
+				want['R'] = true
+			}
+			for len(want) != 0 {
+				var event [1]byte
+				if _, err := io.ReadFull(ready, event[:]); err != nil {
+					_ = cmd.Process.Kill()
+					_ = cmd.Wait()
+					waited = true
+					t.Fatalf("waiting for readiness %v: %v\n%s", want, err, stderr.String())
+				}
+				if !want[event[0]] {
+					t.Fatalf("unexpected readiness event %q", event[0])
+				}
+				delete(want, event[0])
+			}
+			var pids []int
+			for _, suffix := range []string{"-foreground", "-escaped"} {
+				found := proctest.Find(marker + suffix)
+				if len(found) != 1 {
+					t.Fatalf("expected one ready %s command, found %v", suffix, found)
+				}
+				pids = append(pids, found[0])
+			}
+			files, _ := filepath.Glob(filepath.Join(root, "commands", "*.json"))
 			if len(files) != 1 {
-				t.Fatal(files, stderr.String())
+				t.Fatalf("expected one command registry, found %v", files)
 			}
 			b, err := os.ReadFile(files[0])
 			if err != nil {
@@ -92,22 +129,16 @@ func TestSIGKILLStopsForegroundEscapedAndBackgroundCommands(t *testing.T) {
 				t.Fatal(err)
 			}
 			guardian = owner.Guardian.PID
-			if scenario == "background" {
-				proctest.Await(t, func() bool { _, err := os.Stat(filepath.Join(root, "returned")); return err == nil })
-			}
 			if scenario == "supervisor-killed" {
 				// Suspend the agent so it cannot remove the registry before its own crash.
-				if err = syscall.Kill(cmd.Process.Pid, syscall.SIGSTOP); err != nil {
-					t.Fatal(err)
-				}
+				stopCrashProcess(t, cmd.Process.Pid)
 				if err = syscall.Kill(guardian, syscall.SIGKILL); err != nil {
 					t.Fatal(err)
 				}
 			}
 			if scenario == "supervisor-stopped" {
-				if err = syscall.Kill(guardian, syscall.SIGSTOP); err != nil {
-					t.Fatal(err)
-				}
+				// Do not close the lifetime pipe until the supervisor has stopped.
+				stopCrashProcess(t, guardian)
 			}
 			if err = cmd.Process.Kill(); err != nil {
 				t.Fatal(err)
@@ -124,12 +155,12 @@ func TestSIGKILLStopsForegroundEscapedAndBackgroundCommands(t *testing.T) {
 				}
 			}
 			if scenario == "supervisor-stopped" || scenario == "supervisor-killed" {
-				next := local.NewAt(filepath.Join(root, "history", "commands"))
+				next := local.NewAt(filepath.Join(root, "commands"))
 				defer next.Close()
 				if !next.StopsOnCrash() {
 					t.Fatal("startup cleanup failed")
 				}
-				files, _ = filepath.Glob(filepath.Join(root, "history", "commands", "*.json"))
+				files, _ = filepath.Glob(filepath.Join(root, "commands", "*.json"))
 				if len(files) != 0 {
 					t.Fatal("stale registry survived", files)
 				}
@@ -146,4 +177,20 @@ func TestSIGKILLStopsForegroundEscapedAndBackgroundCommands(t *testing.T) {
 			guardian = 0
 		})
 	}
+}
+
+func stopCrashProcess(t *testing.T, pid int) {
+	t.Helper()
+	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	stat := filepath.Join("/proc", strconv.Itoa(pid), "stat")
+	proctest.Await(t, func() bool {
+		data, err := os.ReadFile(stat)
+		if err != nil {
+			return false
+		}
+		info := string(data)
+		return strings.HasPrefix(info[strings.LastIndexByte(info, ')')+1:], " T ")
+	})
 }

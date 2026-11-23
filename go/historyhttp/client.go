@@ -39,10 +39,12 @@ type lease struct {
 	id, token  string
 	mu         sync.Mutex
 	closed     bool
-	lost       chan struct{}
-	lose       sync.Once
-	cutoff     atomic.Int64
-	revoked    atomic.Pointer[<-chan struct{}]
+	writer     context.Context
+	cancel     context.CancelFunc
+	writerMu   sync.Mutex // guards cutoff, revocation and the loss timer
+	cutoff     int64
+	revoked    <-chan struct{}
+	lossTimer  *time.Timer
 	stop, done chan struct{}
 	known      map[string]json.RawMessage
 }
@@ -145,8 +147,9 @@ func (c *Client) TryAcquire(id string) (api.Lease, error) {
 }
 
 func (c *Client) acquire(id string, wait bool, contexts ...context.Context) (api.Lease, error) {
-	l := &lease{c: c, id: id, lost: make(chan struct{})}
+	l := c.newLease(id)
 	if err := l.acquire(wait, contexts...); err != nil && !errors.Is(err, os.ErrNotExist) {
+		l.cancel()
 		return nil, err
 	}
 	return c.track(l)
@@ -155,7 +158,12 @@ func (c *Client) acquire(id string, wait bool, contexts ...context.Context) (api
 // AcquireNew reserves a local handle without contacting the store. The first
 // Save checks the append size before sending PUT or acquiring a writer.
 func (c *Client) AcquireNew(id string) (api.Lease, error) {
-	return c.track(&lease{c: c, id: id, lost: make(chan struct{})})
+	return c.track(c.newLease(id))
+}
+
+func (c *Client) newLease(id string) *lease {
+	writer, cancel := context.WithCancel(c.ctx)
+	return &lease{c: c, id: id, writer: writer, cancel: cancel}
 }
 
 func (c *Client) track(l *lease) (api.Lease, error) {
@@ -276,14 +284,17 @@ func (l *lease) acquire(wait bool, contexts ...context.Context) error {
 	l.stop = make(chan struct{})
 	l.done = make(chan struct{})
 	ttl := leaseDuration(out.TTLMS)
-	l.cutoff.Store(out.sent + int64(ttl/2))
+	l.writerMu.Lock()
+	l.cutoff = out.sent + int64(ttl/2)
+	l.revoked = out.WriterLost
+	l.lossTimer = time.AfterFunc(time.Duration(l.cutoff-leaseClock()), l.expireWriter)
+	l.writerMu.Unlock()
 	if out.WriterLost != nil {
-		l.revoked.Store(&out.WriterLost)
 		go func() {
 			select {
 			case <-out.WriterLost:
 				l.fence()
-			case <-l.lost:
+			case <-l.WriterLost():
 			}
 		}()
 	}
@@ -296,29 +307,26 @@ func (l *lease) acquire(wait bool, contexts ...context.Context) error {
 			case <-l.stop:
 				t.Stop()
 				return
-			case <-l.c.ctx.Done():
+			case <-l.WriterLost():
 				t.Stop()
 				l.fence()
-				return
-			case <-l.lost:
-				t.Stop()
 				return
 			case <-t.C:
 			}
-			sent, previous := leaseClock(), l.cutoff.Load()
-			if sent >= previous || l.isFenced() {
-				l.fence()
+			l.writerMu.Lock()
+			sent, previous := leaseClock(), l.cutoff
+			valid := l.checkWriterLocked(sent) == nil
+			l.writerMu.Unlock()
+			if !valid {
 				return
 			}
-			ctx, cancel := context.WithTimeout(l.c.ctx, time.Duration(previous-sent))
+			ctx, cancel := context.WithTimeout(l.writer, time.Duration(previous-sent))
 			renewedTTL, err := l.c.backend.Renew(ctx, l.id, out.Lease)
 			cancel()
-			cutoff := sent + int64(ttl/2)
-			if err != nil || leaseDuration(renewedTTL) != ttl || leaseClock() >= min(previous, cutoff) {
+			if err != nil || leaseDuration(renewedTTL) != ttl || !l.extendWriter(sent+int64(ttl/2)) {
 				l.fence()
 				return
 			}
-			l.cutoff.Store(cutoff)
 			due = sent + int64(ttl/3)
 		}
 	}()
@@ -332,30 +340,57 @@ func leaseDuration(ms float64) time.Duration {
 }
 
 func (l *lease) CheckWriter() error {
-	if revoked := l.revoked.Load(); revoked != nil {
-		select {
-		case <-*revoked:
-			l.fence()
-		default:
-		}
+	l.writerMu.Lock()
+	defer l.writerMu.Unlock()
+	return l.checkWriterLocked(leaseClock())
+}
+
+func (l *lease) checkWriterLocked(now int64) error {
+	select {
+	case <-l.revoked:
+		l.fenceLocked()
+	default:
 	}
-	cutoff := l.cutoff.Load()
-	if l.isFenced() || cutoff != 0 && leaseClock() >= cutoff || l.c.ctx.Err() != nil {
-		l.fence()
+	if l.writer.Err() != nil || l.cutoff != 0 && now >= l.cutoff {
+		l.fenceLocked()
 		return api.ErrWriterLost
 	}
 	return nil
 }
 
-func (l *lease) WriterLost() <-chan struct{} { return l.lost }
-func (l *lease) fence()                      { l.lose.Do(func() { close(l.lost) }) }
+func (l *lease) extendWriter(cutoff int64) bool {
+	l.writerMu.Lock()
+	defer l.writerMu.Unlock()
+	now := leaseClock()
+	if now >= cutoff || l.checkWriterLocked(now) != nil {
+		return false // Neither a late reply nor an expired writer can renew.
+	}
+	l.cutoff = cutoff
+	return true
+}
 
-func (l *lease) isFenced() bool {
-	select {
-	case <-l.lost:
-		return true
-	default:
-		return false
+func (l *lease) expireWriter() {
+	l.writerMu.Lock()
+	defer l.writerMu.Unlock()
+	now := leaseClock()
+	if l.checkWriterLocked(now) == nil {
+		// A timely renewal moved the cutoff while this timer was pending.
+		l.lossTimer.Reset(time.Duration(l.cutoff - now))
+	}
+}
+
+func (l *lease) WriterLost() <-chan struct{} { return l.writer.Done() }
+
+func (l *lease) fence() {
+	l.writerMu.Lock()
+	defer l.writerMu.Unlock()
+	l.fenceLocked()
+}
+
+func (l *lease) fenceLocked() {
+	l.cancel()
+	if l.lossTimer != nil {
+		l.lossTimer.Stop()
 	}
 }
 func (l *lease) usable() error {
@@ -535,8 +570,9 @@ func (l *lease) save(parent context.Context, s api.Session, settling bool) error
 	if err := l.CheckWriter(); err != nil {
 		return err
 	}
-	writeCtx, cancel := context.WithTimeout(ctx, time.Duration(l.cutoff.Load()-leaseClock()))
-	defer cancel()
+	// The write remains bound to the current writer, not to the cutoff that
+	// happened to be in force when the write started.
+	writeCtx := trace.ContextWithSpanContext(l.writer, trace.SpanContextFromContext(ctx))
 	var err error
 	if revision != "" {
 		err = l.c.profileCall(writeCtx, "POST", path(l.id)+"/entries", appendBody(l.token, entries), nil, revision)
