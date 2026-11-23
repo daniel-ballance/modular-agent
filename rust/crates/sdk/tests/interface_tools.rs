@@ -204,9 +204,8 @@ async fn expiry_or_cancellation_closes_a_started_call_as_unknown() -> Result<()>
         let id = call["id"].as_str().unwrap();
         if cancel {
             session.cancel().await?;
-        } else {
-            continuation(&session, turn.turn_id.as_deref().unwrap()).await?;
         }
+        continuation(&session, turn.turn_id.as_deref().unwrap()).await?;
         assert_eq!(
             connection.report_tool_result(report(id, "late")).await?,
             Disposition::Refused

@@ -901,11 +901,14 @@ impl Session {
     /// Cancel the current turn and hand queued inputs back.
     pub async fn cancel(&self) -> Result<Vec<HandedBack>> {
         self.require("cancel")?;
-        Ok(self
-            .inner
-            .harness
-            .cancel(&self.id)
-            .await?
+        let returned = self.inner.harness.cancel(&self.id).await?;
+        // A cancellation can make a previously ended turn ready for its
+        // result-only continuation. Closing uses cancel directly, without
+        // starting another turn before detaching the session.
+        if self.inner.harness.has_interface_tools() {
+            self.drive();
+        }
+        Ok(returned
             .into_iter()
             .map(|i| HandedBack {
                 input_id: i.id,
