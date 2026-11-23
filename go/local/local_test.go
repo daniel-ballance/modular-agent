@@ -63,12 +63,12 @@ func TestShortCommandStreamsAllOutputBeforeReturning(t *testing.T) {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
 	env := local.NewAt(t.TempDir())
 	defer env.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
 	project := t.TempDir()
 	for i := 0; i < 40; i++ {
 		var streamed strings.Builder
-		result, err := env.Exec(ctx, project, "printf short", 0, func(chunk string) { streamed.WriteString(chunk) })
+		// Check that Exec drains output before returning, not how long all
+		// 40 namespace starts and registry commits take in total.
+		result, err := env.Exec(t.Context(), project, "printf short", 0, func(chunk string) { streamed.WriteString(chunk) })
 		if err != nil || result.Output != "short" || streamed.String() != "short" {
 			t.Fatalf("command %d: result=%q streamed=%q err=%v", i, result.Output, streamed.String(), err)
 		}
