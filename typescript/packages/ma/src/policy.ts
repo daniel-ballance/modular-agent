@@ -25,7 +25,7 @@ function list<T>(value: unknown, valid: (item: unknown) => item is T, name: stri
 }
 
 async function principal(value: unknown, name: string, network = false) {
-  const config = object(value, ["actor", "tenants", "projects", "represents", ...(network ? ["tokenFile"] : [])], name);
+  const config = object(value, ["actor", "tenants", "projects", "represents", ...(network ? ["tokenFile", "clientId"] : [])], name);
   const actor = object(config.actor, ["id", "kind", "rights"], `${name}.actor`);
   if (!id(actor.id) || !["host", "user", "agent", "program"].includes(String(actor.kind))) throw new Error(`Invalid ${name}.actor identity`);
   const allowed = list(actor.rights, (r): r is Actor["rights"][number] => rights.has(r), `${name}.actor.rights`);
@@ -44,11 +44,12 @@ async function principal(value: unknown, name: string, network = false) {
       } catch { throw new Error(`${name}.projects contains an unavailable directory: ${path}`); }
     })),
     tokenFile: config.tokenFile,
+    clientId: config.clientId,
   };
 }
 
-export async function loadPolicy(config: string, options: { policy?: string; listen?: string; tokenFile?: string }): Promise<{
-  stdio?: ServeAcpOptions; actors?: AcpActorToken[]; resourceReservations: ReservationOptions;
+export async function loadPolicy(config: string, options: { policy?: string; listen?: string; tokenFile?: string; agui?: boolean }): Promise<{
+  stdio?: ServeAcpOptions; actors?: (AcpActorToken & { clientId?: string })[]; resourceReservations: ReservationOptions;
 }> {
   const path = options.policy === undefined ? join(config, "policy.json") : resolve(options.policy);
   try {
@@ -58,14 +59,14 @@ export async function loadPolicy(config: string, options: { policy?: string; lis
     });
     const value = object(JSON.parse(data), ["stdio", "actors", "limits"], "policy");
     const stdio = value.stdio === undefined ? undefined : await principal(value.stdio, "stdio");
-    let actors: AcpActorToken[] | undefined;
+    let actors: (AcpActorToken & { clientId?: string })[] | undefined;
     if (value.actors !== undefined) {
       if (!Array.isArray(value.actors) || !value.actors.length) throw new Error("actors must be a nonempty list");
       if (options.listen && options.tokenFile !== undefined) throw new Error("actors and --token-file cannot be combined");
       const tokens = new Set<string>();
       actors = [];
       for (const [index, entry] of value.actors.entries()) {
-        const { tokenFile: name, ...scope } = await principal(entry, `actors[${index}]`, true);
+        const { tokenFile: name, clientId, ...scope } = await principal(entry, `actors[${index}]`, true);
         if (!id(name)) throw new Error(`actors[${index}].tokenFile is required`);
         const tokenFile = resolve(dirname(path), name);
         const info = await stat(tokenFile);
@@ -73,7 +74,8 @@ export async function loadPolicy(config: string, options: { policy?: string; lis
         const token = (await readFile(tokenFile, "utf8")).trim();
         if (Buffer.byteLength(token) < 16 || /[^\x21-\x7e]/.test(token) || tokens.has(token)) throw new Error("actors must use distinct valid tokens");
         tokens.add(token);
-        actors.push({ ...scope, tokenFile });
+        if ((options.agui || clientId !== undefined) && !id(clientId)) throw new Error(`actors[${index}].clientId must be a nonempty string`);
+        actors.push({ ...scope, tokenFile, ...(id(clientId) ? { clientId } : {}) });
       }
     }
     if (options.listen !== undefined && !actors && !options.tokenFile) throw new Error("--listen needs policy actors or --token-file");

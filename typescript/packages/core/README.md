@@ -114,6 +114,12 @@ Use `agent.connectInterfaceTools(sessionId, { actor, routeId, onHandoff, defer? 
 - Call `connection.reportInterfaceToolResult({ callId, status, content, value? })` after the originating turn ends. It returns `{ status: "accepted" }`, `{ status: "alreadySettled" }` or `{ status: "refused", reason?: "notReady" }`. An early report can be sent again after turn end. If result processing fails, the SDK commits a minimal result and raises the processing error. A report does not run a tool or grant authority.
 - Call `connection.disconnect()` when the connection ends. This clears the advertisement without settling the call. A new authenticated connection to the same actor and route may report without advertising, but it cannot receive the executable request again. No reconnect changes the deadline.
 
+### Proposed standard configuration text
+
+`docs/reference/standard-configuration.md` does not yet list `--agui`. Proposed text:
+
+> `--agui` serves the AG-UI HTTP and SSE binding on `--listen ADDR`. It requires a listener and never uses stdio. With `--acp`, the same listener accepts ACP WebSocket upgrades at `/`. `ma` prints the HTTP origin when ready. `ma` has no TLS options; bind to loopback. Use `--token-file FILE` for the local user with client ID `ma-local`, or supply policy `actors` with a nonempty `clientId` on every entry. Tokens that share a client ID must bind the same principal and scope. The operator's `--project` selects the AG-UI creation project; the single-user configuration creates sessions without a tenant.
+
 ### Telemetry context
 
 Plugin peers agree to per-operation context at initialize. ACP stdio accepts context from the launching peer; set `serveAcp({ traceTrusted: false })` to ignore it. An authenticated ACP WebSocket actor accepts it only when its token entry sets `traceTrusted: true`. The SDK carries trace context in history HTTP headers and MCP request metadata. It does not carry baggage or vendor state. Durable resume links a new span to the committed segment in the same trace. Forks omit the checkpoint and the starting context; raw plugin and ACP views keep the envelope but not the context.
