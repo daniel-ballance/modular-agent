@@ -76,6 +76,8 @@ only_lane_fixtures() {
 # The plan keeps the serial order. Each parallel worker follows only its own entries.
 plan() {
   local selection="$1" runtime binding language
+  local -a matrix_options=()
+  if $serial; then matrix_options+=(--serial); fi
   step setup "kits: npm ci (conformance/acp, conformance/tools)" bash -c 'npm ci --silent --prefix conformance/acp && npm ci --silent --prefix conformance/tools'
   if ! $quick; then
     step setup "kits: npm ci (conformance/telemetry)" npm ci --silent --prefix conformance/telemetry
@@ -132,7 +134,7 @@ plan() {
       step "$language" "ADR 0030 kits: $language ACP and history" scripts/production-kits.sh "$language"
     done
     if $all; then
-      step shared "ADR 0030: erasure across languages (12 pairings)" scripts/erasure-matrix.sh
+      step shared "ADR 0030: erasure across languages (12 pairings)" scripts/erasure-matrix.sh "${matrix_options[@]}"
     fi
   fi
   return 0
