@@ -5,10 +5,13 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+axum-core = "0.5"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 anyhow.workspace = true
 futures-util = { workspace = true, features = ["sink"] }
 tokio.workspace = true
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 # Tungstenite 0.30 traces the serialized upgrade, including Authorization.

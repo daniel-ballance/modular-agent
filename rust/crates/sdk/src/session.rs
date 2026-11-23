@@ -1268,7 +1268,7 @@ impl Session {
     }
 }
 
-fn input_turn(data: &base::SessionData, id: &str) -> Option<String> {
+pub(crate) fn input_turn(data: &base::SessionData, id: &str) -> Option<String> {
     data.entries
         .iter()
         .find(|e| {

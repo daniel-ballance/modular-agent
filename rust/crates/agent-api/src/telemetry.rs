@@ -57,6 +57,27 @@ pub fn extract(carrier: &Value) -> Option<Context> {
         .then(|| Context::new().with_remote_span_context(span))
 }
 
+/// Extract only operator-allowed vendor state alongside a valid remote parent.
+pub fn extract_allowed(carrier: &Value, keys: &[String]) -> Option<Context> {
+    let cx = extract(carrier)?;
+    let span = cx.span();
+    let sc = span.span_context();
+    let items = carrier["tracestate"]
+        .as_str()
+        .unwrap_or("")
+        .split(',')
+        .filter_map(|entry| entry.trim().split_once('='))
+        .filter(|(key, _)| keys.iter().any(|k| k == key));
+    let state = TraceState::from_key_value(items).unwrap_or_default();
+    Some(Context::new().with_remote_span_context(SpanContext::new(
+        sc.trace_id(),
+        sc.span_id(),
+        sc.trace_flags(),
+        true,
+        state,
+    )))
+}
+
 pub fn traceparent(cx: &Context) -> Option<String> {
     let span = cx.span();
     let sc = span.span_context();

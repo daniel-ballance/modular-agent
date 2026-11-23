@@ -15,6 +15,8 @@
 //! # Ok(()) }
 //! ```
 mod acp;
+mod agui;
+pub use agui::{AguiActor, AguiOptions, AguiServer, AguiState};
 mod agent;
 mod api_key;
 mod chatgpt;

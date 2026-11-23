@@ -148,6 +148,21 @@ impl InterfaceConnection {
         }
     }
 
+    /// Consume a staged delivery once. Never obtain a delivery ticket from history.
+    pub async fn release_next(&mut self) -> Result<Option<Value>> {
+        let Ok(id) = self.receiver.try_recv() else {
+            return Ok(None);
+        };
+        let h = self
+            .harness
+            .upgrade()
+            .ok_or_else(|| anyhow!("agent closed"))?;
+        h.release_interface_call(self, &id)
+            .await?
+            .map(Some)
+            .ok_or_else(|| anyhow!("staged delivery refused"))
+    }
+
     pub async fn report_tool_result(&self, report: Value) -> Result<InterfaceReportDisposition> {
         let h = self
             .harness
@@ -894,13 +909,18 @@ impl Harness {
                 return Ok(status);
             }
             let start = interface_start(&open.data, &handoff).unwrap();
-            self.commit_interface_result(
+            let result = self.commit_interface_result(
                 open,
                 &handoff,
                 &scope,
                 Draft::new("tool.result", true, json!(proposed))
                     .copying(vec![start.id.clone(), handoff.id.clone()]),
             )?;
+            // The result, not whichever driver happens to wake up, starts the continuation.
+            let cx = telemetry::current();
+            if telemetry::traceparent(&cx).is_some() {
+                open.input_contexts.insert(result.id, cx);
+            }
         }
         op.outcome("modular_agent.tool.status", wire::status(&proposed.status));
         self.interface_work_ready(&connection.session).await?;

@@ -6,6 +6,8 @@ license.workspace = true
 description = "Build agents from interchangeable parts. The Rust SDK, following docs/sdk."
 
 [dependencies]
+axum = { version = "0.8", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 transport-websocket = { path = "../transport-websocket" }
 agent-api.workspace = true
 agent-harness.workspace = true

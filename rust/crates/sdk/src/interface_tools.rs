@@ -20,6 +20,12 @@ impl InterfaceConnection {
         Ok(self.0.next_call().await?)
     }
 
+    /// Release the next staged handoff, if any, after rechecking its writer,
+    /// deadline, erasure, authority and exact recipient view.
+    pub async fn release_next(&mut self) -> Result<Option<Value>> {
+        Ok(self.0.release_next().await?)
+    }
+
     /// Report a completed or failed ToolResult after the originating turn ends.
     /// No dispatch is performed by this operation.
     pub async fn report_tool_result(&self, report: Value) -> Result<InterfaceReportDisposition> {
