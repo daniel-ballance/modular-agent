@@ -384,7 +384,7 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 	if o.agui {
 		actors := o.policy.Actors
 		if o.tokenFile != "" {
-			actors = []modular.ACPActor{{TokenFile: o.tokenFile, Actor: modular.LocalACPActor(), ClientID: "local"}}
+			actors = []modular.ACPActor{{TokenFile: o.tokenFile, Actor: modular.LocalACPActor(), ClientID: "ma-local"}}
 		}
 		service, err := a.ServeAGUI(ctx, modular.ServeAGUIOptions{Listen: o.listen, Actors: actors, ACP: o.acp})
 		if err != nil {

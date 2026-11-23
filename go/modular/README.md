@@ -140,9 +140,9 @@ With a state plugin, set `StatePlugin` and supply its current revision and JSON 
 
 ### Specification findings
 
-The [standard configuration](../../docs/reference/standard-configuration.md) does not list AG-UI. Proposed exact text for its options:
+None open. `--agui` is in the standard configuration.
 
-> `--agui`: Serve the AG-UI HTTP and SSE binding for the operator's project. Require `--listen ADDR` and either `--token-file FILE` or policy `actors`. Print the HTTP origin when ready. With `--acp`, serve ACP WebSocket upgrades on the same listener. For AG-UI each policy actor entry also requires a stable `clientId`. The single-token shorthand uses client ID `local`. As with ACP, ma serves cleartext only on loopback and has no TLS options.
+### Known gaps
 
 Core limits that matter for this binding:
 
