@@ -251,4 +251,6 @@ Each implementation passes:
 - the [AG-UI kit](../../conformance/agui/README.md) against `ma --agui --listen`, including the thread listing;
 - its own tests, including that it depends only on its SDK's public API.
 
+The reference check `resume-open` starts a durable scripted turn under `ma --agui --listen`, kills `ma` with `SIGKILL` during a tool call, restarts it with `--resume-open`, and checks that the turn finishes and its effect happens once without any client connecting; without the option, the turn stays interrupted until a client opens the session.
+
 The reference check `telemetry-export` runs a scripted turn without endpoints and checks that it sends nothing to the default OTLP endpoint. The check uses a private network namespace for this assertion and skips only this assertion if it cannot create one. With a loopback endpoint and always-on sampler, check the invocation and inference spans, `gen_ai.agent.name=ma` and no content, and check the configured `service.name` on the OTLP resource as the receiver gets it; a backend's span query may not return resource attributes. Repeat with `OTEL_SDK_DISABLED=true`; export stops and the declaration stays the same.
