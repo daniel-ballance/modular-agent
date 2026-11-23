@@ -37,7 +37,7 @@ impl std::fmt::Display for TurnLimit {
 impl std::error::Error for TurnLimit {}
 
 pub fn registration(durable: bool) -> Value {
-    json!({"id": if durable {"durable"} else {"transient"},"supports":{"inputDuringTurn":true,"waitingThroughRestart":durable,"continuesAfterRestart":durable,"rewinding":false}})
+    json!({"id": if durable {"durable"} else {"transient"},"supports":{"inputDuringTurn":true,"waitingThroughRestart":durable,"continuesAfterRestart":durable,"interfaceTools":true,"rewinding":false}})
 }
 
 pub async fn run(host: &dyn Host, method: &str, p: Value, durable: bool) -> Result<Value> {
@@ -190,8 +190,10 @@ fn validate_resume(p: &Value, old: &[Value]) -> Result<Option<(Value, Value)>> {
         {
             let id = wire::string(call, "id")?;
             if old.iter().any(|e| {
-                matches!(e["kind"].as_str(), Some("toolResult" | "toolPending"))
-                    && e["toolCallId"] == id
+                matches!(
+                    e["kind"].as_str(),
+                    Some("toolResult" | "toolPending" | INTERFACE_HANDOFF)
+                ) && e["toolCallId"] == id
             }) {
                 continue;
             }
@@ -402,7 +404,10 @@ impl Turn<'_> {
             {
                 bail!("Cannot establish whether an interrupted model request was safe to repeat");
             }
-            for pending in old.iter().filter(|e| e["kind"] == "toolPending") {
+            for pending in old
+                .iter()
+                .filter(|e| e["kind"] == "toolPending" || e["kind"] == INTERFACE_HANDOFF)
+            {
                 if let Some(id) = pending["toolCallId"].as_str()
                     && !settled.contains(id)
                 {
