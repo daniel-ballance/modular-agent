@@ -208,7 +208,7 @@ async fn expiry_or_cancellation_closes_a_started_call_as_unknown() -> Result<()>
         continuation(&session, turn.turn_id.as_deref().unwrap()).await?;
         assert_eq!(
             connection.report_tool_result(report(id, "late")).await?,
-            Disposition::Refused
+            Disposition::Refused { reason: None }
         );
         let rows = session.history().await?;
         let result = entry(&rows, "toolResult");
@@ -502,7 +502,7 @@ async fn erasing_arguments_invalidates_a_staged_call_and_accounts_for_the_copy()
             .report_tool_result(report(id, "invalidated"))
             .await
             .expect("refuse the erased call"),
-        Disposition::Refused
+        Disposition::Refused { reason: None }
     );
     session.wait_idle().await.expect("no erased continuation");
     let rows = session.history().await.expect("history remains available");
@@ -582,7 +582,9 @@ async fn a_report_is_not_ready_until_the_origin_ends_and_rights_are_current() ->
         connection
             .report_tool_result(report(id, "too early"))
             .await?,
-        Disposition::Refused
+        Disposition::Refused {
+            reason: Some("notReady")
+        }
     );
     release.notify_one();
     assert_eq!(turn.await.unwrap()?.open_tool_calls, vec![id]);
@@ -591,7 +593,7 @@ async fn a_report_is_not_ready_until_the_origin_ends_and_rights_are_current() ->
         connection
             .report_tool_result(report(id, "no rights"))
             .await?,
-        Disposition::Refused
+        Disposition::Refused { reason: None }
     );
     agent.close().await
 }
