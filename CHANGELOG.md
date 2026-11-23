@@ -2,6 +2,12 @@
 
 The four SDKs share one version, the revision of the [SDK specification](docs/sdk/README.md). Nothing is published to a registry; a version names a commit on `main`.
 
+## Unreleased
+
+- **OpenTelemetry tracing in all four SDKs and `ma`** ([ADR 0032](docs/adr/0032-telemetry.md), [profile](docs/telemetry.md), declared as `telemetry: 1`). The Harness records spans for turns, steps, model attempts, tool calls, jobs, questions, history commits, lease renewals and capacity waits, following the OpenTelemetry GenAI conventions, through each language's OpenTelemetry API; nothing is exported until an app installs an exporter. Trace context crosses plugins in other processes (once both sides agree in the handshake), ACP, history HTTP and MCP, and a durable turn resumed after a crash continues its trace. Version 1 records no content. `ma` exports through the standard `OTEL_*` variables, off unless an endpoint is set. A shared check, `conformance/telemetry/`, receives each language's real exports and compares them with the profile: 104 cases across the four languages as hosts and plugins, all passed. `scripts/phoenix.sh` starts a local Arize Phoenix to look at traces.
+- **The first Claude request is quick.** The Claude program reported readiness only after reading every model's context window, which took about 12 s; it now answers once Claude Code confirms the account. Rust asks the program, as Go does, instead of running `claude auth status`. Python no longer starts Claude Code every minute to recheck. An unavailable Claude reports why over the plugin binding.
+- **The history service's writer lease is 15 seconds by default,** set with `leaseTtl` in every SDK. The TypeScript services refuse settings they do not recognise.
+
 ## 0.1.0
 
 The first release, for developers to try, on Linux and on macOS (Apple silicon). Nothing is published to a package registry; build from this tag.

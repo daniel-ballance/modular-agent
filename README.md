@@ -112,7 +112,7 @@ Each SDK's README lists its own gaps.
 
 ## Planned for 0.2.0
 
-- **OpenTelemetry, metadata only** ([profile](docs/telemetry.md), [ADR 0032](docs/adr/0032-telemetry.md)). Trace context carried by every binding (to plugins in other processes once both sides agree in the handshake) and kept with each turn, so a trace survives a restart; the Harness instrumented through each language's OpenTelemetry API, which does nothing until an app installs an exporter; one span profile for all four languages. Content capture and deeper tracing follow in later profile versions.
+- **OpenTelemetry, metadata only:** done, see the [CHANGELOG](CHANGELOG.md). Content capture and deeper tracing follow in later [profile versions](docs/telemetry.md#what-later-versions-add).
 - **AG-UI.** A web Interface, after the Harness gains tools run by a client and a rule for history a client sends.
 - **A demonstration host** in `demos/`: one conversation, one inbox and one listener across two agents, to test what the framework must give an application that drives agents. The host itself stays outside the specification ([ADR 0012](docs/adr/0012-one-agent-is-the-scope.md)); see [Agent platform 2027](docs/research/agent-platform-2027.md) for the ideas it tests.
 - **Faster local checks.** The full `scripts/check.sh` takes about 70 minutes, one step at a time. Run the four languages in parallel lanes, after the tests that fail under load are fixed at their cause, and run tests within each suite in parallel where they share no state: pytest-xdist for Python, and Rust tests without `--test-threads=1`. `--quick` (about 10 minutes) stays the everyday check.
