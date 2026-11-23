@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from typing import Any, cast
 from uuid import uuid4
 
@@ -29,6 +30,7 @@ class Exchange:
         self.lost = False
         self.turn: str | None = None
         self.origin: str | None = None
+        self.unwatch: Callable[[], None] | None = None
         self.input_id: str | None = None
         self.steps: set[str] = set()
         self.resumed_step: str | None = None
@@ -195,6 +197,8 @@ class Exchange:
                 await self.response.write(b"data: " + encode(err) + b"\n\n")
         finally:
             detach()
+            if self.unwatch:
+                self.unwatch()
             while not self.queue.empty():
                 h.capacity.release(self.queue.get_nowait()[1])
             if self.route in h.capabilities["questions"][1].route_eligibility:
@@ -280,6 +284,14 @@ class Exchange:
             origin = origins.pop()
             if origin in ended:
                 self.origin = origin
+
+                def refused() -> None:
+                    if self.queue.full():
+                        self.lost = True
+                    else:
+                        self.queue.put_nowait(({"kind": "continuation_busy"}, None))
+
+                self.unwatch = v.h.watch_continuation(v.sid, origin, refused)
                 require(
                     not any(
                         continuation_origin(e) == origin
@@ -430,6 +442,8 @@ class Exchange:
         v = self.v
         kind = d["kind"]
         e = d.get("entry", {})
+        if kind == "continuation_busy":
+            raise Failure("busy")
         if kind == "state_invalidated":
             await self.refresh_state()
             return

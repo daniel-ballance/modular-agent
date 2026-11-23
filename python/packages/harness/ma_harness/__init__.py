@@ -56,6 +56,7 @@ class Harness(Authority, Erasure, InterfaceTools):
         self.followers = []
         self.delivery_observers = {}
         self.output_streams = {}
+        self.continuation_waiters = {}
         self.erasure_locks = {}
         self.capacity = Reservations(reservations)
         self.trace = []
@@ -285,6 +286,18 @@ class Harness(Authority, Erasure, InterfaceTools):
 
     def follow(self, owner, recipient, handler):
         self.followers.append((owner, recipient, handler))
+
+    def watch_continuation(self, sid, origin, refused):
+        key = sid, origin
+        waiters = self.continuation_waiters.setdefault(key, set())
+        waiters.add(refused)
+
+        def detach():
+            waiters.discard(refused)
+            if not waiters:
+                self.continuation_waiters.pop(key, None)
+
+        return detach
 
     def observe_delivery(self, owner, recipient, include, observe):
         """Trusted binding: observe a gated delivery or its loss, scoped before gating.
@@ -702,7 +715,16 @@ class Harness(Authority, Erasure, InterfaceTools):
         if sid in self.sessions:
             await self._assert_writable(sid)
         response = next(((sid, e.get("step")) for e in entries if e["kind"] == "response"), None)
-        charged = self.capacity.stage(session, entries, response=response)
+        try:
+            charged = self.capacity.stage(session, entries, response=response)
+        except AgentError as exc:
+            if exc.code == "busy":
+                for entry in entries:
+                    if entry["kind"] == "turn_start":
+                        origin = (entry["data"].get("source") or {}).get("continuesTurnId")
+                        for notify in self.continuation_waiters.get((sid, origin), ()):
+                            notify()
+            raise
         if "history" in self.capabilities:
             cancellation = await self._commit(sid, session, entries)
         self.capacity.finish(sid, session.get("tenant"), charged, response=response)
