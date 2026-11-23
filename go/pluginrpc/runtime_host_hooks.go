@@ -41,7 +41,7 @@ func (w *runtimeWork) hook(ctx context.Context, hook string, p object) (any, err
 		return nil, err
 	case "turn.end":
 		o := outcomeIn(p)
-		if (!w.boundary() || w.resultRefused) && o.Status == "completed" {
+		if o.Status == "completed" && (!w.boundary() || w.resultRefused || !w.validInterfaceOpen(o)) {
 			return nil, fault("invalid_request", "turn.end is outside a settlement boundary")
 		}
 		w.applyOutcome(&o)

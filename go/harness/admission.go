@@ -184,7 +184,18 @@ func (c *client) WithdrawProposal(ctx context.Context, id, input, who string) er
 }
 
 func turnAdmission(s api.Session, start api.Entry) api.Input {
-	id := api.Decode[api.TurnStart](start.Data).Input
+	draft := api.Decode[api.TurnStart](start.Data)
+	id := draft.Input
+	if id == "" && draft.ContinuesTurn != "" {
+		for _, origin := range s.Branch() {
+			if origin.ID == start.ID {
+				break
+			}
+			if origin.Kind == "turn.start" && origin.Turn == draft.ContinuesTurn {
+				return turnAdmission(s, origin)
+			}
+		}
+	}
 	for _, e := range s.Branch() {
 		if e.Kind == "input" && e.Turn == start.Turn {
 			id = e.InputID()
@@ -206,6 +217,14 @@ func turnAdmission(s api.Session, start api.Entry) api.Input {
 }
 
 func (p *turnPorts) canRunTools(actor string) bool {
+	return p.checkTools(actor, func(who string) bool { return p.c.Authorize(p.s.id, who, "tools") })
+}
+
+func (p *turnPorts) canRunToolsLocked(actor string) bool {
+	return p.checkTools(actor, func(who string) bool { return p.c.authorized(p.s.data, who, "tools") })
+}
+
+func (p *turnPorts) checkTools(actor string, allowed func(string) bool) bool {
 	if p.input.ConnectionRights != nil && !slices.Contains(*p.input.ConnectionRights, "tools") {
 		return false
 	}
@@ -213,7 +232,7 @@ func (p *turnPorts) canRunTools(actor string) bool {
 		return false
 	}
 	for _, who := range []string{actor, p.input.Actor, p.input.ReleasedBy, p.input.ViaActor} {
-		if who != "" && !p.c.Authorize(p.s.id, who, "tools") {
+		if who != "" && !allowed(who) {
 			return false
 		}
 	}

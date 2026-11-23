@@ -26,7 +26,7 @@ type BoundPorts interface {
 }
 
 func (r *Runner) Declaration() api.RuntimeDeclaration {
-	return api.RuntimeDeclaration{Durable: r.Durable, Steering: true, Parallel: true, WaitingThroughRestart: r.Durable, NestedToolCalls: true}
+	return api.RuntimeDeclaration{Durable: r.Durable, Steering: true, Parallel: true, WaitingThroughRestart: r.Durable, NestedToolCalls: true, InterfaceTools: true}
 }
 
 type Start = api.TurnStart
@@ -70,7 +70,10 @@ func (r *Runner) Run(ctx context.Context, t api.Turn) (out api.Outcome) {
 			_, _ = t.IO.Hook(context.WithoutCancel(turnCtx), "runtime.turn.end", out)
 			return
 		}
-		_, err := t.IO.Record(context.WithoutCancel(turnCtx), api.Entry{Kind: "turn.end", Copies: produced, Data: api.JSON(out)})
+		end, err := t.IO.Record(context.WithoutCancel(turnCtx), api.Entry{Kind: "turn.end", Copies: produced, Data: api.JSON(out)})
+		if err == nil {
+			out = api.Decode[api.Outcome](end.Data)
+		}
 		if err != nil {
 			out.Status = "failed"
 			out.Error = err.Error()
@@ -471,6 +474,9 @@ func (r *Runner) Run(ctx context.Context, t api.Turn) (out api.Outcome) {
 				out.Open = open
 				return fail(errors.New(state.Refused))
 			}
+		}
+		if pruner, ok := t.IO.(interface{ PruneSettledInterfaceCalls([]api.Call) []api.Call }); ok {
+			open = pruner.PruneSettledInterfaceCalls(open)
 		}
 		if len(open) > 0 {
 			out.Status = "completed"

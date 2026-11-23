@@ -17,6 +17,7 @@ type pending struct {
 	entry                  string
 	started, settled, open bool
 	recoveredStart, ran    bool
+	interfacePending       bool
 	safeToRepeat           *bool
 	result                 *api.ToolResult
 }
@@ -100,6 +101,10 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 						}
 					}
 				}
+			case api.InterfaceHandoffKind:
+				if !isBound && t.Resume {
+					batch[i].interfacePending = true
+				}
 			case "tool.open":
 				if !isBound {
 					batch[i].started = false
@@ -121,7 +126,7 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 		}
 		// A refusal, cancellation or other failed check on recovery does
 		// not tell us what happened during the original execution.
-		if p.recoveredStart && (!p.ran || p.result != nil && (p.result.Status == "refused" || p.result.NotDispatched)) {
+		if p.recoveredStart && !p.interfacePending && (!p.ran || p.result != nil && (p.result.Status == "refused" || p.result.NotDispatched)) {
 			p.open = false
 			p.result = &api.ToolResult{Status: "unknown", Content: api.Text(interrupted)}
 		}
@@ -137,7 +142,7 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 		}
 		if p.open || (p.result != nil && p.result.Status == "open") {
 			p.open = true
-			if isBound {
+			if isBound || p.interfacePending {
 				p.settled = true
 				return nil
 			}
@@ -238,6 +243,10 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 		}
 		launched := false
 		switch {
+		case p.interfacePending:
+			p.open = !repair
+			p.settled = true
+			continue
 		case repair:
 			continue
 		case ctx.Err() != nil:
@@ -275,6 +284,16 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 			if check.Validate != nil {
 				if err := check.Validate(check.Call); err != nil {
 					p.result = &api.ToolResult{Status: "refused", Content: api.Text(err.Error())}
+					break
+				}
+			}
+			if port, ok := t.IO.(api.InterfaceDispatch); ok {
+				if result, handled := port.DispatchInterface(ctx, check.Call, p.entry, check.Validate); handled {
+					if result.Status == "interfacePending" {
+						p.open, p.interfacePending, p.ran = true, true, true
+					} else {
+						p.result = &result
+					}
 					break
 				}
 			}

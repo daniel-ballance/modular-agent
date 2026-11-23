@@ -73,6 +73,7 @@ type options struct {
 	providerAliases                         map[string]string
 	plugins                                 []Plugin
 	tools                                   []Tool
+	interfaceTools                          []harness.InterfaceSource
 	process                                 []ProcessPlugin
 	services                                []ServicePlugin
 	wire                                    []wirePlugin
@@ -487,6 +488,9 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	a.erasure = a.erasure && a.a.(interface{ SupportsErasure() bool }).SupportsErasure()
 	selectedRuntime, err := a.a.Get("runtime")
 	if err != nil {
+		return nil, appError(err, InvalidComposition)
+	}
+	if err := h.RegisterInterfaceTools(o.interfaceTools); err != nil {
 		return nil, appError(err, InvalidComposition)
 	}
 	continues := selectedRuntime.(Runtime).Declaration().Durable

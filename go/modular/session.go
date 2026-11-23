@@ -482,11 +482,14 @@ func (s *Session) Cancel(ctx context.Context) ([]InputReceipt, error) {
 	if err != nil {
 		return nil, appError(err, NotOpen)
 	}
-	if !busy {
+	if !busy && !s.agent.h.SupportsInterfaceTools() {
 		return nil, nil
 	}
 	if err := s.agent.a.CancelAs(ctx, s.id); err != nil {
 		return nil, appError(err, Forbidden)
+	}
+	if !busy {
+		return nil, nil
 	}
 	out, err := s.agent.a.Wait(ctx, s.id)
 	if err != nil {

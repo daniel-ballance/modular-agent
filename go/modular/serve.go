@@ -129,7 +129,7 @@ func servePlugin(plugin Plugin, run func(*pluginrpc.Server) error) error {
 		if r.runtime != nil {
 			d := r.runtime.Declaration()
 			reg.Runtime = &pluginrpc.RuntimeRegistration{ID: plugin.Name, Supports: pluginrpc.RuntimeSupports{
-				InputDuringTurn: d.Steering, WaitingThroughRestart: d.WaitingThroughRestart, ContinuesAfterRestart: d.Durable,
+				InputDuringTurn: d.Steering, WaitingThroughRestart: d.WaitingThroughRestart, ContinuesAfterRestart: d.Durable, InterfaceTools: d.InterfaceTools,
 			}}
 			server.Runtime = r.runtime
 		}

@@ -129,7 +129,7 @@ type storedQuestion struct {
 func EntryWithoutTrace(e api.Entry) map[string]any {
 	v := Entry(e)
 	switch e.Kind {
-	case telemetry.TurnTrace:
+	case telemetry.TurnTrace, api.InterfaceHandoffKind:
 		delete(v, "data")
 	case "turn.start":
 		delete(asObject(v["data"]), "traceContext")
@@ -289,7 +289,7 @@ func Entry(e api.Entry) map[string]any {
 		if boolean(d, "recovery") {
 			delete(msg, "usage")
 		}
-	case "tool.open":
+	case "tool.open", api.InterfaceHandoffKind:
 		d = asObject(e.Data)
 	case "tool.started":
 		set(d, "point", e.Point, e.Point != "")
@@ -564,7 +564,7 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 	case "model":
 		r := responseIn(msg)
 		e.Data = api.JSON(responseData{r.Stop, r.Usage, r.Wire})
-	case "tool.open":
+	case "tool.open", api.InterfaceHandoffKind:
 		e.Data = api.JSON(d)
 	case "tool.started":
 		c := callIn(asObject(d["call"]))

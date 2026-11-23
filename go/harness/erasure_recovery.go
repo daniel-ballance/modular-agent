@@ -79,6 +79,7 @@ func settleForErasure(row api.Session) api.Session {
 	}
 	live := row
 	live.Entries = row.LiveEntries()
+	handoffs := api.InterfaceHandoffs(row)
 	for _, call := range api.OpenCalls(live) {
 		status := "not_started"
 		if startedCalls[call.ID] {
@@ -86,7 +87,15 @@ func settleForErasure(row api.Session) api.Session {
 		}
 		ref := refs[call.ID]
 		r := api.ToolResult{Call: call.ID, Name: call.Name, Status: status, Content: api.Text(reason)}
-		add(api.Entry{Kind: "tool.result", Turn: ref.turn, Step: ref.step, Call: call.ID, Actor: ref.actor, Data: api.JSON(r), Content: r.Content})
+		e := api.Entry{Kind: "tool.result", Turn: ref.turn, Step: ref.step, Call: call.ID, Actor: ref.actor, Data: api.JSON(r), Content: r.Content}
+		if cp := handoffs[call.ID]; cp.ID != "" {
+			e.Turn, e.Step = cp.Turn, cp.Step
+			e.Copies = []string{cp.Parent, cp.ID}
+			add(e)
+			next.Entries[len(next.Entries)-1].Actor = ""
+		} else {
+			add(e)
+		}
 	}
 	for _, e := range row.LiveEntries() {
 		if e.Kind == "turn.start" && !settledTurns[e.Turn] {

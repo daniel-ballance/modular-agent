@@ -16,7 +16,7 @@ func newRuntimeWork(t api.Turn) *runtimeWork {
 
 func reservedRuntimeKind(kind string) bool {
 	switch kind {
-	case "model", "model.request", "tool.call", "tool.open", "tool.started", "tool.result", "turn.start", "turn.end", "step.start", "step.end", "input.accepted", "input.returned", "input.withdrawn", "plugins.set", "actor.set", "actor.left", "question.open", "question.answer", "job.start", "job.end", "resultFeedback", portable.StepAfterKind, "modular-agent.turnTrace", "modular-agent.disclosure":
+	case "model", "model.request", "tool.call", "tool.open", "tool.started", "tool.result", "turn.start", "turn.end", "step.start", "step.end", "input.accepted", "input.returned", "input.withdrawn", "plugins.set", "actor.set", "actor.left", "question.open", "question.answer", "job.start", "job.end", "resultFeedback", portable.StepAfterKind, api.InterfaceHandoffKind, "modular-agent.turnTrace", "modular-agent.disclosure":
 		return true
 	}
 	return false
@@ -230,6 +230,29 @@ func (w *runtimeWork) runTool(ctx context.Context, submitted api.Call) (any, err
 		return nil, err
 	}
 	c = check.Call
+	if dispatch, ok := w.turn.IO.(interface {
+		api.InterfaceDispatch
+		IsInterfaceTool(string) bool
+	}); ok && w.interfaceTools && dispatch.IsInterfaceTool(c.Name) {
+		w.ran[c.ID] = true
+		dispatchCtx := w.traceStep(ctx, c.Step)
+		w.mu.Unlock()
+		result, handled := dispatch.DispatchInterface(dispatchCtx, c, "", check.Validate)
+		w.mu.Lock()
+		if handled {
+			defer w.mu.Unlock()
+			if result.ProcessingError != nil {
+				return nil, result.ProcessingError
+			}
+			if result.Status == "interfacePending" {
+				w.pending[c.ID] = true
+				return object{"callId": c.ID, "pending": "waiting for an Interface result"}, nil
+			}
+			out, err := w.settleTool(context.WithoutCancel(ctx), c, result)
+			return resultOut(out), err
+		}
+		delete(w.ran, c.ID)
+	}
 	repeat := def.SafeRepeat && w.turn.CanRepeat
 	data := object{"definition": definitionValue(def)}
 	if registration != nil {

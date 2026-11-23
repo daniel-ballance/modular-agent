@@ -99,7 +99,7 @@ func (c *client) eraseRemote(ctx context.Context, store api.Store, remote api.Re
 		if source.pendingStore != nil {
 			return os.ErrNotExist
 		}
-		if source.running || unfinished(source.data) || len(source.commandCancels) != 0 {
+		if source.running || unfinishedBesidesInterfaces(source.data) || len(source.commandCancels) != 0 {
 			return api.ErrErasureBusy
 		}
 		if err := source.checkWriterLocked(); err != nil {
@@ -169,10 +169,15 @@ func (c *client) eraseRemote(ctx context.Context, store api.Store, remote api.Re
 			return report, api.ErrErasureUnavailable
 		}
 		if !exists || id != source.id && !c.authorizedBy(row, ctx, "watch") {
-			report.OutOfReach = []string{"copies in other sessions"}
+			if !slices.Contains(report.OutOfReach, "copies in other sessions") {
+				report.OutOfReach = append(report.OutOfReach, "copies in other sessions")
+			}
 			continue
 		}
 		for _, copy := range plans[i].Copies {
+			if affectedInterfaceCopy(row, copy.ID) && !slices.Contains(report.OutOfReach, interfaceCopyNotice) {
+				report.OutOfReach = append(report.OutOfReach, interfaceCopyNotice)
+			}
 			if copy.Complete {
 				report.ErasedPairs = append(report.ErasedPairs, copy.EntryPair)
 			} else {

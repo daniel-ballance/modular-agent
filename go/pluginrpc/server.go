@@ -821,7 +821,7 @@ func conformanceServer(serviceState string) *Server {
 			if d {
 				name = "durable"
 			}
-			s.Registration.Runtime = &RuntimeRegistration{ID: name, Supports: RuntimeSupports{InputDuringTurn: true, WaitingThroughRestart: d, ContinuesAfterRestart: d}}
+			s.Registration.Runtime = &RuntimeRegistration{ID: name, Supports: RuntimeSupports{InputDuringTurn: true, WaitingThroughRestart: d, ContinuesAfterRestart: d, InterfaceTools: s.Runtime.Declaration().InterfaceTools}}
 			s.Registration.Replaces = append(s.Registration.Replaces, "runtime")
 		}
 		if chosen["provider"] {

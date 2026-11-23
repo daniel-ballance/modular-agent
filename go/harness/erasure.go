@@ -113,7 +113,7 @@ func (c *client) EraseDetails(ctx context.Context, id string, ids []string) (api
 		if source.pendingStore != nil {
 			return os.ErrNotExist
 		}
-		if source.running || unfinished(source.data) || len(source.commandCancels) != 0 {
+		if source.running || unfinishedBesidesInterfaces(source.data) || len(source.commandCancels) != 0 {
 			return api.ErrErasureBusy
 		}
 		if err := source.checkWriterLocked(); err != nil {
@@ -199,6 +199,12 @@ func (c *client) EraseDetails(ctx context.Context, id string, ids []string) (api
 		case !visible[copy.SessionID]:
 			report.OutOfReach = append(report.OutOfReach, "copies in other sessions")
 		case copy.Complete:
+			for _, row := range rows {
+				if row.ID == copy.SessionID && affectedInterfaceCopy(row, copy.ID) {
+					report.OutOfReach = append(report.OutOfReach, interfaceCopyNotice)
+					break
+				}
+			}
 			report.ErasedPairs = append(report.ErasedPairs, copy.EntryPair)
 		default:
 			report.PendingPairs = append(report.PendingPairs, copy.EntryPair)

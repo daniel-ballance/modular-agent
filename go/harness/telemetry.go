@@ -53,6 +53,10 @@ func (h *Harness) runTraced(ctx context.Context, p *turnPorts, t api.Turn, resum
 		} else {
 			options = append(options, trace.WithNewRoot())
 		}
+	} else if p.input.Continuation != "" {
+		if sc := savedTurn(snap, p.input.Continuation); sc.IsValid() {
+			options = append(options, trace.WithLinks(trace.Link{SpanContext: sc}))
+		}
 	} else if len(p.input.Calls) != 0 {
 		for _, e := range snap.Branch() {
 			if e.Kind == "turn.end" && e.Turn != "" {
@@ -85,7 +89,7 @@ func (h *Harness) runTraced(ctx context.Context, p *turnPorts, t api.Turn, resum
 		}
 		span.End()
 	}()
-	if w := telemetry.Own(parent, span); w != nil && (h.deferHistory || runtime.Declaration().Durable) {
+	if w := telemetry.Own(parent, span); w != nil && (h.deferHistory || runtime.Declaration().Durable || h.SupportsInterfaceTools()) {
 		ctx = context.WithValue(ctx, turnWireKey{}, w)
 		if resume != nil {
 			p.s.mu.Lock()

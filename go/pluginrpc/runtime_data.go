@@ -14,6 +14,7 @@ type RuntimeSupports struct {
 	InputDuringTurn       bool `json:"inputDuringTurn"`
 	WaitingThroughRestart bool `json:"waitingThroughRestart"`
 	ContinuesAfterRestart bool `json:"continuesAfterRestart"`
+	InterfaceTools        bool `json:"interfaceTools,omitempty"`
 }
 
 func objects(v any) []object {

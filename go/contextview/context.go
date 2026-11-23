@@ -158,6 +158,7 @@ func forProvider(branch []api.Entry, provider string) ([]api.Message, []string) 
 func messages(entries, branch []api.Entry, provider string) ([]api.Message, []string) {
 	var out []api.Message
 	var sources []string
+	entries = orderInterfaceResults(entries, branch)
 	// A late exchange cannot be sent as an unpaired vendor tool call. Render
 	// waiting calls and their later results as text in the model view only.
 	late := map[string]bool{}

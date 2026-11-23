@@ -54,6 +54,9 @@ func cleanResult(outcome object) {
 
 // PublicEntry projects a raw entry for Interface recipients, not for storage.
 func PublicEntry(e api.Entry) api.Entry {
+	if e.Kind == api.InterfaceHandoffKind {
+		e.Data, e.Wire = nil, nil
+	}
 	e.Content = PublicContent(e.Content)
 	if e.Kind == "model" {
 		d := obj(e.Data)
