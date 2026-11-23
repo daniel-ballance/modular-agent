@@ -179,18 +179,19 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         for row in rows:
             if not self._project_allowed(Path(row["project"])):
                 continue
-            if self._compose is None and Path(row["project"]) != self._agent._project:
-                continue
-            owner = self._connections.composition(row["id"]) if self._connections else None
-            session = (owner or agent)._h.sessions.get(row["id"])
-            if session is None:
-                session = await agent._api.call("history", "read", {"session": row["id"]})
-            if (
-                session is not None
-                and self._scope_allows(session)
-                and agent._h.can_open(session, self.actor, local=not self.network)
-            ):
-                visible.append(row)
+            sid = row["id"]
+            owner = self._agents.get(sid)
+            if owner is None and self._connections is not None:
+                owner = self._connections.composition(sid)
+            summary = await (owner or agent).session_summary(
+                sid,
+                actor=self.actor,
+                local=not self.network,
+                represents=self.represents,
+                approval_views={qid for session, qid in self.approval_views if session == sid},
+            )
+            if summary is not None:
+                visible.append({**row, "waiting": summary["waiting"]})
         return visible
 
     async def require_visible_session(self, project: str | None, sid: str) -> None:

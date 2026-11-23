@@ -652,7 +652,14 @@ class ACP(Plugin):
             raise acp.RequestError.invalid_params({"reason": "Listing has one complete page"})
         rows = {r["id"]: r for r in await self.visible_sessions(cwd)}
         return s.ListSessionsResponse(
-            sessions=[s.SessionInfo(session_id=r["id"], cwd=r["project"]) for r in rows.values()]
+            sessions=[
+                s.SessionInfo(
+                    session_id=r["id"],
+                    cwd=r["project"],
+                    field_meta={NAMESPACE: {"waiting": r["waiting"]}} if "waiting" in r else None,
+                )
+                for r in rows.values()
+            ]
         )
 
     @rpc

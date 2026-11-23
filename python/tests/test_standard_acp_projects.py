@@ -45,6 +45,17 @@ async def test_acp_serves_two_projects_and_reopens_only_in_the_saved_project(tmp
             second = (await conn.new_session(cwd=str(other), mcp_servers=[])).session_id
             for sid in (first, second):
                 assert (await prompt(conn, sid, "one")).stop_reason == "end_turn"
+            [row] = (await conn.list_sessions(cwd=str(other))).sessions
+            assert row.session_id == second
+            assert row.field_meta == {
+                "modular-agent": {
+                    "waiting": {
+                        "questions": 0,
+                        "toolCalls": 0,
+                        "turn": "none",
+                    }
+                }
+            }
             with pytest.raises(acp.RequestError):
                 await conn.load_session(cwd=str(other), session_id=first, mcp_servers=[])
             await conn.close_session(session_id=first)
