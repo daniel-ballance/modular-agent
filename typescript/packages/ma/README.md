@@ -24,7 +24,11 @@ ma -p 'Summarize the files in this folder.'
 ma -c                          # continue the last session in this folder
 ma --acp                       # ACP over stdio
 ma --acp --listen 127.0.0.1:7401 --token-file /path/to/token  # ACP over WebSocket
+ma --agui --listen 127.0.0.1:7401 --token-file /path/to/token # AG-UI over HTTP and SSE
+ma --agui --acp --listen 127.0.0.1:7401 --policy /path/to/policy.json
 ```
+
+With `--agui`, ma prints the HTTP origin. Send authorized requests to `/agui/v1`. Add `--acp` for ACP on the same port. Policy actors need a stable `clientId`; the single-token shorthand uses `ma-local`. The AG-UI creation project is the operator's project. See [Serving AG-UI](../core/README.md#serving-ag-ui) for the SDK and the proposed standard configuration text.
 
 The WebSocket listener requires a loopback address and an owner-only bearer token file. It acts as `ma`'s local ACP user, irrespective of `MODULAR_AGENT_ACTOR`.
 
