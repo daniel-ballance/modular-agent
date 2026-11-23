@@ -20,39 +20,44 @@ import (
 )
 
 type session struct {
-	jobSpans          map[string]context.Context
-	id                string // immutable, safe for event routing while snapshots change
-	project           string // immutable canonical workspace for rewind exclusion
-	tenant            string // immutable capacity scope for output
-	rewindBlocked     bool
-	commandCancels    map[*commandCancellation]struct{}
-	commandBytes      int64
-	mu                sync.Mutex
-	data              api.Session
-	storageCharges    []int64 // encoded sizes for data.Entries, under mu
-	lease             api.Lease
-	pendingStore      api.Store // no persistent writer until first admission or fork publication
-	provisional       atomic.Bool
-	erasureTombstones atomic.Pointer[map[string]bool]
-	h                 *Harness
-	interrupted       chan struct{}
-	interruptEmitted  chan struct{}
-	writerWatchDone   chan struct{}
-	writerFailure     error
-	running, closing  bool
-	stopping          bool // a detach is already settling work and closing the lease
-	opening           bool // job reports during session.start wait for recovery setup
-	cancel            context.CancelCauseFunc
-	done              chan struct{}
-	queue             []api.Input
-	activeActor       string
-	steeringClosed    bool
-	activeInput       api.Input
-	last              api.Outcome
-	resume            *api.Entry
-	external          []api.Call
-	responseClaim     *api.Entry
-	transferredInput  string
+	interfaceConnections []*InterfaceConnection
+	interfaceSpans       map[string]trace.SpanContext
+	interfaceTimer       *time.Timer
+	interfaceReports     sync.Mutex
+	queuedContinuations  map[string]bool
+	jobSpans             map[string]context.Context
+	id                   string // immutable, safe for event routing while snapshots change
+	project              string // immutable canonical workspace for rewind exclusion
+	tenant               string // immutable capacity scope for output
+	rewindBlocked        bool
+	commandCancels       map[*commandCancellation]struct{}
+	commandBytes         int64
+	mu                   sync.Mutex
+	data                 api.Session
+	storageCharges       []int64 // encoded sizes for data.Entries, under mu
+	lease                api.Lease
+	pendingStore         api.Store // no persistent writer until first admission or fork publication
+	provisional          atomic.Bool
+	erasureTombstones    atomic.Pointer[map[string]bool]
+	h                    *Harness
+	interrupted          chan struct{}
+	interruptEmitted     chan struct{}
+	writerWatchDone      chan struct{}
+	writerFailure        error
+	running, closing     bool
+	stopping             bool // a detach is already settling work and closing the lease
+	opening              bool // job reports during session.start wait for recovery setup
+	cancel               context.CancelCauseFunc
+	done                 chan struct{}
+	queue                []api.Input
+	activeActor          string
+	steeringClosed       bool
+	activeInput          api.Input
+	last                 api.Outcome
+	resume               *api.Entry
+	external             []api.Call
+	responseClaim        *api.Entry
+	transferredInput     string
 }
 
 func clone[T any](v T) T {
@@ -331,6 +336,11 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) (errOut e
 	}
 	s.mu.Lock()
 	s.opening = false
+	if err = c.h.recoverInterfaceLocked(s); err != nil {
+		s.mu.Unlock()
+		_ = c.StopSession(id)
+		return err
+	}
 	s.resume, s.queue = recovery(s.data)
 	// Proposals are available through the record, not the running turn's
 	// queue; a cancel must not hand back an unreleased proposal.
@@ -353,6 +363,7 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) (errOut e
 		}
 	}
 	s.external = externalRecovery(s.data)
+	c.h.queueInterfaceContinuationsLocked(s)
 	nextInput := runnableInput(s.queue)
 	if s.resume != nil || nextInput >= 0 || len(s.external) > 0 {
 		in := api.Input{Actor: snap.Actor}
@@ -786,7 +797,7 @@ func (c *client) Fork(ctx context.Context, id, target string) (string, error) {
 	parent := ""
 	mapping := map[string]string{}
 	for _, e := range snap.Branch() {
-		if e.IsErased() || e.Kind == "position" || e.Kind == "tenant" || e.Kind == "limit" || e.Kind == "erasure" || e.Kind == telemetry.TurnTrace {
+		if e.IsErased() || e.Kind == "position" || e.Kind == "tenant" || e.Kind == "limit" || e.Kind == "erasure" || e.Kind == telemetry.TurnTrace || e.Kind == api.InterfaceHandoffKind {
 			continue
 		}
 		if e.Kind == "turn.start" {
@@ -1086,6 +1097,7 @@ func (h *Harness) run(ctx context.Context, s *session, in api.Input) {
 			s.queue = nil
 		}
 		s.last = outcome
+		h.queueInterfaceContinuationsLocked(s)
 		nextInput := runnableInput(s.queue)
 		if nextInput < 0 || s.closing || s.writerFailure != nil || ctx.Err() != nil {
 			s.running = false
@@ -1169,6 +1181,9 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 				return api.Outcome{Status: "failed", Error: "duplicate tool " + tool.Name}
 			}
 			seen[tool.Name] = true
+			if registered := h.interfaceTools[tool.Name]; registered != nil && (access != nil && access.Model().RunsTools || !runtime.Declaration().InterfaceTools || !h.interfaceAvailable(s, registered, tool.Name)) {
+				continue
+			}
 			tools = append(tools, tool)
 		}
 	}
@@ -1205,10 +1220,12 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 	}
 	ports.model = access.Model()
 	turn := api.Turn{ID: ports.id, Session: snap.ID, Actor: in.Actor, Input: in.ID, Settings: snap.Settings, System: prepared.(api.BeforeTurn).System, Context: prepared.(api.BeforeTurn).Context, Access: access, Tools: tools, IO: ports, CanRepeat: true}
-	turn.Reopen, turn.Continuing = in.Calls, len(in.Calls) > 0
+	turn.Reopen, turn.Continuing = in.Calls, len(in.Calls) > 0 || in.Continuation != ""
 	turn.StartedBy = api.TurnStarter{Kind: "actor", ID: in.Actor}
 	if in.Job != "" {
 		turn.StartedBy = api.TurnStarter{Kind: "job", ID: in.Job}
+	} else if in.Continuation != "" {
+		turn.StartedBy = in.ContinuedBy
 	} else if turn.Continuing {
 		answer := in.Answer
 		if answer == "" {
@@ -1252,9 +1269,11 @@ func (c *client) CancelAs(ctx context.Context, id string) error {
 	if !c.Authorize(id, api.Acting(ctx), "cancel") {
 		return errors.New("cancel refused")
 	}
-	return c.Cancel(id)
+	return c.cancel(ctx, id)
 }
-func (c *client) Cancel(id string) error {
+func (c *client) Cancel(id string) error { return c.cancel(context.Background(), id) }
+
+func (c *client) cancel(ctx context.Context, id string) error {
 	s, err := c.find(id)
 	if err != nil {
 		return err
@@ -1264,6 +1283,10 @@ func (c *client) Cancel(id string) error {
 	if s.running {
 		s.cancel(context.Canceled)
 	}
+	if err := c.h.settleInterfacesLocked(s, "", "Interface call cancelled before its outcome was known."); err != nil {
+		return err
+	}
+	c.h.startInterfaceContinuationsLocked(s)
 	return nil
 }
 func (c *client) Withdraw(ctx context.Context, id, input string) (api.Input, error) {
@@ -1352,7 +1375,7 @@ func (c *client) stopSessionAs(ctx context.Context, id string, closing bool, who
 	s.mu.Lock()
 	if who != "" {
 		_, member := actors(s.data)[who]
-		if !member || (s.running || hasUnfinishedJobs(s.data)) && !c.authorizedBy(s.data, ctx, "cancel") {
+		if !member || (s.running || hasUnfinishedJobs(s.data) || hasOpenInterfaces(s.data)) && !c.authorizedBy(s.data, ctx, "cancel") {
 			s.mu.Unlock()
 			return api.ErrCloseForbidden
 		}
@@ -1372,7 +1395,20 @@ func (c *client) stopSessionAs(ctx context.Context, id string, closing bool, who
 		s.mu.Unlock()
 		return errors.New("session has a direct command in progress")
 	}
+	if closing && s.writerFailure == nil {
+		if err := c.h.settleInterfacesLocked(s, "", "Session closed before the Interface call's outcome was known."); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
 	s.stopping, s.closing = true, true
+	if s.interfaceTimer != nil {
+		s.interfaceTimer.Stop()
+	}
+	for _, connection := range s.interfaceConnections {
+		connection.closeLocked()
+	}
+	s.interfaceConnections = nil
 	if s.running {
 		cause := error(context.Canceled)
 		if !closing {
@@ -1493,7 +1529,7 @@ func (p *turnPorts) Hook(ctx context.Context, name string, v any) (any, error) {
 			return nil, err
 		}
 		check = changed.(api.ToolCheck)
-		if check.Call.ParentCall != "" && check.InputChanged && !check.Open && check.Refused == "" {
+		if (check.Call.ParentCall != "" || p.c.h.interfaceTools[check.Call.Name] != nil) && check.InputChanged && !check.Open && check.Refused == "" {
 			check.InputChanged, check.Validate = false, nil
 			ctx = api.WithExecution(ctx, api.Execution{Session: p.s.id, Turn: p.id, Call: check.Call, ToolSource: p.toolRegistration(check.Call.Name)})
 			changed, err = p.c.Invoke(ctx, name, check)
@@ -1674,6 +1710,9 @@ func (p *turnPorts) Record(ctx context.Context, e api.Entry) (api.Entry, error) 
 	e.Actor = p.actor
 	if e.Kind == "tool.started" {
 		call := api.Decode[api.Call](e.Data)
+		if p.c.h.interfaceTools[call.Name] != nil {
+			return e, errors.New("Interface start must be committed with its handoff")
+		}
 		if idx := slices.IndexFunc(p.tools, func(t api.Tool) bool { return t.Name == call.Name }); idx >= 0 {
 			e.OpenWorld = &p.tools[idx].External
 		}
@@ -1683,6 +1722,9 @@ func (p *turnPorts) Record(ctx context.Context, e api.Entry) (api.Entry, error) 
 		if e.Point, err = p.savePoint(ctx); err != nil {
 			return e, err
 		}
+	}
+	if e.Kind == "turn.end" && (len(p.c.h.interfaceTools) != 0 || len(api.InterfaceHandoffs(p.rawSnapshot())) != 0) {
+		return p.recordInterfaceTurnEnd(ctx, e)
 	}
 	if e.Kind != "turn.start" {
 		if e.Kind == "input" {
@@ -1705,7 +1747,15 @@ func (p *turnPorts) Record(ctx context.Context, e api.Entry) (api.Entry, error) 
 	// whose input the next process is missing, even with an external Runtime.
 	actual := p.s
 	actual.mu.Lock()
-	if len(p.input.Calls) != 0 {
+	if p.input.Continuation != "" {
+		start.ContinuesTurn = p.input.Continuation
+		for _, source := range actual.data.Branch() {
+			if source.ID == start.StartedBy.ID {
+				e.Copies = append(e.Copies, source.ID)
+				break
+			}
+		}
+	} else if len(p.input.Calls) != 0 {
 		// The nearest earlier turn that left one of these calls open owns
 		// this continuation, even if the originating response was older.
 		for i := len(actual.data.Entries) - 1; i >= 0; i-- {

@@ -73,6 +73,7 @@ type options struct {
 	providerAliases                         map[string]string
 	plugins                                 []Plugin
 	tools                                   []Tool
+	interfaceTools                          []harness.InterfaceSource
 	process                                 []ProcessPlugin
 	services                                []ServicePlugin
 	wire                                    []wirePlugin
@@ -489,6 +490,9 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	if err != nil {
 		return nil, appError(err, InvalidComposition)
 	}
+	if err := h.RegisterInterfaceTools(o.interfaceTools); err != nil {
+		return nil, appError(err, InvalidComposition)
+	}
 	continues := selectedRuntime.(Runtime).Declaration().Durable
 	// The conformance harness deliberately probes a non-recovering served
 	// Runtime on a durable host. Ordinary SDK compositions must agree.
@@ -649,6 +653,9 @@ func (a *Agent) Declaration() Declaration {
 		d["settingsDuringTurn"] = "refused"
 	}
 	runtime, err := a.a.Get("runtime")
+	if a.h.SupportsInterfaceTools() {
+		d["interfaceTools"] = true
+	}
 	d["nestedToolCalls"] = err == nil && runtime.(api.Runtime).Declaration().NestedToolCalls
 	d["questionsOutlastTurns"], d["lateAnswersStartTurns"] = a.lateAnswers, a.lateAnswers
 	d["startsTurnsUnasked"] = "never"

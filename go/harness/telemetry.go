@@ -53,6 +53,10 @@ func (h *Harness) runTraced(ctx context.Context, p *turnPorts, t api.Turn, resum
 		} else {
 			options = append(options, trace.WithNewRoot())
 		}
+	} else if p.input.Continuation != "" {
+		if sc := savedTurn(snap, p.input.Continuation); sc.IsValid() {
+			options = append(options, trace.WithLinks(trace.Link{SpanContext: sc}))
+		}
 	} else if len(p.input.Calls) != 0 {
 		for _, e := range snap.Branch() {
 			if e.Kind == "turn.end" && e.Turn != "" {

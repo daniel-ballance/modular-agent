@@ -637,11 +637,15 @@ func (m *Manager) accept(ctx context.Context, id string, a api.Answer, sanitized
 	return nil
 }
 func (m *Manager) resume(id string) {
+	if scheduler, ok := m.a.(interface{ ContinueInterfaceWork(string) }); ok {
+		scheduler.ContinueInterfaceWork(id)
+	}
 	s, err := m.a.Snapshot(id)
 	if err != nil {
 		return
 	}
 	pending := api.OpenCalls(s)
+	handoffs := api.InterfaceHandoffs(s)
 	sts := states(s)
 	for _, e := range s.Branch() {
 		out := api.Outcome{}
@@ -656,7 +660,7 @@ func (m *Manager) resume(id string) {
 		} else {
 			continue
 		}
-		if len(out.Open) == 0 {
+		if len(out.Open) == 0 || slices.ContainsFunc(out.Open, func(c api.Call) bool { return handoffs[c.ID].ID != "" }) {
 			continue
 		}
 		var ready []api.Call

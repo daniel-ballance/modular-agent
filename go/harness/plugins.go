@@ -28,6 +28,7 @@ type handler struct {
 	fn    api.Handler
 }
 type Harness struct {
+	interfaceTools  map[string]*interfaceSource
 	agentName       string
 	localActor      string
 	providerAliases map[string]string
@@ -348,7 +349,7 @@ func (c *client) Invoke(ctx context.Context, name string, v any) (any, error) {
 				return nil, errors.New("hook refused operation")
 			}
 			if d.Value != nil {
-				if before, ok := v.(api.ToolCheck); ok && before.Call.ParentCall != "" {
+				if before, ok := v.(api.ToolCheck); ok && (before.Call.ParentCall != "" || c.h.interfaceTools[before.Call.Name] != nil) {
 					after, ok := d.Value.(api.ToolCheck)
 					a, b := before.Call, after.Call
 					if !ok || a.ID != b.ID || a.Name != b.Name || a.Actor != b.Actor || a.Origin != b.Origin || a.ParentCall != b.ParentCall || a.Step != b.Step {

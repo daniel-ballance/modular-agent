@@ -303,6 +303,13 @@ func OpenCalls(s Session) []Call {
 			delete(calls, e.Call)
 		}
 	}
+	if handoffs := InterfaceHandoffs(s); len(handoffs) != 0 {
+		for _, e := range s.LiveEntries() {
+			if handoffs[e.Call].ID != "" && e.WasKind("tool.result") {
+				delete(calls, e.Call)
+			}
+		}
+	}
 	var out []Call
 	for _, id := range order {
 		if c, ok := calls[id]; ok {

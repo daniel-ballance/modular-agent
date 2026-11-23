@@ -193,6 +193,8 @@ func (s Session) Branch() []Entry {
 }
 
 type Input struct {
+	Continuation         string          `json:"-"`
+	ContinuedBy          TurnStarter     `json:"-"`
 	TraceContext         *telemetry.Wire `json:"-"`
 	ResultSchema         json.RawMessage `json:"resultSchema,omitempty"`
 	ID, Key, Actor, When string
@@ -399,6 +401,7 @@ type RuntimeDeclaration struct {
 	Durable, Steering, Parallel bool
 	WaitingThroughRestart       bool
 	NestedToolCalls             bool
+	InterfaceTools              bool
 }
 type Runtime interface {
 	Declaration() RuntimeDeclaration
