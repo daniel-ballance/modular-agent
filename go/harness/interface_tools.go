@@ -16,7 +16,10 @@ import (
 
 const interfacePlugin = "interface-tools"
 
-func (h *Harness) SupportsInterfaceTools() bool { return len(h.interfaceTools) != 0 }
+func (h *Harness) SupportsInterfaceTools() bool       { return len(h.interfaceTools) != 0 }
+func (c *client) SupportsInterfaceTools() bool        { return c.h.SupportsInterfaceTools() }
+func (p *turnPorts) IsInterfaceTool(name string) bool { return p.c.h.interfaceTools[name] != nil }
+func (p *turnPorts) SupportsInterfaceTools() bool     { return p.c.h.SupportsInterfaceTools() }
 
 type InterfaceSource struct {
 	ID, Actor, Route string

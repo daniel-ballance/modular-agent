@@ -23,6 +23,7 @@ type RuntimeSupport struct {
 	InputDuringTurn       bool `json:"inputDuringTurn"`
 	WaitingThroughRestart bool `json:"waitingThroughRestart"`
 	ContinuesAfterRestart bool `json:"continuesAfterRestart"`
+	InterfaceTools        bool `json:"interfaceTools,omitempty"`
 }
 
 type StartedBy struct {
@@ -88,7 +89,7 @@ type runtimePart struct {
 
 func (r runtimePart) Declaration() RuntimeDeclaration {
 	d := r.support
-	return RuntimeDeclaration{Durable: d.ContinuesAfterRestart, Steering: d.InputDuringTurn, WaitingThroughRestart: d.WaitingThroughRestart, NestedToolCalls: true}
+	return RuntimeDeclaration{Durable: d.ContinuesAfterRestart, Steering: d.InputDuringTurn, WaitingThroughRestart: d.WaitingThroughRestart, NestedToolCalls: true, InterfaceTools: d.InterfaceTools}
 }
 func (r runtimePart) Run(context.Context, RuntimeTurn) RuntimeOutcome {
 	return RuntimeOutcome{Status: "failed", Error: "Runtime must be installed through the SDK"}

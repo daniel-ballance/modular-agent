@@ -14,7 +14,7 @@ type remoteRuntime struct{ *remote }
 
 func (r *remoteRuntime) Declaration() api.RuntimeDeclaration {
 	d := r.reg.Runtime.Supports
-	return api.RuntimeDeclaration{Durable: d.ContinuesAfterRestart, Steering: d.InputDuringTurn, WaitingThroughRestart: d.WaitingThroughRestart}
+	return api.RuntimeDeclaration{Durable: d.ContinuesAfterRestart, Steering: d.InputDuringTurn, WaitingThroughRestart: d.WaitingThroughRestart, InterfaceTools: d.InterfaceTools}
 }
 
 // Runtime work is locked to the selected turn/actor/model. The mutex guards
@@ -42,6 +42,7 @@ type runtimeWork struct {
 	registration                                                             func(string) object
 	registrations                                                            map[string]object
 	calls                                                                    map[string]api.Call
+	interfaceTools                                                           bool
 	committed, offered, gating, pending, ran                                 map[string]bool
 	approved                                                                 map[string]api.ToolCheck
 	results                                                                  map[string]api.ToolResult
@@ -71,6 +72,9 @@ func runRuntimeHost(ctx context.Context, t api.Turn, host api.API, declaration a
 	defer w.endTraceSteps()
 	w.turnContext, w.authorize = ctx, host.Authorize
 	w.steering = declaration.Steering
+	if host, ok := t.IO.(interface{ SupportsInterfaceTools() bool }); ok {
+		w.interfaceTools = declaration.InterfaceTools && host.SupportsInterfaceTools()
+	}
 	if port, ok := t.IO.(interface {
 		ToolRegistration(string) (string, string, api.Tool, bool)
 	}); ok {
@@ -167,7 +171,7 @@ func runRuntimeHost(ctx context.Context, t api.Turn, host api.API, declaration a
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if err == nil && (!w.boundary() || w.resultRefused) && out.Status == "completed" {
+	if err == nil && out.Status == "completed" && (!w.boundary() || w.resultRefused || !w.validInterfaceOpen(out)) {
 		out = fail(fault("invalid_request", "Runtime ended outside a settlement boundary"))
 	}
 	w.applyOutcome(&out)
@@ -219,6 +223,7 @@ type interruptedCall struct {
 	call                     api.Call
 	start                    api.Entry
 	started, repeat, pending bool
+	interfaceCall            bool
 }
 
 func (w *runtimeWork) settleOutstanding(ctx context.Context, out api.Outcome) error {
@@ -236,7 +241,7 @@ func (w *runtimeWork) settleOutstanding(ctx context.Context, out api.Outcome) er
 			c = pending.call
 			c.Actor = w.turn.Actor
 		}
-		if open[c.ID] {
+		if open[c.ID] || pending.interfaceCall {
 			continue
 		}
 		res, known := w.results[c.ID]
@@ -318,9 +323,10 @@ func interruptedCalls(s api.Session, t api.Turn) []interruptedCall {
 		}
 	}
 	out := []interruptedCall{}
+	handoffs := api.InterfaceHandoffs(s)
 	for _, id := range order {
 		if !settled[id] {
-			out = append(out, interruptedCall{call: calls[id], start: starts[id], started: started[id], repeat: repeat[id], pending: pending[id]})
+			out = append(out, interruptedCall{call: calls[id], start: starts[id], started: started[id], repeat: repeat[id], pending: pending[id] || handoffs[id].ID != "", interfaceCall: handoffs[id].ID != ""})
 		}
 	}
 	return out
@@ -555,6 +561,37 @@ func (w *runtimeWork) honorCancel(o *api.Outcome) {
 	}
 }
 
+// Validate IDs supplied by opted-in Runtime code against host-owned state.
+func (w *runtimeWork) validInterfaceOpen(out api.Outcome) bool {
+	if !w.interfaceTools {
+		return true
+	}
+	snap, err := w.turn.IO.Snapshot()
+	if err != nil {
+		return false
+	}
+	handoffs := api.InterfaceHandoffs(snap)
+	settled := map[string]bool{}
+	for _, e := range snap.LiveEntries() {
+		if handoffs[e.Call].ID != "" && e.WasKind("tool.result") {
+			settled[e.Call] = true
+		}
+	}
+	seen := map[string]bool{}
+	for _, c := range out.Open {
+		if seen[c.ID] || !w.pending[c.ID] && !(settled[c.ID] && handoffs[c.ID].Turn == w.turn.ID) {
+			return false
+		}
+		seen[c.ID] = true
+	}
+	for id := range w.pending {
+		if !settled[id] && !seen[id] {
+			return false
+		}
+	}
+	return true
+}
+
 func (w *runtimeWork) applyOutcome(o *api.Outcome) {
 	if w.turnContext != nil && w.turnContext.Err() != nil && !errors.Is(context.Cause(w.turnContext), api.ErrProcessStopped) {
 		o.Status, o.Error = "cancelled", ""
@@ -580,8 +617,19 @@ func (w *runtimeWork) applyOutcome(o *api.Outcome) {
 	}
 	o.Open = nil
 	if o.Status != "cancelled" {
+		var handoffs map[string]api.Entry
+		if w.interfaceTools {
+			if snap, err := w.turn.IO.Snapshot(); err == nil {
+				handoffs = api.InterfaceHandoffs(snap)
+				for _, e := range snap.LiveEntries() {
+					if e.WasKind("tool.result") && handoffs[e.Call].ID != "" {
+						delete(w.pending, e.Call)
+					}
+				}
+			}
+		}
 		for id := range w.pending {
-			if w.pending[id] {
+			if w.pending[id] && (o.Status == "completed" || handoffs[id].ID == "") {
 				o.Open = append(o.Open, w.calls[id])
 			}
 		}

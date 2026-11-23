@@ -653,9 +653,6 @@ func (a *Agent) Declaration() Declaration {
 		d["settingsDuringTurn"] = "refused"
 	}
 	runtime, err := a.a.Get("runtime")
-	if a.h.SupportsInterfaceTools() {
-		d["interfaceTools"] = true
-	}
 	d["nestedToolCalls"] = err == nil && runtime.(api.Runtime).Declaration().NestedToolCalls
 	d["questionsOutlastTurns"], d["lateAnswersStartTurns"] = a.lateAnswers, a.lateAnswers
 	d["startsTurnsUnasked"] = "never"

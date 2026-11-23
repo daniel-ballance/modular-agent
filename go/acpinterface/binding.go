@@ -72,6 +72,9 @@ func Declaration(a api.API, project, id string) map[string]any {
 	if store, ok := a.(interface{ SupportsErasure() bool }); ok {
 		d["erasure"] = store.SupportsErasure()
 	}
+	if tools, ok := a.(interface{ SupportsInterfaceTools() bool }); ok && tools.SupportsInterfaceTools() {
+		d["interfaceTools"] = true
+	}
 	if caps, ok := a.(interface{ ReservationDeclaration() any }); ok {
 		d["resourceReservations"] = caps.ReservationDeclaration()
 	}

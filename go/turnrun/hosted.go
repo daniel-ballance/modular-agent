@@ -85,6 +85,23 @@ func (r *Runner) runHosted(ctx context.Context, t api.Turn, p HostedPorts) (out 
 				return fail(errors.New("model " + step.Response.Stop))
 			}
 		}
+		handoffs := api.InterfaceHandoffs(snap)
+		settled := map[string]bool{}
+		for _, e := range snap.LiveEntries() {
+			if e.WasKind("tool.result") {
+				settled[e.Call] = true
+			}
+		}
+		for _, e := range snap.Branch() {
+			if handoffs[e.Call].ID == e.ID && e.Turn == t.ID && !settled[e.Call] {
+				for _, start := range snap.Branch() {
+					if start.ID == e.Parent && start.Kind == "tool.started" {
+						opens = append(opens, api.Decode[api.Call](start.Data))
+						break
+					}
+				}
+			}
+		}
 		if len(opens) > 0 {
 			out.Status, out.Open = "completed", opens
 			return out
