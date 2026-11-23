@@ -6,7 +6,7 @@ import time
 from contextvars import Context
 
 from jsonschema import Draft202012Validator, ValidationError
-from ma_core import AgentError, clone, content
+from ma_core import AgentError, WORK_INPUT, clone, content
 from ma_core import telemetry as ot
 from ma_core.recovery import HANDOFF
 from ma_core.wire import call_out, recorded_as, tool_in, tool_out
@@ -143,6 +143,7 @@ class InterfaceTools:
         self.interface_locks = {}
         self.interface_timers = {}
         self.interface_traces = {}
+        self.interface_report_contexts = {}
 
     def interface_enabled(self):
         runtime = self.capabilities.get("runtime")
@@ -165,6 +166,7 @@ class InterfaceTools:
                 cx["actor"] == actor
                 and cx["route"] == route
                 and cx["deliver"] is not None
+                and (not cx.get("work") or cx["work"](WORK_INPUT.get()))
                 and name in cx["offers"].get(sid, ())
                 and cx["scope"][-1](s)
             ):
@@ -300,21 +302,97 @@ class InterfaceTools:
                 ot.set_attrs(operation, {"modular_agent.tool.status": "pending"})
                 self.interface_traces[sid, cid] = ot.own_context(operation)
                 try:
-                    cx["deliver"](
-                        {
-                            "call_id": cid,
-                            "session_id": sid,
-                            "name": name,
-                            "input": clone(call["input"]),
-                            "deadline": deadline,
-                        }
-                    )
+                    if cx.get("deferred") is not None:
+                        cx["deferred"][sid, cid] = (
+                            turn,
+                            {
+                                "session_id": sid,
+                                "call_id": cid,
+                                "name": name,
+                                "input": clone(call["input"]),
+                                "deadline": deadline,
+                            },
+                        )
+                    else:
+                        cx["deliver"](
+                            {
+                                "call_id": cid,
+                                "session_id": sid,
+                                "name": name,
+                                "input": clone(call["input"]),
+                                "deadline": deadline,
+                            }
+                        )
                 except Exception:
                     # The receiver may have acted before its callback failed.
                     pass
         for e in (start, checkpoint):
             await self._emit({"kind": "history_entry", "session": sid, "entry": e})
         return {"interface": True, "open": True, "pending": "Waiting for an Interface tool result"}
+
+    async def release_interface(self, sid, token, cid):
+        """A live deferred handle, never a reconstructed dispatch from history."""
+        cx = self.interface_connections.get(token)
+        if not cx or not (staged := (cx.get("deferred") or {}).get((sid, cid))):
+            return False
+        turn = staged[0]
+
+        def current():
+            s = self.sessions.get(sid)
+            if (
+                not s
+                or self.interface_connections.get(token) is not cx
+                or not cx["scope"][-1](s)
+                or any(s.get(k) for k in ("closing", "moving", "suspending", "writer_lost"))
+            ):
+                return None
+            start, cp, result = self.interface_state(sid, cid)
+            if result or not self.restored_interface(start, cp):
+                return None
+            d, call = cp["data"], start["data"]["call"]
+            if (
+                (cx["actor"], cx["route"]) != (d["executorActorId"], d["routeId"])
+                or clock() >= d["deadline"]
+                or not REQUIRED <= self.permissions(s, cx["actor"], d["rights"])
+                or "tools"
+                not in self.interface_work_rights(s, turn, call["actor"], call.get("authority"))
+                or not any(
+                    e["kind"] == "turn_end"
+                    and e.get("turn") == turn
+                    and e["data"]["outcome"] == "completed"
+                    and cid in e["data"].get("open_calls", [])
+                    for e in branch_entries(s)
+                )
+            ):
+                return None
+            return call, d["deadline"]
+
+        async with self.interface_lock(sid):
+            scope = CONNECTION_AUTHORITY.set(cx["scope"])
+            try:
+                if (sid, cid) not in cx["deferred"] or not (pair := current()):
+                    return False
+                event = {"type": "toolCall", "data": {"call": call_out(pair[0])}}
+                if not same_json(await self.output(sid, cx["actor"], [event]), [event]):
+                    return False
+                await self._assert_writable(sid)
+                await self.guard_erasure(sid)
+                if not (pair := current()):
+                    return False
+                call, deadline = pair
+                del cx["deferred"][sid, cid]
+                cx["deliver"](
+                    {
+                        "call_id": cid,
+                        "session_id": sid,
+                        "name": call["name"],
+                        "input": clone(call["input"]),
+                        "deadline": deadline,
+                    }
+                )
+                return True
+            finally:
+                CONNECTION_AUTHORITY.reset(scope)
 
     def interface_work_rights(self, s, turn, actor, ceiling=None):
         rights = self.permissions(s, actor, ceiling)
@@ -404,6 +482,9 @@ class InterfaceTools:
         for key in list(self.interface_timers):
             if key[0] == sid:
                 self.interface_timers.pop(key).cancel()
+        for key in list(self.interface_report_contexts):
+            if key[0] == sid:
+                del self.interface_report_contexts[key]
         for key in list(self.interface_traces):
             if key[0] == sid:
                 del self.interface_traces[key]
@@ -627,6 +708,9 @@ class InterfaceTools:
                             return "refused"
                     except AgentError:
                         return "refused"
+                    # Carry the authorized report, not a later polling or recovery request.
+                    # The ephemeral context is never part of the portable result.
+                    self.interface_report_contexts[sid, cid] = ot.inject()
                     await self._commit_interface_result(sid, cid, result, actor=actor)
                 require_processed_result(result)
         finally:
@@ -707,6 +791,11 @@ class InterfaceTools:
                         "actor": start.get("actor", s["actor"]),
                         "content": [],
                         "interface_continuation": True,
+                        "operation_context": self.interface_report_contexts.get(
+                            (sid, by_id.get(trigger, {}).get("call"))
+                        )
+                        if kind == "toolResult"
+                        else None,
                         "ready_order": max(index, order[end["id"]]),
                         "continuation_sources": lineage,
                         "data": {

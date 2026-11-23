@@ -15,6 +15,7 @@ from modular_agent import (
     ACP_RIGHTS,
     Agent,
     AgentError,
+    AguiActor,
     Answer,
     file_credentials,
     Durability,
@@ -104,10 +105,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--history", action="store_true")
     parser.add_argument("--declaration", action="store_true")
     parser.add_argument("--acp", action="store_true")
-    parser.add_argument("--listen", metavar="ADDR", help="serve ACP on a loopback WebSocket")
+    parser.add_argument("--agui", action="store_true", help="serve AG-UI over HTTP and SSE")
+    parser.add_argument("--listen", metavar="ADDR", help="agent service loopback address")
     parser.add_argument("--policy", type=Path, metavar="FILE", help="operator policy JSON")
     parser.add_argument(
-        "--token-file", type=Path, metavar="FILE", help="ACP WebSocket bearer token"
+        "--token-file", type=Path, metavar="FILE", help="agent service bearer token"
     )
     parser.add_argument("--all", action="store_true", help="list sessions across all projects")
     parser.add_argument("--device", action="store_true", help="use a device code to sign in")
@@ -349,7 +351,9 @@ async def _agent(
     script = os.environ.get("MODULAR_AGENT_SCRIPT")
     testing = args.acp and os.environ.get("MODULAR_AGENT_CONFORMANCE") == "1"
     settings: JsonObject = (
-        {"thinking": "off"} if args.acp and not acp_session else paths.settings(project)
+        {"thinking": "off"}
+        if args.acp and not args.agui and not acp_session
+        else paths.settings(project)
     )
     auth = login_file(paths.config / "auth.json")
     providers: list[Provider] = []
@@ -362,7 +366,7 @@ async def _agent(
         else (saved_model if acp_session else args.model)
         or args.model
         or saved_model
-        or (configured_model if not args.acp or acp_session else None)
+        or (configured_model if not args.acp or args.agui or acp_session else None)
     )
     if model is not None:
         model = model_id(model)
@@ -400,6 +404,7 @@ async def _agent(
                 or args.declaration
                 or args.history
                 or args.acp
+                or args.agui
                 or args.command in {"models", "sessions"}
             )
         ):
@@ -448,7 +453,7 @@ async def _agent(
                         ),
                         "off",
                     )
-    inspecting = args.command == "models" or args.declaration or args.acp
+    inspecting = args.command == "models" or args.declaration or (args.acp and not args.agui)
 
     return await create_agent(
         project=project,
@@ -489,14 +494,18 @@ async def _run(args: argparse.Namespace) -> int:
         raise ValueError(f"unknown argument {args.provider}; use --help")
     if args.token_file is not None and args.listen is None:
         raise ValueError("--token-file requires --listen")
+    if args.agui and args.listen is None:
+        raise ValueError("--agui requires --listen")
     if args.listen is not None:
-        if not args.acp or args.command:
-            raise ValueError("--listen requires --acp")
+        if not (args.acp or args.agui) or args.command:
+            raise ValueError("--listen requires --acp or --agui")
         if (args.token_file is None) == (policy.actors is None):
             raise ValueError(
                 f"policy {policy.path}: use either policy actors or --token-file with --listen"
             )
-    if args.acp and (args.prompt is not None or args.session or args.trust_project or args.resume):
+    if (args.acp or args.agui) and (
+        args.prompt is not None or args.session or args.trust_project or args.resume
+    ):
         raise ValueError("with --acp the client creates sessions and grants trust")
     if args.trust_project:
         paths.trust(project)
@@ -548,6 +557,34 @@ async def _run(args: argparse.Namespace) -> int:
             if isinstance(old, dict):
                 saved_model = f"{old['provider']}/{old['id']}"
     async with await _agent(paths, project, args, saved_model=saved_model) as agent:
+        if args.agui:
+            principals = policy.actors
+            if principals and any("client_id" not in entry for entry in principals):
+                raise ValueError(f"policy {policy.path}: AG-UI actors require clientId")
+            agui_actors: list[AguiActor] = (
+                cast(list[AguiActor], principals)
+                if principals
+                else [
+                    {
+                        "token_file": args.token_file,
+                        "client_id": "ma-local",
+                        "actor": {"id": "user", "kind": "host", "rights": list(ACP_RIGHTS)},
+                    }
+                ]
+            )
+            service = await agent.serve_agui(listen=args.listen, actors=agui_actors, acp=args.acp)
+            try:
+                print(service.url, flush=True)
+                stop = asyncio.Event()
+                loop = asyncio.get_running_loop()
+                loop.add_signal_handler(signal.SIGTERM, stop.set)
+                try:
+                    await stop.wait()
+                finally:
+                    loop.remove_signal_handler(signal.SIGTERM)
+            finally:
+                await service.close()
+            return 0
         if args.acp:
 
             async def compose(folder: Path) -> Agent:

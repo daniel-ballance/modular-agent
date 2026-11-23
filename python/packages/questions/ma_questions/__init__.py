@@ -41,6 +41,7 @@ class Questions(Plugin):
 
     def __init__(self):
         self.connected = {}
+        self.route_eligibility = {}
         self.signals = {}
         self.wait_for_unconnected = False
 
@@ -86,11 +87,18 @@ class Questions(Plugin):
                     or (q.get("timeout") is None and not self.wait_for_unconnected)
                 )
             ):
-                if not any(
-                    [await self._eligible(sid, q, a) for a in self.connected.get(sid, set())]
-                ):
+                if not await self._answer_route(sid, q):
                     await self._accept(sid, q, q["actor"], "declined", "noLongerAnswerable")
         return {}
+
+    async def _answer_route(self, sid, q):
+        for actor, routes in self.connected.get(sid, {}).items():
+            if await self._eligible(sid, q, actor) and any(
+                route not in self.route_eligibility or self.route_eligibility[route](q)
+                for route in routes
+            ):
+                return True
+        return False
 
     async def _state(self, sid):
         es = await self.api.session("branch", session=sid)
@@ -299,13 +307,15 @@ class Questions(Plugin):
                 answer = parent["answer"]
                 await self._accept(sid, q, actor, answer["value"], declined=answer.get("declined"))
         else:
-            eligible = (
-                self.connected.get(sid, set())
-                if kind == "approval"
-                or (d.get("timeout") is None and not self.wait_for_unconnected)
-                else s["actors"]
+            in_turn = kind == "approval" or (
+                d.get("timeout") is None and not self.wait_for_unconnected
             )
-            if not any([await self._eligible(sid, q, a) for a in eligible]):
+            eligible = (
+                await self._answer_route(sid, q)
+                if in_turn
+                else any([await self._eligible(sid, q, a) for a in s["actors"]])
+            )
+            if not eligible:
                 await self._accept(
                     sid,
                     q,
@@ -322,9 +332,7 @@ class Questions(Plugin):
             return {"value": "declined", "declined": True, "reason": "refused"}
         if q.get("answer"):
             return q["answer"]
-        if q["kind"] == "approval" and not any(
-            [await self._eligible(sid, q, a) for a in self.connected.get(sid, set())]
-        ):
+        if q["kind"] == "approval" and not await self._answer_route(sid, q):
             await self._accept(sid, q, q["actor"], "declined", "refused")
             return {"value": "declined", "declined": True, "reason": "refused"}
         signal = self.signals.setdefault((sid, q["id"]), asyncio.Event())

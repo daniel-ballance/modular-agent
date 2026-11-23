@@ -51,6 +51,7 @@ from ma_questions import Questions
 from ma_runtime import Runtime
 from ma_selection import Selection
 
+from ._agui_http import AguiServer, AguiTLS
 from .compaction import _CompactionPlugin
 from .mcp import _McpPlugin
 from ._credentials import CredentialStore, _CredentialAdapter, environment_credentials
@@ -232,6 +233,10 @@ def _acp_scope(options: Mapping[str, Any]) -> dict[str, Any]:
 
 def _acp_rights(value: Any) -> frozenset[str]:
     return frozenset(_acp_list(value, lambda r: _actor_id(r) and r in PERMISSIONS, "rights"))
+
+
+class AguiActor(AcpActor):
+    client_id: str
 
 
 class _AcpProject(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter.
@@ -558,7 +563,11 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
                             await self.set_presence(sid, actor, False)
                     self._unbind(sid)
                     self.sessions.discard(sid)
-                    if sid not in connections.sessions and sid in agent._h.sessions:
+                    if (
+                        sid not in connections.sessions
+                        and sid in agent._h.sessions
+                        and not isinstance(agent._acp_server, AguiServer)
+                    ):
                         await agent._h.suspend_session(sid)
                 finally:
                     self._scope.reset(scope)
@@ -627,7 +636,7 @@ class Agent:
         self._closed = False
         self._plugin_host = False
         self._enable_plugin_host: Callable[[], Awaitable[None]] | None = None
-        self._acp_server: WebSocketServer | None = None
+        self._acp_server: WebSocketServer | AguiServer | None = None
         self._conformance = False
         self._late_answers = False
         self._several_actors = False
@@ -888,6 +897,7 @@ class Agent:
         on_handoff: Callable[[InterfaceToolHandoff], None] | None = None,
         rights: Sequence[str] | None = None,
         tenants: Sequence[str | None] = (None,),
+        defer: bool = False,
     ) -> InterfaceToolConnection:
         """Bind an independently authenticated principal and operator route.
 
@@ -902,7 +912,7 @@ class Agent:
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "Unknown Interface right")
         if any(t is not None and t not in self._h.tenants for t in tenants):
             raise AgentError(ErrorCode.INVALID_COMPOSITION, "Unknown Interface tenant")
-        return InterfaceToolConnection(self, actor_id, route_id, on_handoff, rights, tenants)
+        return InterfaceToolConnection(self, actor_id, route_id, on_handoff, rights, tenants, defer)
 
     def reservation_limits(self) -> dict[str, dict[str, int]]:
         """Return the operator's limits, never live use or another session's state."""
@@ -952,6 +962,96 @@ class Agent:
         if queued_jobs != value["queuedInputAfterRestart"]:
             value["queuedJobReportsAfterRestart"] = queued_jobs
         return cast(JsonObject, value)
+
+    async def serve_agui(
+        self,
+        *,
+        listen: str,
+        actors: Sequence[AguiActor],
+        tls: AguiTLS | None = None,
+        tenant: str | None = None,
+        acp: bool = False,
+        origins: Sequence[str] = (),
+        state_plugin: str | None = None,
+        state_snapshot: Callable[[str], Awaitable[JsonObject | None]] | None = None,
+        raw_sources: Mapping[str, str] | None = None,
+        trace_state_keys: Sequence[str] = (),
+    ) -> AguiServer:
+        """Serve HTTP + SSE for this project, optionally alongside ACP at /."""
+        from ._agui import Binding
+        from ._agui_http import listen_agui
+
+        async with self._lock:
+            if self._closed:
+                raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")
+            if self._acp_server is not None or (acp and self._h.sessions):
+                raise AgentError(ErrorCode.BUSY, "Service is already in use")
+            binding = Binding(
+                self,
+                actors,
+                tenant,
+                state_plugin,
+                state_snapshot,
+                raw_sources or {},
+                trace_state_keys,
+            )
+            if acp and not self._plugin_host and self._enable_plugin_host is not None:
+                await self._enable_plugin_host()
+                self._plugin_host = True
+            handle = None
+            if acp:
+                _, handle = await self._network_acp(binding.actors, None, None, None, None)
+            server = await listen_agui(listen, tls, origins, binding, handle)
+            self._acp_server = server
+            return server
+
+    async def _network_acp(
+        self,
+        actors: Sequence[AcpActor],
+        compose: Callable[[Path], Awaitable[Agent]] | None,
+        compose_reopen: Callable[[Path, str], Awaitable[Agent]] | None,
+        project_settings: Callable[[Path], JsonObject] | None,
+        project_mcp: Callable[[Path], Sequence[JsonObject]] | None,
+    ) -> tuple[Sequence[AcpActor], Callable[[Any, AcpActor], Awaitable[None]]]:
+        kinds: dict[str, str] = {}
+        connections = _AcpConnections()
+        principals = actors
+        scopes = {}
+        try:
+            for entry in principals:
+                actor = entry["actor"]
+                aid, kind = actor["id"], actor["kind"]
+                if not _actor_id(aid) or kind not in ("user", "host", "agent", "program"):
+                    raise ValueError("Each WebSocket actor needs an id, kind and valid rights")
+                if aid in kinds and kind != kinds[aid]:
+                    raise ValueError("Tokens for the same actor id must agree on kind")
+                kinds[aid] = kind
+                scopes[id(entry)] = _acp_scope(entry), _acp_rights(actor["rights"])
+            if not principals:
+                raise ValueError("WebSocket ACP requires at least one configured actor")
+        except (TypeError, ValueError, KeyError) as exc:
+            raise AgentError(ErrorCode.INVALID_COMPOSITION, str(exc)) from exc
+        await self._install_acp_mcp(project_mcp)
+
+        async def handle(frames: WebSocketFrames, entry: AcpActor) -> None:
+            interface = _Interface(
+                self,
+                compose,
+                compose_reopen,
+                project_settings,
+                project_mcp,
+                principal=entry,
+                connections=connections,
+                scope=scopes[id(entry)][0],
+                rights=scopes[id(entry)][1],
+            )
+            await self._h.attach_interface(interface)
+            try:
+                await interface.serve_frames(frames)
+            finally:
+                await interface.close_connection()
+
+        return principals, handle
 
     async def _install_acp_mcp(
         self, resolver: Callable[[Path], Sequence[JsonObject]] | None
@@ -1057,46 +1157,9 @@ class Agent:
                     raise AgentError(ErrorCode.INVALID_COMPOSITION, str(exc)) from exc
                 self._plugin_host = True
             if listen is not None:
-                kinds: dict[str, str] = {}
-                connections = _AcpConnections()
-                principals = deepcopy(actors)
-                scopes = {}
-                try:
-                    for entry in principals:
-                        actor = entry["actor"]
-                        aid, kind = actor["id"], actor["kind"]
-                        if not _actor_id(aid) or kind not in ("user", "host", "agent", "program"):
-                            raise ValueError(
-                                "Each WebSocket actor needs an id, kind and valid rights"
-                            )
-                        if aid in kinds and kind != kinds[aid]:
-                            raise ValueError("Tokens for the same actor id must agree on kind")
-                        kinds[aid] = kind
-                        scopes[id(entry)] = _acp_scope(entry), _acp_rights(actor["rights"])
-                    if not principals:
-                        raise ValueError("WebSocket ACP requires at least one configured actor")
-                except (TypeError, ValueError, KeyError) as exc:
-                    raise AgentError(ErrorCode.INVALID_COMPOSITION, str(exc)) from exc
-                await self._install_acp_mcp(project_mcp)
-
-                async def handle(frames: WebSocketFrames, entry: AcpActor) -> None:
-                    interface = _Interface(
-                        self,
-                        compose,
-                        compose_reopen,
-                        project_settings,
-                        project_mcp,
-                        principal=entry,
-                        connections=connections,
-                        scope=scopes[id(entry)][0],
-                        rights=scopes[id(entry)][1],
-                    )
-                    await self._h.attach_interface(interface)
-                    try:
-                        await interface.serve_frames(frames)
-                    finally:
-                        await interface.close_connection()
-
+                principals, handle = await self._network_acp(
+                    deepcopy(actors), compose, compose_reopen, project_settings, project_mcp
+                )
                 self._acp_server = await listen_websocket(
                     listen,
                     [(entry["token_file"], entry) for entry in principals],

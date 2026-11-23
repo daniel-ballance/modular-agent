@@ -3,6 +3,7 @@
 from ._agent import (
     ACP_RIGHTS as ACP_RIGHTS,
     AcpActor as AcpActor,
+    AguiActor as AguiActor,
     Agent as Agent,
     AgentStart as AgentStart,
     RuntimeChoice as RuntimeChoice,
@@ -113,6 +114,7 @@ from ._history import (
     memory_history as memory_history,
     serve_history as serve_history,
 )
+from ._agui_http import AguiServer as AguiServer, AguiTLS as AguiTLS
 from ._interface_tools import (
     InterfaceToolConnection as InterfaceToolConnection,
     InterfaceToolDisposition as InterfaceToolDisposition,

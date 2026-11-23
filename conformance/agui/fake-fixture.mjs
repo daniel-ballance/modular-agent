@@ -92,7 +92,7 @@ export function fakeFixture(name, fault, script) {
   function startContinuation(s, operationContext) {
     s.nextTurn = turnId();
     s.nextContext = operationContext;
-    record(s, 'turnStart', { continuesTurnId: s.originTurn, startedBy: { kind: 'toolResult', id: s.result.id } }, { turnId: s.nextTurn });
+    record(s, 'turnStart', { startedBy: { kind: 'toolResult', id: s.result.id } }, { turnId: s.nextTurn, continuesTurnId: s.originTurn });
   }
   function completeContinuation(s, push, recovered = false) {
     const ctx = recovered && fault === 'lost-recovery-trace' ? context({}, 'owner') : s.nextContext;

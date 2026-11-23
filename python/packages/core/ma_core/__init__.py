@@ -2,9 +2,24 @@
 
 import json
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 
 TOOL_RESULT_BYTES = 64 * 1024
+
+
+# Volatile scope for request-only Interface offers. Never store a connection handle.
+WORK_INPUT = ContextVar("work_input", default=None)
+
+
+@contextmanager
+def taking_input(sid, queued):
+    token = WORK_INPUT.set((sid, queued.get("actor"), queued["id"], queued["data"].get("key")))
+    try:
+        yield
+    finally:
+        WORK_INPUT.reset(token)
 
 
 def identity():

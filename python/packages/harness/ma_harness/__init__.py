@@ -54,6 +54,7 @@ class Harness(Authority, Erasure, InterfaceTools):
         self.append_locks = {}
         self.tool_dispatches = {}
         self.followers = []
+        self.delivery_observers = {}
         self.output_streams = {}
         self.erasure_locks = {}
         self.capacity = Reservations(reservations)
@@ -284,6 +285,29 @@ class Harness(Authority, Erasure, InterfaceTools):
 
     def follow(self, owner, recipient, handler):
         self.followers.append((owner, recipient, handler))
+
+    def observe_delivery(self, owner, recipient, include, observe):
+        """Trusted binding: observe a gated delivery or its loss, scoped before gating.
+
+        The original event is for routing and comparing actionable views, never
+        a substitute payload. A missing view invalidates any dependent sequence.
+        """
+
+        async def unused(_):
+            pass
+
+        follower = (owner, recipient, unused)
+        self.followers.append(follower)
+        self.delivery_observers[follower] = include, observe
+
+        def detach():
+            self.followers.remove(follower)
+            self.delivery_observers.pop(follower)
+            for key in [k for k in self.output_streams if k[0] == owner]:
+                for reservation, _ in self.output_streams.pop(key):
+                    self.capacity.release(reservation)
+
+        return detach
 
     async def fire(self, owner, name, data):
         if name not in self.hooks or self.hooks[name][0] != owner:
@@ -1038,7 +1062,10 @@ class Harness(Authority, Erasure, InterfaceTools):
         event = provider_projection(event)
         sid = event.get("session")
         for owner, recipient, handler in list(self.followers):
+            observer = self.delivery_observers.get((owner, recipient, handler))
             try:
+                if observer and not observer[0](event):
+                    continue
                 kind = event["kind"]
                 events = [{"type": kind, "data": event}]
                 if self.holds_output() and kind in {"model_output", "tool_progress"}:
@@ -1058,7 +1085,10 @@ class Harness(Authority, Erasure, InterfaceTools):
                         self.capacity.release(reservation)
                     events = [piece for _, piece in buffered] + events
                 revision = await self.erasure_revision(sid) if sid is not None else 0
-                for item in await self.output(sid, recipient, events):
+                gated = await self.output(sid, recipient, events)
+                if observer and not gated:
+                    await observer[1](event, None)
+                for original, item in zip(events, gated):
                     view = await self.fire(
                         "@harness", "output", {"recipient": recipient, "value": item["data"]}
                     )
@@ -1066,7 +1096,12 @@ class Harness(Authority, Erasure, InterfaceTools):
                         value = clone(view["value"])
                         if sid is not None and revision != await self.erasure_revision(sid):
                             break
-                        await handler(value)
+                        if observer:
+                            await observer[1](original["data"], value)
+                        else:
+                            await handler(value)
+                    elif observer:
+                        await observer[1](original["data"], None)
             except Exception:
                 # A failed output gate or recipient can never expose ungated output.
                 continue

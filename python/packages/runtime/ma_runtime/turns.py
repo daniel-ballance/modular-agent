@@ -83,7 +83,9 @@ class Turns:
         self.unsettled_turns[sid] = turn
         parent = ot.extract(None)
         if queued:
-            parent = self.input_traces.pop((sid, queued["id"]), parent)
+            parent = self.input_traces.pop(
+                (sid, queued["id"]), ot.extract(queued.get("operation_context"))
+            )
         links = []
         if recovering:
             parent = ot.saved_turn_context(await self.api.session("branch", session=sid), sid, turn)

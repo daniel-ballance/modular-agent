@@ -23,6 +23,15 @@ Use `ma login chatgpt` to sign in with a browser or add `--device` for a code. U
 
 The Provider ids are `chatgpt`, `grok` and `claude`. `ma` still accepts `openai-codex` and `xai` in `--model`, `login`, `logout`, `settings.json`, `models.json` and saved sessions. On the next write of `auth.json`, it moves logins to their new ids. If both entries exist, it keeps the login under the new id.
 
+## Serve AG-UI
+
+```sh
+ma --agui --listen 127.0.0.1:7400 --token-file /path/to/operator.token
+ma --agui --acp --listen 127.0.0.1:7400 --token-file /path/to/operator.token
+```
+
+Use one command at a time. Each prints the HTTP origin when ready. Send the token in the Authorization header, not in the URL. Use a random token with at least 128 bits of entropy, in an owner-only regular file. AG-UI uses `/agui/v1`; ACP upgrades use `/`. Both serve the selected project. To distinguish clients, supply operator policy actors with a `clientId` per client instead of the shorthand. TLS is available through the SDK, not the command.
+
 ## Client identity
 
 By default, ChatGPT requests and browser sign-in use `modular-agent` as the `originator`. Grok device sign-in uses it as the `referrer`. The identity is a label, not a credential. It does not change the services' sign-in client IDs.
