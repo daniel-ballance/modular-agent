@@ -114,20 +114,6 @@ Use `agent.connectInterfaceTools(sessionId, { actor, routeId, onHandoff, defer? 
 - Call `connection.reportInterfaceToolResult({ callId, status, content, value? })` after the originating turn ends. It returns `{ status: "accepted" }`, `{ status: "alreadySettled" }` or `{ status: "refused", reason?: "notReady" }`. An early report can be sent again after turn end. If result processing fails, the SDK commits a minimal result and raises the processing error. A report does not run a tool or grant authority.
 - Call `connection.disconnect()` when the connection ends. This clears the advertisement without settling the call. A new authenticated connection to the same actor and route may report without advertising, but it cannot receive the executable request again. No reconnect changes the deadline.
 
-#### Proposed specification text
-
-[`docs/sdk/api.md`, The Agent](../../../docs/sdk/api.md#the-agent) names the composition option but omits the protocol-neutral connection and report operation. Add this operation row:
-
-> | `connectInterfaceTools(sessionId, { actor, routeId, onHandoff, defer? })` | a handle for a trusted binding's authenticated executor in an open session. The binding checks project and tenant scope before connecting. The handle does not join an actor or grant rights. |
-
-After the table, add:
-
-> The Interface tool handle supports `advertise(definitions)`, `release(callId)`, `reportInterfaceToolResult(report)` and `disconnect()`. Definitions must exactly match the registered offer; an empty list clears it. Without `defer`, the Harness calls `onHandoff({ sessionId, turnId, call, deadline })` synchronously at delivery. With `defer`, `release(callId)` rechecks permission and returns whether it delivered. A report uses the shared Interface result shape and returns `accepted`, `alreadySettled` or `refused`; `notReady` is a retryable refusal before the originating turn ends. Disconnect clears presence without settling an open call.
-
-[`docs/bindings/plugin.md`, Runtime outcomes](../../../docs/bindings/plugin.md#the-host-asks-the-runtime) does not say how a Runtime can account for expiry after it receives `pending`. After the outcome validation rule, add:
-
-> If the host settles an Interface call after returning `pending`, the Runtime may still list that call in its reply. The host MUST check the list against the dispositions it issued and the terminal results it committed, reject any other mismatch, and omit the settled call from the committed `turnEnd`.
-
 ### Telemetry context
 
 Plugin peers agree to per-operation context at initialize. ACP stdio accepts context from the launching peer; set `serveAcp({ traceTrusted: false })` to ignore it. An authenticated ACP WebSocket actor accepts it only when its token entry sets `traceTrusted: true`. The SDK carries trace context in history HTTP headers and MCP request metadata. It does not carry baggage or vendor state. Durable resume links a new span to the committed segment in the same trace. Forks omit the checkpoint and the starting context; raw plugin and ACP views keep the envelope but not the context.
