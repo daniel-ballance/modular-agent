@@ -1,6 +1,6 @@
 # Ops desk: design
 
-Status: proposed, 2026-11-23. No code yet.
+Status: accepted by the owner, 2026-11-23. No code yet.
 
 ## Purpose
 
