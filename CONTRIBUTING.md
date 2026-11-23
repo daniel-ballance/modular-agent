@@ -41,6 +41,8 @@ The script prints each finished step with its lane and elapsed time. It prints t
 
 Use `scripts/stress.sh N [check.sh options]` to reproduce failures under load. It copies the tracked files as they are on disk, including uncommitted changes to tracked files. Each check builds from scratch and writes to its own scratch directory. Allow disk space for all the builds. The final table counts how many runs failed each step and lists their log paths. The script keeps the logs and removes the build trees. A check that fails intermittently is a bug to fix, not to retry until it passes.
 
+Each step has a 30-minute hang guard (`MA_CHECK_STEP_LIMIT`, in seconds). A step that reaches it is stopped with its processes and reported as failed; its log ends with `hang guard: stopped after`. The guard catches hangs; a step that is merely slow is a problem to find, not a reason to raise it.
+
 The checks need Linux with unprivileged user, PID and mount namespaces, [mise](https://mise.jdx.dev) (which pins Rust and Go), Node.js 22.12 or later, and [uv](https://docs.astral.sh/uv/) (which pins Python 3.13). Set `TMPDIR` to a folder on disk if `/tmp` is small; the script defaults to `~/.cache/ma-std-tmp`.
 
 A coding agent's shell commands may run inside a systemd scope that ends with the agent's process; T3 Code does this. Ending the scope kills everything in it, including a check started with `nohup` or `setsid`. Start a long run as its own user unit instead, so it survives:
