@@ -97,6 +97,7 @@ fi
 # ---------- binding kits against each selected language ----------
 if ! $quick; then
   want rust && step "rust: build history service example" bash -c "cd rust && mise exec -- cargo build -q -p modular-agent --example history_service"
+  want rust && step "telemetry: Rust runner, every placement" bash -c 'npm ci --silent --prefix conformance/telemetry && (cd rust && mise exec -- cargo build -q -p sdk-scenarios --bin scenario-agent) && node conformance/telemetry/run.mjs rust -- "$PWD/rust/target/debug/scenario-agent"'
   want go && step "go: build history service" bash -c "cd go && mise exec -- go build -o .bin/modular-service ./cmd/modular-service"
   for language in rust typescript go python; do
     want "$language" || continue
