@@ -151,13 +151,7 @@ One Rust question constructor lacks a field required by the binding: “Link que
 
 The SDK API says: “A report uses the shared Interface result shape and returns `accepted`, `alreadySettled` or `refused`; `notReady` is a retryable refusal before the originating turn ends.” The existing Rust handle does not distinguish early reports from other refusals. The HTTP adapter checks the committed `turnEnd` before reporting and returns `409 conflict` for an early report; the client can refresh and try after the turn ends.
 
-The standard configuration specifies `--listen` only for ACP. Proposed text for its options table:
-
-> `--agui`: Serve AG-UI 1.0 over HTTP and SSE for the selected project. Requires `--listen`. With `--acp`, serve ACP WebSocket upgrades on the same listener.
->
-> `--listen ADDR`: With `--acp`, `--agui`, or both, listen on loopback until stopped. With AG-UI, print the HTTP origin when ready. The executable has no TLS options.
->
-> With AG-UI, each policy actor entry supplies a nonsecret `clientId`. Tokens sharing a client ID must have the same actor and scope. The single `--token-file` shorthand uses the client ID `ma-local`.
+The `ma --agui` options are in the [standard configuration](../../../docs/reference/standard-configuration.md#the-program).
 
 The Harness declares `telemetry: 1`, whether export is installed or not. Set `Agent::builder().agent_name("my-agent")` to supply a stable, non-sensitive GenAI agent name. Register the application's tracer and meter providers with `opentelemetry::global` before building the agent. The SDK uses the OpenTelemetry API only; the application owns sampling, export and shutdown. Durable turns save their span context and use it as the parent and a link when they resume. Forks and public history do not carry that context. The SDK sends no baggage or vendor state. It trusts stdio ACP launchers for trace context; it treats network ACP principals as outside that scope. Configured plugin peers negotiate trace context separately on every connection.
 
