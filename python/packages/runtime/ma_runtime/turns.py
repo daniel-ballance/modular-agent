@@ -80,6 +80,7 @@ class Turns:
     async def _turn(self, sid, queued=None, turn=None):
         recovering = turn is not None
         turn = turn or identity()
+        self.unsettled_turns[sid] = turn
         parent = ot.extract(None)
         if queued:
             parent = self.input_traces.pop((sid, queued["id"]), parent)

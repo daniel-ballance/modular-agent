@@ -30,6 +30,8 @@ class Runtime(Turns, Plugin):
         self.tasks = {}
         self.admission = {}
         self.scheduling = {}
+        self.turn_boundaries = {}
+        self.unsettled_turns = {}
         self.steering_closed = set()
         self.cancelled = set()
         self.suspending = set()
@@ -359,6 +361,8 @@ class Runtime(Turns, Plugin):
 
     async def wait(self, d, emit):
         sid = d["session"]
+        if "input" in d:
+            return await self._wait_input(sid, d["input"])
         task = self.tasks.get(sid)
         if task is None and sid in self.suspending:
             raise AgentError("Session suspended", "lost")
@@ -373,6 +377,47 @@ class Runtime(Turns, Plugin):
         if sid in self.suspending:
             raise AgentError("Session suspended", "lost")
         return result if isinstance(result, list) else []
+
+    async def _wait_input(self, sid, input_id):
+        # A worker can drain several turns. An ACP prompt only waits for the
+        # one that took its input, including input steered into that turn.
+        while True:
+            task = self.tasks.get(sid)
+            boundary = self.turn_boundaries.setdefault(sid, asyncio.Event())
+            entries = await self._entries(sid)
+            if sid in self.suspending:
+                raise AgentError("Session suspended", "lost")
+            taken = next(
+                (
+                    e
+                    for e in entries
+                    if e["kind"] in {"input", "turn_start"} and e["data"].get("input") == input_id
+                ),
+                None,
+            )
+            if taken and (
+                not task or task.done() or self.unsettled_turns.get(sid) != taken["turn"]
+            ):
+                for e in entries:
+                    if e["kind"] == "turn_end" and e["turn"] == taken["turn"]:
+                        return [e["data"]]
+            if task is not self.tasks.get(sid) or boundary.is_set():
+                continue
+            if task is None or task.done():
+                if task is not None and not task.cancelled():
+                    task.result()  # Propagate an unexpected worker failure.
+                return []
+            changed = asyncio.create_task(boundary.wait())
+            try:
+                await asyncio.wait({task, changed}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                changed.cancel()
+                await asyncio.gather(changed, return_exceptions=True)
+
+    def _turn_boundary(self, sid):
+        self.unsettled_turns.pop(sid, None)
+        if boundary := self.turn_boundaries.pop(sid, None):
+            boundary.set()
 
     async def cancel(self, d, emit):
         sid = d["session"]
@@ -562,6 +607,7 @@ class Runtime(Turns, Plugin):
     async def _close(self, d):
         await self.cancel(d, None)
         self.tasks.pop(d["session"], None)
+        self._turn_boundary(d["session"])
         self.cancelled.discard(d["session"])
         for key in list(self.input_traces):
             if key[0] == d["session"]:
@@ -570,14 +616,22 @@ class Runtime(Turns, Plugin):
     async def _drain(self, sid):
         results = []
         try:
-            while sid not in self.cancelled:
-                queued = await self._pending(sid)
-                if not queued:
-                    break
+            while True:
+                # Serialize going idle with submit/kick taking the worker slot.
+                # A report committed during this check either appears here or
+                # its kick waits to start a new worker.
+                async with self.scheduling.setdefault(sid, asyncio.Lock()):
+                    queued = [] if sid in self.cancelled else await self._pending(sid)
+                    if not queued:
+                        await self.api.session("busy", session=sid, value=False)
+                        return results
+                    self._turn_boundary(sid)
                 results.append(await self._turn(sid, queued[0]))
-        finally:
+        except BaseException:
             await self.api.session("busy", session=sid, value=False)
-        return results
+            raise
+        finally:
+            self._turn_boundary(sid)
 
     async def _record(self, sid, turn, kind, **kw):
         return await self.api.session(

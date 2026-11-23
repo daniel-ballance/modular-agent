@@ -2,16 +2,20 @@
 
 import asyncio
 import json
+import sqlite3
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import acp
 import pytest
 
 from acp_fixture import Client, prompt, running
-from ma_core import content
+from ma_acp import ACP
+from ma_core import Plugin, content
 from ma_fake import Fake, reply
+from ma_history import History, pending
 from ma_cli import build
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +58,152 @@ async def test_shared_acp_conformance_kit(runtime_kind, request):
             # Close transport first so the agent suspends and reaps its plugins.
             proc.terminate()
             await proc.wait()
+
+
+@pytest.fixture
+def memory_history(tmp_path, monkeypatch):
+    # Test turn synchronization without waiting for disk sync on each record.
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "history.sqlite3").touch()
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, project TEXT, meta TEXT)")
+    db.execute("CREATE TABLE entries (id TEXT PRIMARY KEY, session TEXT, record TEXT)")
+    pending.schema(db)
+
+    @contextmanager
+    def connect(_):
+        with db:
+            yield db
+
+    monkeypatch.setattr(History, "_connect", connect)
+    try:
+        yield
+    finally:
+        db.close()
+
+
+async def test_prompt_does_not_return_before_its_turn_releases_busy(
+    tmp_path, runtime_type, memory_history
+):
+    recorded, release, waiting = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    class PausedRuntime(runtime_type):
+        async def submit(self, d, emit):
+            receipt = await super().submit(d, emit)
+            await recorded.wait()
+            return receipt
+
+        async def wait(self, d, emit):
+            waiting.set()
+            return await super().wait(d, emit)
+
+    class Pause(Plugin):
+        name = "pause-turn-end"
+
+        async def start(self, api):
+            await super().start(api)
+            api.on("turn.end", self.end)
+
+        async def end(self, _):
+            recorded.set()
+            await release.wait()
+
+    h = await build(
+        tmp_path / "state",
+        Fake([reply("done")]),
+        runtime=PausedRuntime(),
+        project=tmp_path,
+        process_plugins=[],
+    )
+    interface = ACP(tmp_path, {"model": "fake"})
+    try:
+        await h.load(Pause(), process=False)
+        await h.load(interface, process=False)
+        await interface.initialize(1)
+        sid = (await interface.new_session(str(tmp_path), [])).session_id
+        async with asyncio.timeout(30):
+            first = asyncio.create_task(
+                interface.prompt(sid, [acp.schema.TextContentBlock(text="first")])
+            )
+            pending = asyncio.create_task(waiting.wait())
+            try:
+                await asyncio.wait({first, pending}, return_when=asyncio.FIRST_COMPLETED)
+                if first.done():
+                    # Reproduce the settings refusal before releasing turn.end.
+                    await interface.set_config_option("approval", sid, "off")
+                    pytest.fail("Prompt replied while turn.end was still running")
+            finally:
+                release.set()
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+            assert (await first).stop_reason == "end_turn"
+            await interface.set_config_option("approval", sid, "off")
+    finally:
+        release.set()
+        await h.stop()
+
+
+async def test_prompt_waits_for_its_own_turn_not_the_job_report(
+    tmp_path, runtime_type, memory_history
+):
+    first_started, second_started = asyncio.Event(), asyncio.Event()
+    release_first, release_second = asyncio.Event(), asyncio.Event()
+
+    class Pause(Plugin):
+        name = "pause-turn-start"
+        seen = 0
+
+        async def start(self, api):
+            await super().start(api)
+            api.on("turn.start", self.turn)
+
+        async def turn(self, _):
+            self.seen += 1
+            if self.seen == 1:
+                first_started.set()
+                await release_first.wait()
+            else:
+                second_started.set()
+                await release_second.wait()
+
+    h = await build(
+        tmp_path / "state",
+        Fake([reply("first answer"), reply("second answer")]),
+        runtime=runtime_type(),
+        project=tmp_path,
+        process_plugins=[],
+    )
+    interface = ACP(tmp_path, {"model": "fake"})
+    first = None
+    try:
+        await h.load(Pause(), process=False)
+        await h.load(interface, process=False)
+        await interface.initialize(1)
+        sid = (await interface.new_session(str(tmp_path), [])).session_id
+        async with asyncio.timeout(30):
+            first = asyncio.create_task(
+                interface.prompt(sid, [acp.schema.TextContentBlock(text="first")])
+            )
+            await first_started.wait()
+            job = await h.api().call("jobs", "create", {"session": sid, "kind": "fixture"})
+            await h.api().call(
+                "jobs", "report", {"session": sid, "job": job["id"], "result": content("report")}
+            )
+            release_first.set()
+            await second_started.wait()
+            result = await first
+            assert result.stop_reason == "end_turn"
+            assert result.field_meta["modular-agent"]["result"]["content"] == content(
+                "first answer"
+            )
+            assert (await h.api().session("get", session=sid))["busy"]
+    finally:
+        release_first.set()
+        release_second.set()
+        if first is not None:
+            await asyncio.gather(first, return_exceptions=True)
+        await h.stop()
 
 
 async def test_cancel_bash_during_process_bootstrap(tmp_path, runtime_kind, monkeypatch):

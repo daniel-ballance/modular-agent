@@ -82,7 +82,7 @@ export async function checkUpgrades({ url, protocol, token }, check, attempt) {
 // One text message per send. The callback sees a whole message, including any
 // embedded whitespace. For the kits' normal traffic, keep track of unanswered
 // work so silent connections can be probed without imposing a work deadline.
-export function socketPeer({ url, protocol, token, retry = false }, onText = () => {}) {
+export function socketPeer({ url, protocol, token, startup }, onText = () => {}) {
 	const outstanding = new Set();
 	let socket, stopping = false, idleTimer, controlTimer, pingId, rejectedFrame = false;
 	let settle;
@@ -103,13 +103,15 @@ export function socketPeer({ url, protocol, token, retry = false }, onText = () 
 		end();
 		settle({ code: 1006, rejectedFrame });
 	};
+	let exited = false;
+	void startup?.exited.then(() => { exited = true; });
 	const dial = async () => {
-		const deadline = Date.now() + CONTROL_MS;
-		while (!stopping) {
+		const deadline = performance.now() + (startup?.watchdog ?? CONTROL_MS);
+		while (!stopping && !exited) {
 			const ws = socket = new WebSocket(url, { protocols: [protocol], headers: { Authorization: `Bearer ${token}` } });
 			const finish = new Promise((resolve) => ws.addEventListener("close", resolve, { once: true }));
 			const opened = await new Promise((resolve) => {
-				const timer = setTimeout(() => { ws.close(); resolve(false); }, Math.max(1, deadline - Date.now()));
+				const timer = setTimeout(() => { ws.close(); resolve(false); }, Math.max(1, deadline - performance.now()));
 				const done = (ok) => { clearTimeout(timer); resolve(ok); };
 				ws.addEventListener("open", () => done(true), { once: true });
 				ws.addEventListener("error", () => done(false), { once: true });
@@ -145,7 +147,7 @@ export function socketPeer({ url, protocol, token, retry = false }, onText = () 
 				});
 				return ws;
 			}
-			if (!retry || Date.now() >= deadline) break;
+			if (!startup || exited || performance.now() >= deadline) break;
 			await sleep(50);
 		}
 		settle({ code: 1006 });

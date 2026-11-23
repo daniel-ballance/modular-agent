@@ -168,13 +168,19 @@ function spawnAgent(which, extraEnv, captureStderr = false) {
 	return child;
 }
 
+// A managed fixture starts a fresh agent, not just a WebSocket handshake.
+// At high load Python took 14.1 s from launch to listen. This is a hang
+// guard for fixture startup; an already-running service keeps CONTROL_MS.
+const MANAGED_STARTUP_WATCHDOG_MS = 30000;
+
 // The SDK takes streams of message objects, not lines. One WebSocket message
 // is one object even when its JSON contains newlines.
 function webTransport(service, token) {
 	let peer, ended = false, input;
 	const closed = service.then(async (listener) => {
 		if (ended) return { code: 1006 };
-		peer = socketPeer({ ...network, url: listener?.url ?? network.url, token, retry: !!listener }, (_, rpc) => {
+		const startup = listener && { exited: listener.exited, watchdog: MANAGED_STARTUP_WATCHDOG_MS };
+		peer = socketPeer({ ...network, url: listener?.url ?? network.url, token, startup }, (_, rpc) => {
 			if (!ended && rpc && typeof rpc === "object" && !Array.isArray(rpc)) input.enqueue(rpc);
 			else peer.end();
 		});
@@ -873,11 +879,12 @@ if (probeChecks) for (const [name, plugins] of [
 		const peer = connect(command, settings);
 		try {
 			const init = peer.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
-			const seen = await within(15000, Promise.race([init.then(() => ({ initialized: true }), () => peer.wire.closed), peer.wire.closed]), "startup failure or successful initialize");
 			const service = await peer.service;
-			const exit = seen.code === 1006 && await Promise.race([service.exited, sleep(50).then(() => null)]);
+			const seen = await within(MANAGED_STARTUP_WATCHDOG_MS, Promise.race([
+				init.then(() => ({ initialized: true }), () => peer.wire.closed), peer.wire.closed,
+			]).then(async (result) => result.code === 1006 ? { ...result, exit: await service.exited } : result), "startup failure or successful initialize");
 			check(`Choosing plugins at start (${name}): refuses the connection or closes with failure before initialize`,
-				!seen.initialized && (seen.code === 1011 || (exit?.code != null && exit.code !== 0)), JSON.stringify(seen));
+				!seen.initialized && (seen.code === 1011 || (seen.exit?.code != null && seen.exit.code !== 0)), JSON.stringify(seen));
 		} finally { await stop(peer); }
 		return;
 	}
