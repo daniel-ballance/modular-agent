@@ -40,6 +40,8 @@ export interface ExternalPluginSpec {
 	command: string[];
 	env?: Record<string, string>;
 	config?: Record<string, unknown>;
+	/** Omit the context offer when testing a peer without context support. */
+	offerTraceContext?: boolean;
 }
 
 /** A network plugin and optional operator-configured liveness deadlines (milliseconds). */
@@ -115,7 +117,7 @@ export async function startExternalPlugin(spec: ExternalPluginSpec, info: { proj
 		await exited;
 		clearTimeout(timer);
 	};
-	return registerExternalPlugin(peer, info, spec.config ?? {}, stop);
+	return registerExternalPlugin(peer, info, spec.config ?? {}, stop, undefined, spec.offerTraceContext);
 }
 
 /** Connect a service and register it through the same host as a child process. */

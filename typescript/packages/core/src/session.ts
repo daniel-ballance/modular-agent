@@ -1,6 +1,6 @@
 import { untilAborted, inputHandedBackIds, inputIdOf, isToolCall, textOf, type AgentEvent, type InputRequest, type PluginApi, type TurnOutcome } from "@modular-agent/harness";
 import { setTimeout as delay } from "node:timers/promises";
-import type { Actor, Answer, Content, Question, Right, ToolCall, HistoryEntry, InputTiming, InputReceipt, Input, Outcome, QuestionHandler, Settings, ToolStatus, TurnResult, Usage } from "./data.js";
+import type { Actor, Answer, Content, Declaration, Question, Right, ToolCall, HistoryEntry, InputTiming, InputReceipt, Input, Outcome, QuestionHandler, Settings, ToolStatus, TurnResult, Usage } from "./data.js";
 import { AgentError, checked, sdkError } from "./errors.js";
 import { schema } from "./schema.js";
 
@@ -385,6 +385,11 @@ export class Session {
     const view = await this.#api.gateOutput(this.id, this.actor, "command.result", result);
     if (view === undefined) throw new AgentError("withheld", "Command result was withheld");
     return view;
+  }
+
+  declaration(): Declaration {
+    this.#require("watch");
+    return this.#api.declaration(this.id);
   }
 
   async lastTurn(): Promise<PromptResult | undefined> {

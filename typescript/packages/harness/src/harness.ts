@@ -2189,7 +2189,10 @@ export class Harness {
 		const span = this.turnSpan(s, turnId, queued.trace ?? null, undefined, continuesTurnId);
 		return span.run(async () => {
 			try {
-				const traceContext = runtime?.supports.continuesAfterRestart ? carrier(span.spanContext) : undefined;
+				// Kept turns can be settled after a restart even if their Runtime
+				// cannot resume them. Save the original segment for any persistent history.
+				const store = this.use<HistoryStore>("history-store");
+				const traceContext = store && store.supports.persistent !== false ? carrier(span.spanContext) : undefined;
 				await this.commit(s, [
 					{ kind: "turnStart", writer: "harness", modelVisible: false, turnId, continuesTurnId, actorId: queued.actorId, data: { ...snapshot, ...(traceContext ? { traceContext } : {}), startedBy: queued.startedBy, resultShape: failure ? undefined : resultShape, point, rights: state.startingRights,
 						authorizers: [...actors].map(actorId => ({ sessionId: s.id, actorId })), ...(continuing ? { authorityActors: [...actors], authorityJobs: [...jobs] } : {}) } },
@@ -2349,7 +2352,7 @@ export class Harness {
 			await this.endInterruptedTurn(s, { turnId, calls: calls.filter((c) => !eligible.includes(c)) });
 			outcome = await runtime.resumeTurn(
 				{ sessionId: s.id, turnId, startedBy, model: this.turnModel(s, turnId, state, model), settings: state.settings, resultShape: snapshot?.resultShape },
-				this.runtimeHost(s, turnId, state, snapshot?.resultShape),
+				this.runtimeHost(s, turnId, state, snapshot?.resultShape, runtime.supports.continuesAfterRestart === true),
 				signal,
 				{ turnId, calls: eligible, ...(restored ? { lastStep: restored.lastStep } : {}) },
 			);
@@ -2428,10 +2431,14 @@ export class Harness {
 		return span;
 	}
 
-	private runtimeHost(s: Session, turnId: string, state: TurnState, resultShape?: Record<string, unknown>): RuntimeHost {
+	private runtimeHost(s: Session, turnId: string, state: TurnState, resultShape?: Record<string, unknown>, observeSteps = true): RuntimeHost {
 		const turn = activeOperation();
-		const step = (id: string) => turn ? turn.run(() => this.step(s, turnId, state.steps, id)) : this.step(s, turnId, state.steps, id);
-		const inStep = <T>(id: string | undefined, work: () => T): T => id ? step(id).run(work) : work();
+		// A kept Runtime may finish bookkeeping, but it does not resume a step.
+		const step = (id: string) => observeSteps ? turn?.run(() => this.step(s, turnId, state.steps, id)) : undefined;
+		const inStep = <T>(id: string | undefined, work: () => T): T => {
+			const span = id ? step(id) : undefined;
+			return span ? span.run(work) : work();
+		};
 		const withAuthority = <T>(fn: () => T): T => this.turnAuthority.run({ sessionId: s.id, actors: state.actors, jobs: state.jobs, state }, fn);
 		const checkRead = async () => { await this.admitHistory(s); withAuthority(() => this.checkScopedWork(s, "watch")); };
 		return {

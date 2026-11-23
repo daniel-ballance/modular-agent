@@ -21,7 +21,7 @@ export function count(path: string): number {
   }
 }
 
-export function fixture(name: string, config?: Record<string, unknown>): Plugin {
+export function fixture(name: string, config?: Record<string, unknown>, yes = "yes"): Plugin {
   switch (name) {
     case "tide": return definePlugin({ name, config, tools: [tide] });
     case "counter": return definePlugin({ name, config, setup(r) {
@@ -43,7 +43,7 @@ export function fixture(name: string, config?: Record<string, unknown>): Plugin 
       name: "confirm", description: "Ask whether to go ahead.",
       input: z.object({ question: z.string() }),
       async run({ question }, cx) {
-        const answer = await cx.ask({ kind: "choice", question, options: ["yes", "no"] });
+        const answer = await cx.ask({ kind: "choice", question, options: [yes, "no"] });
         return typeof answer === "object" && "value" in answer ? answer.value : "declined";
       },
     })] });
