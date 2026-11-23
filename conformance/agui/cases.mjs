@@ -185,7 +185,7 @@ export const cases = {
       clean(copy, 'dispatch-blue');
       await reportRefused(await other.post(input(copy, [tool(id, 'foreign result')]), opts(copy)));
     }
-    await historyError(await nextConnection.post(input(view, [], { resume: [{ interruptId: id, status: 'resolved', value: 'not a tool report' }] }), opts(view)));
+    await historyError(await nextConnection.post(input(view, [], { resume: [{ interruptId: id, status: 'resolved', payload: 'not a tool report' }] }), opts(view)));
     await refused(await nextConnection.post(input(view, [user('mixed new input'), tool(id, rawReport)]), opts(view)), 400, 'invalid_request');
     await reportRefused(await nextConnection.post(input(view, [tool(id, rawReport), tool('unknown-call', 'invalid')]), opts(view)));
     const report = input(view, [{ ...tool(id, rawReport), metadata: { actorId: 'forged-report-actor', status: 'refused' } }]);
