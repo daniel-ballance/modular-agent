@@ -2,6 +2,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import {
   closeSync,
+  copyFileSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -93,6 +94,9 @@ export function launch(projects: Projects, agent: Agent, pluginUrl: string, appr
     data = join(root, 'agents', agent);
   const auth = token(root, agent + '-agui');
   const childEnv = env(root);
+  const live = process.env.DESK_LIVE === '1';
+  const model = live ? process.env['DESK_' + agent.toUpperCase() + '_MODEL'] : 'scripted/script';
+  if (!model) throw Error('No live model for ' + agent);
   const plugins: object[] = [{ url: pluginUrl, tokenFile: token(root, agent + '-tools').path }];
   const python = join(demo, 'triage', '.venv', 'bin', 'python');
   mkdirSync(data, { recursive: true });
@@ -106,9 +110,15 @@ export function launch(projects: Projects, agent: Agent, pluginUrl: string, appr
   if (agent === 'coder') {
     plugins.push({
       command: [python, join(demo, 'coder', 'change.py')],
-      env: { DESK_APPROVAL_MS: String(approvalMs) }
+      env: { DESK_APPROVAL_MS: String(approvalMs), ...(live ? { DESK_LIVE: '1' } : {}) }
     });
-    childEnv.MODULAR_AGENT_SCRIPT = join(demo, 'coder', 'model.json');
+    if (live) {
+      // Keep ma's configuration and HOME private to the desk. Only Claude Code needs its sign-in.
+      childEnv.CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR;
+      childEnv.MODULAR_AGENT_CLAUDE_SIDECAR = resolve(demo, '../../typescript/sidecars/claude/dist/main.js');
+      copyFileSync(join(demo, 'coder/instructions.md'), join(data, 'AGENTS.md'));
+      writeFileSync(join(data, 'settings.json'), JSON.stringify({ thinking: 'low', step_limit: 8, output_limit: 2048 }));
+    } else childEnv.MODULAR_AGENT_SCRIPT = join(demo, 'coder', 'model.json');
     const policy = join(data, 'policy.json');
     writeFileSync(
       policy,
@@ -133,10 +143,12 @@ export function launch(projects: Projects, agent: Agent, pluginUrl: string, appr
       '--project',
       project,
       '--model',
-      'scripted/script'
+      model
     ];
-  } else
+  } else {
+    if (live) Object.assign(childEnv, { DESK_MODEL: model, DESK_LOGINS: process.env.DESK_LOGINS });
     cmd = agent === 'triage' ? [python, join(demo, 'triage', 'main.py')] : [join(demo, '.build', 'verifier')];
+  }
   childEnv.MODULAR_AGENT_PLUGINS = JSON.stringify(plugins);
   const log = openSync(join(root, agent + '.log'), 'a', 0o600);
   const proc = spawn('setpriv', ['--pdeathsig', 'KILL', '--', ...cmd], {
