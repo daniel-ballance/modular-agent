@@ -2164,6 +2164,11 @@ export class Harness {
 		const continuesTurnId = queued.continueTurnId;
 		if (continuesTurnId && !this.readyContinuations(s).some(item => item.origin === continuesTurnId)) return;
 		const continuing = continuesTurnId ? this.openCalls(s, continuesTurnId) : undefined;
+		if (continuesTurnId && !this.reservations.reserve(s, `turn:${turnId}`, { storageBytes: 3 * this.reservations.limits.settlementBytes })) {
+			// No turn was admitted. Wake only exchanges waiting on this origin.
+			this.emit(s, "continuation.refused", { code: "busy" }, "harness", { turnId: continuesTurnId });
+			return;
+		}
 		const runtime = this.runtime();
 		const ref = parseModel(s.settings.model);
 		const model: ModelAccess | undefined = this.modelAccess(s, ref) ?? (ref ? {
@@ -2211,10 +2216,6 @@ export class Harness {
 			snapshot = { model: ref ?? null, system: "", settings: {}, tools: [] };
 		}
 		const state: TurnState = { ...snapshot, ...authority, interfaceOffer, interfaceAllowances: new Map(), dispatched: new Set(), steps: new Map(), sources: new Map(), actors, jobs };
-		if (continuing && !this.reservations.reserve(s, `turn:${turnId}`, { storageBytes: 3 * unit })) {
-			// Leave existing open calls intact when a continuation cannot reserve its own turn.
-			return;
-		}
 		const span = this.turnSpan(s, turnId, queued.trace ?? null, undefined, continuesTurnId);
 		return span.run(async () => {
 			try {

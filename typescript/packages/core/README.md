@@ -138,9 +138,9 @@ Run `typescript/scripts/check-agui.sh` after building. It installs the kit in a 
 
 #### Gaps in the core operations
 
-The [binding](../../../docs/bindings/agui.md#interrupts-and-frontend-tools) says: “If the group becomes unsafe before release, withhold it and use `RUN_ERROR`; the Harness settles the call if it can confirm non-delivery, otherwise it remains open until its deadline.” The adapter withholds the group and sends the error. The Interface tool handle has no operation to confirm non-delivery of a staged group rejected by the adapter's final output gate. The adapter leaves that call with the Harness until settlement; it does not manufacture a failed report from the actor.
+The [binding](../../../docs/bindings/agui.md#interrupts-and-frontend-tools) requires settlement **if the Harness can confirm non-delivery**. Withholding the final group sends `RUN_ERROR`; it does not report a tool failure on the actor's behalf. The handle has no acknowledgment from the adapter proving non-delivery. If the Harness cannot prove it independently, the call remains open until a valid report, cancellation or its existing deadline. No handoff is repeated.
 
-The [run rules](../../../docs/bindings/agui.md#runs-and-events) say: “Use SSE comments while waiting; if the origin becomes ineligible, end with `RUN_ERROR`.” The follower detects a branch move, erasure, writer loss, session end and loss of watch. There is no core notification for a ready continuation that fails to reserve a turn and never starts. In that case a waiting exchange can stay open; it cannot claim a turn outcome. The snapshot route remains available.
+A waiting exchange receives `RUN_ERROR` with code `busy` if its ready continuation cannot reserve a turn. That refusal does not undo a committed result or start a different turn.
 
 ### Proposed standard configuration text
 
