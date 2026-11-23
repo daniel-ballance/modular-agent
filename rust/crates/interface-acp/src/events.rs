@@ -235,7 +235,7 @@ async fn question(
     }
 }
 fn add_question_trace(session: &Session, q: &Question, params: &mut Value) {
-    if !PRINCIPAL.with(|p| p.network)
+    if PRINCIPAL.with(|p| p.trusts_trace())
         && let Some(parent) = session.api.question_trace(&q.scope.session, &q.id)
     {
         params["_meta"]["traceparent"] = json!(parent);

@@ -732,7 +732,9 @@ type ServeACPOptions struct {
 	Projects, Tenants  []string
 	Rights, Represents []string
 	// StdioActor replaces the environment-derived principal and sets its ceiling.
-	StdioActor      *Actor
+	StdioActor *Actor
+	// StdioTrustTrace defaults to true for the launching peer.
+	StdioTrustTrace *bool
 	TLS             *TLSOptions
 	ControlDeadline time.Duration
 }
@@ -783,6 +785,7 @@ func (a *Agent) ServeACP(ctx context.Context, options ...ServeACPOptions) error 
 	if opt.StdioActor != nil {
 		policy.Actor.ID, policy.Actor.Kind = opt.StdioActor.ID, opt.StdioActor.Kind
 	}
+	policy.TrustTrace = opt.StdioTrustTrace == nil || *opt.StdioTrustTrace
 	return appError(iface.ServeStdio(ctx, opt.Input, opt.Output, declared, projects, policy), Lost)
 }
 

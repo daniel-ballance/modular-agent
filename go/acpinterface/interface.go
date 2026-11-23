@@ -86,7 +86,7 @@ func (i *Interface) ServeWithDeclaration(ctx context.Context, in io.ReadCloser, 
 	if len(configs) > 0 {
 		config = configs[0]
 	}
-	policy := Principal{}
+	policy := Principal{TrustTrace: true} // The launcher supplies the stdio peer.
 	if tenants, ok := i.a.(interface{ StdioTenantGrants() ([]string, error) }); ok {
 		grants, err := tenants.StdioTenantGrants()
 		if err != nil {
@@ -114,7 +114,6 @@ func (i *Interface) ServeStdio(ctx context.Context, in io.ReadCloser, out io.Wri
 			return errors.New("MODULAR_AGENT_ACP_REPRESENTS must be a JSON array of principal IDs")
 		}
 	}
-	policy.TrustTrace = true // The launcher supplies the stdio peer.
 	return i.serve(ctx, in, out, declared, config, policy.Actor.ID, &policy)
 }
 

@@ -4,10 +4,21 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestTraceTrustOnWorkRequests(t *testing.T) {
+	ma := filepath.Join(t.TempDir(), "ma")
+	if output, err := exec.Command("go", "build", "-o", ma, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build ma: %v\n%s", err, output)
+	}
+	if output, err := exec.Command("node", "../../../conformance/reference/trace-trust.mjs", ma).CombinedOutput(); err != nil {
+		t.Fatalf("trace trust: %v\n%s", err, output)
+	}
+}
 
 func TestOperatorPolicyLimitsAndStartupDiagnostics(t *testing.T) {
 	d, project, _ := isolated(t)
@@ -36,6 +47,7 @@ func TestOperatorPolicyLimitsAndStartupDiagnostics(t *testing.T) {
 	for _, raw := range []string{
 		`{"stdio":{"actor":{"id":"host","kind":"host","rights":["watch"]},"projects":false}}`,
 		`{"stdio":{"actor":{"id":"host","kind":"host","rights":[]},"represents":["guest"]}}`,
+		`{"stdio":{"actor":{"id":"host","kind":"host","rights":[]},"traceTrusted":null}}`,
 		`{"limits":{"agent":{"bufferedBytes":-1}}}`,
 		`{"limits":{"session":{"storageBytes":0}}}`,
 	} {

@@ -75,6 +75,7 @@ By default `ma` sends no telemetry. Set `OTEL_EXPORTER_OTLP_ENDPOINT` or a per-s
 # From the repository root, after uv sync above:
 npm ci --prefix conformance/acp
 npm ci --prefix conformance/tools
+npm ci --prefix conformance/telemetry
 node conformance/reference/run.mjs --agent python
 MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- "$PWD/python/.venv/bin/ma" --acp
 scripts/websocket-kits.sh python

@@ -37,6 +37,8 @@ pub struct Identity {
     pub explicit_rights: bool,
     pub join_on_open: bool,
     pub network: bool,
+    /// None uses the transport default: trust stdio, not network peers.
+    pub trust_trace_context: Option<bool>,
 }
 impl Identity {
     pub fn local() -> Self {
@@ -50,7 +52,11 @@ impl Identity {
             explicit_rights: false,
             join_on_open: true,
             network: false,
+            trust_trace_context: None,
         }
+    }
+    fn trusts_trace(&self) -> bool {
+        self.trust_trace_context.unwrap_or(!self.network)
     }
     pub fn may_discover(&self, data: &SessionData) -> bool {
         sessions::discoverable(self, data)
@@ -277,9 +283,7 @@ impl State {
         request: UntypedMessage,
         cx: ConnectionTo<acp::Client>,
     ) -> Result<Value> {
-        // Stdio is an operator-launched peer. Network authentication grants work,
-        // not trace trust, so WebSocket requests start in a fresh trace.
-        let context = if !self.principal.network
+        let context = if self.principal.trusts_trace()
             && matches!(
                 request.method.as_str(),
                 "session/prompt"

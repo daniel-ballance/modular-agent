@@ -470,6 +470,7 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 			acpOptions.Represents = []string{}
 			if scope := o.policy.Stdio; scope != nil {
 				acpOptions.StdioActor = &scope.Actor
+				acpOptions.StdioTrustTrace = &scope.TrustTrace
 				acpOptions.Projects, acpOptions.Tenants = scope.Projects, scope.Tenants
 			}
 			acpOptions.Input, acpOptions.Output = in, out

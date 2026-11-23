@@ -22,6 +22,7 @@ DEFAULT_LIMITS = {
 
 class StdioPolicy(TypedDict):
     actor: Actor
+    trace_trusted: bool
     projects: NotRequired[list[Path]]
     tenants: NotRequired[list[str | None]]
     represents: NotRequired[list[str]]
@@ -111,10 +112,15 @@ def _principal(
             "projects",
             "tenants",
             "represents",
+            "traceTrusted",
             *(["tokenFile", "clientId"] if network else []),
         },
         "actors entry" if network else "stdio",
     )
+    trusted = value.pop("traceTrusted", not network)
+    if not isinstance(trusted, bool):
+        raise ValueError("traceTrusted must be a boolean")
+    value["trace_trusted"] = trusted
     actor = value.get("actor")
     _shape(actor, {"id", "kind", "rights"}, "actor")
     if not isinstance(actor.get("id"), str) or not actor["id"]:

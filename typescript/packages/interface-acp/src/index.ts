@@ -211,6 +211,10 @@ export class AcpInterface implements InterfaceCapability {
 	}
 
 	/** Give the session the MCP servers the client passed. They are not recorded: their headers and env may hold secrets. */
+	private questionTrace() {
+		return this.options.traceTrusted !== false ? carrier(currentSpan()) : undefined;
+	}
+
 	private traced<T>(meta: unknown, work: () => T): T {
 		return withTrace(this.options.traceTrusted !== false ? readTrace(meta) : undefined, work);
 	}
@@ -1006,7 +1010,7 @@ export class AcpInterface implements InterfaceCapability {
 				sessionId: request.sessionId,
 				toolCall: { toolCallId: request.toolCallId ?? request.id, title: call.name, rawInput: call.input,
 					...(request.details ? { content: [{ type: "content" as const, content: { type: "text" as const, text: request.details } }] } : {}) },
-				options, _meta: { ...carrier(currentSpan()), [NS]: { requestId: request.id, actorId } },
+				options, _meta: { ...this.questionTrace(), [NS]: { requestId: request.id, actorId } },
 			} };
 			const gated = await this.apiFor(request.sessionId).gateOutput(request.sessionId, this.actorId, "request", payload);
 			if (!gated || !isDeepStrictEqual(gated, payload) || Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: Number.MAX_SAFE_INTEGER, ...gated })) > MAX_LINE_BYTES) {
@@ -1034,7 +1038,7 @@ export class AcpInterface implements InterfaceCapability {
 		const params = {
 			sessionId: request.sessionId,
 			mode: "form",
-			_meta: { ...carrier(currentSpan()), [NS]: { requestId: request.id, actorId } },
+			_meta: { ...this.questionTrace(), [NS]: { requestId: request.id, actorId } },
 			message: request.question,
 			requestedSchema: { type: "object", properties: { answer: field }, required: ["answer"] },
 		} as acp.CreateElicitationRequest;

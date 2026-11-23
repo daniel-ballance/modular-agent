@@ -15,10 +15,11 @@ import (
 )
 
 type policyScope struct {
-	Actor      Actor           `json:"actor"`
-	Projects   json.RawMessage `json:"projects"`
-	Tenants    json.RawMessage `json:"tenants"`
-	Represents []string        `json:"represents"`
+	TraceTrusted json.RawMessage `json:"traceTrusted"`
+	Actor        Actor           `json:"actor"`
+	Projects     json.RawMessage `json:"projects"`
+	Tenants      json.RawMessage `json:"tenants"`
+	Represents   []string        `json:"represents"`
 }
 
 type aclPolicy struct {
@@ -94,8 +95,18 @@ func ReadACPPolicy(path string, optional, representation bool) (policy ACPPolicy
 		}
 	}
 	policy.Limits = parsed.Limits
-	convert := func(s policyScope) (ACPActor, error) {
-		r := ACPActor{Actor: s.Actor}
+	convert := func(s policyScope, defaultTrust bool) (ACPActor, error) {
+		r := ACPActor{Actor: s.Actor, TrustTrace: defaultTrust}
+		if s.TraceTrusted != nil {
+			switch string(s.TraceTrusted) {
+			case "true":
+				r.TrustTrace = true
+			case "false":
+				r.TrustTrace = false
+			default:
+				return r, errors.New("traceTrusted must be a boolean")
+			}
+		}
 		if !representation && len(s.Represents) != 0 {
 			return r, errors.New("represents must be empty in ma")
 		}
@@ -144,7 +155,7 @@ func ReadACPPolicy(path string, optional, representation bool) (policy ACPPolicy
 		return r, nil
 	}
 	if parsed.Stdio != nil {
-		s, err := convert(*parsed.Stdio)
+		s, err := convert(*parsed.Stdio, true)
 		if err != nil {
 			return policy, fmt.Errorf("stdio: %w", err)
 		}
@@ -154,7 +165,7 @@ func ReadACPPolicy(path string, optional, representation bool) (policy ACPPolicy
 		policy.Actors = make([]ACPActor, 0, len(parsed.Actors))
 	}
 	for i, row := range parsed.Actors {
-		actor, err := convert(row.policyScope)
+		actor, err := convert(row.policyScope, false)
 		if err != nil {
 			return policy, fmt.Errorf("actors[%d]: %w", i, err)
 		}

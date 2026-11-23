@@ -222,9 +222,9 @@ func run(ctx context.Context, args []string, input io.ReadCloser, stdout, stderr
 		if policy == nil {
 			return v.(*acpinterface.Interface).Serve(ctx, input, stdout)
 		}
-		var principal acpinterface.Principal
+		principal := acpinterface.Principal{TrustTrace: true}
 		if s := policy.Stdio; s != nil {
-			principal = acpinterface.Principal{Actor: s.Actor, Projects: s.Projects, Tenants: s.Tenants, Represents: s.Represents}
+			principal = acpinterface.Principal{TrustTrace: s.TrustTrace, Actor: s.Actor, Projects: s.Projects, Tenants: s.Tenants, Represents: s.Represents}
 		}
 		projects := acpinterface.Projects{Compose: func(_ context.Context, project, _ string) (acpinterface.Project, error) {
 			projectOptions := options

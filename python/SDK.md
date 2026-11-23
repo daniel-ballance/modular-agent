@@ -23,6 +23,7 @@ Set `TMPDIR=$HOME/.cache/ma-std-tmp` and create that directory first. From the r
 ```sh
 (cd conformance/acp && npm ci)
 (cd conformance/tools && npm ci)
+(cd conformance/telemetry && npm ci)
 (cd python && uv sync --python 3.13)
 (cd python && uv run --offline pytest -q --runtime transient)
 (cd python && uv run --offline pytest -q --runtime durable)
@@ -156,7 +157,7 @@ Call `await claude_provider.available()` before displaying account-specific mode
 
 ## Trace trust and spec findings
 
-The launcher of a stdio ACP host is trusted for per-request trace context. Set `trace_trusted=True` in an embedded network ACP `actors` entry only for a peer allowed to share trace IDs. Network principals are not trace-trusted by default. Configured history and plugin destinations get context per request. The SDK does not accept or send baggage. AG-UI can accept allowlisted vendor state on a trusted work POST.
+The launcher of a stdio ACP host is trusted for per-request trace context unless `serve_acp(trace_trusted=False)` disables it. Set `trace_trusted=True` in an embedded network ACP `actors` entry only for a peer allowed to share trace IDs. Network principals are not trace-trusted by default. Configured history and plugin destinations get context per request. The SDK does not accept or send baggage. AG-UI can accept allowlisted vendor state on a trusted work POST.
 
 ### ADR 0033 spec findings
 

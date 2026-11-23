@@ -218,6 +218,7 @@ async fn acp_receives_both_interruptions_and_lost_prompt_errors() -> Result<()> 
                         tls: None,
                         actors: vec![AcpActor {
                             token_file: token.clone(),
+                            trust_trace_context: false,
                             actor: Actor {
                                 id: "user".into(),
                                 kind: "user".into(),
