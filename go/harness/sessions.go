@@ -22,6 +22,7 @@ import (
 type session struct {
 	interfaceConnections []*InterfaceConnection
 	interfaceSpans       map[string]trace.SpanContext
+	interfaceParents     map[string]*telemetry.Wire
 	interfaceUnreleased  map[string]bool
 	interfaceTimer       *time.Timer
 	interfaceReports     sync.Mutex

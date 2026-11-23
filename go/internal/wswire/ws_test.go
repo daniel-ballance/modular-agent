@@ -23,7 +23,7 @@ const testToken = "test-only-7ec88b6cbef734ac29e7eb14374c"
 func TestWebSocketTLSAndAuthentication(t *testing.T) {
 	dir := t.TempDir()
 	cert, key, roots := selfSigned(t, dir)
-	s, err := Listen(t.Context(), "127.0.0.1:0", &TLSOptions{cert, key}, Plugin, map[string]int{testToken: 23}, func(_ context.Context, c *Conn, principal int) {
+	s, err := Listen(t.Context(), "127.0.0.1:0", &TLSOptions{CertFile: cert, KeyFile: key}, Plugin, map[string]int{testToken: 23}, func(_ context.Context, c *Conn, principal int) {
 		b, err := c.ReadMessage()
 		if err == nil {
 			_ = c.WriteMessage(fmt.Appendf(nil, `{"principal":%d,"echo":%s}`, principal, b))
@@ -83,7 +83,7 @@ func TestWebSocketTLSAndAuthentication(t *testing.T) {
 	if err := os.WriteFile(token, []byte(testToken), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s2, err := Listen(t.Context(), "127.0.0.1:0", &TLSOptions{cert, key}, Plugin, map[string]int{testToken: 23}, func(context.Context, *Conn, int) { t.Error("unauthenticated TLS connection was served") })
+	s2, err := Listen(t.Context(), "127.0.0.1:0", &TLSOptions{CertFile: cert, KeyFile: key}, Plugin, map[string]int{testToken: 23}, func(context.Context, *Conn, int) { t.Error("unauthenticated TLS connection was served") })
 	if err != nil {
 		t.Fatal(err)
 	}

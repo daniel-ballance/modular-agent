@@ -115,6 +115,10 @@ func (i *InterfaceConnection) ReportToolResult(ctx context.Context, report api.I
 	}
 	entry, err := i.c.h.appendInterfaceResultLocked(s, cp, result, i.actor, ctx)
 	if err == nil {
+		if s.interfaceParents == nil {
+			s.interfaceParents = map[string]*telemetry.Wire{}
+		}
+		s.interfaceParents[cp.Turn] = telemetry.Inject(ctx)
 		i.c.h.armInterfaceTimerLocked(s)
 	}
 	s.mu.Unlock()
@@ -291,7 +295,8 @@ func (h *Harness) queueInterfaceContinuationsLocked(s *session) {
 		}
 		input.ID, input.Key, input.Answer, input.When = "", "continue:"+end.Turn, "", "after"
 		input.Continuation, input.ContinuedBy, input.Calls = end.Turn, latest, rerun
-		input.TraceContext = nil
+		input.TraceContext = s.interfaceParents[end.Turn]
+		delete(s.interfaceParents, end.Turn)
 		input.Content = nil
 		readyTurns = append(readyTurns, ready{max(at, positions[end.ID]), input})
 	}

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,7 +32,7 @@ const (
 	handshakeTimeout = 5 * time.Second
 )
 
-type TLSOptions struct{ CertFile, KeyFile string }
+type TLSOptions struct{ CertFile, KeyFile, ClientCAFile string }
 
 // ReadToken does not include a token or file contents in diagnostics. Length is
 // only a sanity check; the operator must generate at least 128 bits of entropy.
@@ -95,6 +96,12 @@ func (s *Server) Close() error {
 // Listen authenticates every request before upgrading. Each token is scanned
 // with the same fixed-length comparisons, regardless of its position or match.
 func Listen[T any](ctx context.Context, addr string, secure *TLSOptions, protocol string, tokens map[string]T, serve func(context.Context, *Conn, T)) (*Server, error) {
+	return ListenAgent(ctx, addr, secure, protocol, tokens, serve, nil)
+}
+
+// ListenAgent optionally serves authenticated HTTP beside the WebSocket upgrade.
+// An HTTP route gets a nil principal on authentication failure, for its own error framing.
+func ListenAgent[T any](ctx context.Context, addr string, secure *TLSOptions, protocol string, tokens map[string]T, serve func(context.Context, *Conn, T), routes func(http.ResponseWriter, *http.Request, *T)) (*Server, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -113,7 +120,21 @@ func Listen[T any](ctx context.Context, addr string, secure *TLSOptions, protoco
 			return nil, err
 		}
 		tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+		if secure.ClientCAFile != "" {
+			b, err := os.ReadFile(secure.ClientCAFile)
+			if err != nil {
+				return nil, err
+			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(b) {
+				return nil, errors.New("invalid client CA file")
+			}
+			tlsConfig.ClientCAs, tlsConfig.ClientAuth = pool, tls.RequireAndVerifyClientCert
+		}
 		scheme = "wss"
+	}
+	if routes != nil {
+		scheme = strings.Replace(scheme, "ws", "http", 1)
 	}
 	endpoint := &url.URL{Scheme: scheme, Host: addr, Path: "/"}
 	if strings.Contains(addr, "://") {
@@ -125,6 +146,9 @@ func Listen[T any](ctx context.Context, addr string, secure *TLSOptions, protoco
 		if endpoint.Path == "" {
 			endpoint.Path = "/"
 		}
+	}
+	if routes != nil && endpoint.Path != "/" {
+		return nil, errors.New("agent HTTP listener requires an origin")
 	}
 	host, port, err := net.SplitHostPort(endpoint.Host)
 	if err != nil || port == "" {
@@ -163,6 +187,23 @@ func Listen[T any](ctx context.Context, addr string, secure *TLSOptions, protoco
 		match := 0
 		for i, key := range keys {
 			match = subtle.ConstantTimeSelect(subtle.ConstantTimeCompare(digest[:], key.digest[:]), i+1, match)
+		}
+		if routes != nil && (serve == nil || r.URL.Path != endpoint.Path || !websocket.IsWebSocketUpgrade(r)) {
+			s.mu.Lock()
+			if s.closing {
+				s.mu.Unlock()
+				http.Error(w, "Service stopping", http.StatusServiceUnavailable)
+				return
+			}
+			s.workers.Add(1)
+			s.mu.Unlock()
+			defer s.workers.Done()
+			var principal *T
+			if match != 0 {
+				principal = &keys[match-1].value
+			}
+			routes(w, r, principal)
+			return
 		}
 		if match == 0 {
 			w.Header().Set("WWW-Authenticate", "Bearer")

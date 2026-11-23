@@ -18,7 +18,10 @@ import (
 // Nil Projects allows any project supported by this composition. Nil Tenants
 // permits only untenantized sessions. Include "" to allow those in a list.
 type ACPActor struct {
-	TokenFile         string
+	TokenFile string
+	// ClientID is required on an AG-UI listener. TrustTrace opts the token into per-work trace propagation.
+	ClientID          string
+	TrustTrace        bool
 	Actor             Actor
 	Tenants, Projects []string
 	Represents        []string
@@ -109,6 +112,7 @@ func (a *Agent) ListenACP(ctx context.Context, opt ServeACPOptions) (*Service, e
 			return nil, err
 		}
 		policy.Actor.ID, policy.Actor.Kind = entry.Actor.ID, entry.Actor.Kind
+		policy.TrustTrace = entry.TrustTrace
 		token, err := wswire.ReadToken(entry.TokenFile)
 		if err != nil {
 			return nil, appError(err, InvalidParams)
