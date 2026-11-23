@@ -102,17 +102,16 @@ class Stdio:
                 if "id" in message:
                     raise ConnectionError("ACP request was withheld because it exceeds 64 MiB")
                 return
-            raw = encode(
-                {
-                    "jsonrpc": "2.0",
-                    "id": message.get("id"),
-                    "error": {
-                        "code": -32000,
-                        "message": "Result exceeds 64 MiB",
-                        "data": {"code": "result_too_large"},
-                    },
-                }
-            )
+            message = {
+                "jsonrpc": "2.0",
+                "id": message.get("id"),
+                "error": {
+                    "code": -32000,
+                    "message": "Result exceeds 64 MiB",
+                    "data": {"code": "result_too_large"},
+                },
+            }
+            raw = encode(message)
         async with self.lock:
             if self.authorize is not None:
                 if "method" in message:
@@ -125,7 +124,7 @@ class Stdio:
                     if method == "session/new" and isinstance(result, dict):
                         sid = result.get("sessionId")
                 try:
-                    if isinstance(sid, str):
+                    if isinstance(sid, str) or (method == "session/list" and "result" in message):
                         prepared = UPDATE_VIEW.get() if "method" in message else REPLY_VIEW.get()
                         reduced = await self.authorize(sid, method, message, prepared)
                         if reduced is not None:

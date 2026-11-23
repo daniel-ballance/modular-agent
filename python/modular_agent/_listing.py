@@ -15,6 +15,10 @@ class WaitingSummary(TypedDict):
     turn: Literal["none", "running", "interrupted"]
 
 
+def still_disclosable(shown: WaitingSummary, current: WaitingSummary) -> bool:
+    return shown["questions"] <= current["questions"] and shown["toolCalls"] <= current["toolCalls"]
+
+
 class SessionSummary(TypedDict):
     id: str
     project: str

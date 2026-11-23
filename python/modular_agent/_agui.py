@@ -24,6 +24,7 @@ from opentelemetry.context import Context
 
 from ._agui_wire import Obj, Failure, content, encode, event, fingerprint, iso, parse_run, require
 from ._interface_tools import InterfaceToolConnection
+from ._listing import still_disclosable
 from ._types import AgentError, ErrorCode, JsonObject
 
 if TYPE_CHECKING:
@@ -283,9 +284,14 @@ class View:
         if len(rows) > limit:
             reply["next"] = uuid4().hex
         await self.required("threads", reply, exact=True)
-        # A gate may have waited. Do not disclose old grants, waits or erased IDs.
+        # The page describes the records we read, not a reservation on the next
+        # commit. Recheck disclosure, not the timestamp or the turn's progress.
+        visible = []
         for row in page:
-            require(await self.thread(row["threadId"]) == row, "conflict")
+            current = await self.thread(row["threadId"])
+            if current and still_disclosable(row["waiting"], current["waiting"]):
+                visible.append(row)
+        reply["threads"] = visible
         if "next" in reply:
             pages[reply["next"]] = self.client, rows[limit - 1][0]
             if len(pages) > 1024:

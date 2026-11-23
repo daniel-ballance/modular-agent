@@ -136,6 +136,8 @@ async def test_restart_during_tool_call(tmp_path, mode, runtime):
                         pytest.fail((await active).text[-1500:])
                     await asyncio.sleep(0.02)
                 if mode == "flag":
+                    if sys.platform == "linux":
+                        assert (await observer.session_summary(sid))["waiting"]["turn"] == "running"
                     async with ma(root, "held", "--resume-open"):
                         assert (root / "held").read_text().splitlines() == [
                             f"resume-open: skipped {sid}"

@@ -16,6 +16,7 @@ from ma_core.wire import settings_in
 from ma_harness.authority import CONNECTION_AUTHORITY
 
 from ._agui_http import AguiServer
+from ._listing import SessionSummary, still_disclosable
 from ._types import Actor, JsonObject
 
 if TYPE_CHECKING:
@@ -178,22 +179,47 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
             or self._agent._resumed.get(sid)
         )
 
+    async def _listed_session(self, sid: str) -> SessionSummary | None:
+        return await (self._owner(sid) or self._current()).session_summary(
+            sid,
+            actor=self.actor,
+            local=not self.network,
+            represents=self.represents,
+            approval_views={qid for session, qid in self.approval_views if session == sid},
+        )
+
+    async def authorize_frame(
+        self, sid: str | None, method: str, message: dict[str, Any], prepared: Any = None
+    ) -> Any:
+        if method != "session/list" or "result" not in message:
+            return await super().authorize_frame(sid, method, message, prepared)
+        scope = self.project_scope()
+        try:
+            rows = []
+            for row in message["result"]["sessions"]:
+                summary = await self._listed_session(row["sessionId"])
+                shown = (row.get("_meta", {}).get("modular-agent") or {}).get("waiting")
+                if (
+                    summary
+                    and row["cwd"] == summary["project"]
+                    and (shown is None or still_disclosable(shown, summary["waiting"]))
+                ):
+                    rows.append(row)
+            return {**message, "result": {**message["result"], "sessions": rows}}
+        except Exception as exc:
+            raise protocol_error("unavailable", "Session listing unavailable") from exc
+        finally:
+            self.reset_project_scope(scope)
+
     async def visible_sessions(self, project: str | None) -> list[dict[str, Any]]:
         canonical = str(Path(project).resolve()) if project is not None else None
         rows = cast(list[dict[str, Any]], await super().visible_sessions(canonical))
-        agent = self._current()
         visible = []
         for row in rows:
             if not self._project_allowed(Path(row["project"])):
                 continue
             sid = row["id"]
-            summary = await (self._owner(sid) or agent).session_summary(
-                sid,
-                actor=self.actor,
-                local=not self.network,
-                represents=self.represents,
-                approval_views={qid for session, qid in self.approval_views if session == sid},
-            )
+            summary = await self._listed_session(sid)
             if summary is not None:
                 visible.append({**row, "waiting": summary["waiting"]})
         return visible

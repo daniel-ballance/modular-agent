@@ -7,7 +7,7 @@ from httpx2 import AsyncClient
 import pytest
 from websockets.asyncio.client import connect
 
-from modular_agent import ToolContext, create_agent, tool
+from modular_agent import Plugin, ToolContext, create_agent, tool
 from modular_agent.testing import scripted_provider
 from test_sdk_agui import events, new, principal, prompt
 from test_websocket import rpc
@@ -136,6 +136,88 @@ async def test_handoff_is_counted_on_the_executor_route_only(tmp_path):
                 }
                 assert "private" not in reply.text and handoffs[0]["call_id"] not in reply.text
         assert reports == []
+
+
+async def test_a_turn_can_finish_while_its_listing_is_gated(tmp_path):
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def gate(payload):
+        if any(
+            e["type"] == "reply" and "threads" in e["data"].get("result", {})
+            for e in payload["events"]
+        ):
+            entered.set()
+            await release.wait()
+
+    async with create_agent(
+        project=tmp_path,
+        data_dir=tmp_path / "data",
+        durability="kept",
+        plugins=[Plugin("gate", hooks={"output": gate})],
+        providers=[scripted_provider([{"text": "first"}, {"text": "second"}])],
+    ) as agent:
+        session = await agent.session()
+        await session.prompt("first turn")
+        async with clients(agent, tmp_path) as (client, _):
+            page = asyncio.create_task(client.get("threads"))
+            try:
+                async with asyncio.timeout(5):
+                    await entered.wait()
+                await session.prompt("advance the committed watermark")
+            finally:
+                release.set()
+            assert listing(await page) == {
+                session.id: {"questions": 0, "toolCalls": 0, "turn": "none"}
+            }
+
+
+@pytest.mark.parametrize("binding", ["agui", "acp"])
+async def test_revocation_during_the_list_reply_omits_the_session(tmp_path, binding):
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def gate(payload):
+        if any(
+            e["type"] == "reply" and e["data"].get("method") in {"agui.threads", "session/list"}
+            for e in payload["events"]
+        ):
+            entered.set()
+            await release.wait()
+
+    async with (
+        create_agent(
+            project=tmp_path,
+            data_dir=tmp_path / "data",
+            durability="kept",
+            several_actors=True,
+            providers=[scripted_provider([{"text": "ok"}])],
+            plugins=[Plugin("gate", hooks={"output": gate})],
+        ) as agent,
+        clients(agent, tmp_path, acp=True) as (client, auth),
+    ):
+        session = await agent.session(actors=[{"id": "bob", "kind": "user", "rights": ["watch"]}])
+        await session.prompt("private")
+        async with connect(
+            str(client.base_url.copy_with(scheme="ws", path="/")),
+            subprotocols=["modular-agent-acp-1"],
+            additional_headers=auth[2],
+        ) as ws:
+            await rpc(ws, 1, "initialize", {"protocolVersion": 1})
+            page = asyncio.create_task(
+                client.get("threads", headers=auth[2])
+                if binding == "agui"
+                else rpc(ws, 2, "session/list", {})
+            )
+            try:
+                async with asyncio.timeout(5):
+                    await entered.wait()
+                await session.leave("bob")
+            finally:
+                release.set()
+            result = await page
+            if binding == "agui":
+                assert listing(result) == {}
+            else:
+                assert result["result"]["sessions"] == []
 
 
 async def test_pages_are_ordered_scoped_and_expire_on_restart(tmp_path):

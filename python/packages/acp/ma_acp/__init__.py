@@ -1506,6 +1506,8 @@ class ACP(Plugin):
         return await self.api.session("erasure_cutoff", session=sid, actor=self.actor)
 
     async def authorize_frame(self, sid, method, message, prepared=None):
+        if sid is None:
+            return
         # The handler may have waited behind another frame since its last check.
         details = message.get("error", {}).get("data")
         if lease_refused_open(method, details) or (

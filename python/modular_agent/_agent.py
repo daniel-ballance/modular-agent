@@ -489,9 +489,10 @@ class Agent:
         """Inspect kept work for a viewer, without a writer lease, recovery or presence."""
         if not id or not id.isalnum():
             raise AgentError(ErrorCode.INVALID_PARAMS, "Invalid session id")
-        if not self.declaration()["portableSessions"]:
-            return None
         h = self._h
+        store = h.plugins[h.capabilities["history"][0]].declarations
+        if store.get("retention") == "process":
+            return None
         owned = h.sessions.get(id)
         if owned and not owned.get("writer_lost") and id not in h.interruptions:
             state = owned
@@ -520,7 +521,7 @@ class Agent:
             state = h.sessions.get(id)
             if not discoverable() or state.get("writer_lost"):
                 return None
-        return summarize(
+        row = summarize(
             h,
             state,
             running=bool(state is h.sessions.get(id) and (state.get("busy") or id in h.reopening)),
@@ -531,6 +532,14 @@ class Agent:
             live_questions=live_questions,
             approval_views=approval_views,
         )
+        if (
+            owned is None
+            and row["waiting"]["turn"] == "interrupted"
+            and store.get("observes_writer")
+            and await self._call("history", "writer_present", session=id)
+        ):
+            row["waiting"]["turn"] = "running"
+        return row
 
     async def session_info(self, id: str) -> JsonObject:
         """Read saved local session settings without starting recovery or taking its lease."""

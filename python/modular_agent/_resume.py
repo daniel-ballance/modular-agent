@@ -43,7 +43,10 @@ async def resume_sessions(
         for row in await root.sessions(project=root._project):
             sid = cast(str, row["id"])
             summary = await root.session_summary(sid, actor=actor, kind=kind)
-            if summary is None or summary["waiting"]["turn"] != "interrupted":
+            if summary is None or summary["waiting"]["turn"] == "none":
+                continue
+            if summary["waiting"]["turn"] == "running":
+                options["report"](sid, "skipped")
                 continue
             selected = await compose(root._project, sid) if compose else root
             try:
