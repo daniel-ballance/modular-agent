@@ -29,6 +29,7 @@ class Exchange:
         self.origin: str | None = None
         self.input_id: str | None = None
         self.steps: set[str] = set()
+        self.resumed_step: str | None = None
         self.text: dict[str, str] = {}
         self.open_text: set[str] = set()
         self.cx: InterfaceToolConnection | None = None
@@ -107,6 +108,11 @@ class Exchange:
                 # already have produced live output by the time the socket opens.
                 await self.write(self.initial)
                 self.v.remember(self.initial_stamp)
+                if self.resumed_step:
+                    await self.write(
+                        await self.frame(event("STEP_STARTED", stepName=self.resumed_step))
+                    )
+                    self.steps.add(self.resumed_step)
                 while not self.finished:
                     require(not self.lost, "unavailable")
                     try:
@@ -237,6 +243,7 @@ class Exchange:
                 )
             else:
                 self.turn = origin
+                self.resumed_step = next((q["step"] for q, _, _ in planned if q.get("step")), None)
             require(
                 all(qid in seen for qid, (q, _) in questions.items() if q["turn"] == origin),
                 "conflict",

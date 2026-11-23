@@ -18,7 +18,15 @@ The first invocation of `run.mjs` with a command runs every case, with a fresh f
 
 ## Launching a fixture
 
-The fixture is an SDK app, not a replacement AG-UI adapter. Use the real listener, Harness, Runtime, output gate and history store. There is no SDK implementation to launch yet. See [Serving AG-UI](../../docs/sdk/placement.md#serving-ag-ui) for the proposed setup. `fake-agent.mjs` is only a launch-mode self-test for the basic cases.
+The fixture is an SDK app, not a replacement AG-UI adapter. Use the real listener, Harness, Runtime, output gate and history store. To run the Python implementation, run `(cd python && uv sync --python 3.13)` and `npm ci --prefix conformance/agui` from the repository root, then run:
+
+```sh
+node conformance/agui/run.mjs -- "$PWD/python/.venv/bin/python" "$PWD/python/scripts/agui_fixture.py"
+```
+
+The launcher uses the Python `ma --agui --acp` command for history, encoding and the stock conversation. For the other cases it starts a scripted SDK agent with the kit's actors, plugin, controls and disposable TLS files. Both use the SDK listener and the standard configuration's scripted Provider.
+
+See [Serving AG-UI](../../docs/sdk/placement.md#serving-ag-ui) for the proposed setup. `fake-agent.mjs` is only a launch-mode self-test for the basic cases.
 
 The kit starts the command in a new process group, with a fresh home, working directory and data directory, and without the inherited environment except `PATH`. It sets:
 

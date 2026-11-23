@@ -143,6 +143,7 @@ class InterfaceTools:
         self.interface_locks = {}
         self.interface_timers = {}
         self.interface_traces = {}
+        self.interface_report_contexts = {}
 
     def interface_enabled(self):
         runtime = self.capabilities.get("runtime")
@@ -480,6 +481,9 @@ class InterfaceTools:
         for key in list(self.interface_timers):
             if key[0] == sid:
                 self.interface_timers.pop(key).cancel()
+        for key in list(self.interface_report_contexts):
+            if key[0] == sid:
+                del self.interface_report_contexts[key]
         for key in list(self.interface_traces):
             if key[0] == sid:
                 del self.interface_traces[key]
@@ -703,6 +707,9 @@ class InterfaceTools:
                             return "refused"
                     except AgentError:
                         return "refused"
+                    # Carry the authorized report, not a later polling or recovery request.
+                    # The ephemeral context is never part of the portable result.
+                    self.interface_report_contexts[sid, cid] = ot.inject()
                     await self._commit_interface_result(sid, cid, result, actor=actor)
                 require_processed_result(result)
         finally:
@@ -783,6 +790,11 @@ class InterfaceTools:
                         "actor": start.get("actor", s["actor"]),
                         "content": [],
                         "interface_continuation": True,
+                        "operation_context": self.interface_report_contexts.get(
+                            (sid, by_id.get(trigger, {}).get("call"))
+                        )
+                        if kind == "toolResult"
+                        else None,
                         "ready_order": max(index, order[end["id"]]),
                         "continuation_sources": lineage,
                         "data": {
