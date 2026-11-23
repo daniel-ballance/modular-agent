@@ -1213,11 +1213,11 @@ export class Harness {
 	// ---------- the record ----------
 
 	/** Commit drafts to the session. All are kept, or none are. */
-	commit(s: Session, drafts: EntryDraft[], pluginRecord = false): Promise<HistoryEntry[]> {
+	commit(s: Session, drafts: EntryDraft[], pluginRecord = false, guard?: () => boolean | Promise<boolean>): Promise<HistoryEntry[]> {
 		// A suspended session's process has stopped: nothing more is recorded for it here.
 		const run = s.committing.then(() => {
 			const registry = this.pendingRegistry();
-			const write = () => this.commitNow(s, drafts, pluginRecord);
+			const write = async () => guard && !await guard() ? [] : this.commitNow(s, drafts, pluginRecord);
 			return registry ? registry.exclusive(write) : write();
 		});
 		s.committing = run.catch(() => undefined);
@@ -2213,11 +2213,12 @@ export class Harness {
 				// cannot resume them. Save the original segment for any persistent history.
 				const store = this.use<HistoryStore>("history-store");
 				const traceContext = store && store.supports.persistent !== false ? carrier(span.spanContext) : undefined;
-				await this.commit(s, [
+				const [start] = await this.commit(s, [
 					{ kind: "turnStart", writer: "harness", modelVisible: false, turnId, continuesTurnId, actorId: queued.actorId, sources: queued.sources, data: { ...snapshot, ...(traceContext ? { traceContext } : {}), startedBy: queued.startedBy, resultShape: failure ? undefined : resultShape, point, rights: state.startingRights,
 						authorizers: [...actors].map(actorId => ({ sessionId: s.id, actorId })), ...(continuing ? { authorityActors: [...actors], authorityJobs: [...jobs] } : {}) } },
 					...(continuing ? [] : [this.inputEntry(s, queued, turnId)]),
 				]);
+				if (start && span.spanContext) this.turnTraces.set(start, span.spanContext);
 				this.emit(s, "turn.started", { startedBy: queued.startedBy }, "harness", { turnId });
 				let outcome: TurnOutcome;
 				if (limited) outcome = this.tenantLimitOutcome();
@@ -2241,6 +2242,8 @@ export class Harness {
 		});
 	}
 
+	private turnTraces = new WeakMap<HistoryEntry, NonNullable<ReturnType<typeof currentSpan>>>();
+
 	private turnSpan(s: Session, turnId: string, parent: ReturnType<typeof readTrace> | null, resumed?: boolean, continuesTurnId?: string): Operation {
 		const previous = continuesTurnId ? this.savedTrace(s, continuesTurnId) : undefined;
 		const link = resumed ? parent : previous;
@@ -2254,7 +2257,7 @@ export class Harness {
 		for (const entry of s.branch().reverse()) {
 			if (entry.turnId !== turnId || entry.erased || s.copied.has(entry.id) || entry.writer !== "harness" ||
 				(entry.kind !== "turnStart" && entry.kind !== TURN_TRACE)) continue;
-			const saved = readTrace((entry.data as { traceContext?: unknown } | undefined)?.traceContext);
+			const saved = this.turnTraces.get(entry) ?? readTrace((entry.data as { traceContext?: unknown } | undefined)?.traceContext);
 			if (saved) return saved;
 		}
 	}
@@ -2990,11 +2993,13 @@ export class Harness {
 			const scope = { toolCallId: call.id, turnId, stepId: call.stepId };
 			const data: HandoffData = { toolStartedId: startId, executorActorId: source.actorId, routeId: source.routeId,
 				rights: this.executorRights(s, connection), deadline };
-			await this.commit(s, [
+			const committed = await this.commit(s, [
 				{ ...scope, id: startId, kind: "toolStarted", writer: "harness", modelVisible: false, actorId: call.actorId,
 					data: { call, source: { plugin: INTERFACE_SOURCE, toolSource: source.sourceId }, definition, safeToRepeat: false, openWorld: true } },
 				{ ...scope, kind: INTERFACE_HANDOFF, writer: "harness", modelVisible: false, sources: [startId], data: { ...scope, ...data } },
-			]);
+			], false, () => eligible() && deadline > this.now() && data.rights.every(r => this.executorRights(s, connection).includes(r)) &&
+				(!this.pendingRegistry() || this.checkPending(s) === freshness));
+			if (!committed.length) return refused();
 			const pinned = AsyncLocalStorage.snapshot();
 			const live: LiveHandoff = { connection, released: false, check: () => pinned(() => eligible() && deadline > this.now()) };
 			const work = this.interfaceWork.get(s) ?? new Map();
@@ -3006,8 +3011,8 @@ export class Harness {
 			try { fresh = (await this.admitHistory(s)) === freshness; } catch { /* fail closed */ }
 			if (!fresh || !live.check()) {
 				// No executable request left the Harness.
-				const result = await this.settleInterfaceCall(s, item);
-				return { callId: call.id, pending: result ? "Interface request was not released" : "Interface call handed off" };
+				await this.settleInterfaceCall(s, item);
+				return { callId: call.id, pending: "Interface request was not released" };
 			}
 			this.checkWriter(s);
 			this.scheduleInterfaceExpiry(s, item);
@@ -3120,14 +3125,15 @@ export class Harness {
 				if (!item.result) { await this.settleInterfaceCall(s, item); this.maybeContinueOpenCalls(s); }
 				return refused;
 			}
-			const end = s.branch().find(e => e.turnId === checkpoint!.turnId && e.kind === "turnEnd" && !e.erased);
+			const end = s.branch().find(e => e.turnId === checkpoint!.turnId && e.kind === "turnEnd");
+			if (end?.erased || item.result?.erased) return refused;
 			if (!end) return { status: "refused", reason: "notReady" };
 			if (!(end.data as { result?: TurnOutcome["result"] })?.result?.openToolCalls.includes(item.id)) return refused;
 			if (item.result) return item.result.actorId === connection.actor.id && !item.result.erased ? { status: "alreadySettled" } : refused;
 			if (this.interfaceWork.get(s)?.has(item.id)) return refused;
 			const span = startOperation("modular_agent.interface.report", { ...conversation(s.id) }, { parent: parent ?? null });
 			return span.observe(async () => {
-				const settled = await this.settleInterfaceCall(s, item, { report, actorId: connection.actor.id });
+				const settled = await this.settleInterfaceCall(s, item, { report, actorId: connection.actor.id, authorized });
 				this.maybeContinueOpenCalls(s);
 				if (settled?.error) throw settled.error;
 				return settled ? { status: "accepted" } : refused;
@@ -3136,7 +3142,7 @@ export class Harness {
 	}
 
 	private async settleInterfaceCall(s: Session, item: HandoffRecord,
-		submitted?: { report: InterfaceToolReport; actorId: string }, erasure = false) {
+		submitted?: { report: InterfaceToolReport; actorId: string; authorized: () => boolean }, erasure = false) {
 		if (item.result || s.suspended) return;
 		const { checkpoint, start, dispatch } = item;
 		const origin = checkpoint ?? start;
@@ -3155,10 +3161,7 @@ export class Harness {
 			const startingRights = origin?.turnId ? this.recordedTurnRights(branch, origin.turnId) : [];
 			const checked = submitted && call ? await this.turnAuthority.run({ sessionId: s.id, actors, jobs, state: { startingRights } },
 				() => this.toolAfter(s, { sessionId: s.id, call, result: submitted.report }, true)) : undefined;
-			if (submitted) {
-				try { await this.admitHistory(s); } catch { return; }
-				if (s.erasing || this.interfaceRecords(s).get(id)?.result) return;
-			}
+
 			const result: ToolResult = checked?.result ?? { callId: id, status: live && !live.released ? "notStarted" : "outcomeUnknown",
 				content: [text(live && !live.released ? "Interface request was not released" : "Interface tool outcome is unknown")] };
 			const draft: EntryDraft = { kind: "toolResult", writer: "harness", modelVisible: true, turnId: origin?.turnId,
@@ -3167,8 +3170,13 @@ export class Harness {
 				message: { role: "toolResult", toolCallId: id, toolName: call?.name ?? "unknown", content: result.content, isError: result.status !== "completed" },
 				data: { status: result.status, value: result.value },
 			};
-			if (erasure) await this.commitNow(s, [draft]);
-			else await this.commit(s, [draft]);
+			const written = erasure ? await this.commitNow(s, [draft]) : await this.commit(s, [draft], false, async () => {
+				if (this.interfaceRecords(s).get(id)?.result) return false;
+				if (!submitted) return true;
+				try { await this.admitHistory(s); } catch { return false; }
+				return submitted.authorized();
+			});
+			if (!written.length) return;
 			clearTimeout(this.interfaceTimers.get(s)?.get(id));
 			this.interfaceTimers.get(s)?.delete(id);
 			this.interfaceWork.get(s)?.delete(id);
@@ -4439,6 +4447,7 @@ function eraseCopies(origin: Session, ids: string[], sessions: Map<string, Sessi
 			const targetsHere = targets.get(session);
 			const entries = [...session.entries.values()];
 			const erased = entries.filter((e) => targetsHere?.has(e.id));
+			const handoffs = handoffRecords(entries);
 			const calls = new Set(erased.flatMap((e) => [
 				...(e.kind !== "toolResult" && e.toolCallId ? [e.toolCallId] : []),
 				...(e.message?.role === "assistant" ? e.message.content.filter(isToolCall).map((c) => c.id) : []),
@@ -4447,7 +4456,9 @@ function eraseCopies(origin: Session, ids: string[], sessions: Map<string, Sessi
 				if (targetsHere?.has(e.id) || authority(e.kind)) continue;
 				const forkedFrom = session.copied.has(e.id) ? session.meta.forkedFrom : undefined;
 				const links = forkedFrom ? e.sources?.some((id) => targets.get(sessions.get(forkedFrom.sessionId)!)?.has(id)) : e.sources?.some((id) => targetsHere?.has(id));
-				const callCopy = e.toolCallId && calls.has(e.toolCallId);
+				const callCopy = e.toolCallId && calls.has(e.toolCallId) ||
+					e.kind === "response" && e.message?.role === "assistant" &&
+					e.message.content.some(p => isToolCall(p) && calls.has(p.id) && handoffs.has(p.id));
 				const turnResult = e.kind === "turnEnd" && erased.some((x) => x.turnId === e.turnId && ["response", "toolResult"].includes(x.kind));
 				// A completed turn with an erased outcome must not look like an interrupted turn on reopen.
 				const endedTurnStart = e.kind === "turnStart" && erased.some((x) => x.kind === "turnEnd" && x.turnId === e.turnId);
