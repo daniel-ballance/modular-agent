@@ -1,0 +1,15 @@
+[
+  {
+    "toolCalls": [
+      {
+        "name": "codemode",
+        "input": {
+          "code": "source = tools.read(path='limits.py')\nold = 'return 0' if 'return 0' in source else 'return max(0, value)'\nnew = 'return max(0, value)' if old == 'return 0' else 'return min(100, max(0, value))'\ntools.apply_change(old=old, new=new)\ntools.post(text='Committed limits.py: ' + new, kind='change')\ntools.hand_off(to='verifier', task='Run the percentage tests on my commit.')"
+        }
+      }
+    ]
+  },
+  {
+    "text": "The coder turn is finished."
+  }
+]

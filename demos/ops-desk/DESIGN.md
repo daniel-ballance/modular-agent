@@ -1,6 +1,6 @@
 # Ops desk: design
 
-Status: accepted by the owner, 2026-11-23. No code yet.
+Status: accepted by the owner, 2026-11-23. The scripted desk implements plan steps 1–3.
 
 ## Purpose
 
@@ -83,12 +83,22 @@ With real models (`--live`) the same flow runs against your sign-ins; it is not 
 
 ## Findings
 
-Expected before building, to confirm or reject:
+Expected findings (checked against the scripted desk):
 
-- **Approvals cannot wait past a turn.** An inbox read hours later needs approvals that wait durably. This demo uses short deadlines; a later ADR can decide.
-- **Waking an agent.** The host starts processes and reopens sessions itself. Whether the framework should help (a wake contract, or a declared way to find an agent's open work) is a candidate gap.
-- **Posts during a turn.** See [above](#why-posts-are-plugin-tools-not-interface-run-tools).
-- **Traces across agents.** Telemetry version 1 has no links between a hand-off and the work it starts in another agent.
+- **Approvals cannot wait past a turn — confirmed.** The [interrupt rules](../../docs/bindings/agui.md#interrupts-and-frontend-tools) require an existing presence and forbid extending an approval past its turn. In the deadline check the question disappeared from `waiting.questions`, the change tool was refused, and the file and commit stayed unchanged. A stored inbox row did not make a late answer valid.
+- **Waking an agent — confirmed.** AG-UI discovery needs a running listener. There is no wake or list-threads operation. The host launches each executable, reads its ready origin and keeps the thread ID. Opening a post's snapshot after idle shutdown starts the process and reopens the same session.
+- **Posts during a turn — confirmed for Interface tools.** A frontend handoff ends the exchange; it cannot acknowledge a post and continue that step. A server tool can. A plugin can also emit a gated custom event, but that is a live notification, not a committed, acknowledged post. The desk authenticates each tool service separately and stores posts by session and call ID.
+- **Traces across agents — confirmed for hand-off links, not for propagation in general.** At a local OTLP/HTTP receiver, the triage and verifier `invoke_agent` spans had the desk event's trace ID. Neither had a link to the other agent's `hand_off` call. The host carried its own event parent across the queue; [telemetry v1](../../docs/telemetry.md#what-later-versions-add) does not do this for it. The Rust `ma` invocation arrived on a different trace: network parents require operator trust, and `ma`'s actor policy exposes `clientId` but no trace-trust option. Authentication alone is not trace trust.
+
+Additional findings:
+
+- **Stock `ma` cannot switch on write approval.** The [standard configuration](../../docs/reference/standard-configuration.md#the-program) omits the approval feature. A remote `tool.before` gate [cannot ask](../../docs/bindings/plugin.md#from-core-hooks-to-wire-hooks). A separate coder tool therefore asks inside its own `tools/call`, then invokes `edit` on the approved arguments. The gate refuses other edits, writes and shell commands.
+- **Rust tool-originated approval needs an extra field.** [InputRequestDraft](../../docs/bindings/data.md#questions) specifies no `options` for approval. With the documented draft, Rust offered the exact approval, but returned HTTP 409 on `{allow:true}`. Its answer check looks for `allow` in `options` as for a choice. Supplying the options on the coder tool's approval made that same answer work.
+- **A closed run has no closure feed.** [Presence](../../docs/bindings/agui.md#listener-and-authentication) carries comments, not events. A snapshot lists only still-answerable questions, not the reason a former question disappeared. The host checks a fresh snapshot before showing or sending answers. It can label a deadline refusal here because it controls the sole answer route. It also observes the desk plugin's `turn.end` hook so it does not stop a coder that is still finishing after expiry.
+- **Recovery gives a thread snapshot, not a run receipt or terminal outcome.** After `SIGKILL`, GET reopened the coder session. Its snapshot showed the interrupted tool's effects as unknown and the recovered assistant reply. There is no AG-UI operation to reattach to the lost run stream or fetch its terminal event. The host records “reopened,” not a synthetic `RUN_FINISHED`. It saves the thread ID before sending input, uses one thread per routed task, and never replays a tool from a snapshot. A 404 for a saved provisional thread cannot distinguish loss before first input from an inaccessible session; the host does not silently start over on a new thread.
+- **Identifying callers of the desk service takes three listeners.** The public [plugin service API](../../docs/sdk/placement.md#services) takes one `tokenFile`, not a token-to-principal map. `tools/call` has a session and a call, not an authenticated agent name. Each listener closes over the identity whose token it accepts. Neither model text nor plugin initialization config selects that identity.
+
+All three real AG-UI adapters ran. The implementation-status sentences at the top of the binding and under SDK placement's “Serving AG-UI” are out of date.
 
 ## Plan
 
