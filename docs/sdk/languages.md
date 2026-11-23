@@ -60,6 +60,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - Data types own their data and implement `Serialize`, `Deserialize`, `Clone` and `Debug`.
 - Minimum Rust version: the one pinned in `rust/mise.toml`. Edition 2024.
 - Subscription Providers: `chatgpt(ChatGptOptions::new(subscription_logins(path)))` and `grok(GrokOptions::new(subscription_logins(path)))`, given to `AgentBuilder::provider`. `sign_in` and `sign_out` are async and take `"chatgpt"` or `"grok"`. `SignInOptions::paste` is an optional Tokio receiver of pasted lines, ignored for Grok. `AgentBuilder::claude_provider(claude(ClaudeOptions::default())?)` starts the Claude program as a process plugin; it needs Node.js 22 or later.
+- Interface-run tools: `AgentBuilder::interface_tools` registers them. A binding attaches an executor with `Session::connect_interface_tools(route_id, actor_id, rights)`, takes calls with `next_call().await` and reports with `report_tool_result(report).await`.
 
 ## TypeScript
 
