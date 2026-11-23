@@ -3,7 +3,7 @@ import { checkTls } from './tls.mjs';
 import { answer, dispatch, draft, first, frontend, handoff, historyError, offer, options, opts, rawReport, reportRefused, second, simple, success, transformed } from './cases.mjs';
 import { at, clean, finalView, input, refused, threadPath, tool, user } from './wire.mjs';
 
-const action = (id, value, status = 'resolved') => ({ interruptId: id, status, ...(value === undefined ? {} : { value }) });
+const action = (id, value, status = 'resolved') => ({ interruptId: id, status, ...(value === undefined ? {} : { payload: value }) });
 const resume = (...answers) => ({ resume: answers });
 const scenario = (model, run, extra = {}) => ({ model, run, control: true, ...extra });
 const prompt = async (api, extra = {}) => {
@@ -278,7 +278,7 @@ export const advanced = {
     const copy = await api.view(view.threadId);
     assert.deepEqual(copy.messages, final.messages, 'gated replay matches live view');
     await refused(await at(origin, tokens.sibling).request(threadPath(view.threadId)), 403, 'output_withheld');
-    assert.ok(entries(await evidenceFor(control, view.threadId), 'response').some(e => e.data.text === hidden), 'redaction does not change the authoritative response');
+    assert.ok(entries(await evidenceFor(control, view.threadId), 'response').some(e => e.message?.role === 'assistant' && e.message.content.some(p => p.type === 'text' && p.text === hidden)), 'redaction does not change the authoritative response');
   }),
 
   'output-size': scenario(simple, async ({ api, origin, tokens }) => {
