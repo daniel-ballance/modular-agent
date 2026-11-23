@@ -17,6 +17,7 @@ export interface Provider {
   models(): ModelInfo[];
   supports: { keepsState: boolean; safeToRepeat: boolean };
   inProcessOnly?: boolean;
+  inProcessInference?: boolean;
   available?(context: Pick<ProviderContext, "credential">): boolean | Promise<boolean>;
   /** Subscribe to local catalog invalidation. Use defineProvider to publish it. */
   onChange?(handler: () => void): () => void;
@@ -45,7 +46,7 @@ export function adaptProvider(p: Provider, read: (name?: string) => Promise<stri
     return key;
   };
   return {
-    id: p.id, models: () => structuredClone(p.models()),
+    id: p.id, inProcessInference: p.inProcessInference, models: () => structuredClone(p.models()),
     supports: { ...p.supports, runsTools: false, liveSessions: false },
     available: p.available && (async () => {
       let active = true;

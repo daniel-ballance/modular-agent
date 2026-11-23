@@ -10,6 +10,7 @@ import { paths, settingsFor, skillsFor, standardSettings, mcpServers, optionalJs
 import { standardPrompt } from "./prompt.js";
 import { codemode } from "./codemode.js";
 import { loadScript } from "./script.js";
+import { startTelemetry } from "./telemetry.js";
 import { line, print } from "./terminal.js";
 import { HELP } from "./help.js";
 import { loadPolicy } from "./policy.js";
@@ -163,7 +164,7 @@ async function main(argv: string[]) {
   const conformance = opts.acp && process.env.MODULAR_AGENT_CONFORMANCE === "1";
   const history = process.env.MODULAR_AGENT_HISTORY_URL ? httpHistory(process.env.MODULAR_AGENT_HISTORY_URL,
     process.env.MODULAR_AGENT_HISTORY_TOKEN_FILE ?? "") : undefined;
-  const base = { durability: opts.runtime === "durable" ? "durable" as const : "kept" as const, history, dataDir: p.state,
+  const base = { agentName: "ma", durability: opts.runtime === "durable" ? "durable" as const : "kept" as const, history, dataDir: p.state,
     resourceReservations: policy.resourceReservations };
   const script = await loadScript(process.env.MODULAR_AGENT_SCRIPT, process.env.MODULAR_AGENT_SCRIPT_LOG);
   let savedModel: string | undefined;
@@ -273,7 +274,12 @@ async function main(argv: string[]) {
   }
 }
 
-main(process.argv.slice(2)).then(code => { process.exitCode = code; }, error => {
+async function runFromCli() {
+  const stop = await startTelemetry();
+  try { return await main(process.argv.slice(2)); } finally { await stop(); }
+}
+
+runFromCli().then(code => { process.exitCode = code; }, error => {
   console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;
 });

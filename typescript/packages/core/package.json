@@ -10,20 +10,23 @@
   },
   "dependencies": {
     "@earendil-works/pi-mcp": "1.5.2",
+    "@modular-agent/approval": "*",
+    "@modular-agent/context-compaction": "0.1.0",
+    "@modular-agent/env-local": "*",
     "@modular-agent/harness": "*",
     "@modular-agent/history-jsonl": "*",
-    "@modular-agent/env-local": "*",
+    "@modular-agent/interface-acp": "*",
+    "@modular-agent/plugin-wire": "*",
     "@modular-agent/runtime-durable": "*",
     "@modular-agent/runtime-transient": "*",
-    "@modular-agent/approval": "*",
-    "@modular-agent/plugin-wire": "*",
-    "@modular-agent/interface-acp": "*",
     "@modular-agent/services": "*",
     "ajv": "^8.20.0",
-    "json-schema-to-ts": "^3.1.1",
-    "@modular-agent/context-compaction": "0.1.0"
+    "json-schema-to-ts": "^3.1.1"
   },
   "devDependencies": {
+    "@opentelemetry/context-async-hooks": "^3.1.1",
+    "@opentelemetry/sdk-metrics": "^3.1.1",
+    "@opentelemetry/sdk-trace": "^3.1.1",
     "zod": "^4.6.7"
   }
 }

@@ -121,6 +121,8 @@ interface HistoryPort {
 	list(options: ListOptions, signal: AbortSignal): Promise<ListPage>;
 }
 
+import { conversation, currentSpan, startOperation } from "@modular-agent/harness/telemetry";
+
 class HistoryWriter implements HistoryStore {
 	readonly supports: { erasure: boolean; retention: boolean; persistent: boolean };
 	historyErasure?: HistoryErasureRegistry;
@@ -206,7 +208,8 @@ class HistoryWriter implements HistoryStore {
 					if (!lastHeld) budget = now + this.ttl! + 1000;
 					lastHeld = error;
 					if (now + error.retryAfterMs >= budget) throw error;
-					await sleep(error.retryAfterMs);
+					await startOperation("modular_agent.capacity.wait", { ...conversation(id), "modular_agent.capacity.scope": "session" })
+						.observe(() => sleep(error.retryAfterMs!));
 					continue;
 				}
 				if (lastHeld && (this.clock.now() >= budget || (signal.aborted && remaining <= 10_000))) throw lastHeld;
@@ -227,10 +230,14 @@ class HistoryWriter implements HistoryStore {
 		}
 	}
 	private schedule(id: string, lease: Lease, sent: number) {
-		lease.timer = setTimeout(() => { void this.renew(id, lease).catch(() => this.lose(lease)); }, Math.max(1, Math.min(2 ** 31 - 1, sent + lease.ttl / 3 - this.clock.margin - this.clock.now())));
+		lease.timer = setTimeout(() => { void this.renew(id, lease, false).catch(() => this.lose(lease)); }, Math.max(1, Math.min(2 ** 31 - 1, sent + lease.ttl / 3 - this.clock.margin - this.clock.now())));
 		lease.timer.unref();
 	}
-	private async renew(id: string, lease: Lease) {
+	private renew(id: string, lease: Lease, requested = true): Promise<void> {
+		return startOperation("modular_agent.history.lease.renew", conversation(id), { parent: requested ? currentSpan() ?? null : null })
+			.observe(() => this.renewLease(id, lease));
+	}
+	private async renewLease(id: string, lease: Lease) {
 		this.checkWriter(id);
 		const sent = this.clock.now();
 		const reply = await this.port.renew(id, lease.value, AbortSignal.any([lease.abort.signal, timeout(lease.cutoff - sent)]));

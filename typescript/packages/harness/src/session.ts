@@ -21,6 +21,7 @@ export function inputKeyScope(key: string, actorId?: string, submittedBy = actor
 
 export type InputTiming = "now" | "steer" | "after" | "propose";
 export interface QueuedInput {
+	trace?: import("@opentelemetry/api").SpanContext;
 	id: string;
 	content: ContentPart[];
 	resultShape?: Record<string, unknown>;
@@ -75,6 +76,7 @@ export class Session {
 	followUps: QueuedInput[] = [];
 	readonly proposals = new Map<string, QueuedInput>();
 	readonly admissions = new Map<string, QueuedInput>();
+	admissionsInFlight = 0;
 	admitting: Promise<unknown> = Promise.resolve();
 	readonly keys = new Map<string, InputReceipt>();
 	readonly erasedKeys = new Set<string>();

@@ -3,6 +3,11 @@
  * line, requests in both directions, `$/cancel` and `$/ping` (docs/bindings/plugin.md).
  */
 
+import { carrier, conversation, currentSpan, readTrace, safeName, SpanKind, startOperation, type Operation, withTrace } from "@modular-agent/harness/telemetry";
+
+const workMethod = (method: string) => !method.startsWith("$/") && !method.startsWith("plugin/") && method !== "host/problem";
+const objectParams = (params: unknown): params is Record<string, unknown> => !!params && typeof params === "object" && !Array.isArray(params);
+
 export const PLUGIN_BINDING = "modular-agent-plugin/1";
 export const DATA_BINDING = "modular-agent-data/1";
 /** The largest message either side sends or accepts. */
@@ -63,6 +68,8 @@ export class WirePeer {
 	private handlers = new Map<string, Handler>();
 	private notes = new Map<string, NoteHandler>();
 	private waiting = new Map<number | string, { resolve(v: unknown): void; reject(e: Error): void }>();
+	private trace?: { name: string; agreed: boolean; callbackScope?: (params: any) => Operation | undefined };
+	private sent = new Map<number | string, Operation>();
 	private running = new Map<number | string, AbortController>();
 	private nextId = 1;
 	private closedWith?: Error;
@@ -76,6 +83,44 @@ export class WirePeer {
 		this.onNotification("$/cancel", (p) => this.running.get(p?.id)?.abort());
 	}
 
+	configureTracing(name: string, agreed: boolean, callbackScope?: (params: any) => Operation | undefined): void {
+		this.trace = { name, agreed, callbackScope };
+	}
+
+	requestTrace(id: number | string): Operation | undefined { return this.isWaiting(id) ? this.sent.get(id) : undefined; }
+
+	private workSpan(method: string, params: unknown, kind: SpanKind, parent?: ReturnType<typeof readTrace> | null) {
+		const p = objectParams(params) ? params : {};
+		const turn = objectParams(p.turn) ? p.turn : {};
+		const id = kind === SpanKind.SERVER && this.trace?.callbackScope ? undefined : safeName(p.sessionId ?? turn.sessionId);
+		const span = startOperation("modular_agent.plugin.request", { ...(id ? conversation(id) : {}),
+			"modular_agent.plugin.name": safeName(this.trace?.name), "modular_agent.plugin.method": method,
+		}, { kind, parent });
+		if (kind === SpanKind.CLIENT || !this.trace?.callbackScope) span.set("modular_agent.turn.id", safeName(turn.turnId));
+		return span;
+	}
+
+	private paramsWithTrace(method: string, params: unknown): unknown {
+		if (method === "plugin/initialize") return params;
+		const traceContext = this.trace?.agreed && workMethod(method) && method !== "host/credentials/read" ? carrier(currentSpan()) : undefined;
+		if (!objectParams(params)) return params;
+		if (!traceContext && !Object.hasOwn(params, "traceContext")) return params;
+		const { traceContext: _discard, ...clean } = params;
+		return traceContext ? { ...clean, traceContext } : clean;
+	}
+
+	private incoming<T>(method: string, params: any, work: (clean: any, parent: ReturnType<typeof readTrace> | null) => T): T {
+		const tracked = workMethod(method) && method !== "host/credentials/read" ? this.trace?.callbackScope?.(params) : undefined;
+		const received = this.trace?.agreed && workMethod(method) && method !== "host/credentials/read" ? readTrace(params?.traceContext) : undefined;
+		const clean = method !== "plugin/initialize" && objectParams(params) && Object.hasOwn(params, "traceContext") ? (({ traceContext: _discard, ...rest }) => rest)(params) : params;
+		const run = () => {
+			const authorized = tracked ? currentSpan() : undefined;
+			const parent = this.trace?.callbackScope ? (received && received.traceId === authorized?.traceId ? received : authorized) : received;
+			return work(clean, parent ?? null);
+		};
+		return tracked ? tracked.run(run) : run();
+	}
+
 	handle(method: string, handler: Handler): void {
 		this.handlers.set(method, handler);
 	}
@@ -87,18 +132,22 @@ export class WirePeer {
 	/** Send a request. The returned promise carries `id`, so the request can be cancelled or named as a parent. */
 	request<T = any>(method: string, params?: unknown, signal?: AbortSignal): Promise<T> & { id: number } {
 		const id = this.nextId++;
+		const span = this.trace && workMethod(method) ? this.workSpan(method, params, SpanKind.CLIENT) : undefined;
 		const promise = new Promise<T>((resolve, reject) => {
 			if (this.closedWith) return reject(this.closedWith);
 			this.waiting.set(id, { resolve: resolve as (v: unknown) => void, reject });
 			try {
-				this.send({ jsonrpc: "2.0", id, method, params });
+				if (span) this.sent.set(id, span);
+				const send = () => this.send({ jsonrpc: "2.0", id, method, params: this.paramsWithTrace(method, params) });
+				if (span) span.run(send); else send();
 			} catch (error) {
 				this.waiting.delete(id);
 				reject(error);
 			}
 		}) as Promise<T> & { id: number };
 		promise.id = id;
-		promise.catch(() => undefined);
+		const end = () => { this.sent.delete(id); span?.end(); };
+		void promise.then(end, (error: WireError) => { if (error?.code !== "cancelled" && error?.code !== "busy") span?.fail("failed"); end(); });
 		if (signal) {
 			if (signal.aborted) this.cancel(id);
 			else {
@@ -112,7 +161,7 @@ export class WirePeer {
 	}
 
 	notify(method: string, params?: unknown): void {
-		if (!this.closedWith) this.send({ jsonrpc: "2.0", method, params });
+		if (!this.closedWith) this.send({ jsonrpc: "2.0", method, params: this.paramsWithTrace(method, params) });
 	}
 
 	cancel(id: number | string): void {
@@ -211,7 +260,8 @@ export class WirePeer {
 		}
 		if (m.method !== undefined) {
 			try {
-				this.notes.get(m.method)?.(m.params);
+				const handler = this.notes.get(m.method);
+				if (handler) this.incoming(m.method, m.params, (params, parent) => withTrace(parent ?? undefined, () => handler(params)));
 			} catch {
 				/* a notification has no answer to carry an error */
 			}
@@ -239,9 +289,20 @@ export class WirePeer {
 			if (abort.signal.aborted) throw new WireError("cancelled", "Cancelled");
 			if (this.allowRequest && !this.allowRequest(m.method!)) throw new WireError("invalid_request", "The plugin is not registered");
 			let fence: ((send: () => void) => Promise<void>) | undefined;
-			const result = await handler(m.params ?? {}, { signal: abort.signal, id: m.id!, atReply: guard => { fence = guard; } });
-			const send = () => this.send({ jsonrpc: "2.0", id: m.id, result: result === undefined ? null : result });
-			if (fence) await fence(send); else send();
+			await this.incoming(m.method!, m.params, (params, parent) => {
+				const work = async () => {
+					const result = await handler(params ?? {}, { signal: abort.signal, id: m.id!, atReply: guard => { fence = guard; } });
+					const send = () => this.send({ jsonrpc: "2.0", id: m.id, result: result === undefined ? null : result });
+					if (fence) await fence(send); else send();
+				};
+				if (!this.trace || !workMethod(m.method!)) return withTrace(undefined, work);
+				const span = this.workSpan(m.method!, params, SpanKind.SERVER, parent);
+				return span.run(async () => {
+					try { await work(); }
+					catch (error) { if (!(error instanceof WireError) || !["cancelled", "busy", "invalid_request"].includes(error.code)) span.fail("failed"); throw error; }
+					finally { span.end(); }
+				});
+			});
 			if (!this.closed) this.afterReply?.(m.method!);
 		} catch (error) {
 			const e = abort.signal.aborted && !(error instanceof WireError) ? new WireError("cancelled", "Cancelled") : error;

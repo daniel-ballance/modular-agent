@@ -219,7 +219,7 @@ export interface ToolSource {
 // ---------- Declarations ----------
 
 /** What a part, or the session as set up, supports. */
-export type Declaration = Record<string, boolean | string | import("./reservations.js").ReservationDeclaration>;
+export type Declaration = Record<string, boolean | string | 1 | import("./reservations.js").ReservationDeclaration>;
 
 // ---------- Providers and model access ----------
 
@@ -250,6 +250,7 @@ export interface RequestOptions {
 
 export interface Provider {
 	id: string;
+	readonly inProcessInference?: boolean;
 	readonly prepareOnWire?: boolean;
 	supports: Declaration;
 	models(): ModelInfo[];
@@ -266,6 +267,7 @@ export interface Provider {
 /** What the Runtime is given: the chosen model, without credentials. */
 export interface ModelAccess {
 	model: ModelInfo;
+	readonly inProcessInference?: boolean;
 	readonly prepareOnWire?: boolean;
 	supports: Declaration;
 	request(request: ModelRequest, options: RequestOptions): Promise<AssistantMessage>;

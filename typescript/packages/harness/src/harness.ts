@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { activeOperation, carrier, conversation, currentSpan, historyForPeer, observeInference, readTrace, safeName, startOperation, telemetryEvent, toolAttributes, TURN_TRACE, withTrace, type Operation } from "./telemetry.js";
 import { Reservations, resourceBytes, reservationLimits, type ReservationOptions } from "./reservations.js";
 import { memoryPendingErasure, type ErasureIntent, type ErasurePlan, type HistoryErasureRegistry, type PendingErasure } from "./erasure.js";
 import { addAbortListener } from "node:events";
@@ -142,7 +143,7 @@ export interface PluginApi {
 	runCommand(sessionId: string, line: string, actorId: string): Promise<string | void>;
 	// sessions
 	startSession(options?: SessionStartOptions): Promise<string>;
-	openSession(id: string, actor?: Actor, prepare?: SessionPrepare): Promise<string>;
+	openSession(id: string, actor?: Actor, prepare?: SessionPrepare, operation?: "load" | "resume"): Promise<string>;
 	/** Add an actor to a session. Its authority must be within the authority of whoever grants it. */
 	join(sessionId: string, actor: Actor, grantedBy: string): Promise<void>;
 	leave(sessionId: string, actorId: string, requestedBy?: string): Promise<void>;
@@ -171,6 +172,8 @@ export interface PluginApi {
 	history(sessionId: string, options?: { all?: boolean }): HistoryEntry[];
 	checkPending(sessionId: string): Promise<string>;
 	readHistory(sessionId: string, options?: { all?: boolean }): HistoryEntry[] | Promise<HistoryEntry[]>;
+	/** Inspect a fresh snapshot and register any follow-up observer without yielding. */
+	inspectHistory<T>(sessionId: string, options: { all?: boolean }, inspect: (entries: HistoryEntry[]) => T): T | Promise<T>;
 	/** The history as a recipient may see it: every entry passes the output gate for that recipient. */
 	gatedHistory(sessionId: string, options: { recipient: string; all?: boolean }): Promise<HistoryEntry[]>;
 	append(sessionId: string, draft: EntryDraft): Promise<HistoryEntry>;
@@ -191,6 +194,7 @@ export interface PluginApi {
 	workActors(sessionId: string): string[];
 	workJobs(sessionId: string): string[];
 	workMay(sessionId: string, right: Authority, actors: string[], jobs?: string[]): boolean;
+	jobTrace?(sessionId: string, jobId: string): Operation | undefined;
 	findJob(jobId: string): { sessionId: string } | undefined;
 	onJobCancel(handler: (jobId: string) => Promise<void>): void;
 	/** Jobs this plugin started that the history shows as never ended, for example because the process stopped. */
@@ -209,7 +213,7 @@ export interface PluginApi {
 	config(): Record<string, unknown>;
 }
 
-export interface HarnessOptions { project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn" | "refused"; jobReportsStartTurns?: boolean; rejectUnknownModel?: boolean; reopenModelAliases?: Readonly<Record<string, string>>; resourceReservations?: ReservationOptions; tenants?: Record<string, Tenant> | null }
+export interface HarnessOptions { agentName?: string; project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn" | "refused"; jobReportsStartTurns?: boolean; rejectUnknownModel?: boolean; reopenModelAliases?: Readonly<Record<string, string>>; resourceReservations?: ReservationOptions; tenants?: Record<string, Tenant> | null }
 
 export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"];
 
@@ -225,7 +229,7 @@ function intersectConnectionRights(...scopes: (ConnectionRights | undefined)[]):
 	}
 	return rights.size ? Object.fromEntries(rights) : undefined;
 }
-interface TurnState extends TurnSnapshot { startingRights?: Authority[]; connectionRights?: ConnectionRights; endedHook?: boolean; sources: Map<string, string[]>; actors: Set<string>; jobs: Set<string>; tenantLimit?: boolean; capacityLimit?: boolean; stepAfterRunning?: boolean; toolResultError?: string }
+interface TurnState extends TurnSnapshot { dispatched: Set<string>; steps: Map<string, Operation>; startingRights?: Authority[]; connectionRights?: ConnectionRights; endedHook?: boolean; sources: Map<string, string[]>; actors: Set<string>; jobs: Set<string>; tenantLimit?: boolean; capacityLimit?: boolean; stepAfterRunning?: boolean; toolResultError?: string }
 
 /**
  * The Harness: hosts plugins, offers the plugin API, keeps sessions.
@@ -250,8 +254,10 @@ export class Harness {
 	private readonly settingsDuringTurn?: "nextTurn" | "refused";
 	private readonly jobReportsStartTurns: boolean;
 	private readonly rejectUnknownModel: boolean;
+	private readonly agentName?: string;
 	private readonly reopenModelAliases: Readonly<Record<string, string>>;
 	private newId: () => string;
+	private jobSpans = new WeakMap<Session, Map<string, Operation>>();
 	private jobCancels = new Map<string, (jobId: string) => Promise<void>>();
 	private refusedTools = new Set<string>();
 	private turnAuthority = new AsyncLocalStorage<{ sessionId: string; actors: Set<string>; jobs: Set<string>; state?: Pick<TurnState, "connectionRights" | "startingRights"> }>();
@@ -270,6 +276,7 @@ export class Harness {
 		this.settingsDuringTurn = options.settingsDuringTurn;
 		this.jobReportsStartTurns = options.jobReportsStartTurns ?? true;
 		this.rejectUnknownModel = options.rejectUnknownModel === true;
+		this.agentName = safeName(options.agentName);
 		this.reopenModelAliases = { ...options.reopenModelAliases };
 		this.hooks = new HookRegistry(({ hook, plugin, error }) => this.problem(plugin, `hook ${hook}`, error));
 		const h = (name: string, rule: HookRule, owner: string) => this.hooks.define(name, rule, owner);
@@ -403,7 +410,7 @@ export class Harness {
 			commands: () => [...this.commandTable].map(([name, c]) => ({ name, description: c.description, plugin: c.plugin })),
 			runCommand: (sessionId, line, actorId) => this.runCommand(sessionId, line, actorId),
 			startSession: (options) => this.startSession(options),
-			openSession: (id, actor, prepare) => this.openSession(id, actor, prepare),
+			openSession: (id, actor, prepare, operation) => this.openSession(id, actor, prepare, operation),
 			join: (sessionId, actor, grantedBy) => this.join(this.session(sessionId), actor, grantedBy, pluginName),
 			leave: async (sessionId, actorId, requestedBy) => {
 				const s = this.session(sessionId);
@@ -440,16 +447,8 @@ export class Harness {
 			setLimit: (id, rights, actorId) => this.setLimit(this.session(id), rights, actorId, pluginName),
 			tenant: (id) => this.tenantInfo(this.session(id)),
 			checkPending: id => this.admitHistory(this.session(id)),
-			readHistory: (id, options) => {
-				const s = this.session(id);
-				const snapshot = () => {
-					this.checkScopedWork(s, "watch");
-					return options?.all ? s.order.map(id => s.entries.get(id)!) : s.branch();
-				};
-				if (this.httpErasure() && !s.provisional) return this.admitHistory(s).then(snapshot);
-				this.checkPending(s);
-				return snapshot();
-			},
+			readHistory: (id, options) => this.inspectHistory(id, options ?? {}, entries => entries),
+			inspectHistory: (id, options, inspect) => this.inspectHistory(id, options, inspect),
 			history: (sessionId, options) => {
 				const s = this.session(sessionId);
 				this.checkScopedWork(s, "watch");
@@ -474,6 +473,10 @@ export class Harness {
 			workActors: (id) => this.workActors(this.session(id)),
 			workJobs: (id) => { const work = this.turnAuthority.getStore(); return work?.sessionId === id ? [...work.jobs] : []; },
 			workMay: (id, right, actors, jobs) => this.workRights(this.session(id), actors, jobs).includes(right),
+			jobTrace: (id, jobId) => {
+				const s = this.session(id);
+				return s.jobs.get(jobId)?.job.plugin === pluginName ? this.jobSpans.get(s)?.get(jobId) : undefined;
+			},
 			findJob: (jobId) => {
 				for (const s of this.sessions.values()) {
 					if (s.order.some((id) => { const e = s.entries.get(id)!; return e.kind === "jobStarted" && e.jobId === jobId && e.writer === pluginName; })) return { sessionId: s.id };
@@ -802,6 +805,11 @@ export class Harness {
 	}
 
 	async startSession(options: SessionStartOptions = {}): Promise<string> {
+		const span = startOperation("modular_agent.session.open", { "modular_agent.session.operation": "new" });
+		return span.observe(() => this.startSessionWithin(options, span));
+	}
+
+	private async startSessionWithin(options: SessionStartOptions, span: Operation): Promise<string> {
 		await this.rebuildReservations();
 		const store = this.use<HistoryStore>("history-store");
 		const sourceId = options.forkFrom?.sessionId ?? options.parentSessionId;
@@ -811,6 +819,7 @@ export class Harness {
 		if (tenant !== undefined && !this.tenants.has(tenant)) throw Object.assign(new Error(`Unknown tenant ${tenant}`), { code: "invalid_params" });
 		const cwd = options.settings?.cwd;
 		const meta: StoredSession = { id: this.newId(), created: this.now(), project: ancestor?.meta.project ?? (typeof cwd === "string" ? cwd : this.project), forkedFrom: options.forkFrom, parentSessionId: options.parentSessionId };
+		span.set("gen_ai.conversation.id", meta.id);
 		const s = new Session(meta, !store);
 		s.tenant = tenant;
 		s.provisional = !!store && store.supports.persistent !== false && !options.forkFrom;
@@ -867,7 +876,7 @@ export class Harness {
 				const batch = [...copies, ...setup];
 				const publish = async () => {
 					if (ancestor && await this.admitHistory(ancestor) !== ancestorView) throw failure("unavailable", "Erasure changed the fork source");
-					await this.write(s, () => store?.append(s.id, batch, { forkErasureView: ancestorView }));
+					await this.observeCommit(s, batch.length, () => this.write(s, () => store?.append(s.id, batch, { forkErasureView: ancestorView })));
 					for (const e of batch) s.apply(e);
 				};
 				const registry = this.pendingRegistry();
@@ -913,7 +922,12 @@ export class Harness {
 		}
 	}
 
-	async openSession(id: string, actor?: Actor, prepare?: SessionPrepare): Promise<string> {
+	async openSession(id: string, actor?: Actor, prepare?: SessionPrepare, operation: "load" | "resume" = "resume"): Promise<string> {
+		return startOperation("modular_agent.session.open", { ...conversation(id), "modular_agent.session.operation": operation })
+			.observe(() => this.openSessionWithin(id, actor, prepare));
+	}
+
+	private async openSessionWithin(id: string, actor?: Actor, prepare?: SessionPrepare): Promise<string> {
 		await this.rebuildReservations();
 		if (this.opening.has(id) || this.sessions.get(id)?.closing) {
 			throw Object.assign(new Error("Session is busy"), { code: "busy" });
@@ -1080,6 +1094,7 @@ export class Harness {
 
 	private stopSessionWork(s: Session): void {
 		s.suspended = true;
+		this.endJobObservation(s);
 		s.steering = [];
 		s.followUps = [];
 		s.running?.abort.abort();
@@ -1119,6 +1134,7 @@ export class Harness {
 		// Stop admission synchronously, before notifying anyone or waking a waiting call.
 		s.suspended = true;
 		this.emit(s, "session.interrupted", { reason }, "harness");
+		this.endJobObservation(s);
 		s.interruption.abort(Object.assign(failure("lost", "Session was interrupted; reopen it to recover"), { cause }));
 		this.stopSessionWork(s);
 		for (const record of s.jobs.values()) void this.cancelJob(s, record.job.id).catch(error => this.problem(record.job.plugin, "cancel interrupted job", error));
@@ -1151,6 +1167,11 @@ export class Harness {
 	}
 
 	async closeSession(id: string, actorId?: string, delegatedBy?: string, authority?: readonly Authority[]): Promise<void> {
+		return startOperation("modular_agent.session.close", { ...conversation(id), "modular_agent.session.operation": "close" })
+			.observe(() => this.closeSessionWithin(id, actorId, delegatedBy, authority));
+	}
+
+	private async closeSessionWithin(id: string, actorId?: string, delegatedBy?: string, authority?: readonly Authority[]): Promise<void> {
 		const s = this.sessions.get(id);
 		if (!s) return;
 		await this.admit(s, async () => {
@@ -1182,13 +1203,32 @@ export class Harness {
 		// A suspended session's process has stopped: nothing more is recorded for it here.
 		const run = s.committing.then(() => {
 			const registry = this.pendingRegistry();
-			return registry ? registry.exclusive(() => this.commitNow(s, drafts, pluginRecord)) : this.commitNow(s, drafts, pluginRecord);
+			const write = () => this.commitNow(s, drafts, pluginRecord);
+			return registry ? registry.exclusive(write) : write();
 		});
 		s.committing = run.catch(() => undefined);
 		return run;
 	}
 
-	private async commitNow(s: Session, drafts: EntryDraft[], pluginRecord = false): Promise<HistoryEntry[]> {
+	private async observeCommit<T>(s: Session, count: number, work: (span: Operation) => Promise<T>): Promise<T> {
+		const span = startOperation("modular_agent.history.commit", { ...conversation(s.id), "modular_agent.history.entry.count": count });
+		try {
+			const result = await span.run(() => work(span));
+			span.set("modular_agent.history.commit.status", s.suspended ? "failed" : "committed");
+			return result;
+		} catch (error) {
+			const status = (error as { code?: string }).code === "lost" ? "uncertain" : "failed";
+			span.set("modular_agent.history.commit.status", status);
+			span.fail(status);
+			throw error;
+		} finally { span.end(); }
+	}
+
+	private commitNow(s: Session, drafts: EntryDraft[], pluginRecord = false): Promise<HistoryEntry[]> {
+		return this.observeCommit(s, drafts.length, span => this.commitBatch(s, drafts, pluginRecord, span));
+	}
+
+	private async commitBatch(s: Session, drafts: EntryDraft[], pluginRecord: boolean, span: Operation): Promise<HistoryEntry[]> {
 		s.interruption.signal.throwIfAborted();
 		if (s.suspended) return [];
 		const firstAdmission = s.provisional && drafts.some(d => d.kind === "inputAccepted");
@@ -1222,6 +1262,7 @@ export class Harness {
 				case "input": case "inputAccepted": case "inputHandedBack":
 					add("input", inputIdOf(entry)); add("job", entry.jobId); break;
 				case "turnStart": add("input", inputId); add("turn", entry.turnId); break;
+				case TURN_TRACE: add("turn", entry.turnId); break;
 				case "turnEnd":
 					add("turn", entry.turnId); break;
 				case "modelRequest": case "response":
@@ -1246,6 +1287,7 @@ export class Harness {
 		if (firstAdmission) {
 			const store = this.use<HistoryStore>("history-store")!;
 			const initial = [...s.order.map(id => s.entries.get(id)!), ...entries];
+			span.set("modular_agent.history.entry.count", initial.length);
 			await this.write(s, async () => {
 				await store.create(s.meta);
 				await store.openForWriting(s.id);
@@ -1404,6 +1446,17 @@ export class Harness {
 	private pendingRegistry(): PendingErasure | undefined {
 		const store = this.use<HistoryStore>("history-store");
 		return store ? store.pendingErasure : this.ephemeralErasure;
+	}
+
+	private inspectHistory<T>(id: string, options: { all?: boolean }, inspect: (entries: HistoryEntry[]) => T): T | Promise<T> {
+		const s = this.session(id);
+		const snapshot = () => {
+			this.checkScopedWork(s, "watch");
+			return inspect(options.all ? s.order.map(id => s.entries.get(id)!) : s.branch());
+		};
+		if (this.httpErasure() && !s.provisional) return this.admitHistory(s).then(snapshot);
+		this.checkPending(s);
+		return snapshot();
 	}
 
 	private checkPending(s: Session): string {
@@ -1849,6 +1902,18 @@ export class Harness {
 	// ---------- input and turns ----------
 
 	private async input(sessionId: string, options: InputOptions): Promise<InputReceipt & { handled?: boolean; output?: string }> {
+		const span = startOperation("modular_agent.input.admit", conversation(sessionId));
+		try {
+			const receipt = await span.run(() => this.inputWithin(sessionId, options));
+			span.set("modular_agent.input.id", receipt.inputId);
+			return receipt;
+		} catch (error) {
+			if ((error as { code?: string }).code === "busy") span.event("modular_agent.capacity.refused", {});
+			throw error;
+		} finally { span.end(); }
+	}
+
+	private async inputWithin(sessionId: string, options: InputOptions): Promise<InputReceipt & { handled?: boolean; output?: string }> {
 		const s = this.session(sessionId);
 		await this.reconcilePending(s);
 		this.checkWriter(s);
@@ -1914,7 +1979,10 @@ export class Harness {
 
 	/** Serialize receipts, release and cancellation for a session. */
 	private admit<T>(s: Session, work: () => Promise<T>): Promise<T> {
-		const run = s.admitting.then(work);
+		const wait = s.admissionsInFlight++ > 0 ? startOperation("modular_agent.capacity.wait", {
+			...conversation(s.id), "modular_agent.capacity.scope": "session",
+		}) : undefined;
+		const run = s.admitting.then(() => { wait?.end(); return work(); }).finally(() => { s.admissionsInFlight--; });
 		s.admitting = run.catch(() => undefined);
 		return run;
 	}
@@ -1949,6 +2017,7 @@ export class Harness {
 			if (!s.interruption.signal.aborted) this.reservations.release(s, `input:${q.id}`);
 			throw error;
 		}
+		q.trace ??= currentSpan();
 		const receipt: InputReceipt = { inputId: q.id, taken };
 		if (q.when !== "propose") {
 			if (taken === "now") this.startTurn(s, q);
@@ -2112,38 +2181,63 @@ export class Harness {
 			failure = "Turn preparation exceeds reserved capacity";
 			snapshot = { model: ref ?? null, system: "", settings: {}, tools: [] };
 		}
-		const state: TurnState = { ...snapshot, ...authority, sources: new Map(), actors, jobs };
+		const state: TurnState = { ...snapshot, ...authority, dispatched: new Set(), steps: new Map(), sources: new Map(), actors, jobs };
 		if (continuing && !this.reservations.reserve(s, `turn:${turnId}`, { storageBytes: 3 * unit })) {
 			// Leave existing open calls intact when a continuation cannot reserve its own turn.
 			return;
 		}
-		await this.commit(s, [
-			{ kind: "turnStart", writer: "harness", modelVisible: false, turnId, continuesTurnId, actorId: queued.actorId, data: { ...snapshot, startedBy: queued.startedBy, resultShape: failure ? undefined : resultShape, point, rights: state.startingRights,
-				authorizers: [...actors].map(actorId => ({ sessionId: s.id, actorId })), ...(continuing ? { authorityActors: [...actors], authorityJobs: [...jobs] } : {}) } },
-			...(continuing ? [] : [this.inputEntry(s, queued, turnId)]),
-		]);
-		this.emit(s, "turn.started", { startedBy: queued.startedBy }, "harness", { turnId });
-		let outcome: TurnOutcome;
-		if (limited) outcome = this.tenantLimitOutcome();
-		else if (failure) outcome = this.failedOutcome(failure);
-		else if (!runtime) outcome = this.failedOutcome("No Runtime is loaded");
-		else if (!model) outcome = this.failedOutcome("No model is selected, or its Provider is not loaded");
-		else {
+		const span = this.turnSpan(s, turnId, queued.trace ?? null, undefined, continuesTurnId);
+		return span.run(async () => {
 			try {
-				const input = {
-					sessionId: s.id, turnId, startedBy: queued.startedBy, model: this.turnModel(s, turnId, state, model),
-					settings, resultShape,
-				};
-				const host = this.runtimeHost(s, turnId, state, resultShape);
-				outcome = continuing ? await runtime.continueOpenCalls(input, host, signal, continuing) : await runtime.runTurn(input, host, signal);
-			} catch (error) {
-				outcome = this.failedOutcome(error instanceof Error ? error.message : String(error));
-			}
+				const traceContext = runtime?.supports.continuesAfterRestart ? carrier(span.spanContext) : undefined;
+				await this.commit(s, [
+					{ kind: "turnStart", writer: "harness", modelVisible: false, turnId, continuesTurnId, actorId: queued.actorId, data: { ...snapshot, ...(traceContext ? { traceContext } : {}), startedBy: queued.startedBy, resultShape: failure ? undefined : resultShape, point, rights: state.startingRights,
+						authorizers: [...actors].map(actorId => ({ sessionId: s.id, actorId })), ...(continuing ? { authorityActors: [...actors], authorityJobs: [...jobs] } : {}) } },
+					...(continuing ? [] : [this.inputEntry(s, queued, turnId)]),
+				]);
+				this.emit(s, "turn.started", { startedBy: queued.startedBy }, "harness", { turnId });
+				let outcome: TurnOutcome;
+				if (limited) outcome = this.tenantLimitOutcome();
+				else if (failure) outcome = this.failedOutcome(failure);
+				else if (!runtime) outcome = this.failedOutcome("No Runtime is loaded");
+				else if (!model) outcome = this.failedOutcome("No model is selected, or its Provider is not loaded");
+				else {
+					try {
+						const input = {
+							sessionId: s.id, turnId, startedBy: queued.startedBy, model: this.turnModel(s, turnId, state, model),
+							settings, resultShape,
+						};
+						const host = this.runtimeHost(s, turnId, state, resultShape);
+						outcome = continuing ? await runtime.continueOpenCalls(input, host, signal, continuing) : await runtime.runTurn(input, host, signal);
+					} catch (error) {
+						outcome = this.failedOutcome(error instanceof Error ? error.message : String(error));
+					}
+				}
+				await this.finishTurn(s, turnId, outcome, state, signal, resultShape);
+			} finally { this.endSteps(state); span.end(); }
+		});
+	}
+
+	private turnSpan(s: Session, turnId: string, parent: ReturnType<typeof readTrace> | null, resumed?: boolean, continuesTurnId?: string): Operation {
+		const previous = continuesTurnId ? this.savedTrace(s, continuesTurnId) : undefined;
+		const link = resumed ? parent : previous;
+		return startOperation(this.agentName ? `invoke_agent ${this.agentName}` : "invoke_agent", {
+			...conversation(s.id), "modular_agent.turn.id": turnId, "gen_ai.operation.name": "invoke_agent",
+			"gen_ai.agent.name": this.agentName, "modular_agent.turn.outcome": "interrupted", "modular_agent.turn.resumed": resumed,
+		}, { parent, links: link ? [link] : undefined });
+	}
+
+	private savedTrace(s: Session, turnId: string) {
+		for (const entry of s.branch().reverse()) {
+			if (entry.turnId !== turnId || entry.erased || s.copied.has(entry.id) || entry.writer !== "harness" ||
+				(entry.kind !== "turnStart" && entry.kind !== TURN_TRACE)) continue;
+			const saved = readTrace((entry.data as { traceContext?: unknown } | undefined)?.traceContext);
+			if (saved) return saved;
 		}
-		await this.finishTurn(s, turnId, outcome, state, signal, resultShape);
 	}
 
 	private async finishTurn(s: Session, turnId: string, outcome: TurnOutcome, state?: TurnState, signal?: AbortSignal, resultShape?: Record<string, unknown>): Promise<void> {
+		if (state) this.endSteps(state);
 		// The process stopped: the turn is interrupted, not ended. Nothing is recorded or announced here;
 		// reopening the session finds the turn and hands it to the Runtime.
 		if (s.suspended) return;
@@ -2200,12 +2294,28 @@ export class Harness {
 				result: { openToolCalls: [...open] } };
 		}
 		await this.commit(s, [{ kind: "turnEnd", writer: "harness", modelVisible: false, turnId, sources, data: { outcome: outcome.outcome, result: outcome.result, usage: outcome.usage } }]);
+		activeOperation()?.set("modular_agent.turn.outcome", outcome.outcome.kind);
+		if (outcome.outcome.kind === "failed") activeOperation()?.fail("failed");
 		if (!state?.endedHook) await this.hooks.observe("turn.end", { sessionId: s.id, turnId, outcome: outcome.outcome, result: outcome.result });
 		this.emit(s, "turn.ended", outcome, "harness", { turnId });
 		if (open.size) this.maybeContinueOpenCalls(s);
 	}
 
 	private async resumeTurn(s: Session, interrupted: InterruptedTurn, startedBy: QueuedInput["startedBy"], signal: AbortSignal, snapshot?: Partial<TurnSnapshot> & { resultShape?: Record<string, unknown> }): Promise<void> {
+		const turnId = interrupted.turnId;
+		if (!this.runtime()?.supports.continuesAfterRestart) return withTrace(undefined, () => this.resumeTurnWithin(s, interrupted, startedBy, signal, snapshot));
+		const saved = this.savedTrace(s, turnId);
+		const span = this.turnSpan(s, turnId, saved ?? null, true);
+		try {
+			await span.run(async () => {
+				const traceContext = carrier(span.spanContext);
+				if (traceContext) await this.commit(s, [{ kind: TURN_TRACE, writer: "harness", turnId, modelVisible: false, data: { traceContext } }]);
+				await this.resumeTurnWithin(s, interrupted, startedBy, signal, snapshot);
+			});
+		} finally { span.end(); }
+	}
+
+	private async resumeTurnWithin(s: Session, interrupted: InterruptedTurn, startedBy: QueuedInput["startedBy"], signal: AbortSignal, snapshot?: Partial<TurnSnapshot> & { resultShape?: Record<string, unknown> }): Promise<void> {
 		const turnId = interrupted.turnId;
 		const runtime = this.runtime();
 		const model = this.modelAccess(s, snapshot?.model);
@@ -2219,7 +2329,7 @@ export class Harness {
 		const state: TurnState = {
 			model: model.model, system: snapshot?.system ?? "", context: snapshot?.context, tools: snapshot?.tools ?? this.toolDefinitions(s),
 			settings: snapshot?.settings ? { ...snapshot.settings, reasoning: lowerReasoning(snapshot.settings.reasoning, model.model) } : this.turnSettings(s, model.model),
-			sources: new Map(), actors: new Set(this.recordedTurnActors(branch, turnId)),
+			dispatched: new Set(), steps: new Map(), sources: new Map(), actors: new Set(this.recordedTurnActors(branch, turnId)),
 			jobs: new Set(this.recordedTurnJobs(branch, turnId)),
 			startingRights: this.recordedTurnRights(branch, turnId),
 			connectionRights: intersectConnectionRights(...branch.filter(e => e.turnId === turnId && e.kind === "input" && !e.erased)
@@ -2305,37 +2415,56 @@ export class Harness {
 		return { outcome: { kind: "failed", error }, result: { openToolCalls: [] }, entries: [], usage: zeroUsage() };
 	}
 
+	private endSteps(state: TurnState, except?: string): void {
+		for (const [id, span] of state.steps) if (id !== except) { span.end(); state.steps.delete(id); }
+	}
+
+	private step(s: Session, turnId: string, steps: Map<string, Operation>, stepId: string): Operation {
+		let span = steps.get(stepId);
+		if (!span) {
+			span = startOperation("modular_agent.step", { ...conversation(s.id), "modular_agent.turn.id": turnId, "modular_agent.step.id": stepId });
+			steps.set(stepId, span);
+		}
+		return span;
+	}
+
 	private runtimeHost(s: Session, turnId: string, state: TurnState, resultShape?: Record<string, unknown>): RuntimeHost {
+		const turn = activeOperation();
+		const step = (id: string) => turn ? turn.run(() => this.step(s, turnId, state.steps, id)) : this.step(s, turnId, state.steps, id);
+		const inStep = <T>(id: string | undefined, work: () => T): T => id ? step(id).run(work) : work();
 		const withAuthority = <T>(fn: () => T): T => this.turnAuthority.run({ sessionId: s.id, actors: state.actors, jobs: state.jobs, state }, fn);
 		const checkRead = async () => { await this.admitHistory(s); withAuthority(() => this.checkScopedWork(s, "watch")); };
 		return {
 			newId: async () => this.newId(),
 			callActor: () => state.actors.values().next().value ?? this.actorForJob(s, state.jobs),
-			prepareStep: async ({ stepId, usage }) => {
-				await checkRead();
-				if (state.capacityLimit) throw turnLimit("capacity");
-				if (state.tenantLimit || await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
-				const attempts = s.order.map((id) => s.entries.get(id)!).filter((e) => e.turnId === turnId && e.kind === "modelRequest" && !(e.data as { auxiliary?: boolean })?.auxiliary).length;
-				if (state.settings.maxSteps !== undefined && attempts >= state.settings.maxSteps) throw turnLimit("steps");
-				const model = this.modelAccess(s, state.model);
-				const branch = s.branch();
-				const lastAttempt = branch.findLastIndex((e) => e.turnId === turnId && e.kind === "modelRequest" && !(e.data as { auxiliary?: boolean })?.auxiliary);
-				const feedback = branch.slice(lastAttempt + 1).filter((e) => !e.erased && e.turnId === turnId && e.kind === "resultFeedback");
-				const request: ModelRequest = {
-					systemPrompt: state.system, messages: s.modelMessages(branch, turnId), tools: state.tools, providerTools: "none",
-					settings: { reasoning: state.settings.reasoning, maxOutput: state.settings.maxOutput },
-				};
-				const payload = { sessionId: s.id, turnId, stepId, usage, model: model?.model, history: s.branch(), request };
-				const transformed = (await withAuthority(() => this.hooks.transform("step.before", payload))).value.request;
-				await checkRead();
-				if (!Array.isArray(transformed?.tools) || transformed.tools.some(t => !request.tools.some(offered => isDeepStrictEqual(offered, t)))) throw new Error("step.before cannot widen the tool offer");
-				const prepared: ModelRequest = feedback.length ? { ...transformed, messages: [...transformed.messages,
-					...feedback.map((e): ModelMessage => ({ role: "user", content: [text((e.data as { reason: string }).reason)] }))] } : transformed;
-				// Hooks may copy or transform messages, so conservatively name their visible sources.
-				state.sources.set(stepId, [...new Set([...branch.filter((e) => !e.erased && ((e.modelVisible && e.kind !== "resultFeedback") || e.kind === "summary" || (e.kind === "turnStart" && e.turnId === turnId && state.context?.length))), ...feedback].map((e) => e.id))]);
-				return prepared;
+			prepareStep: ({ stepId, usage }) => {
+				this.endSteps(state, stepId);
+				return inStep(stepId, async () => {
+					await checkRead();
+					if (state.capacityLimit) throw turnLimit("capacity");
+					if (state.tenantLimit || await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
+					const attempts = s.order.map((id) => s.entries.get(id)!).filter((e) => e.turnId === turnId && e.kind === "modelRequest" && !(e.data as { auxiliary?: boolean })?.auxiliary).length;
+					if (state.settings.maxSteps !== undefined && attempts >= state.settings.maxSteps) throw turnLimit("steps");
+					const model = this.modelAccess(s, state.model);
+					const branch = s.branch();
+					const lastAttempt = branch.findLastIndex((e) => e.turnId === turnId && e.kind === "modelRequest" && !(e.data as { auxiliary?: boolean })?.auxiliary);
+					const feedback = branch.slice(lastAttempt + 1).filter((e) => !e.erased && e.turnId === turnId && e.kind === "resultFeedback");
+					const request: ModelRequest = {
+						systemPrompt: state.system, messages: s.modelMessages(branch, turnId), tools: state.tools, providerTools: "none",
+						settings: { reasoning: state.settings.reasoning, maxOutput: state.settings.maxOutput },
+					};
+					const payload = { sessionId: s.id, turnId, stepId, usage, model: model?.model, history: s.branch().map(historyForPeer), request };
+					const transformed = (await withAuthority(() => this.hooks.transform("step.before", payload))).value.request;
+					await checkRead();
+					if (!Array.isArray(transformed?.tools) || transformed.tools.some(t => !request.tools.some(offered => isDeepStrictEqual(offered, t)))) throw new Error("step.before cannot widen the tool offer");
+					const prepared: ModelRequest = feedback.length ? { ...transformed, messages: [...transformed.messages,
+						...feedback.map((e): ModelMessage => ({ role: "user", content: [text((e.data as { reason: string }).reason)] }))] } : transformed;
+					// Hooks may copy or transform messages, so conservatively name their visible sources.
+					state.sources.set(stepId, [...new Set([...branch.filter((e) => !e.erased && ((e.modelVisible && e.kind !== "resultFeedback") || e.kind === "summary" || (e.kind === "turnStart" && e.turnId === turnId && state.context?.length))), ...feedback].map((e) => e.id))]);
+					return prepared;
+				});
 			},
-			hook: async (name, payload) => {
+			hook: (name, payload) => inStep(payload?.stepId ?? payload?.call?.stepId, async () => {
 				if (name === "turn.end") {
 					if (state.endedHook || s.suspended) return null as never;
 					state.endedHook = true;
@@ -2365,7 +2494,7 @@ export class Harness {
 								modelVisible: false, data: { decision }, sources: [restored.response.id] }]);
 						}
 						return { value, ...(decision === null ? {} : { refused: decision.refuse }) } as never;
-					} finally { state.stepAfterRunning = false; }
+					} finally { state.stepAfterRunning = false; state.steps.get(payload.stepId)?.end(); state.steps.delete(payload.stepId); }
 				}
 				const scope = { ...payload, sessionId: s.id, turnId };
 				if (name === "tool.after") {
@@ -2385,9 +2514,10 @@ export class Harness {
 					const provider = this.providerFor(s, state.model);
 					if (provider?.supports.keepsState === true) await provider.discardState?.(s.id);
 				}
+				if (name === "tool.before" && result?.pending && payload.call) this.toolDisposition(payload.call, "pending");
 				return result;
-			},
-			runToolCall: (call, signal) => withAuthority(() => this.executeTool(s, call, signal, turnId, state)),
+			}),
+			runToolCall: (call, signal) => inStep(call.stepId, () => withAuthority(() => this.executeTool(s, call, signal, turnId, state))),
 			definition: async (name) => this.findTool(s, name)?.definition,
 			registration: (name) => {
 				const found = this.findTool(s, name);
@@ -2397,7 +2527,7 @@ export class Harness {
 				await checkRead();
 				return options?.all ? s.order.map(id => s.entries.get(id)!) : s.branch();
 			},
-			record: async (draft) => {
+			record: (draft) => inStep(draft.stepId, async () => {
 				if (draft.kind === "turnStart" || draft.kind === "turnEnd") {
 					return s.branch().find((e) => e.turnId === turnId && e.kind === draft.kind)
 						?? { ...draft, id: turnId, turnId, sessionId: s.id, time: this.now(), parentId: s.position };
@@ -2411,8 +2541,13 @@ export class Harness {
 						|| e.message?.role === "assistant" && e.message.content.some((p) => isToolCall(p) && p.id === draft.toolCallId))
 					.map((e) => e.id) : [];
 				const sources = [...new Set([...(draft.sources ?? []), ...modelSources, ...callSources])];
-				return (await this.commit(s, [{ ...draft, turnId, sources }]))[0];
-			},
+				const entry = (await this.commit(s, [{ ...draft, turnId, sources }]))[0];
+				if (draft.kind === "toolResult" && draft.toolCallId && !state.dispatched.has(draft.toolCallId) && draft.message?.role === "toolResult") {
+					const status = (draft.data as { status?: string } | undefined)?.status;
+					if (status) this.toolDisposition({ id: draft.toolCallId, name: draft.message.toolName, startedBy: "model" }, status);
+				}
+				return entry;
+			}),
 			takeSteering: (final = false) => this.admit(s, async () => {
 				const items = s.steering.splice(0);
 				if (final && !items.length && s.running?.turnId === turnId) s.running.steeringClosed = true;
@@ -2423,7 +2558,10 @@ export class Harness {
 				return this.commit(s, items.map((q) => this.inputEntry(s, q, turnId)));
 			}),
 			hasSteering: async () => s.steering.length > 0,
-			report: (type, data, ids) => { if (type !== "model.output") this.emit(s, type, data, "runtime", { turnId, ...ids }); },
+			report: (type, data, ids) => {
+				if (type === "step.started" && ids?.stepId) { this.endSteps(state, ids.stepId); step(ids.stepId); }
+				if (type !== "model.output") this.emit(s, type, data, "runtime", { turnId, ...ids });
+			},
 		};
 	}
 
@@ -2431,12 +2569,13 @@ export class Harness {
 
 	private turnModel(s: Session, turnId: string | undefined, state: Pick<TurnState, "sources" | "actors" | "jobs" | "tenantLimit" | "capacityLimit" | "connectionRights" | "startingRights">,
 		model: ModelAccess, authorize?: () => void): ModelAccess {
+		const turn = activeOperation();
+		const steps = "steps" in state ? (state as TurnState).steps : undefined;
 		return { ...model, request: async (request, options) => {
-			return this.turnAuthority.run({ sessionId: s.id, actors: state.actors, jobs: state.jobs, state }, async () => {
+			const stepId = options.stepId ?? [...state.sources.keys()].at(-1) ?? this.newId();
+			const work = () => this.turnAuthority.run({ sessionId: s.id, actors: state.actors, jobs: state.jobs, state }, async () => {
 				options.signal.throwIfAborted();
 				if (state.tenantLimit || await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
-				const stepId = options.stepId ?? [...state.sources.keys()].at(-1) ?? this.newId();
-
 				const freshness = await this.admitHistory(s);
 				await this.reconcileProviderErasure(s, model.model.provider);
 				this.checkProviderErasure(s, model.model.provider);
@@ -2517,6 +2656,7 @@ export class Harness {
 					options.onEffectiveRequest?.(prepared.request);
 					return dispatched;
 				};
+				const attributes = { ...conversation(s.id), "modular_agent.turn.id": turnId, "modular_agent.step.id": stepId };
 				let observed = Promise.resolve();
 				const onEvent = (event: import("./types.js").ModelStreamEvent) => {
 					observed = observed.then(() => this.hooks.observe("provider.piece", { ...scope, turnId, stepId, piece: structuredClone(event) }));
@@ -2528,14 +2668,15 @@ export class Harness {
 					try {
 						if (model.prepareOnWire) {
 							const work = { sessionId: s.id, actors: state.actors, jobs: state.jobs, state };
-							message = await model.request(request, { ...options, onEvent,
+							message = await observeInference(scope.provider, scope.model.id, attributes, !!options.onEvent, () => model.request(request, { ...options, onEvent,
 								prepareDispatch: () => this.turnAuthority.run(work, prepareDispatch),
-								handoff: send => this.turnAuthority.run(work, () => handoff(send)) });
+								handoff: send => this.turnAuthority.run(work, () => handoff(send)) }));
 						} else {
 							const dispatched = await prepareDispatch();
 							let result!: Promise<AssistantMessage>;
 							await handoff(() => {
-								result = model.request(dispatched, { ...options, requestPrepared: true, onEvent });
+								result = observeInference(scope.provider, scope.model.id, attributes, !!options.onEvent,
+									() => model.request(dispatched, { ...options, requestPrepared: true, onEvent }), model.inProcessInference !== true);
 								void result.catch(() => {});
 							});
 							message = await result;
@@ -2571,6 +2712,9 @@ export class Harness {
 					await observed;
 					if (turnId) this.emit(s, "model.streamEnd", {}, "harness", { turnId, stepId }); }
 			});
+			if (!turnId || !steps) return work();
+			const step = () => this.step(s, turnId, steps, stepId);
+			return (turn ? turn.run(step) : step()).run(work);
 		} };
 	}
 
@@ -2593,6 +2737,7 @@ export class Harness {
 			model: info,
 			supports: provider.supports,
 			prepareOnWire: provider.prepareOnWire,
+			inProcessInference: provider.inProcessInference,
 			request: async (request, options) => {
 				const available = provider.prepareOnWire ? true : await provider.available?.().catch(() => false);
 				options.signal.throwIfAborted();
@@ -2710,7 +2855,27 @@ export class Harness {
 		await this.admitHistory(s);
 		this.checkWriter(s);
 		if (signal.aborted || !eligible(this.findTool(s, call.name))) return refused();
+		const name = safeName(found.definition.name);
+		const span = startOperation(name ? `execute_tool ${name}` : "execute_tool", {
+			...conversation(s.id), "modular_agent.turn.id": turnId, "modular_agent.step.id": call.stepId,
+			...toolAttributes(call), "gen_ai.agent.name": this.agentName,
+		});
+		state?.dispatched.add(call.id);
+		return span.run(async () => {
+			try {
+				const result = await this.invokeTool(s, found, call, signal, turnId, state, nested, owners, allowed, env, start);
+				const status = isPending(result) ? "pending" : result.status;
+				span.set("modular_agent.tool.status", status);
+				if (status === "failed" || status === "outcomeUnknown") span.fail(status);
+				return result;
+			} finally { span.end(); }
+		});
+	}
+
+	private async invokeTool(s: Session, found: NonNullable<ReturnType<Harness["findTool"]>>, call: ToolCall, signal: AbortSignal, turnId: string | undefined, state: TurnState | undefined,
+		nested: { depth: number } | undefined, owners: string[], allowed: () => boolean, env: WorkingEnvironment | undefined, start: HistoryEntry): Promise<ToolResult | (ToolPending & { callId: string })> {
 		this.emit(s, "tool.started", { call }, found.source.id, { turnId, toolCallId: call.id, stepId: call.stepId });
+		const toolSpan = activeOperation();
 		let asked = 0;
 		const pendingQuestions: string[] = [];
 		const children = new Set<Promise<ToolResult>>();
@@ -2756,7 +2921,8 @@ export class Harness {
 						}
 						const childSignal = AbortSignal.any([signal, lifetime.signal, ...(askingSignal ? [askingSignal] : [])]);
 						if (childSignal.aborted) throw Object.assign(new Error("The callback was cancelled"), { code: "cancelled" });
-						const work = this.callNested(s, call, name, structuredClone(input), childSignal, (nested?.depth ?? 0) + 1, turnId, state, start.id);
+						const invoke = () => this.callNested(s, call, name, structuredClone(input), childSignal, (nested?.depth ?? 0) + 1, turnId, state, start.id);
+						const work = toolSpan ? toolSpan.run(invoke) : invoke();
 						children.add(work);
 						try { return await work; } finally { children.delete(work); }
 					},
@@ -2832,6 +2998,7 @@ export class Harness {
 			processingError = error;
 			result = stop(signal.aborted ? "notStarted" : "failed", "Could not process the nested call");
 		}
+		if (!state?.dispatched.has(call.id) && (result.status === "refused" || result.status === "notStarted")) this.toolDisposition(call, result.status);
 		await this.closeNestedQuestions(s, call.id);
 		const after = await this.toolAfter(s, { sessionId: s.id, call: executed, result });
 		result = after.result;
@@ -2842,6 +3009,10 @@ export class Harness {
 			throw processingError;
 		}
 		return result;
+	}
+
+	private toolDisposition(call: Pick<ToolCall, "id" | "name" | "startedBy" | "parentCallId">, status: string): void {
+		telemetryEvent("modular_agent.tool.disposition", { ...toolAttributes(call), "modular_agent.tool.status": status });
 	}
 
 	private async recordNestedResult(s: Session, call: ToolCall, turnId: string | undefined, result: ToolResult, intent?: string): Promise<void> {
@@ -2928,7 +3099,10 @@ export class Harness {
 			? { refused: `${call.name} can't be called by a ${call.startedBy}`, value: { call } }
 			: await this.toolGate({ sessionId: s.id, call, definition });
 		let result: ToolResult;
-		if (gate.refused) result = { callId: call.id, status: "refused", content: [text(gate.refused)] };
+		if (gate.refused) {
+			result = { callId: call.id, status: "refused", content: [text(gate.refused)] };
+			this.toolDisposition(call, result.status);
+		}
 		else {
 			const ran = await this.executeTool(s, gate.value.call, s.interruption.signal);
 			// Only a turn can carry an open call forward, so outside a turn it fails instead.
@@ -3072,7 +3246,15 @@ export class Harness {
 			kept = outcome === "activated" ? { requestId: request.id, actorId: answer.actorId, stored: request.credential }
 				: { requestId: request.id, actorId: answer.actorId, declined: true, reason: "superseded" };
 		}
-		await this.commit(s, [{ ...fields, kind: "inputAnswer", data: kept }]);
+		const record = async () => {
+			await this.commit(s, [{ ...fields, kind: "inputAnswer", data: kept }]);
+			const system = kept.actorId === "harness" && kept.reason &&
+				["cancelled", "noLongerAnswerable", "restart", "timeLimit", "superseded", "refused", "erased"].includes(kept.reason) ? kept.reason : undefined;
+			telemetryEvent("modular_agent.question.close", { "modular_agent.question.id": request.id,
+				"modular_agent.question.kind": request.kind, "modular_agent.question.disposition": kept.declined ? system ?? "declined" : kept.stored ? "stored" : "answered" });
+		};
+		if (activeOperation()?.isOpen && activeOperation()?.spanContext) await record();
+		else await startOperation("modular_agent.question.answer", { ...conversation(s.id), "modular_agent.turn.id": request.turnId, "modular_agent.step.id": stepId }).observe(record);
 		if (request.kind === "secret" && kept.declined) await this.discardSecret(s, request.id);
 		return kept;
 	}
@@ -3177,6 +3359,7 @@ export class Harness {
 				throw error;
 			}
 		}
+		telemetryEvent("modular_agent.question.open", { "modular_agent.question.id": request.id, "modular_agent.question.kind": request.kind });
 		if (!this.hasAnswerer(s, request)) {
 			const approval = request.kind === "approval";
 			const answer = { requestId: request.id, declined: true, actorId: "harness", reason: approval ? "refused" : "noLongerAnswerable" };
@@ -3242,7 +3425,8 @@ export class Harness {
 		if (!this.mayAnswer(s, request, answer.actorId)) return { accepted: false, reason: `${answer.actorId} may not answer this request` };
 		s.lateAnswers.add(request.id);
 		const previous = s.settling ?? Promise.resolve();
-		const work = previous.then(async () => {
+		const span = startOperation("modular_agent.question.answer", { ...conversation(s.id), "modular_agent.turn.id": request.turnId });
+		const work = previous.then(() => span.observe(async () => {
 			const kept = await this.recordAnswer(s, request, answer,
 				s.order.map(id => s.entries.get(id)!).find(e => e.requestId === request.id)?.stepId,
 				request.kind === "secret" && !answer.declined);
@@ -3250,8 +3434,8 @@ export class Harness {
 			for (const i of this.viewersFor(s, request)) i.onInputRequestClosed?.(request.id);
 			this.emitAnswer(s, request, kept, true);
 			s.waiting.delete(request.id);
-			this.continueOpenCalls(s, kept);
-		});
+			this.continueOpenCalls(s, kept, currentSpan());
+		}));
 		s.settling = work.catch((error) => this.problem("harness", "late answer", error)).finally(() => {
 			if (s.settling === tracked) s.settling = undefined;
 		});
@@ -3286,7 +3470,7 @@ export class Harness {
 		this.continueOpenCalls(s, answers.at(-1)!.data as Answer);
 	}
 
-	private continueOpenCalls(s: Session, answer: Answer): void {
+	private continueOpenCalls(s: Session, answer: Answer, trace?: ReturnType<typeof currentSpan>): void {
 		const calls = this.openCalls(s);
 		if (!calls.length) return;
 		const stillWaiting = new Set(this.waitingRequests(s).map((r) => r.toolCallId));
@@ -3304,7 +3488,7 @@ export class Harness {
 		}
 		const queued: QueuedInput = {
 			id: this.newId(), content: [], actorId: [...owners][0] ?? answer.actorId, authorityActors: [...owners], authorityJobs: [...jobs], startingRights: intersectRights(...ceilings),
-			when: "after", startedBy: { kind: "answer", id: answer.requestId }, kind: "continue", continueCalls: [...callIds],
+			when: "after", startedBy: { kind: "answer", id: answer.requestId }, kind: "continue", continueCalls: [...callIds], trace,
 		};
 		if (s.isBusy()) {
 			if (!s.followUps.some((q) => q.continueCalls)) s.followUps.push(queued);
@@ -3405,13 +3589,31 @@ export class Harness {
 		const startEntryId = this.newId();
 		const job: Job = { id: this.newId(), kind: options.kind, sessionId: s.id, plugin, actorId, turnId: s.running?.turnId, state: "running", usage: zeroUsage() };
 		this.reserveJob(s, job.id);
-		const ready = this.commit(s, [{
+		const span = this.observeJob(s, job);
+		const ready = span.run(() => this.commit(s, [{
 			id: startEntryId, kind: "jobStarted", writer: plugin, modelVisible: false, turnId: job.turnId,
 			toolCallId: options.toolCallId ?? this.toolWork.getStore()?.id, jobId: job.id, actorId,
 			data: { kind: job.kind, key, detail: detail ?? null, actors, rights, authorizers: actors.map(actorId => ({ sessionId: s.id, actorId })) },
-		}]).then(() => this.emit(s, "job.started", { job }, plugin, { jobId: job.id }));
-		void ready.catch((error) => { s.jobs.delete(job.id); this.problem(plugin, "record job", error); });
+		}])).then(() => this.emit(s, "job.started", { job }, plugin, { jobId: job.id }));
+		void ready.catch((error) => { span.fail("failed"); span.end(); this.jobSpans.get(s)?.delete(job.id); s.jobs.delete(job.id); this.problem(plugin, "record job", error); });
 		return this.jobHandle(s, { job, key, detail, actors, rights }, startEntryId, ready);
+	}
+
+	private observeJob(s: Session, job: Job): Operation {
+		let spans = this.jobSpans.get(s);
+		if (!spans) { spans = new Map(); this.jobSpans.set(s, spans); }
+		let span = spans.get(job.id);
+		if (!span) {
+			span = startOperation("modular_agent.job", { ...conversation(s.id), "modular_agent.job.id": job.id, "modular_agent.turn.id": job.turnId,
+				"modular_agent.job.outcome": "interrupted" });
+			spans.set(job.id, span);
+		}
+		return span;
+	}
+
+	private endJobObservation(s: Session): void {
+		for (const span of this.jobSpans.get(s)?.values() ?? []) span.end();
+		this.jobSpans.delete(s);
 	}
 
 	private readJob(s: Session, e: HistoryEntry): KeptJob | undefined {
@@ -3437,6 +3639,7 @@ export class Harness {
 	private jobHandle(s: Session, kept: KeptJob, startEntryId?: string, ready: Promise<unknown> = Promise.resolve()): JobHandle {
 		const { job } = kept;
 		const plugin = job.plugin;
+		const span = this.observeJob(s, job);
 		const handle: JobHandle = {
 			id: job.id, started: true, ready, startEntryId,
 			progress: (content) => {
@@ -3471,14 +3674,24 @@ export class Harness {
 							inputs: 1, bufferedBytes: resourceBytes(queued), storageBytes: 5 * this.reservations.limits.settlementBytes,
 						});
 						else this.reservations.release(s, `job:${job.id}`);
+						span.set("modular_agent.job.outcome", outcome.kind);
+						if (outcome.kind === "failed") span.fail("failed");
+						span.end();
+						this.jobSpans.get(s)?.delete(job.id);
 						job.state = state;
 						job.result = content;
 						this.emit(s, "job.ended", { state, result: content }, plugin, { jobId: job.id });
+						if (queued) {
+							const admission = startOperation("modular_agent.input.admit", { ...conversation(s.id), "modular_agent.input.id": queued.id },
+								{ links: span.spanContext ? [span.spanContext] : [] });
+							queued.trace = admission.spanContext;
+							admission.end();
+						}
 						if (queued?.when === "after") { s.followUps.push(queued); this.startQueued(s); }
 					});
 					if (oversized) throw failure("result_too_large", "Job result exceeds reserved capacity");
 				};
-				record.ending = work().catch((error) => { if (job.state === "running") record.ending = undefined; throw error; });
+				record.ending = span.run(work).catch((error) => { if (job.state === "running") record.ending = undefined; throw error; });
 				return record.ending.finally(() => { if (job.state !== "running") s.jobs.delete(job.id); });
 			},
 			onCancel: (fn) => { record.cancel = fn; },
@@ -3555,6 +3768,7 @@ export class Harness {
 			erasure: (!!this.pendingRegistry() || !!this.httpErasure()) && (!store || !!store.erase),
 			inputKeys: true,
 			resourceReservations: this.reservations.declaration(),
+			telemetry: 1,
 			portableSessions: true,
 			nestedToolCalls: runtime?.supports.nestedToolCalls === true,
 			mixedActorInput: "shared",
@@ -3730,7 +3944,7 @@ const PROVISIONAL_SETUP = new Set(["tenant", "actorJoined", "actorLeft", "settin
 const STANDARD_ENTRY_KINDS = new Set("limit tenant actorJoined actorLeft setting inputAccepted inputHandedBack input turnStart modelRequest response toolStarted toolPending toolResult inputRequest secretAnswerAccepted inputAnswer resultFeedback modular-agent.stepAfter turnEnd summary position erasure jobStarted jobCleanupUnconfirmed jobEnded plugins".split(" "));
 
 function copyForkPrefix(branch: HistoryEntry[], sessionId: string, makeId: () => string): HistoryEntry[] {
-	const kept = branch.filter((e) => !e.erased && e.kind !== "position");
+	const kept = branch.filter((e) => !e.erased && e.kind !== "position" && e.kind !== TURN_TRACE);
 	const entries = new Map(kept.map((e) => [e.id, makeId()]));
 	const associations = new Map<string, Map<string, string>>();
 	const remap = (kind: string, id: string) => {
@@ -3741,7 +3955,7 @@ function copyForkPrefix(branch: HistoryEntry[], sessionId: string, makeId: () =>
 	};
 	let parentId: string | null = null;
 	return kept.map((old) => {
-		const e: HistoryEntry = { ...structuredClone(old), id: entries.get(old.id)!, parentId, sessionId, sources: [old.id] };
+		const e: HistoryEntry = { ...structuredClone(historyForPeer(old)), id: entries.get(old.id)!, parentId, sessionId, sources: [old.id] };
 		if (e.turnId) e.turnId = remap("turn", e.turnId);
 		if (e.continuesTurnId) e.continuesTurnId = remap("turn", e.continuesTurnId);
 		if (e.stepId) e.stepId = remap("step", e.stepId);

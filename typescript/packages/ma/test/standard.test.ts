@@ -33,6 +33,55 @@ async function project(t: TestContext) {
   const env = { PATH: process.env.PATH, HOME: home, MODULAR_AGENT_DATA_DIR: config, MODULAR_AGENT_SCRIPT: script, MODULAR_AGENT_SCRIPT_LOG: log };
   return { dir, home, config, work, script, log, env, put, run: (...args: string[]) => exec(process.execPath, [cli, ...args], { cwd: work, env }) };
 }
+test("ma sends protobuf only to configured OTLP signals", async t => {
+  const p = await project(t);
+  const requests: { path?: string; type?: string; header?: string; payload: Buffer }[] = [];
+  const server = createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    requests.push({ path: req.url, type: req.headers["content-type"],
+      header: String(req.headers["x-test-signal"] ?? ""), payload: Buffer.concat(chunks) });
+    res.writeHead(200, { "content-type": "application/x-protobuf" }).end();
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const run = (env: Record<string, string>) => exec(process.execPath, [cli, "-p", "OTEL_PROMPT_SENTINEL"], { cwd: p.work, env: { ...p.env, ...env } });
+  const off = await run({});
+  assert.equal(off.stdout, "ok\n");
+  assert.equal(requests.length, 0);
+  // No endpoint also leaves the API providers uninstalled, so there is no
+  // fallback exporter to a default port.
+  const helper = new URL("../src/telemetry.js", import.meta.url);
+  const probe = await exec(process.execPath, ["--input-type=module", "-e", `
+    import { trace } from "@opentelemetry/api";
+    import { startTelemetry } from ${JSON.stringify(helper.href)};
+    const close = await startTelemetry();
+    console.log(trace.getTracer("probe").startSpan("probe").isRecording());
+    await close();
+  `], { cwd: here, env: p.env });
+  assert.equal(probe.stdout, "false\n");
+
+  await run({ OTEL_EXPORTER_OTLP_ENDPOINT: url, OTEL_SDK_DISABLED: "true" });
+  assert.equal(requests.length, 0);
+  const on = await run({ OTEL_EXPORTER_OTLP_ENDPOINT: url + "/prefix", OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: url + "/configured",
+    OTEL_SERVICE_NAME: "ma-test-otel", OTEL_EXPORTER_OTLP_HEADERS: "x-test-signal=base",
+    OTEL_EXPORTER_OTLP_TRACES_HEADERS: "x-test-signal=traces" });
+  assert.equal(on.stdout, off.stdout);
+  const trace = requests.find(r => r.path === "/configured");
+  const metrics = requests.find(r => r.path === "/prefix/v1/metrics");
+  assert.equal(trace?.type, "application/x-protobuf");
+  assert.equal(metrics?.type, "application/x-protobuf");
+  assert.equal(trace?.header, "traces");
+  assert.equal(metrics?.header, "base");
+  assert.match(trace!.payload.toString("utf8"), /ma-test-otel/);
+  assert.match(trace!.payload.toString("utf8"), /invoke_agent ma/);
+  assert.match(trace!.payload.toString("utf8"), /chat script/);
+  assert.doesNotMatch(trace!.payload.toString("utf8"), /OTEL_PROMPT_SENTINEL/);
+  assert.match(metrics!.payload.toString("utf8"), /gen_ai\.client\.inference\.duration/);
+});
+
 test("ma validates MA_CLIENT_IDENTITY before help, sign-in, or loading a script", async t => {
   const p = await project(t);
   const run = (identity: string, ...args: string[]) => exec(process.execPath, [cli, ...args], {
@@ -529,17 +578,21 @@ for (const remote of [false, true]) test(`ma ACP session/new is provisional with
   }
 });
 
-test("ma composes only the public SDK and official SDK plugin entry points", async () => {
+test("ma uses public SDK entry points and keeps OTLP dependencies in its telemetry setup", async () => {
   const pkg = join(root, "typescript/packages/ma");
   const manifest = JSON.parse(await readFile(join(pkg, "package.json"), "utf8"));
   const allowed = ["@modular-agent/claude", "@modular-agent/core", "@modular-agent/subscription", "@modular-agent/tools-files", "@modular-agent/tools-mcp", "@pydantic/monty", "protobufjs"]; // Monty's worker wire codec
-  assert.deepEqual(Object.keys(manifest.dependencies).sort(), allowed.slice().sort());
+  const telemetry = ["@opentelemetry/api", "@opentelemetry/context-async-hooks", "@opentelemetry/resources",
+    "@opentelemetry/sdk-metrics", "@opentelemetry/sdk-trace", "@opentelemetry/exporter-metrics-otlp-grpc",
+    "@opentelemetry/exporter-metrics-otlp-proto", "@opentelemetry/exporter-trace-otlp-grpc", "@opentelemetry/exporter-trace-otlp-proto"];
+  assert.deepEqual(Object.keys(manifest.dependencies).sort(), [...allowed, ...telemetry].sort());
   for (const file of await readdir(join(pkg, "src"))) if (file.endsWith(".ts")) {
     const source = await readFile(join(pkg, "src", file), "utf8");
     for (const entry of source.matchAll(/(?:\bfrom\s+|\bimport\s*\(\s*)["']([^"']+)/g)) {
       const spec = entry[1];
       assert.ok(spec.startsWith("node:") || /^\.\/[\w-]+\.(js|json)$/.test(spec) ||
         (file === "monty-worker.ts" && spec === "protobufjs") ||
+        (file === "telemetry.ts" && telemetry.includes(spec)) ||
         ["@modular-agent/claude", "@modular-agent/core", "@modular-agent/core/testing", "@modular-agent/subscription", "@modular-agent/tools-files/sdk", "@modular-agent/tools-mcp/sdk", "@pydantic/monty"].includes(spec), `${file}: ${spec}`);
     }
   }

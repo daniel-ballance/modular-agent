@@ -181,6 +181,8 @@ export interface Work {
   startJob?(kind: string, detail: unknown, key?: string): Promise<import("@modular-agent/harness").JobHandle>;
 }
 
+import { historyForPeer } from "@modular-agent/harness/telemetry";
+
 function emitCustom(sessionId: string | undefined, type: string, data: unknown, send: (sessionId: string, type: string, data: unknown) => void) {
   if (!sessionId || typeof type !== "string" || !type.includes(".") || /^(session|actor|input|turn|step|model|tool|provider|job|history|position|entries|setting|plugin|capability)\./.test(type)) {
     throw new AgentError("invalid_request", "Custom events need a non-standard dotted name and a session");
@@ -214,7 +216,7 @@ function context(api: PluginApi, ids: Pick<CallContext, "sessionId" | "actorId" 
       const at = cursor === undefined ? -1 : all.findIndex(e => e.id === cursor);
       if (cursor !== undefined && at < 0) throw new AgentError("invalid_request", "Unknown history cursor");
       const entries = all.slice(at + 1, at + 101);
-      return { entries: structuredClone(entries), next: all.length > at + 101 ? entries.at(-1)?.id : undefined };
+      return { entries: structuredClone(entries.map(historyForPeer)), next: all.length > at + 101 ? entries.at(-1)?.id : undefined };
     },
     emit(type, data) {
       assert();

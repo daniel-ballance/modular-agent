@@ -16,6 +16,8 @@ try {
 
 ## What is checked
 
+The telemetry tests use an OpenTelemetry in-memory span exporter and metric reader. They check the span tree, overlapping nested calls, question and refusal events, one measurement per inference, metadata-only export, both plugin handshake omissions, exporter failure, and a `SIGKILL` over durable history. The crash check matches the resumed trace, parent, link and checkpoint against the saved segment. A turn also completes with no registered OpenTelemetry SDK.
+
 The subscription tests use loopback fixtures and the public SDK. They cover both ChatGPT sign-ins and the Grok device sign-in, including polling backoff and rejection of a non-HTTPS address. The request tests run in process and over the plugin binding. They check the shared catalog, headers, output limits, encrypted reasoning replay, refresh under the lock and a refused refresh. The `ma` tests cover both old ids at each accepted entry point. See [the `ma` check results](../ma/README.md#what-is-checked). No live checks ran.
 
 ADR 0030 checks include SDK calls, fixture barriers, and separate processes. The current opt-in results are:
@@ -97,6 +99,12 @@ The SDK adds Ajv 8 (its [2020-12 entry point](https://ajv.js.org/json-schema.htm
 | 17. Pending erasure | `httpHistory(url, tokenFile)` discovers the [pending-erasure registry profile](../../../docs/bindings/history-http.md#pending-erasure-registry-profile-pendingerasure-1). Without version `1` the composition declares `erasure: false`. With it, the agent checks plans before handoff and a later writer completes them under its lease. `Session.erase()` reports confirmed and pending pairs and out-of-reach descriptions. Local history still uses its own SQLite registry. `fileHistory(dir, { pendingErasureDir })` can keep that local registry outside history backups. |
 | 18. ma policy | `ma` reads the default `policy.json` or `--policy FILE` before protected project setup, applies principals and exact scope on both ACP transports, and keeps the one-token shorthand. `ma --declaration` prints operator byte bounds under `limits`. |
 
+| 19. Telemetry | The Harness declares `telemetry: 1` on the agent and session. It records metadata only through `@opentelemetry/api`. Set `createAgent({ agentName })` to a stable, non-sensitive name. The app registers its tracer and meter providers and an async context manager before composition, and owns export and shutdown. The SDK installs none of them. |
+
+### Telemetry context
+
+Plugin peers agree to per-operation context at initialize. ACP stdio accepts context from the launching peer; set `serveAcp({ traceTrusted: false })` to ignore it. An authenticated ACP WebSocket actor accepts it only when its token entry sets `traceTrusted: true`. The SDK carries trace context in history HTTP headers and MCP request metadata. It does not carry baggage or vendor state. Durable resume links a new span to the committed segment in the same trace. Forks omit the checkpoint and the starting context; raw plugin and ACP views keep the envelope but not the context.
+
 ### Subscription Providers
 
 ```ts
@@ -129,6 +137,10 @@ The base Harness `PluginApi.history()` is synchronous and refuses reads of publi
 Use `encodeHistoryJson`, `parseHistoryJson` and `equalHistoryJson` to preserve opaque fields and exact numeric values, and `historyTombstone` for the standard erasure projection. Throw `HistoryServiceError` for a confirmed refusal; include the remaining `retryAfterMs` for `held`. If a mutation's commit is uncertain, throw another error so the adapter closes the request without an acknowledgement.
 
 ## Findings
+
+**Trace trust.** Replace the sentence beginning “Incoming context from a peer outside” in [Context on the wire](../../../docs/telemetry.md#context-on-the-wire) with:
+
+> Incoming context from a peer outside the operator’s trace trust scope MUST be ignored. Authentication alone does not put a network ACP peer in that scope. The operator can opt a network peer in independently of its rights. A stdio host that launches its peer can trust that peer by default; the operator can turn that trust off.
 
 These are proposed documentation replacements, not changes to the specification.
 

@@ -56,6 +56,8 @@ export function ndjson(res: ServerResponse): (value: unknown) => void {
 export interface ClientOptions { url: string; token: string }
 
 /** A failure the service reported, as opposed to one on the way to it. */
+import { carrier, currentSpan } from "@modular-agent/harness/telemetry";
+
 export class ServiceError extends Error {
 	constructor(readonly status: number, message: string, readonly code?: string, readonly retryAfterMs?: number) {
 		super(message);
@@ -76,7 +78,7 @@ export async function call<T>(client: ClientOptions, method: string, path: strin
 				method,
 				redirect: "error",
 				cache: options.noStore ? "no-store" : undefined,
-				headers: { authorization: `Bearer ${client.token}`, ...(options.body !== undefined ? { "content-type": "application/json" } : {}),
+				headers: { authorization: `Bearer ${client.token}`, ...carrier(currentSpan()), ...(options.body !== undefined ? { "content-type": "application/json" } : {}),
 					...(options.historyRevision !== undefined ? { "History-Revision": options.historyRevision } : {}) },
 				body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
 				signal: options.signal,

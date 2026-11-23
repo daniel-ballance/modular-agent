@@ -1,3 +1,4 @@
+import { carrier, currentSpan, historyForPeer, readTrace, withTrace } from "@modular-agent/harness/telemetry";
 import { Readable, Writable } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import { type AgentApp, type AgentContext, type Stream, agent, methods, ndJsonStream, PROTOCOL_VERSION, RequestError } from "@agentclientprotocol/sdk";
@@ -104,6 +105,8 @@ export function localAcpActor(id = "acp-user"): Actor & { kind: "host" } {
 	return { id, kind: "host", authority: [...ALL_AUTHORITY] };
 }
 export interface AcpOptions {
+	/** Accept per-request trace context from this operator-trusted peer. */
+	traceTrusted?: boolean;
 	actorId?: string;
 	actor?: Actor;
 	allowTenant?(tenant: string | null): boolean;
@@ -206,6 +209,10 @@ export class AcpInterface implements InterfaceCapability {
 	}
 
 	/** Give the session the MCP servers the client passed. They are not recorded: their headers and env may hold secrets. */
+	private traced<T>(meta: unknown, work: () => T): T {
+		return withTrace(this.options.traceTrusted !== false ? readTrace(meta) : undefined, work);
+	}
+
 	private async attachMcp(api: PluginApi, sessionId: string, servers: acp.McpServer[] | undefined, cwd: string | undefined): Promise<void> {
 		const mcp = this.mcp(api);
 		if (!servers?.length) return;
@@ -256,7 +263,7 @@ export class AcpInterface implements InterfaceCapability {
 			if (tenant !== undefined && typeof tenant !== "string") throw RequestError.invalidParams();
 			if (this.options.allowTenant && (!this.options.allowTenant(tenant ?? null) || !this.actor().authority.includes("input"))) throw bindingError("forbidden");
 			if (params.mcpServers?.length && (this.options.hostMcpServers === false || !this.actor().authority.includes("tools"))) throw bindingError("forbidden");
-			const sessionId = await this.checked(async () => {
+			const sessionId = await this.checked(() => this.traced(params._meta, async () => {
 				const { api, cwd } = await this.options.project?.(params.cwd) ?? { api: this.api, cwd: params.cwd };
 				const overrides = await this.options.projectSettings?.(cwd);
 				return api.startSession({ tenant, settings: { ...overrides, cwd }, actor: this.actor(), prepare: async id => {
@@ -265,7 +272,7 @@ export class AcpInterface implements InterfaceCapability {
 					try { await this.attachMcp(api, id, params.mcpServers, params.cwd); }
 					catch (error) { this.projects.delete(id); throw error; }
 				} });
-			});
+			}));
 			this.open(sessionId);
 			return { sessionId, configOptions: await this.configOptions(sessionId), _meta: { [NS]: { declaration: this.bindingDeclaration(sessionId) } } };
 		});
@@ -292,7 +299,7 @@ export class AcpInterface implements InterfaceCapability {
 
 		app.onRequest(methods.agent.session.close, async ({ params }) => {
 			await this.requireAttachment(params.sessionId);
-			await this.checked(() => this.apiFor(params.sessionId).closeSession(params.sessionId, this.actorId, undefined, this.actor().authority));
+			await this.checked(() => this.traced(params._meta, () => this.apiFor(params.sessionId).closeSession(params.sessionId, this.actorId, undefined, this.actor().authority)));
 			this.sessions.get(params.sessionId)?.unfollow?.();
 			this.sessions.delete(params.sessionId);
 			this.projects.delete(params.sessionId);
@@ -326,7 +333,7 @@ export class AcpInterface implements InterfaceCapability {
 			const state = this.sessions.get(params.sessionId)!;
 			this.requireRight(params.sessionId, this.actorId, "input");
 			const writer = state.writer ?? this.apiFor(params.sessionId).sessionInterruption(params.sessionId);
-			return this.checked(() => untilAborted(writer, () => this.prompt(params, state, writer)));
+			return this.checked(() => this.traced(params._meta, () => untilAborted(writer, () => this.prompt(params, state, writer))));
 		});
 
 		app.onNotification(methods.agent.session.cancel, async ({ params }) => {
@@ -345,11 +352,11 @@ export class AcpInterface implements InterfaceCapability {
 		this.registerExtensions();
 	}
 
-	private async openForClient(params: { sessionId: string; cwd: string; mcpServers?: acp.McpServer[] }, replay: boolean) {
+	private async openForClient(params: { sessionId: string; cwd: string; mcpServers?: acp.McpServer[]; _meta?: unknown }, replay: boolean) {
 		const id = params.sessionId;
 		const previous = this.sessions.get(id);
 		const attached = !!previous && !previous.writer?.aborted;
-		await this.reopen(id, params.cwd, previous ? undefined : params.mcpServers);
+		await this.traced(params._meta, () => this.reopen(id, params.cwd, previous ? undefined : params.mcpServers, replay ? "load" : "resume"));
 		try {
 			const result = await this.gateReply(id, replay ? "session/load" : "session/resume", await this.openResponse(id));
 			if (replay && !attached && this.hasRight(id, this.actorId, "watch")) await this.replay(id);
@@ -358,7 +365,7 @@ export class AcpInterface implements InterfaceCapability {
 		} catch (e) { if (!previous) this.sessions.delete(id); throw e; }
 	}
 
-	private async reopen(sessionId: string, cwd: string, servers?: acp.McpServer[]): Promise<void> {
+	private async reopen(sessionId: string, cwd: string, servers?: acp.McpServer[], operation?: "load" | "resume"): Promise<void> {
 		if (this.options.actor && !this.actor().authority.includes("watch")) throw bindingError("forbidden");
 		const previous = this.sessions.get(sessionId);
 		if (!previous) {
@@ -370,7 +377,7 @@ export class AcpInterface implements InterfaceCapability {
 			await this.checked(async () => {
 				const api = (await this.options.project?.(cwd, sessionId))?.api ?? this.projects.get(sessionId) ?? this.api;
 				this.projects.set(sessionId, api);
-				await api.openSession(sessionId, this.actor(), id => this.attachMcp(api, id, servers, cwd));
+				await api.openSession(sessionId, this.actor(), id => this.attachMcp(api, id, servers, cwd), operation);
 			});
 		} catch (error) {
 			if (!previous) { this.sessions.delete(sessionId); this.projects.delete(sessionId); }
@@ -441,7 +448,7 @@ export class AcpInterface implements InterfaceCapability {
 			const max = 4 * 1024 * 1024;
 			let bytes = Buffer.byteLength('{"entries":[]}');
 			for (let i = at + 1; i < Math.min(raw.length, at + 1 + limit); i++) {
-				const entry = raw[i];
+				const entry = historyForPeer(raw[i]);
 				const request = entry.kind === "inputRequest" ? (entry.data as { request?: InputRequest } | undefined)?.request : undefined;
 				const view = request && await this.requestView(request);
 				const projected = view ? { ...entry, data: { request: view } } : entry;
@@ -488,7 +495,7 @@ export class AcpInterface implements InterfaceCapability {
 			this.requireRight(sessionId, actorId, right);
 			if (typeof params.content !== "string" && !Array.isArray(params.content)) throw RequestError.invalidParams();
 			const content = typeof params.content === "string" ? params.content : fromAcp(params.content);
-			const receipt = await this.checked(() => this.apiFor(sessionId).input(sessionId, { content, actorId, delegatedBy: actorId === this.actorId ? undefined : this.actorId, when, key: typeof params.key === "string" ? params.key : undefined }));
+			const receipt = await this.checked(() => this.traced(params._meta, () => this.apiFor(sessionId).input(sessionId, { content, actorId, delegatedBy: actorId === this.actorId ? undefined : this.actorId, when, key: typeof params.key === "string" ? params.key : undefined })));
 			return receipt.erased ? { duplicate: true, erased: true } : { inputId: receipt.inputId, taken: receipt.taken, ...(receipt.duplicate ? { duplicate: true } : {}) };
 		});
 		extension("requests", async ({ params }) => {
@@ -516,7 +523,7 @@ export class AcpInterface implements InterfaceCapability {
 			const declined = params.declined === true || params.value === undefined || request.kind === "approval" && params.value === "refuse";
 			if ((request.kind === "secret" && params.value !== undefined) || !declined && (typeof params.value !== "string" || (request.kind === "choice" && !request.options?.includes(params.value)) ||
 				(request.kind === "approval" && params.value !== "allow"))) throw bindingError("invalid_params", "Invalid answer value");
-			const answer = await this.checked(() => this.apiFor(sessionId).submitAnswer(sessionId, { requestId: request.id, actorId, delegatedBy: actorId === this.actorId ? undefined : this.actorId, value: declined ? undefined : params.value, declined }));
+			const answer = await this.checked(() => this.traced(params._meta, () => this.apiFor(sessionId).submitAnswer(sessionId, { requestId: request.id, actorId, delegatedBy: actorId === this.actorId ? undefined : this.actorId, value: declined ? undefined : params.value, declined })));
 			return answer.accepted ? answer : notOpen();
 		});
 		extension("actors", ({ params }) => {
@@ -674,6 +681,7 @@ export class AcpInterface implements InterfaceCapability {
 			settingsDuringTurn: d.settingsDuringTurn ?? "nextTurn",
 			erasureDuringTurn: d.erasureDuringTurn,
 			commandContainment: d.commandContainment,
+			...(scoped.telemetry === 1 ? { telemetry: 1 } : {}),
 			...(d.confinesFiles === undefined ? {} : { confinesFiles: bool("confinesFiles") }),
 			...(d.nestedToolCalls === undefined ? {} : { nestedToolCalls: bool("nestedToolCalls") }),
 			...(d.resourceReservations === undefined ? {} : { resourceReservations: d.resourceReservations }),
@@ -717,26 +725,29 @@ export class AcpInterface implements InterfaceCapability {
 			}
 			return this.gateReply(sessionId, "session/prompt", promptResponse(receipt.inputId, { kind: "completed" }, receipt.duplicate ? { duplicate: true } : {}));
 		}
-		const all = await this.apiFor(sessionId).readHistory(sessionId, { all: true });
-		const taken = all.find((e) => e.kind === "input" && inputIdOf(e) === receipt.inputId);
-		const end = taken?.turnId ? all.find((e) => e.kind === "turnEnd" && e.turnId === taken.turnId) : undefined;
-		const latest = all.findLast((e) => e.kind === "inputAccepted" && inputIdOf(e) === receipt.inputId);
-		if (receipt.duplicate && !taken && ((latest?.data as { when?: string } | undefined)?.when === "propose" ||
-			all.some((e) => e.kind === "inputHandedBack" && inputHandedBackIds(e).includes(receipt.inputId)))) {
-			throw RequestError.invalidParams(undefined, "The input was not taken by a turn");
-		}
-		if (end) {
-			const data = (end.data ?? {}) as { outcome?: Outcome; result?: { openToolCalls?: string[] } };
-			const response = await this.response(sessionId, receipt.inputId, data.outcome ?? { kind: "completed" }, {
-				...(receipt.duplicate ? { duplicate: true } : {}),
-				...(data.result?.openToolCalls?.length ? { openToolCalls: data.result.openToolCalls } : {}),
+		// Take the snapshot and install the waiter in the same synchronous callback.
+		// An input or turn end committed in between would never reach this waiter.
+		return this.apiFor(sessionId).inspectHistory(sessionId, { all: true }, async all => {
+			const taken = all.find((e) => e.kind === "input" && inputIdOf(e) === receipt.inputId);
+			const end = taken?.turnId ? all.find((e) => e.kind === "turnEnd" && e.turnId === taken.turnId) : undefined;
+			const latest = all.findLast((e) => e.kind === "inputAccepted" && inputIdOf(e) === receipt.inputId);
+			if (receipt.duplicate && !taken && ((latest?.data as { when?: string } | undefined)?.when === "propose" ||
+				all.some((e) => e.kind === "inputHandedBack" && inputHandedBackIds(e).includes(receipt.inputId)))) {
+				throw RequestError.invalidParams(undefined, "The input was not taken by a turn");
+			}
+			if (end) {
+				const data = (end.data ?? {}) as { outcome?: Outcome; result?: { openToolCalls?: string[] } };
+				const response = await this.response(sessionId, receipt.inputId, data.outcome ?? { kind: "completed" }, {
+					...(receipt.duplicate ? { duplicate: true } : {}),
+					...(data.result?.openToolCalls?.length ? { openToolCalls: data.result.openToolCalls } : {}),
+				});
+				if (response instanceof Error) throw response;
+				return response;
+			}
+			state.ownInputs.add(receipt.inputId);
+			return new Promise((resolve, reject) => {
+				state.waiters.push({ inputId: receipt.inputId, turnId: taken?.turnId, duplicate: receipt.duplicate, resolve, reject });
 			});
-			if (response instanceof Error) throw response;
-			return response;
-		}
-		state.ownInputs.add(receipt.inputId);
-		return new Promise((resolve, reject) => {
-			state.waiters.push({ inputId: receipt.inputId, turnId: taken?.turnId, duplicate: receipt.duplicate, resolve, reject });
 		});
 	}
 
@@ -979,7 +990,7 @@ export class AcpInterface implements InterfaceCapability {
 				sessionId: request.sessionId,
 				toolCall: { toolCallId: request.toolCallId ?? request.id, title: call.name, rawInput: call.input,
 					...(request.details ? { content: [{ type: "content" as const, content: { type: "text" as const, text: request.details } }] } : {}) },
-				options, _meta: { [NS]: { requestId: request.id, actorId } },
+				options, _meta: { ...carrier(currentSpan()), [NS]: { requestId: request.id, actorId } },
 			} };
 			const gated = await this.apiFor(request.sessionId).gateOutput(request.sessionId, this.actorId, "request", payload);
 			if (!gated || !isDeepStrictEqual(gated, payload) || Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: Number.MAX_SAFE_INTEGER, ...gated })) > MAX_LINE_BYTES) {
@@ -1007,7 +1018,7 @@ export class AcpInterface implements InterfaceCapability {
 		const params = {
 			sessionId: request.sessionId,
 			mode: "form",
-			_meta: { [NS]: { requestId: request.id, actorId } },
+			_meta: { ...carrier(currentSpan()), [NS]: { requestId: request.id, actorId } },
 			message: request.question,
 			requestedSchema: { type: "object", properties: { answer: field }, required: ["answer"] },
 		} as acp.CreateElicitationRequest;

@@ -33,6 +33,8 @@ import { fromWire, toWire } from "./translate.js";
 import { DATA_BINDING, listDirectory, notFoundAsEnoent, optionalMethod, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
 
 export interface ServeOptions {
+	/** For hosts that need to test a peer without context support. */
+	acceptTraceContext?: boolean;
 	/** The plugin's name in its registration. */
 	name: string;
 	/** Pass the whole initialize config to a single plugin. */
@@ -298,10 +300,13 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 			}
 		})();
 		await setup;
+		const agreed = p.traceContext === 1 && options.acceptTraceContext !== false;
+		peer.configureTracing(options.name, agreed);
 		const { inputDuringTurn, waitingThroughRestart, continuesAfterRestart } = runtime?.supports ?? {};
 		return {
 			binding: PLUGIN_BINDING,
 			name: options.name,
+			...(agreed ? { traceContext: 1 } : {}),
 			...(providers.length ? { providers: providers.map((x) => ({ id: x.id, supports: x.supports, models: toWire(x.models()) })) } : {}),
 			...(toolSources.length ? { toolSources: toolSources.map((t) => ({ id: t.id, tools: toWire(t.tools()) })) } : {}),
 			...(environment ? { workingEnvironment: { containment: environment.containment ?? options.containment ?? "none", platforms: [process.platform], ...(environment.points && environment.save && environment.hasPoint && environment.restore ? { points: true } : {}), ...(environment.confinesFiles === true ? { confinesFiles: true } : {}) } } : {}),
