@@ -5,6 +5,9 @@ import base64
 import json
 import os
 import sys
+import traceback
+
+ZERO_USAGE = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": 0}
 
 pending = {}
 tasks = set()
@@ -68,8 +71,9 @@ async def request(message):
         step = (await runtime_host("newId"))["id"]
         wrong_parent = await runtime_host("newId", parentRequestId="not-the-turn")
         wrong_session = await runtime_host("newId", sessionId="not-the-session")
-        request = await runtime_host("prepareStep", stepId=step, usage={})
+        request = await runtime_host("prepareStep", stepId=step, usage=ZERO_USAGE)
         response = await runtime_host("model", stepId=step, request=request)
+        usage = response.get("usage", ZERO_USAGE)
         draft = {"kind": "response", "modelVisible": True, "stepId": step, "message": response}
         forged = await runtime_host("record", entry={**draft, "message": {**response, "content": []}})
         entry = await runtime_host("record", entry=draft)
@@ -105,12 +109,12 @@ async def request(message):
         trace["after"] = await runtime_host("hook", hook="step.after", stepId=step, payload={"response": response})
         if mode == "runtime-latched" and config.get("prepareAgain"):
             next_step = (await runtime_host("newId"))["id"]
-            denied = await runtime_host("prepareStep", stepId=next_step, usage=response["usage"])
+            denied = await runtime_host("prepareStep", stepId=next_step, usage=usage)
             trace["next"] = denied
             data = denied.get("error", {}).get("data", {})
             if data.get("code") == "turn_limit":
                 outcome = {"kind": "limit", "limit": data["limit"]}
-        result = {"outcome": outcome, "result": {"openToolCalls": open_calls, "text": text}, "usage": response["usage"], "entries": [entry["id"]]}
+        result = {"outcome": outcome, "result": {"openToolCalls": open_calls, "text": text}, "usage": usage, "entries": [entry["id"]]}
         trace["end"] = await runtime_host("hook", hook="turn.end", payload=result)
         if mode == "runtime-parent":
             after_end = await runtime_host("newId")
@@ -121,14 +125,14 @@ async def request(message):
         parent = {"parentRequestId": mid}
         cancel = turn_cancels[mid] = asyncio.Event()
         steps = [(await host("host/runtime/newId", parent))["id"] for _ in range(2)]
-        callbacks = [start_host("host/runtime/prepareStep", {**parent, "stepId": step, "usage": {}}) for step in steps]
+        callbacks = [start_host("host/runtime/prepareStep", {**parent, "stepId": step, "usage": ZERO_USAGE}) for step in steps]
         await cancel.wait()
         del turn_cancels[mid]
         for key, _ in callbacks:
             send({"method": "$/cancel", "params": {"id": key}})
         replies = await asyncio.gather(*(future for _, future in callbacks))
         history = await host("host/history", {**parent, "sessionId": p["turn"]["sessionId"], "limit": 1})
-        result = {"outcome": {"kind": "cancelled"}, "result": {"openToolCalls": []}, "usage": {}, "entries": []}
+        result = {"outcome": {"kind": "cancelled"}, "result": {"openToolCalls": []}, "usage": ZERO_USAGE, "entries": []}
         end = await host("host/runtime/hook", {**parent, "hook": "turn.end", "payload": result})
         with open(config["observed"], "w", encoding="utf8") as stream:
             json.dump({"replies": replies, "history": history, "end": end}, stream)
@@ -278,6 +282,18 @@ async def request(message):
     send({"id": mid, "result": result})
 
 
+async def answer(message):
+    try:
+        await request(message)
+    except Exception as exc:
+        traceback.print_exc()
+        send({"id": message["id"], "error": {
+            "code": -32603,
+            "message": f"{message['method']}: {type(exc).__name__}: {exc}",
+            "data": {"code": "internal"},
+        }})
+
+
 async def main():
     loop = asyncio.get_running_loop()
     reader = asyncio.StreamReader(limit=70 * 1024 * 1024)
@@ -295,7 +311,7 @@ async def main():
                 if turn_cancel is not None:
                     turn_cancel.set()
             elif "id" in message:
-                task = asyncio.create_task(request(message))
+                task = asyncio.create_task(answer(message))
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
     finally:
