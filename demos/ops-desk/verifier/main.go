@@ -16,6 +16,7 @@ import (
 
 	"github.com/daniel-ballance/modular-agent/go/modular"
 	"github.com/daniel-ballance/modular-agent/go/modular/modulartest"
+	"github.com/daniel-ballance/modular-agent/go/modular/subscription"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -29,7 +30,7 @@ const script = `[
  {"text":"Verification finished."}
 ]`
 
-func model() modular.Provider {
+func scriptedModel() modular.Provider {
 	p := modulartest.ScriptedProvider(nil)
 	p.Request = func(ctx context.Context, ref modular.ModelRef, r modular.ModelRequest, pc *modular.ProviderContext) (modular.AssistantMessage, error) {
 		var replies []modulartest.Reply
@@ -52,6 +53,30 @@ func model() modular.Provider {
 		return modulartest.ScriptedProvider(replies).Request(ctx, ref, r, pc)
 	}
 	return p
+}
+
+func modelOptions() ([]modular.Option, error) {
+	id := os.Getenv("DESK_MODEL")
+	if id == "" {
+		return []modular.Option{modular.WithProvider(scriptedModel()), modular.WithModel(modulartest.ScriptedModel)}, nil
+	}
+	logins := subscription.SubscriptionLogins(os.Getenv("DESK_LOGINS")).WithAliases(map[string]string{"openai-codex": "chatgpt"})
+	p, err := subscription.ChatGPT(subscription.ChatGPTOptions{Logins: logins})
+	if err != nil {
+		return nil, err
+	}
+	const system = "You verify a coder's commit in a separate checkout. Inspect limits.py with read. " +
+		"Run the tests with exec using exactly this command: " + command + ". " +
+		"Wait for its result. Call post once with kind verdict and text copied exactly from the command result, " +
+		"including the PASS: or FAIL: prefix. If the command cannot run, post FAIL: and the reason. " +
+		"The desk routes failures. Finish after posting."
+	prompt := modular.Plugin{Name: "verifier-prompt", Setup: func(r *modular.Registrar) error {
+		return r.OnTurnBefore(func(context.Context, modular.TurnBefore) (modular.TurnContribution, error) {
+			return modular.TurnContribution{System: system}, nil
+		})
+	}}
+	return []modular.Option{modular.WithProvider(p), modular.WithModel(id), modular.WithPlugin(prompt),
+		modular.WithSettings(modular.Settings{"reasoning": "low", "maxSteps": 7, "maxOutput": 2048})}, nil
 }
 
 type pathInput struct {
@@ -94,13 +119,16 @@ func run() error {
 		}
 	}
 	project := os.Getenv("DESK_PROJECT")
-	a, err := modular.New(ctx, modular.WithProject(project), modular.WithDataDir(os.Getenv("MODULAR_AGENT_DATA_DIR")), modular.WithDurability(modular.Durable), modular.WithPluginHost(true),
-		modular.WithProvider(model()), modular.WithModel(modulartest.ScriptedModel),
+	opts, err := modelOptions()
+	if err != nil {
+		return err
+	}
+	a, err := modular.New(ctx, append(opts, modular.WithProject(project), modular.WithDataDir(os.Getenv("MODULAR_AGENT_DATA_DIR")), modular.WithDurability(modular.Durable), modular.WithPluginHost(true),
 		modular.WithTool(modular.NewTool("read", "Read a sample file.", read, modular.ReadOnly())),
 		modular.WithTool(modular.NewTool("list", "List the sample files.", func(ctx context.Context, _ struct{}, c *modular.ToolContext) ([]modular.DirEntry, error) {
 			return c.Environment.List(ctx, ".")
 		}, modular.ReadOnly())),
-		modular.WithTool(modular.NewTool("exec", "Run the sample tests.", test)))
+		modular.WithTool(modular.NewTool("exec", "Run the sample tests.", test)))...)
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,7 @@
 """A tool inside the stock coder's composition, not an approval in the desk."""
 import json
 import os
+import re
 
 from modular_agent import Plugin, ToolContext, serve, tool
 
@@ -10,6 +11,12 @@ allowed = {}
 
 async def guard(payload, ctx):
     call = payload["call"]
+    if os.getenv("DESK_LIVE") == "1":
+        path = call["input"].get("path", ".")
+        if call["name"] == "read" and path not in {"limits.py", "cases.json", "test_limits.py"}:
+            return {"refuse": "Read one of the three sample files by name."}
+        if call["name"] in {"list", "find"} and path != ".":
+            return {"refuse": "Only list the sample checkout."}
     if call["name"] in {"exec", "write", "edit"}:
         key = (ctx.session_id, call.get("parentCallId"))
         if call["name"] != "edit" or allowed.get(key) != call["input"]:
@@ -19,6 +26,12 @@ async def guard(payload, ctx):
 @tool()
 async def apply_change(old: str, new: str, ctx: ToolContext) -> str:
     """Replace one expression in limits.py and commit it in the coder's checkout."""
+    # The verifier will import this code on the owner's machine. This sample
+    # needs only a numeric return expression, not arbitrary Python statements.
+    if os.getenv("DESK_LIVE") == "1" and not all(
+        re.fullmatch(r" *(?:return +)?(?:min|max|value|[0-9 (),+-])+", s) for s in (old, new)
+    ):
+        raise ctx.refuse("Replace just the return expression with a numeric expression using value, min or max.")
     args = {"old": old, "new": new}
     prompt = f"Allow apply_change {json.dumps(args, sort_keys=True)} in limits.py and commit?"
     # Rust currently checks the approval value against options as for a choice.
