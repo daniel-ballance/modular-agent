@@ -2,6 +2,7 @@ package acpinterface_test
 
 import (
 	"encoding/json"
+	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/conformancemodel"
 	"github.com/daniel-ballance/modular-agent/go/durable"
 	"github.com/daniel-ballance/modular-agent/go/historyhttp"
@@ -30,6 +31,30 @@ func TestACPLoadRecoversForeignInterruptedTurn(t *testing.T) {
 	}
 }
 
+// The HTTP service serializes access to this single-session fixture store.
+type portableFixtureStore struct{ snapshot api.Session }
+
+func (s *portableFixtureStore) List(string) ([]api.Session, error) {
+	if s.snapshot.ID == "" {
+		return nil, nil
+	}
+	return []api.Session{s.snapshot}, nil
+}
+
+func (s *portableFixtureStore) Acquire(string) (api.Lease, error) { return s, nil }
+func (s *portableFixtureStore) Erase([]string) error              { return api.ErrErasureUnavailable }
+func (s *portableFixtureStore) Close() error                      { return nil }
+func (s *portableFixtureStore) Save(snapshot api.Session) error {
+	s.snapshot = snapshot
+	return nil
+}
+func (s *portableFixtureStore) Load() (api.Session, error) {
+	if s.snapshot.ID == "" {
+		return api.Session{}, os.ErrNotExist
+	}
+	return s.snapshot, nil
+}
+
 func checkForeignTurn(t *testing.T, fixture, wantStatus string, wantStarts int) {
 	t.Helper()
 	const id = "foreign-crash"
@@ -48,10 +73,9 @@ func checkForeignTurn(t *testing.T, fixture, wantStatus string, wantStarts int) 
 		// revocation then attaches directly to the model response.
 		entries = append(entries[:len(entries)-2], json.RawMessage(`{"id":"revoke","parentId":"reply","sessionId":"foreign-crash","kind":"actorJoined","time":1007,"writer":"peer","modelVisible":false,"data":{"actor":{"id":"user","kind":"host","rights":["watch","input","vendor.future"]}}}`))
 	}
-	service, err := historyhttp.New(t.TempDir(), time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The test checks recovery from foreign records, not disk sync or lease
+	// expiry. Keep the real HTTP binding and avoid disk writes under the lease.
+	service := historyhttp.NewStoreServer(&portableFixtureStore{}, time.Second)
 	t.Cleanup(func() { service.Close() })
 	server := httptest.NewServer(service.Handler("test-token"))
 	t.Cleanup(server.Close)
