@@ -18,7 +18,7 @@ The first invocation of `run.mjs` with a command runs every case, with a fresh f
 
 ## Launching a fixture
 
-The fixture is an SDK app, not a replacement AG-UI adapter. Use the real listener, Harness, Runtime, output gate and history store. Run `conformance/agui/rust.sh` for Rust. It builds `ma` and the separate `standard` example `agui_fixture`. The launcher runs ordinary conversations against `ma` and uses the example for cases that need operator configuration or controls. All 25 cases run; no reference manifest fields are needed. See [Serving AG-UI](../../docs/sdk/placement.md#serving-ag-ui) for the proposed setup. `fake-agent.mjs` is only a launch-mode self-test for the basic cases.
+The fixture is an SDK app, not a replacement AG-UI adapter. Use the real listener, Harness, Runtime, output gate and history store. Run `conformance/agui/rust.sh` for Rust. It builds `ma` and the separate `sdk-scenarios` example `agui_fixture`. The launcher runs ordinary conversations against `ma` and uses the example for cases that need operator configuration or controls. All 25 cases run; no reference manifest fields are needed. See [Serving AG-UI](../../docs/sdk/placement.md#serving-ag-ui) for the proposed setup. `fake-agent.mjs` is only a launch-mode self-test for the basic cases.
 
 The kit starts the command in a new process group, with a fresh home, working directory and data directory, and without the inherited environment except `PATH`. It sets:
 

@@ -4518,17 +4518,22 @@ name = "sdk-scenarios"
 version = "0.1.0"
 dependencies = [
  "agent-api",
+ "anyhow",
+ "axum",
  "futures-util",
  "history-fs",
  "libc",
+ "log",
  "modular-agent",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "serde",
  "serde_json",
+ "standard",
  "tempfile",
  "tokio",
+ "transport-websocket",
  "uuid",
 ]
 
@@ -4876,15 +4881,11 @@ dependencies = [
 name = "standard"
 version = "0.1.0"
 dependencies = [
- "agent-api",
  "anyhow",
- "axum",
  "credentials-auth",
  "futures-util",
- "history-fs",
  "jiff",
  "libc",
- "log",
  "modular-agent",
  "modular-agent-files",
  "modular-agent-mcp",
@@ -4899,7 +4900,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tools-code",
- "transport-websocket",
 ]
 
 [[package]]

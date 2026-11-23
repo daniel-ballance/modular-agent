@@ -31,10 +31,4 @@ monty-types = "=1.6.0"
 tempfile.workspace = true
 
 [dev-dependencies]
-agent-api.workspace = true
-history-fs = { path = "../history-fs" }
-transport-websocket = { path = "../transport-websocket" }
-axum = "0.8"
-opentelemetry_sdk = { version = "0.33.1", features = ["testing"] }
-log = { version = "0.4", features = ["std"] }
 libc.workspace = true
