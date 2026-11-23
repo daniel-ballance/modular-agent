@@ -19,7 +19,7 @@ const usage = `node run.mjs [--only CASE[,CASE...]] -- /absolute/path/to/fixture
 node run.mjs --only CASE --url ORIGIN --token-file FILE [--ROLE-token-file FILE ...]
              [--control URL --control-token-file FILE]
 node run.mjs --list`;
-const requiredRoles = { listener: ['watch', 'tenant', 'project'], frontend: ['rotated', 'sibling', 'foreign'], approval: ['sibling'], 'state-and-gate': ['sibling'], 'output-size': ['sibling'], trace: ['foreign'] };
+const requiredRoles = { listener: ['watch', 'tenant', 'project'], frontend: ['rotated', 'sibling', 'foreign'], approval: ['sibling'], 'approval-absent': ['sibling'], 'state-and-gate': ['sibling'], 'output-size': ['sibling'], trace: ['foreign'] };
 
 function loopback(host) { return host === '[::1]' || /^127(?:\.\d{1,3}){3}$/.test(host); }
 function endpoint(value) {

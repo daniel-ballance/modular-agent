@@ -82,10 +82,12 @@ function settled(evidence, callId, status, { continuation = true, report = statu
 
 export const advanced = {
   tls: scenario(simple, checkTls),
-  'approval-absent': scenario(frontend, async ({ api, control }) => {
+  'approval-absent': scenario(frontend, async ({ api, origin, tokens, control }) => {
     const { view, request } = await prompt(api, options);
-    // A snapshot and the run stream are not the separate presence route.
-    const run = await api.run(request, opts(view));
+    // The sibling shares the actor, not this client's approval route.
+    const presence = await at(origin, tokens.sibling).presence(view.threadId);
+    let run;
+    try { run = await api.run(request, opts(view)); } finally { await presence.close(); }
     success(run);
     assert.equal(run.calls.size, 0, 'no executable tool without eligible approval presence');
     const evidence = await evidenceFor(control, view.threadId);

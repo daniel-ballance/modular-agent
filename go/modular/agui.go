@@ -69,7 +69,7 @@ type agClient struct {
 }
 type agPresence struct {
 	ctx    context.Context
-	detach func()
+	detach map[string]func()
 }
 type agDelivery struct {
 	presence *agPresence
@@ -512,6 +512,7 @@ func (q *agRequest) present() error {
 	}
 	p := &agPresence{ctx: q.ctx}
 	s.presence = p
+	defer q.a.q.manager().ConnectClient(q.id, q.Actor.ID, q.client)()
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()

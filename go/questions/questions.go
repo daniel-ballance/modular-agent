@@ -22,8 +22,16 @@ type Manager struct {
 	a       api.API
 	mu      sync.Mutex
 	changed chan struct{}
-	present map[string]int
+	present map[answerRoute]int
 }
+
+// A route can advertise presence without an answerable approval. An AG-UI
+// approval route names the exact question whose unchanged view was delivered.
+type answerRoute struct {
+	session, actor, client, question string
+	approval                         bool
+}
+
 type stored struct {
 	Question                       api.Question
 	ForwardSession, ForwardRequest string
@@ -39,7 +47,7 @@ type relay struct{ Session, Request string }
 
 func Plugin() api.Plugin {
 	return api.Plugin{Name: "questions", Setup: func(a api.API) error {
-		m := &Manager{a: a, changed: make(chan struct{}), present: map[string]int{}}
+		m := &Manager{a: a, changed: make(chan struct{}), present: map[answerRoute]int{}}
 		if err := a.Provide("questions", m); err != nil {
 			return err
 		}
@@ -90,14 +98,30 @@ func Plugin() api.Plugin {
 	}}
 }
 func (m *Manager) Connect(session, actor string) func() {
+	return m.connect(answerRoute{session: session, actor: actor, approval: true})
+}
+
+// ConnectClient marks a client present; it does not make an approval deliverable.
+func (m *Manager) ConnectClient(session, actor, client string) func() {
+	return m.connect(answerRoute{session: session, actor: actor, client: client})
+}
+
+func (m *Manager) OfferApproval(session, actor, client, question string) func() {
+	return m.connect(answerRoute{session: session, actor: actor, client: client, question: question, approval: true})
+}
+
+func (m *Manager) connect(route answerRoute) func() {
 	m.mu.Lock()
-	m.present[session+":"+actor]++
+	m.present[route]++
 	m.mu.Unlock()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			m.mu.Lock()
-			m.present[session+":"+actor]--
+			m.present[route]--
+			if m.present[route] == 0 {
+				delete(m.present, route)
+			}
 			close(m.changed)
 			m.changed = make(chan struct{})
 			m.mu.Unlock()
@@ -377,13 +401,13 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 		present, eligible := false, false
 		if q.Kind == "approval" {
 			for who := range s.Actors {
-				if m.present[q.Session+":"+who] > 0 && m.valid(q, api.Answer{Actor: who}) {
+				if m.approvalRouteLocked(q, who) && m.valid(q, api.Answer{Actor: who}) {
 					present = true
 					break
 				}
 			}
 			if s.Actors == nil {
-				present = m.present[q.Session+":"+s.Actor] > 0 && m.valid(q, api.Answer{Actor: s.Actor})
+				present = m.approvalRouteLocked(q, s.Actor) && m.valid(q, api.Answer{Actor: s.Actor})
 			}
 		}
 		m.mu.Unlock()
@@ -515,23 +539,43 @@ func (m *Manager) emitClosure(ctx context.Context, q api.Question, reason string
 func (m *Manager) Answer(ctx context.Context, id string, a api.Answer) error {
 	a.Actor = api.Acting(ctx)
 	a.Via = nil
-	return m.accept(ctx, id, a, false)
+	return m.accept(ctx, id, a, false, "")
 }
 
 // AnswerFor retains the host's own authority as well as the answering actor's.
 func (m *Manager) AnswerFor(ctx context.Context, id, actor string, a api.Answer) error {
 	a.Actor = actor
 	a.Via = []api.ActorRef{{Session: id, Actor: api.Acting(ctx)}}
-	return m.accept(ctx, id, a, false)
+	return m.accept(ctx, id, a, false, "")
 }
 
 func (m *Manager) Present(id, actor string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.present[id+":"+actor] > 0
+	for r := range m.present {
+		if r.session == id && r.actor == actor {
+			return true
+		}
+	}
+	return false
 }
 
-func (m *Manager) accept(ctx context.Context, id string, a api.Answer, sanitized bool) error {
+func (m *Manager) approvalRouteLocked(q api.Question, actor string) bool {
+	for r := range m.present {
+		if r.session == q.Session && r.actor == actor && r.approval && (r.question == "" || r.question == q.ID) {
+			return true
+		}
+	}
+	return false
+}
+
+// AnswerOnClient checks the live approval route under the answer commit lock.
+func (m *Manager) AnswerOnClient(ctx context.Context, id, client string, a api.Answer) error {
+	a.Actor, a.Via = api.Acting(ctx), nil
+	return m.accept(ctx, id, a, false, client)
+}
+
+func (m *Manager) accept(ctx context.Context, id string, a api.Answer, sanitized bool, client string) error {
 	// Leave a refused answer open for a bounded replacement. Even the worst
 	// JSON escaping of this value fits the reserved closing record.
 	if len(a.Value) > 256<<10 {
@@ -554,7 +598,7 @@ func (m *Manager) accept(ctx context.Context, id string, a api.Answer, sanitized
 		_ = m.decline(q, "timeLimit")
 		return api.ErrQuestionNotFound
 	}
-	if !m.valid(q, a) {
+	if !m.valid(q, a) || client != "" && q.Kind == "approval" && m.present[answerRoute{id, a.Actor, client, q.ID, true}] == 0 {
 		m.mu.Unlock()
 		return api.ErrAnswerAuthority
 	}
@@ -629,7 +673,7 @@ func (m *Manager) accept(ctx context.Context, id string, a api.Answer, sanitized
 			return e
 		}
 		via := append(append([]api.ActorRef(nil), a.Via...), api.ActorRef{Session: id, Actor: a.Actor})
-		e = m.accept(ctx, child.ID, api.Answer{Request: forward.ForwardRequest, Actor: child.Actor, Value: a.Value, Declined: a.Declined, Via: via}, true)
+		e = m.accept(ctx, child.ID, api.Answer{Request: forward.ForwardRequest, Actor: child.Actor, Value: a.Value, Declined: a.Declined, Via: via}, true, "")
 		if e != nil {
 			return e
 		}
