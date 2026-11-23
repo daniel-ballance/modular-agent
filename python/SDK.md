@@ -84,7 +84,7 @@ The five [live checks](../docs/sdk/testing.md#live-checks) in `tests/test_sdk_li
 | Questions | `on_question` can override the agent-wide handler. `questions()` lists only open questions and reports per-recipient `answerable`; `answer` submits by ID. Without a handler an untimed non-approval can wait for an eligible offline actor, while an approval still needs a present eligible answerer. A text `declined` and a tagged decline are distinct. `late_answers_start_turns=True` enables a timed non-approval to leave a call open. |
 | Secrets | `environment_credentials()` is read-only. `file_credentials(path)` provides durable `stage`, `lookup_staged`, `activate` and `discard`. `ma` passes a `SubscriptionLogins` so secret answers and sign-ins share the same `auth.json` and lock. Recovery discards unselected staging and completes a committed selection before resuming work. |
 | Tools | Input from type hints, one Pydantic model, or `Tool.from_schema`; exact hints, structured results, cancellation, refusal, questions, progress, log, history pages, environment and nested calls. Typed `toolOutput` events expose the text `chunk` and optional original `content`, including images. Nesting is four levels including the outer call. The public wire Runtime placement does not declare nesting. |
-| Interface tools | `create_agent(interface_tools=[{"source_id": ..., "actor_id": ..., "route_id": ..., "result_timeout_ms": ..., "tools": [...]}])` registers model-only definitions. An authenticated Interface can advertise availability, receive one checked handoff, and report a result for a later turn. Both shipped Runtimes support the feature, including on the plugin binding. AG-UI is not implemented. |
+| Interface tools | `create_agent(interface_tools=[{"source_id": ..., "actor_id": ..., "route_id": ..., "result_timeout_ms": ..., "tools": [...]}])` registers model-only definitions. An authenticated Interface can advertise availability, receive one checked handoff, and report a result for a later turn. Both shipped Runtimes support the feature, including on the plugin binding. The AG-UI listener uses deferred release for these calls. |
 | Plugins and parts | Register tools, changing tool sources, Providers, commands, hooks, working environments, Runtimes and job owners, in process or served. Custom configuration, credential stores, Interfaces and plugin-defined hooks run in process. `Registrar.on` provides typed payloads and answers for core points; `HookContext` supports raw history, cancellation and custom events. Actor joins/leaves and Provider pieces are local hooks. A flagged local `tool.before` gate can leave a call pending even when the Runtime is served. |
 | Jobs | Registered owners start keyed work through `context.jobs.start()`. Job handles report progress and settlement. Owner cancellation and reopen/resume are checked in both placements. A missing committed end on cancellation records `jobCleanupUnconfirmed`; the execution cannot report or resume. |
 | Providers and commands | Providers may declare kept state; `runsToolsAtProvider` and `liveSessions` are always false. Embedded catalog invalidation with `ProviderCatalog.changed()`; polling over the binding without a private notification. In-process commands can ask questions or request models under their own recorded step without starting a turn. A served command uses `host/session` for its project, even when the session was saved in a different project. Tools and Providers can read named credentials in process. API-key Providers use the shared, byte-checked model table; explicitly enrolled unlisted ids send no reasoning controls. |
@@ -103,6 +103,32 @@ Both WebSocket servers return a listener with `url` (the bound address including
 
 A plugin value gets a new registration and copy per connection. If the plugin carries state in function closures or holds noncopyable resources, pass a zero-argument factory to `serve` so each connection gets fresh state. ACP's `actors` entries are `{"token_file": path, "actor": {"id": ..., "kind": ..., "rights": [...]}, "tenants": [...], "projects": [...]}`. Tenant scope defaults to no tenant; include `None` to allow it alongside named tenants. An explicit project list contains canonical project roots; omitting it allows the projects the serving composition admits. Tokens for the same actor id must agree on kind, but can impose different rights ceilings on the same recorded grants. An authorized second connection can attach to an open session's existing writer without sharing the first connection's ACP handshake or leaving the session suspended on its disconnect.
 
+## Serve AG-UI
+
+```python
+listener = await agent.serve_agui(
+    listen="127.0.0.1:0",
+    actors=[
+        {
+            "token_file": token_path,
+            "client_id": "editor",
+            "actor": {"id": "alice", "kind": "user", "rights": ["input", "watch", "tools"]},
+        }
+    ],
+    acp=True,
+)
+# listener.url is an HTTP origin. The authenticated discovery path is /agui/v1.
+await listener.close()
+```
+
+The listener uses the agent's project and the operator's optional `tenant`. Each actor entry can restrict `projects` and `tenants`. Token rotation may keep a client ID only for the same actor and scope. A different client ID cannot report a pending call. For HTTPS set `tls={"cert_file": ..., "key_file": ...}`. Add `client_ca_file` to require a trusted client certificate as well as the bearer. `origins` lists additional allowed browser origins. Trace parents are accepted only for entries with `trace_trusted=True`. The optional `trace_state_keys` lists the trusted HTTP vendor keys. No baggage is accepted.
+
+Send the latest committed messages with the new suffix. `MA-History-Cursor` is optional. On conflict, replace the local conversation with the authenticated thread snapshot, including its new message IDs. The optional presence stream allows an in-turn question to be answered on the same live route. It does not carry calls. Execute only after the terminal event, never from the snapshot.
+
+For shared state, set `state_plugin` to the emitting plugin's name and provide its async `state_snapshot(session_id)` reader. The reader returns `{revisionId, snapshot}` or `None` when no current snapshot can be supplied. The adapter requests it at run start and when a patch loses its base. Without a reader the plugin must publish a current snapshot before any delta. To allow explicitly foreign events, set `raw_sources={plugin_name: source}`. The plugin emits `modular-agent.agui.raw` with the foreign event as its payload.
+
+The [managed kit](../conformance/agui/README.md) checks 25 cases. History, encoding and the official client's ordinary conversation use the actual `ma` executable. The other 22 use the kit's scripted SDK composition. None are skipped.
+
 ## Proposed standard configuration text
 
 Add these rows to the flags table in [Standard configuration](../docs/reference/standard-configuration.md), replacing the existing `--listen` row:
@@ -118,6 +144,8 @@ Add to the policy's `actors` description:
 
 Register definitions in shared ToolDefinition form (`parameters`, `callers: ["model"]`), without handlers. Use a finite positive integer timeout in milliseconds. After authenticating the peer, trusted adapter code calls `agent.connect_interface_tools(actor_id=..., route_id=..., on_handoff=...)`. It can supply `rights` to cap the connection and `tenants` to allow named tenants; the default is the agent's project with no tenant. The actor still needs recorded `watch` and `tools` rights.
 
+With `defer=True`, the callback runs only on a successful `await connection.release(session.id, call_id)`. Release checks the live handle, originating turn, scope, rights, gate, deadline, erasure and writer. Reopening a session does not create another delivery.
+
 Call `connection.advertise(session.id, definitions)` with the exact subset this connection can execute. Use an empty list to withdraw it. The synchronous `on_handoff` callback receives `session_id`, `call_id`, `name`, `input` and the absolute `deadline`. It must not block. Calling `connection.close()` clears presence without settling an open call. A new authenticated connection on the same route can report without advertising or registering a callback.
 
 After the originating turn ends, call `await connection.report_tool_result(session.id, report)`, with shared fields `callId`, `status` (`completed` or `failed`), `content` and optional `value`. It returns `accepted`, `alreadySettled` or `refused`. A pre-end refusal can be retried; an expired call cannot be reported. Results supply context to a continuation, not a new user message. Do not execute a call from a history entry or an event replay. ACP does not expose the executor connection or the report method.
@@ -132,17 +160,22 @@ Call `await claude_provider.available()` before displaying account-specific mode
 
 ## Trace trust and spec findings
 
-The launcher of a stdio ACP host is trusted for per-request trace context. Set `trace_trusted=True` in an embedded network ACP `actors` entry only for a peer allowed to share trace IDs. Network principals are not trace-trusted by default. Configured history and plugin destinations get context per request. The SDK does not accept or send baggage or vendor trace state.
+The launcher of a stdio ACP host is trusted for per-request trace context. Set `trace_trusted=True` in an embedded network ACP `actors` entry only for a peer allowed to share trace IDs. Network principals are not trace-trusted by default. Configured history and plugin destinations get context per request. The SDK does not accept or send baggage. AG-UI can accept allowlisted vendor state on a trusted work POST.
 
 ### ADR 0033 spec findings
 
-- [SDK API, Sessions and turns](../docs/sdk/api.md#sessions-and-turns) lists `interfaceTools` at composition but has no result-report operation. Insert this row after `callTool`:
+- The [SDK API](../docs/sdk/api.md#the-agent) now defines a session-bound executor handle. Python's existing handle is scoped to the configured project and actor; its `advertise`, `release` and `report_tool_result` take the session ID explicitly. For a language note:
 
   > | `connection.reportToolResult(sessionId, report)` | `accepted`, `alreadySettled` or `refused`. The connection is bound to an independently authenticated actor and operator-configured Interface route. The report uses the [shared shape](../docs/bindings/data.md#interface-handoff-records). This operation never dispatches a tool. |
 
-- [SDK placement, Serving AG-UI](../docs/sdk/placement.md#serving-ag-ui) describes the wire advertisement but not the SDK seam for a binding. Replace “The app advertises the exact definitions it can run.” with:
+- The [Interface handle](../docs/sdk/api.md#the-agent) says: “A report uses the shared Interface result shape and returns `accepted`, `alreadySettled` or `refused`; `notReady` is a retryable refusal before the originating turn ends.” The existing Python handle returns `refused` rather than a distinct `notReady` disposition. The HTTP adapter detects an open origin in the committed branch and rejects an early report with HTTP 409 `conflict`.
+
+- For [Serving AG-UI](../docs/sdk/placement.md#serving-ag-ui), replace “The app advertises the exact definitions it can run.” with:
 
   > The binding attaches an executor connection using the authenticated actor, the operator-configured route, and the connection scope. The connection replaces its per-session availability with an exact subset of the registered definitions. The Harness sends executable requests only through that connection, after committing the handoff. Closing the connection clears its availability without settling any call. Another independently authenticated connection on the same route can report a result without advertising availability.
+
+- The [connection rules](../docs/contracts.md#authority) say: “The Harness MUST refuse unless operator policy admits that principal for this session's project and tenant, `joinOnOpen` is enabled and the session supports another member if needed.” The Python network policy has no `joinOnOpen` option. The listener refuses unrecorded actors; a trusted Interface must grant them membership first. The kit fixture uses that grant operation.
+- The [binding](../docs/bindings/agui.md#shared-state) says: “The adapter starts each run with the plugin's current snapshot if the plugin is present.” For [placement](../docs/sdk/placement.md#serving-ag-ui), add: “To expose state, select its emitting plugin and supply its current snapshot reader. The reader takes a session ID and returns the plugin's revision and snapshot, or no snapshot. Do not use a client's input state as that snapshot.”
 
 ## Remaining Python implementation gaps
 

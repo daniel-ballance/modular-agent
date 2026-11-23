@@ -6,6 +6,8 @@ The SDK wraps the clean-room Python build, which implements [production edition 
 
 The base build's notes are in [docs/clean-room](docs/clean-room/README.md). Paths in those notes are relative to the old repository root. `conformance` links to this repository's kits.
 
+Serve [AG-UI](../docs/bindings/agui.md) with `await agent.serve_agui(listen=..., actors=...)`. Set `acp=True` to accept ACP WebSocket upgrades on the same port. See [the listener example and scope rules](SDK.md#serve-ag-ui).
+
 ## Install and check
 
 Python is pinned with mise; dependencies are managed by uv. The kit tests need the ACP kit's dependencies: run `npm ci` in `../conformance/acp` first.

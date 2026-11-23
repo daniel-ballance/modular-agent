@@ -164,6 +164,7 @@ plan() {
     for label in Rust TypeScript Go Python; do
       step "${label,,}" "telemetry: $label runner, $telemetry_label" telemetry_kit "${label,,}" "$scope"
     done
+    step python "AG-UI kit: Python ma and scripted service" python/scripts/agui-kit.sh
     step rust "rust: build history service example" bash -c "cd rust && mise exec -- cargo build -q -p modular-agent --example history_service"
     step go "go: build history service" bash -c "cd go && mise exec -- go build -o .bin/modular-service ./cmd/modular-service"
     for language in rust typescript go python; do
