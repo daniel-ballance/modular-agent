@@ -242,6 +242,11 @@ impl Agent {
         self.check_crashed()?;
         let harness = self.inner.harness.as_ref();
         base::AgentApi::install_recovery(harness, id).await?;
+        self.finish_open(id).await
+    }
+
+    pub(crate) async fn finish_open(&self, id: &str) -> Result<Session> {
+        let harness = self.inner.harness.as_ref();
         // Register the app's answerer before durable recovery can ask it.
         self.attach(id)?;
         if let Err(error) = base::AgentApi::run_recovery(harness, id).await {

@@ -43,7 +43,7 @@ pub trait AcpComposition: Send + Sync + 'static {
 }
 
 /// Serve the built agent's project by default, or compose per project.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct AcpOptions {
     pub compose: Option<Arc<dyn AcpComposition>>,
     pub actor: Option<crate::Actor>,
@@ -51,6 +51,30 @@ pub struct AcpOptions {
     pub tenants: Option<Vec<Option<String>>>,
     pub rights: Option<crate::Rights>,
     pub represents: Vec<String>,
+}
+
+impl AcpOptions {
+    fn identity(&self) -> Result<interface_acp::Identity> {
+        let mut identity = interface_acp::Identity::local();
+        identity.projects = validate_scope(self.projects.clone(), &self.tenants, &self.represents)?;
+        identity.tenants = self.tenants.clone();
+        identity.represents = self.represents.clone();
+        if let Some(actor) = self.actor.clone() {
+            validate_actor(&actor)?;
+            identity.kind = actor.kind;
+            identity.id = actor.id;
+            identity.rights = actor.rights;
+            identity.explicit_rights = true;
+        } else {
+            identity = interface_acp::stdio_identity(identity)
+                .map_err(|e| Error::new(Code::InvalidComposition, e.to_string()))?;
+        }
+        if let Some(rights) = &self.rights {
+            identity.rights = identity.rights.intersect(rights);
+            identity.explicit_rights = true;
+        }
+        Ok(identity)
+    }
 }
 
 /// A bearer-token principal. Omitted projects use the composition's scope.
@@ -290,25 +314,7 @@ impl Agent {
     /// Start the Interface before opening embedded sessions; stdout belongs to ACP.
     pub async fn serve_acp(&self, options: AcpOptions) -> Result<()> {
         self.check_acp_host()?;
-        let mut identity = interface_acp::Identity::local();
-        identity.projects =
-            validate_scope(options.projects, &options.tenants, &options.represents)?;
-        identity.tenants = options.tenants;
-        identity.represents = options.represents;
-        if let Some(actor) = options.actor {
-            validate_actor(&actor)?;
-            identity.kind = actor.kind;
-            identity.id = actor.id;
-            identity.rights = actor.rights;
-            identity.explicit_rights = true;
-        } else {
-            identity = interface_acp::stdio_identity(identity)
-                .map_err(|e| Error::new(Code::InvalidComposition, e.to_string()))?;
-        }
-        if let Some(rights) = options.rights {
-            identity.rights = identity.rights.intersect(&rights);
-            identity.explicit_rights = true;
-        }
+        let identity = options.identity()?;
         let routes = self.acp_routes();
         let _serving = routes
             .serving
@@ -393,6 +399,48 @@ impl Agent {
             base::Authority::default()
         };
         Ok(Some((rights, h.is_driving_turn(&data.id))))
+    }
+
+    /// Reopen an unfinished turn in this project as the local operator. A race
+    /// with another completed recovery returns None; a held writer stays held.
+    /// This installs no client route and does not mark the operator present.
+    pub async fn open_interrupted_session(
+        &self,
+        id: &str,
+        local: &AcpOptions,
+    ) -> Result<Option<crate::Session>> {
+        let identity = local.identity()?;
+        let check = identity.clone();
+        let h = self.inner.harness.clone();
+        let project = self.inner.project.clone();
+        self.acp_factory(None, self.acp_routes()).await?;
+        identity
+            .as_operator(async {
+                let installed = self
+                    .inner
+                    .harness
+                    .install_recovery_if(id, move |data| {
+                        base::ensure!(
+                            data.project == project
+                                && check.may_discover(data)
+                                && h.discovery_rights(
+                                    data,
+                                    &check.id,
+                                    &check.rights,
+                                    check.join_on_open
+                                )?
+                                .has("watch"),
+                            base::OperationError::Forbidden("session inaccessible".into())
+                        );
+                        Ok(base::unfinished_turns(&data.branch()).next().is_some())
+                    })
+                    .await?;
+                if installed.is_none() {
+                    return Ok(None);
+                }
+                self.finish_open(id).await.map(Some)
+            })
+            .await
     }
 
     pub(crate) fn check_acp_host(&self) -> Result<()> {

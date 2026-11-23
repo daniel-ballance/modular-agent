@@ -52,6 +52,18 @@ impl Identity {
             network: false,
         }
     }
+    pub fn may_discover(&self, data: &SessionData) -> bool {
+        sessions::discoverable(self, data)
+    }
+    /// Apply the local operator identity to a reopen without a client route.
+    pub async fn as_operator<T>(self, work: impl std::future::Future<Output = T>) -> T {
+        let ceiling = self.connection_ceiling();
+        with_principal(Arc::new(self), ceiling, work).await
+    }
+    fn connection_ceiling(&self) -> Option<Arc<ConnectionCeiling>> {
+        self.has_ceiling()
+            .then(|| Arc::new(ConnectionCeiling::new(self.id.clone(), self.rights.clone())))
+    }
     fn has_ceiling(&self) -> bool {
         self.network || self.explicit_rights
     }
@@ -950,12 +962,7 @@ async fn run_connection(
     } else {
         None
     };
-    let ceiling = identity.has_ceiling().then(|| {
-        Arc::new(ConnectionCeiling::new(
-            identity.id.clone(),
-            identity.rights.clone(),
-        ))
-    });
+    let ceiling = identity.connection_ceiling();
     let state = Arc::new(State {
         routes,
         principal: Arc::new(identity),

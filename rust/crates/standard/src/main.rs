@@ -41,6 +41,7 @@ Options:
   --declaration         print what this agent declares it supports
   --acp                 serve the Agent Client Protocol on stdio, for an editor or host
   --agui                serve AG-UI over HTTP and SSE; requires --listen
+  --resume-open         reopen interrupted turns before serving --acp or --agui
   --listen ADDR         loopback listener for --agui, --acp, or both
   --token-file FILE     configure a single local token for --listen
   --policy FILE         read operator policy instead of policy.json
@@ -406,6 +407,7 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
     };
     let (mut acp, mut trust, mut resume) = (false, false, false);
     let mut agui = false;
+    let mut resume_open = false;
     let (mut listen, mut token_file) = (None, None);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -421,6 +423,7 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
             "--all" => terminal.all_projects = true,
             "--acp" => acp = true,
             "--agui" => agui = true,
+            "--resume-open" => resume_open = true,
             "--listen" => listen = Some(take(&mut args, &arg)?),
             "--token-file" => token_file = Some(take(&mut args, &arg)?),
             "--trust-project" => trust = true,
@@ -464,14 +467,25 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
         (None, None) => None,
         _ => bail!("--listen requires --acp or --agui, and --token-file requires --listen"),
     };
-    if agui {
+    let local = policy.stdio();
+    if acp || agui {
         ensure!(
             terminal.prompt.is_none() && terminal.session.is_none() && !resume,
-            "with --agui the client creates or reopens sessions"
+            "with --acp or --agui the client creates or reopens sessions"
         );
         if trust {
             standard.configuration().trust(&project)?;
         }
+        if standard.resume_open()? || resume_open {
+            let factory = standard::acp::Factory {
+                standard: standard.clone(),
+                settings: terminal.settings.clone(),
+                mcp: Mcp::default(),
+            };
+            factory.resume_open(&project, &local).await?;
+        }
+    }
+    if agui {
         let project = project.canonicalize()?;
         let configured = standard.configuration().settings(&project)?;
         let mut model = terminal.settings["model"]
@@ -523,13 +537,6 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
         return result.and(closed.map_err(Into::into));
     }
     if acp {
-        ensure!(
-            terminal.prompt.is_none() && terminal.session.is_none() && !resume,
-            "with --acp the client creates or reopens sessions"
-        );
-        if trust {
-            standard.configuration().trust(&project)?;
-        }
         let mcp = Mcp::default();
         // The bootstrap agent supplies the declaration. Only the actual
         // project/session composition can choose to start Claude.
@@ -543,7 +550,7 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
         let agent = builder(&standard, launch.path(), &mcp, vec![])?
             .build()
             .await?;
-        let mut options = policy.stdio();
+        let mut options = local;
         options.compose = Some(std::sync::Arc::new(standard::acp::Factory {
             standard,
             settings: terminal.settings,

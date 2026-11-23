@@ -11,6 +11,49 @@ pub struct Factory {
     pub settings: Value,
     pub mcp: Mcp,
 }
+impl Factory {
+    /// Use the saved model and the ordinary project composition. Release the
+    /// writer when recovery finishes so a later client can open it normally.
+    pub async fn resume_open(
+        &self,
+        project: &Path,
+        local: &modular_agent::AcpOptions,
+    ) -> Result<()> {
+        let project = project.canonicalize()?;
+        if local
+            .projects
+            .as_ref()
+            .is_some_and(|p| !p.contains(&project))
+            || local.actor.as_ref().is_some_and(|a| !a.rights.has("watch"))
+        {
+            return Ok(());
+        }
+        for info in self.history()?.sessions(Some(&project))? {
+            if !info.unfinished_turn
+                || !local
+                    .tenants
+                    .as_ref()
+                    .map_or(info.tenant.is_none(), |allowed| {
+                        allowed.contains(&info.tenant)
+                    })
+            {
+                continue;
+            }
+            let id = info.id.escape_default();
+            let agent = self.compose(&project, Some(&info.id)).await?;
+            let result = agent.open_interrupted_session(&info.id, local).await;
+            let closed = agent.close().await;
+            match result {
+                Ok(Some(_)) => eprintln!("resume-open: resumed {id}"),
+                Ok(None) => eprintln!("resume-open: skipped {id} (turn already ended)"),
+                Err(error) => eprintln!("resume-open: skipped {id} ({})", error.code().as_str()),
+            }
+            closed?;
+        }
+        Ok(())
+    }
+}
+
 fn pairs(server: &Value, field: &str) -> Result<std::collections::BTreeMap<String, String>> {
     server[field]
         .as_array()

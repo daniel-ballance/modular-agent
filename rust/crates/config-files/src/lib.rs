@@ -31,6 +31,9 @@ fn read(path: &Path) -> Result<Value> {
     }
 }
 impl FilesConfiguration {
+    pub fn global_settings(&self) -> Result<Value> {
+        read(&self.global)
+    }
     fn trust_path(&self) -> PathBuf {
         self.global.with_file_name("trusted-projects.json")
     }
@@ -112,7 +115,7 @@ impl Configuration for FilesConfiguration {
         for path in [&self.global, &project.join(".modular-agent.json")] {
             let mut layer = read(path)?;
             // Executable plugin configuration is not a session default or history content.
-            for key in ["plugins", "plugin_settings", "mcp_servers"] {
+            for key in ["plugins", "plugin_settings", "mcp_servers", "resume_open"] {
                 layer.as_object_mut().unwrap().remove(key);
             }
             layer

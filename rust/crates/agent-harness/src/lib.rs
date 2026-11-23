@@ -490,12 +490,29 @@ impl Harness {
     }
 
     async fn install_recovery(&self, id: &str) -> Result<Vec<Input>> {
-        let op = Operation::internal("modular_agent.session.open", &Scope::session(id));
-        op.attr("modular_agent.session.operation", "load");
-        op.run(self.install_recovery_inner(id)).await
+        Ok(self
+            .install_recovery_if(id, |_| Ok(true))
+            .await?
+            .expect("unconditional open"))
     }
 
-    async fn install_recovery_inner(&self, id: &str) -> Result<Vec<Input>> {
+    /// Recheck a discovery predicate under the writer lease, before preparing
+    /// plugins or recovering work. A false result leaves the session unopened.
+    pub async fn install_recovery_if(
+        &self,
+        id: &str,
+        select: impl FnOnce(&SessionData) -> Result<bool> + Send + 'static,
+    ) -> Result<Option<Vec<Input>>> {
+        let op = Operation::internal("modular_agent.session.open", &Scope::session(id));
+        op.attr("modular_agent.session.operation", "load");
+        op.run(self.install_recovery_inner(id, select)).await
+    }
+
+    async fn install_recovery_inner(
+        &self,
+        id: &str,
+        select: impl FnOnce(&SessionData) -> Result<bool> + Send + 'static,
+    ) -> Result<Option<Vec<Input>>> {
         let _erasure = self
             .erasure
             .try_read()
@@ -506,17 +523,23 @@ impl Harness {
         );
         let store = self.store().ok_or_else(|| anyhow!("no history store"))?;
         let session_id = id.to_owned();
-        let (lease, mut data, erased) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let loaded = tokio::task::spawn_blocking(move || -> Result<_> {
             let lease = store.acquire(&session_id)?;
             let loaded = store.load(&session_id)?;
+            if !select(&loaded)? {
+                return Ok(None);
+            }
             let (data, erased) = match store.reconcile_erasure(&session_id)? {
                 Some((data, _)) => (data, true),
                 None => (loaded, false),
             };
             store.check_erasure(&data)?;
-            Ok((lease, data, erased))
+            Ok(Some((lease, data, erased)))
         })
         .await??;
+        let Some((lease, mut data, erased)) = loaded else {
+            return Ok(None);
+        };
         if erased {
             self.invalidate_providers(id)?;
         }
@@ -678,7 +701,7 @@ impl Harness {
         open.active = (!interrupted.is_empty()).then_some(ActiveTurn::Recovery);
         open.steer_closed = open.active.is_some();
         open.interrupted = interrupted;
-        Ok(handed_back)
+        Ok(Some(handed_back))
     }
 
     async fn run_recovery(&self, id: &str) -> Result<()> {

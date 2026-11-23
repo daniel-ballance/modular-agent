@@ -17,6 +17,11 @@ impl FilesConfiguration {
         }
     }
 
+    /// Operator settings before combining any project defaults.
+    pub fn global_settings(&self) -> Result<Value> {
+        Ok(self.base().global_settings()?)
+    }
+
     pub fn settings(&self, project: &Path) -> Result<Value> {
         use agent_api::Configuration;
         Ok(self.base().settings(project)?)
