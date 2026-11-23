@@ -114,6 +114,7 @@ func (i *Interface) ServeStdio(ctx context.Context, in io.ReadCloser, out io.Wri
 			return errors.New("MODULAR_AGENT_ACP_REPRESENTS must be a JSON array of principal IDs")
 		}
 	}
+	policy.TrustTrace = true // The launcher supplies the stdio peer.
 	return i.serve(ctx, in, out, declared, config, policy.Actor.ID, &policy)
 }
 

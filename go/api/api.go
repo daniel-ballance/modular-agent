@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
 	"time"
 )
 
@@ -192,6 +193,7 @@ func (s Session) Branch() []Entry {
 }
 
 type Input struct {
+	TraceContext         *telemetry.Wire `json:"-"`
 	ResultSchema         json.RawMessage `json:"resultSchema,omitempty"`
 	ID, Key, Actor, When string
 	Answer               string    `json:",omitempty"`
@@ -410,6 +412,7 @@ type TurnStarter struct {
 	ID   string `json:"id"`
 }
 type TurnStart struct {
+	TraceContext  *telemetry.Wire `json:"traceContext,omitempty"`
 	ContinuesTurn string
 	StartedBy     TurnStarter
 	Model         Model

@@ -10,6 +10,14 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+
+	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -156,12 +164,24 @@ func crashRuntimeOptions(project, data string) []modular.Option {
 		modulartest.Script(`[{"text":"committed before the crash"}]`)}
 }
 
+type crashTraceProcessor struct{ path string }
+
+func (p crashTraceProcessor) OnStart(ctx context.Context, s sdktrace.ReadWriteSpan) {
+	if s.Name() == "invoke_agent" {
+		_ = os.WriteFile(p.path, []byte(telemetry.Inject(trace.ContextWithSpan(ctx, s)).Parent), 0600)
+	}
+}
+func (crashTraceProcessor) OnEnd(sdktrace.ReadOnlySpan)      {}
+func (crashTraceProcessor) Shutdown(context.Context) error   { return nil }
+func (crashTraceProcessor) ForceFlush(context.Context) error { return nil }
+
 func TestServedRuntimeCrashHostProgram(t *testing.T) {
 	ready := os.Getenv("MA_TEST_RUNTIME_CRASH_READY")
 	if ready == "" {
 		t.Skip("only run in the host child")
 	}
 	ctx := t.Context()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(crashTraceProcessor{filepath.Join(os.Getenv("MA_TEST_DATA"), "crash-trace")})))
 	options := append(crashRuntimeOptions(os.Getenv("MA_TEST_PROJECT"), os.Getenv("MA_TEST_DATA")), servedTestRuntime(t, "crash", ready))
 	a, err := modular.New(ctx, options...)
 	if err != nil {
@@ -246,6 +266,19 @@ func TestServedCustomRuntimeRecoversAfterProcessCrash(t *testing.T) {
 		t.Fatalf("old Runtime did not exit: %v", err)
 	}
 
+	wire, err := os.ReadFile(filepath.Join(data, "crash-trace"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := telemetry.Parse(&telemetry.Wire{Parent: string(wire)})
+	if !previous.IsValid() {
+		t.Fatal("missing original turn span context")
+	}
+	mem := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(mem))
+	otel.SetTracerProvider(tp)
+	defer otel.SetTracerProvider(tracenoop.NewTracerProvider())
+	defer tp.Shutdown(context.Background())
 	options := append(crashRuntimeOptions(project, data), servedTestRuntime(t, "crash", ""))
 	a := modulartest.Agent(t, options...)
 	s, err := a.OpenSession(ctx, id)
@@ -260,6 +293,20 @@ func TestServedCustomRuntimeRecoversAfterProcessCrash(t *testing.T) {
 	history, err := s.History(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	var resumed bool
+	for _, span := range mem.GetSpans() {
+		if span.Name != "invoke_agent" {
+			continue
+		}
+		resumed = true
+		if span.Parent.SpanID() != previous.SpanID() || span.SpanContext.SpanID() == previous.SpanID() || span.SpanContext.TraceID() != previous.TraceID() ||
+			len(span.Links) != 1 || span.Links[0].SpanContext.SpanID() != previous.SpanID() {
+			t.Fatalf("wrong resumed trace parent or link: %+v", span)
+		}
+	}
+	if !resumed {
+		t.Fatal("no resumed invocation span")
 	}
 	counts := map[string]int{}
 	for _, entry := range history {

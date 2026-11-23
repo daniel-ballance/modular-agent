@@ -1,8 +1,11 @@
 package harness
 
 import (
+	"context"
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
+	"go.opentelemetry.io/otel/trace"
 	"slices"
 	"strings"
 )
@@ -27,7 +30,7 @@ func (c *client) CheckSessionWriter(id string) error {
 	return s.checkWriterLocked()
 }
 
-func (c *client) finishJobLocked(s *session, end api.Entry) (api.Entry, api.Entry, error) {
+func (c *client) finishJobLocked(s *session, end api.Entry, contexts ...context.Context) (api.Entry, api.Entry, error) {
 	job := api.Decode[api.Job](end.Data)
 	next := clone(s.data)
 	var admission api.Entry
@@ -44,8 +47,14 @@ func (c *client) finishJobLocked(s *session, end api.Entry) (api.Entry, api.Entr
 	end = appendEntry(&next, end, c.owner, true)
 	if job.Report {
 		in, admission = appendJobReport(&next, end, job, api.ID(), job.Outcome.Result, c.h.parkJobReports)
+		if span := s.jobSpans[end.Job]; span != nil {
+			ctx, admit := telemetry.Start(telemetry.Session(firstContext(contexts), s.id), "modular_agent.input.admit", trace.WithLinks(trace.Link{SpanContext: span.SpanContext()}), trace.WithAttributes(telemetry.String("modular_agent.input.id", in.ID)))
+			in.TraceContext = telemetry.Inject(ctx)
+			defer admit.End()
+			contexts = []context.Context{ctx}
+		}
 	}
-	if err := s.commitLocked(next); err != nil {
+	if err := s.commitLocked(next, contexts...); err != nil {
 		return end, api.Entry{}, fmt.Errorf("%w: %v", api.ErrJobCommitLost, err)
 	}
 	if admission.ID != "" && !s.opening && !parked(in) {

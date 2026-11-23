@@ -115,6 +115,12 @@ func (p *turnPorts) runNested(ctx context.Context, call api.Call, depth int) (ap
 	result := api.ToolResult{Status: "refused"}
 	fail := func(status, reason string) { result.Status, result.Content = status, api.Text(reason) }
 	var processing error
+	dispatched := false
+	defer func() {
+		if !dispatched {
+			toolDisposition(ctx, call, result.Status)
+		}
+	}()
 	for {
 		if ctx.Err() != nil {
 			fail("not_started", "Parent invocation ended before dispatch.")
@@ -200,6 +206,7 @@ func (p *turnPorts) runNested(ctx context.Context, call api.Call, depth int) (ap
 		if !same() {
 			continue
 		}
+		dispatched = true
 		result, processing = p.executeTool(ctx, executor, snap, final, binding, depth)
 		result.Returns = def.Output
 		call = final
@@ -239,6 +246,8 @@ func (p *turnPorts) runNested(ctx context.Context, call api.Call, depth int) (ap
 }
 
 func (p *turnPorts) executeTool(ctx context.Context, source api.ToolSource, snap api.Session, call api.Call, binding api.ToolRegistration, depth int) (result api.ToolResult, err error) {
+	ctx, span := startTool(ctx, call)
+	defer func() { endTool(span, result, err) }()
 	live, cancel := context.WithCancelCause(ctx)
 	i := &invocation{p: p, ctx: live, cancel: cancel, call: call, depth: depth}
 	defer func() {

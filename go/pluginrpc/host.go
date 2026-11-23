@@ -171,6 +171,7 @@ func load(ctx context.Context, h *harness.Harness, project, home string, specs [
 		} else if err := r.startProcess(spec, project, legacyCommandArgs); err != nil {
 			return err
 		}
+		r.peer.traceHost = true
 		r.peer.Handle = r.callback
 		r.peer.notify = r.notification
 		r.peer.admitNotification = r.admitNotification
@@ -186,7 +187,7 @@ func load(ctx context.Context, h *harness.Harness, project, home string, specs [
 				close(r.exited)
 			}
 		}()
-		init := object{"binding": Binding, "data": DataBinding, "host": object{"name": "modular-agent-go", "version": "1"}, "project": project, "home": state, "config": spec.Config}
+		init := object{"binding": Binding, "data": DataBinding, "host": object{"name": "modular-agent-go", "version": "1"}, "project": project, "home": state, "config": spec.Config, "traceContext": 1}
 		if spec.Config == nil {
 			init["config"] = object{}
 		}
@@ -202,6 +203,8 @@ func load(ctx context.Context, h *harness.Harness, project, home string, specs [
 			return err
 		}
 		err = r.validate()
+		r.peer.traceName.Store(&r.reg.Name)
+		r.peer.traceAgreed.Store(r.reg.TraceContext == 1)
 		if err == nil && (r.reg.Name == "harness" || h.HasLocalPlugin(r.reg.Name) || bridge.registeredPlugin(r.reg.Name) != nil) {
 			err = errors.New("duplicate plugin name: " + r.reg.Name)
 		}
@@ -813,7 +816,7 @@ func (r *remote) callback(ctx context.Context, method string, raw json.RawMessag
 			return nil, fault("lost", "working environment unavailable")
 		}
 		return environmentRequest(ctx, value.(api.WorkingEnvironment), method, v, func(chunk string) {
-			_ = r.peer.Send("host/env/output", object{"parentRequestId": callbackID, "chunk": chunk})
+			_ = r.peer.sendWork(ctx, "host/env/output", object{"parentRequestId": callbackID, "chunk": chunk})
 		})
 	}
 	return nil, unknownMethod(method)

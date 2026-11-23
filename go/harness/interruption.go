@@ -52,6 +52,9 @@ func (s *session) stopWriterLocked(cause error) error {
 		reason = "writerLost"
 	}
 	s.writerFailure = errors.Join(api.ErrSessionLost, cause)
+	for id := range s.jobSpans {
+		s.endJobSpan(id, "interrupted")
+	}
 	if s.cancel != nil {
 		s.cancel(api.ErrProcessStopped)
 	}

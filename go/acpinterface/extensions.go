@@ -62,6 +62,7 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 	}
 	var p struct {
 		SessionID string          `json:"sessionId"`
+		Meta      json.RawMessage `json:"_meta"`
 		Rights    json.RawMessage `json:"rights"`
 		Present   *bool           `json:"present"`
 		ActorID   string          `json:"actorId"`
@@ -124,6 +125,10 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 		return nil, acpError("not_supported")
 	}
 	ctx = s.acting(ctx, p.SessionID, st.actor)
+	var meta map[string]json.RawMessage
+	if json.Unmarshal(p.Meta, &meta) == nil {
+		ctx = s.workTrace(ctx, meta)
+	}
 	if method == "_modular-agent/history" && !api.ConnectionAllows(ctx, "watch") {
 		return nil, acpError("forbidden")
 	}

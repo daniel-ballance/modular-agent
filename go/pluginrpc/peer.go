@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
+	"go.opentelemetry.io/otel/trace"
 	"io"
 	"io/fs"
 	"strings"
@@ -193,6 +195,9 @@ type messageConn interface {
 }
 
 type Peer struct {
+	traceHost     bool
+	traceName     atomic.Pointer[string]
+	traceAgreed   atomic.Bool
 	in            io.ReadCloser
 	out           io.Writer
 	wire          messageConn
@@ -235,7 +240,11 @@ func (p *Peer) Parent(id json.RawMessage) (context.Context, bool) {
 	return x.ctx, ok
 }
 func (p *Peer) Send(method string, params any) error {
-	return p.send(envelope{Method: method, Params: mustJSON(params)})
+	return p.sendWork(context.Background(), method, params)
+}
+
+func (p *Peer) sendWork(ctx context.Context, method string, params any) error {
+	return p.send(envelope{Method: method, Params: traceParams(mustJSON(params), ctx, p.traceAgreed.Load() && traceWork(method))})
 }
 func mustJSON(v any) json.RawMessage { b, _ := json.Marshal(v); return b }
 func (p *Peer) send(m envelope) error {
@@ -270,7 +279,12 @@ func (p *Peer) Call(ctx context.Context, method string, params any, out any) err
 
 // A cancelled Runtime request returns its recorded TurnOutcome, not just an
 // acknowledgement. Keep its parent binding alive through cleanup.
-func (p *Peer) call(ctx context.Context, method string, params any, out any, acceptCancelledResult bool) error {
+func (p *Peer) call(ctx context.Context, method string, params any, out any, acceptCancelledResult bool) (errOut error) {
+	if name := p.traceName.Load(); name != nil && traceWork(method) {
+		var span trace.Span
+		ctx, span = tracePlugin(ctx, *name, method, trace.SpanKindClient)
+		defer func() { telemetry.Finish(span, errOut) }()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -294,7 +308,7 @@ func (p *Peer) call(ctx context.Context, method string, params any, out any, acc
 		}
 		p.mu.Unlock()
 	}()
-	if err := p.send(envelope{ID: id, Method: method, Params: mustJSON(params)}); err != nil {
+	if err := p.send(envelope{ID: id, Method: method, Params: traceParams(mustJSON(params), ctx, p.traceAgreed.Load() && traceWork(method))}); err != nil {
 		if Code(err) != "" {
 			return err
 		}
@@ -480,7 +494,7 @@ func (p *Peer) run(drain bool) error {
 					cancel()
 				}
 			} else if p.notify != nil || p.Notify != nil {
-				ctx := p.captureParent(p.ctx, m.Params)
+				ctx := p.receivedTrace(p.captureParent(p.ctx, m.Params), m.Method, m.Params)
 				key := capturedParent(ctx).key
 				if p.admitNotification != nil {
 					var admit bool
@@ -506,6 +520,7 @@ func (p *Peer) run(drain bool) error {
 		if strings.HasPrefix(m.Method, "host/") {
 			ctx = p.captureParent(ctx, m.Params)
 		}
+		ctx = p.receivedTrace(ctx, m.Method, m.Params)
 		var after <-chan struct{}
 		if p.requestBarrier != nil {
 			after = q.barrier(p.requestBarrier(ctx, m))
@@ -553,7 +568,14 @@ func capturedParent(ctx context.Context) incomingParent {
 
 func (p *Peer) answer(ctx context.Context, m envelope, cancel context.CancelFunc) {
 	defer cancel()
+	var span trace.Span
+	if name := p.traceName.Load(); name != nil && !p.traceHost && traceWork(m.Method) {
+		ctx, span = tracePlugin(ctx, *name, m.Method, trace.SpanKindServer)
+	}
 	result, err := p.handle(ctx, m)
+	if span != nil {
+		defer telemetry.Finish(span, err)
+	}
 	response := envelope{ID: m.ID}
 	if err == nil {
 		response.Result, err = json.Marshal(result)

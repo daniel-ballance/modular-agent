@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
 )
 
 func externalRecovery(s api.Session) []api.Call {
@@ -60,7 +61,7 @@ func (h *Harness) runExternal(ctx context.Context, s *session, calls []api.Call)
 	out := api.Outcome{Status: "completed"}
 	for _, call := range calls {
 		ports := &turnPorts{c: &client{h: h, owner: owner}, s: s, actor: call.Actor, tools: tools}
-		result, e := runner.RunCall(ctx, api.Turn{Session: s.id, Actor: call.Actor, Resume: true, CanRepeat: canRepeat, Tools: tools, IO: ports}, call)
+		result, e := runner.RunCall(telemetry.Scope(ctx, s.id, "", "", h.agentName), api.Turn{Session: s.id, Actor: call.Actor, Resume: true, CanRepeat: canRepeat, Tools: tools, IO: ports}, call)
 		if e != nil && !errors.Is(context.Cause(ctx), api.ErrProcessStopped) {
 			return api.Outcome{Status: "failed", Error: e.Error()}
 		}

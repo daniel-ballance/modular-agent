@@ -16,7 +16,7 @@ func newRuntimeWork(t api.Turn) *runtimeWork {
 
 func reservedRuntimeKind(kind string) bool {
 	switch kind {
-	case "model", "model.request", "tool.call", "tool.open", "tool.started", "tool.result", "turn.start", "turn.end", "step.start", "step.end", "input.accepted", "input.returned", "input.withdrawn", "plugins.set", "actor.set", "actor.left", "question.open", "question.answer", "job.start", "job.end", "resultFeedback", portable.StepAfterKind:
+	case "model", "model.request", "tool.call", "tool.open", "tool.started", "tool.result", "turn.start", "turn.end", "step.start", "step.end", "input.accepted", "input.returned", "input.withdrawn", "plugins.set", "actor.set", "actor.left", "question.open", "question.answer", "job.start", "job.end", "resultFeedback", portable.StepAfterKind, "modular-agent.turnTrace", "modular-agent.disclosure":
 		return true
 	}
 	return false
@@ -126,6 +126,8 @@ func (w *runtimeWork) beforeTool(ctx context.Context, p object) (any, error) {
 }
 
 func (w *runtimeWork) refuseTool(ctx context.Context, c api.Call, answer object, reason string) (any, error) {
+	ctx = w.traceStep(ctx, c.Step)
+	api.ObserveToolDisposition(ctx, c, "refused")
 	result, err := w.settleTool(context.WithoutCancel(ctx), c, api.ToolResult{Status: "refused", Content: api.Text(reason)})
 	if err != nil {
 		return nil, err
@@ -245,6 +247,7 @@ func (w *runtimeWork) runTool(ctx context.Context, submitted api.Call) (any, err
 	w.ran[c.ID] = true
 	w.mu.Unlock()
 	t := w.turn
+	ctx = w.traceStep(ctx, c.Step)
 	result := t.IO.RunTool(api.WithExecution(api.AsActor(ctx, t.Actor), api.Execution{Session: t.Session, Turn: t.ID, Call: c}), c)
 	w.mu.Lock()
 	defer w.mu.Unlock()

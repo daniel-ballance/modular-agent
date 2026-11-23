@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
 )
 
 func (c *client) CallTool(ctx context.Context, id string, call api.Call) (api.ToolResult, error) {
@@ -38,7 +39,7 @@ func (c *client) CallTool(ctx context.Context, id string, call api.Call) (api.To
 	}
 	s.running = true
 	s.done = make(chan struct{})
-	callCtx, cancel := context.WithCancelCause(ctx)
+	callCtx, cancel := context.WithCancelCause(telemetry.Scope(ctx, id, "", "", c.h.agentName))
 	s.cancel = cancel
 	snap := clone(s.data)
 	s.mu.Unlock()

@@ -155,7 +155,7 @@ func (s *Server) runRuntime(ctx context.Context, method string, params object) (
 		return impl.RunBinding(ctx, method, params, func(ctx context.Context, method string, params Object) (any, error) {
 			if method == "host/runtime/report" {
 				params["parentRequestId"] = port.parent
-				return nil, s.peer.Send(method, params)
+				return nil, s.peer.sendWork(ctx, method, params)
 			}
 			var out any
 			params["parentRequestId"] = port.parent

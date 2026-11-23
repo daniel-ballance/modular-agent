@@ -303,7 +303,7 @@ func (m *manager) compactWith(ctx context.Context, id string, step *api.StepCont
 			return err
 		}
 	}
-	response, err := access.Generate(ctx, request, func(api.Part) {})
+	response, err := api.ObserveInference(ctx, access, request, func(api.Part) {})
 	if auxiliary.ID != "" && !errors.Is(context.Cause(ctx), api.ErrProcessStopped) {
 		if err != nil {
 			response.Stop = "failed"

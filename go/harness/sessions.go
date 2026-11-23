@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
 	"github.com/daniel-ballance/modular-agent/go/portable"
+	"go.opentelemetry.io/otel/trace"
 	"os"
 	"path/filepath"
 	"slices"
@@ -18,6 +20,7 @@ import (
 )
 
 type session struct {
+	jobSpans          map[string]trace.Span
 	id                string // immutable, safe for event routing while snapshots change
 	project           string // immutable canonical workspace for rewind exclusion
 	tenant            string // immutable capacity scope for output
@@ -99,7 +102,14 @@ func (c *client) NewEmbedded(ctx context.Context, project, tenant string, actors
 	return c.newSession(ctx, project, tenant, nil, false, nil, actors)
 }
 
-func (c *client) newSession(ctx context.Context, project, tenant string, limit *[]string, forking bool, host *api.Actor, initial []api.Actor) (string, error) {
+func (c *client) newSession(ctx context.Context, project, tenant string, limit *[]string, forking bool, host *api.Actor, initial []api.Actor) (idOut string, errOut error) {
+	ctx, span := telemetry.Start(ctx, "modular_agent.session.open", trace.WithAttributes(telemetry.String("modular_agent.session.operation", "new")))
+	defer func() {
+		if idOut != "" {
+			span.SetAttributes(telemetry.String("gen_ai.conversation.id", idOut))
+		}
+		telemetry.Finish(span, errOut)
+	}()
 	if err := c.seedCapacity(); err != nil {
 		return "", err
 	}
@@ -235,7 +245,9 @@ func (c *client) OpenForHost(ctx context.Context, id string, host api.Actor) err
 	return c.open(ctx, id, &host)
 }
 
-func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
+func (c *client) open(ctx context.Context, id string, host *api.Actor) (errOut error) {
+	ctx, span := telemetry.Start(telemetry.Session(ctx, id), "modular_agent.session.open", trace.WithAttributes(telemetry.String("modular_agent.session.operation", "load")))
+	defer func() { telemetry.Finish(span, errOut) }()
 	if err := c.seedCapacity(); err != nil {
 		return err
 	}
@@ -243,11 +255,11 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) error {
 	if err != nil {
 		return err
 	}
-	lease, err := v.(api.Store).Acquire(id)
+	lease, err := acquireHistory(ctx, v.(api.Store), id)
 	if err != nil {
 		return err
 	}
-	snap, err := lease.Load()
+	snap, err := loadHistory(ctx, lease)
 	if err != nil {
 		_ = lease.Close()
 		return err
@@ -504,11 +516,11 @@ func (c *client) view(ctx context.Context, id string, gateRemote bool) (api.Sess
 }
 
 // commitLocked stages a new state and publishes only after persistence succeeds.
-func (s *session) commitLocked(next api.Session) error {
+func (s *session) commitLocked(next api.Session, contexts ...context.Context) error {
 	if s.rewindBlocked {
 		return errRewindUnresolved
 	}
-	return s.commitSnapshotLocked(next)
+	return s.commitSnapshotLocked(next, contexts...)
 }
 
 var errProvisionalSession = errors.New("session has not admitted its first input")
@@ -526,19 +538,21 @@ func startsLegacyHistory(e api.Entry) bool { return !isSetup(e) || e.Kind == "su
 
 // Only admission and fork publication can start a persistent writer. Save the
 // already staged setup with the new entries before making the state visible.
-func (s *session) publishInitialLocked(next api.Session) error {
+func (s *session) publishInitialLocked(next api.Session, contexts ...context.Context) error {
 	if s.pendingStore == nil {
-		return s.commitLocked(next)
+		return s.commitLocked(next, contexts...)
 	}
 	if err := s.checkWriterLocked(); err != nil {
 		return err
 	}
 	return s.withErasureCheck(next, func() error {
-		return s.commitCapacity(next, func() error { return s.publishReservedInitialLocked(next) })
+		return s.commitCapacity(next, func() error {
+			return s.traceCommit(next, true, contexts, func(ctx context.Context) error { return s.publishReservedInitialLocked(next, ctx) })
+		})
 	})
 }
 
-func (s *session) publishReservedInitialLocked(next api.Session) error {
+func (s *session) publishReservedInitialLocked(next api.Session, ctx context.Context) error {
 	l, err := acquireNew(s.pendingStore, s.id)
 	if err != nil {
 		return s.stopWriterLocked(err)
@@ -548,7 +562,7 @@ func (s *session) publishReservedInitialLocked(next api.Session) error {
 	if err := s.checkWriterLocked(); err != nil {
 		return err
 	}
-	if err := l.Save(next); err != nil {
+	if err := saveHistory(ctx, l, next); err != nil {
 		return s.stopWriterLocked(err)
 	}
 	s.pendingStore, s.data = nil, next
@@ -556,13 +570,16 @@ func (s *session) publishReservedInitialLocked(next api.Session) error {
 	return nil
 }
 
-func (s *session) commitSnapshotLocked(next api.Session) error {
+func (s *session) commitSnapshotLocked(next api.Session, contexts ...context.Context) error {
 	return s.withErasureCheck(next, func() error {
-		return s.commitCapacity(next, func() error { return s.commitReservedSnapshotLocked(next) })
+		return s.commitCapacity(next, func() error {
+			return s.traceCommit(next, s.pendingStore == nil, contexts, func(ctx context.Context) error { return s.commitReservedSnapshotLocked(next, ctx) })
+		})
 	})
 }
 
-func (s *session) commitReservedSnapshotLocked(next api.Session) error {
+func (s *session) commitReservedSnapshotLocked(next api.Session, contexts ...context.Context) error {
+	ctx := firstContext(contexts)
 	if err := s.checkWriterLocked(); err != nil {
 		return err
 	}
@@ -576,7 +593,7 @@ func (s *session) commitReservedSnapshotLocked(next api.Session) error {
 	// Outside the public persistent lifecycle, keep the original lazy
 	// save rule. An attached public persistent lease saves all changes.
 	if s.lease != nil && (s.h.deferHistory || next.ForkedFrom != "" || slices.ContainsFunc(next.Entries, startsLegacyHistory)) {
-		if err := s.lease.Save(next); err != nil {
+		if err := saveHistory(ctx, s.lease, next); err != nil {
 			if s.rewindBlocked && !errors.Is(err, api.ErrWriterLost) && s.reconcileRewindCommit(next) {
 				return nil
 			}
@@ -588,13 +605,13 @@ func (s *session) commitReservedSnapshotLocked(next api.Session) error {
 	return nil
 }
 
-func (s *session) recordLocked(e api.Entry, writer string, advance bool) (api.Entry, error) {
+func (s *session) recordLocked(e api.Entry, writer string, advance bool, contexts ...context.Context) (api.Entry, error) {
 	// Appending does not change published entries or session metadata. Clip
 	// the prefix so staging cannot overwrite the published slice's backing array.
 	next := s.data
 	next.Entries = slices.Clip(next.Entries)
 	e = appendEntry(&next, e, writer, advance)
-	return e, s.commitLocked(next)
+	return e, s.commitLocked(next, contexts...)
 }
 
 func appendEntry(next *api.Session, e api.Entry, writer string, advance bool) api.Entry {
@@ -629,9 +646,18 @@ func (c *client) Record(ctx context.Context, id string, e api.Entry) (api.Entry,
 	s.mu.Lock()
 	var admission api.Entry
 	if e.Kind == "job.end" && c.owner == "jobs" {
-		e, admission, err = c.finishJobLocked(s, e)
+		e, admission, err = c.finishJobLocked(s, e, ctx)
+		if err == nil {
+			s.endJobSpan(e.Job, api.Decode[api.Job](e.Data).Outcome.Status)
+		}
 	} else {
-		e, err = s.recordLocked(e, c.owner, true)
+		e, err = s.recordLocked(e, c.owner, true, telemetry.Step(telemetry.Session(ctx, id), e.Step))
+		if err == nil && e.Kind == "job.start" {
+			if s.jobSpans == nil {
+				s.jobSpans = make(map[string]trace.Span)
+			}
+			_, s.jobSpans[e.Job] = telemetry.Start(telemetry.Session(ctx, id), "modular_agent.job", trace.WithAttributes(telemetry.String("modular_agent.job.id", e.Job)))
+		}
 	}
 	s.mu.Unlock()
 	if err == nil {
@@ -759,8 +785,13 @@ func (c *client) Fork(ctx context.Context, id, target string) (string, error) {
 	parent := ""
 	mapping := map[string]string{}
 	for _, e := range snap.Branch() {
-		if e.IsErased() || e.Kind == "position" || e.Kind == "tenant" || e.Kind == "limit" || e.Kind == "erasure" {
+		if e.IsErased() || e.Kind == "position" || e.Kind == "tenant" || e.Kind == "limit" || e.Kind == "erasure" || e.Kind == telemetry.TurnTrace {
 			continue
+		}
+		if e.Kind == "turn.start" {
+			start := api.Decode[api.TurnStart](e.Data)
+			start.TraceContext = nil
+			e.Data = api.JSON(start)
 		}
 		source := e.ID
 		e.ID = api.ID()
@@ -880,7 +911,14 @@ func (c *client) SetSettings(ctx context.Context, id string, settings api.Settin
 	next.Position = e.ID
 	return s.commitLocked(next)
 }
-func (c *client) Submit(ctx context.Context, id string, in api.Input) (api.Receipt, error) {
+func (c *client) Submit(ctx context.Context, id string, in api.Input) (receipt api.Receipt, errOut error) {
+	ctx, span := telemetry.Start(telemetry.Session(ctx, id), "modular_agent.input.admit")
+	defer func() {
+		if receipt.ID != "" {
+			span.SetAttributes(telemetry.String("modular_agent.input.id", receipt.ID))
+		}
+		telemetry.Finish(span, errOut)
+	}()
 	in.ConnectionRights = api.ConnectionRights(ctx)
 	if in.Job != "" {
 		return api.Receipt{}, api.ErrJobReportRefused
@@ -956,7 +994,12 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (api.Recei
 		}
 	}
 	in.ConnectionRights = &starting
-	return c.admitLocked(s, in)
+	in.TraceContext = telemetry.Inject(ctx)
+	r, err := c.admitLocked(s, in, ctx)
+	if errors.Is(err, api.ErrCapacity) {
+		telemetry.Event(ctx, "modular_agent.capacity.refused")
+	}
+	return r, err
 }
 func duplicate(s api.Session, input api.Input) (api.Receipt, bool) {
 	key := input.Key
@@ -1114,6 +1157,7 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 	if resume != nil {
 		turnID = resume.Turn
 	}
+	ctx = telemetry.Scope(telemetry.Extract(ctx, in.TraceContext), snap.ID, turnID, "", h.agentName)
 	ctx = api.WithExecution(api.AsActor(ctx, in.Actor), api.Execution{Session: snap.ID, Turn: turnID})
 	ctx = api.WithJobContributors(api.WithConnectionRights(ctx, in.ConnectionRights), in.Actor, in.ViaActor, in.ReleasedBy)
 	var tools []api.Tool
@@ -1201,7 +1245,7 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 		turn.CanRepeat = env.(api.WorkingEnvironment).StopsOnCrash()
 	}
 	turn.Settings.Thinking = api.LowerReasoning(turn.Settings.Thinking, access.Model().Thinking)
-	return runtime.Run(ctx, turn)
+	return h.runTraced(ctx, ports, turn, resume, snap, runtime)
 }
 func (c *client) CancelAs(ctx context.Context, id string) error {
 	if !c.Authorize(id, api.Acting(ctx), "cancel") {
@@ -1294,7 +1338,12 @@ func (c *client) stopSession(id string, closing bool) error {
 	return c.stopSessionAs(context.Background(), id, closing, "", "")
 }
 
-func (c *client) stopSessionAs(ctx context.Context, id string, closing bool, who, via string) error {
+func (c *client) stopSessionAs(ctx context.Context, id string, closing bool, who, via string) (errOut error) {
+	if closing {
+		var span trace.Span
+		ctx, span = telemetry.Start(telemetry.Session(ctx, id), "modular_agent.session.close", trace.WithAttributes(telemetry.String("modular_agent.session.operation", "close")))
+		defer func() { telemetry.Finish(span, errOut) }()
+	}
 	s, err := c.find(id)
 	if err != nil {
 		return err
@@ -1356,11 +1405,14 @@ func (c *client) stopSessionAs(ctx context.Context, id string, closing bool, who
 	if closing && !interrupted {
 		hook = "session.end"
 	}
-	_, err = c.h.API().Invoke(context.Background(), hook, id)
+	_, err = c.h.API().Invoke(context.WithoutCancel(ctx), hook, id)
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
+	for id := range s.jobSpans {
+		s.endJobSpan(id, "interrupted")
+	}
 	close(s.writerWatchDone)
 	if s.lease != nil {
 		err = s.lease.Close()
@@ -1647,6 +1699,7 @@ func (p *turnPorts) Record(ctx context.Context, e api.Entry) (api.Entry, error) 
 	}
 	start := api.Decode[api.TurnStart](e.Data)
 	start.Model = p.model
+	start.TraceContext = turnWire(ctx)
 	// Publish the start and its input together. A crash cannot leave a start
 	// whose input the next process is missing, even with an external Runtime.
 	actual := p.s
@@ -1672,7 +1725,7 @@ func (p *turnPorts) Record(ctx context.Context, e api.Entry) (api.Entry, error) 
 		taken, err = staged.takeLocked(p.input, p.id)
 	}
 	if err == nil {
-		err = actual.commitLocked(staged.data)
+		err = actual.commitLocked(staged.data, ctx)
 	}
 	actual.mu.Unlock()
 	if err == nil {
@@ -1729,7 +1782,12 @@ func (p *turnPorts) HasSteering() bool {
 	defer p.s.mu.Unlock()
 	return slices.ContainsFunc(p.s.queue, func(in api.Input) bool { return in.When == "steer" })
 }
-func (p *turnPorts) RunTool(ctx context.Context, call api.Call) api.ToolResult {
+func (p *turnPorts) RunTool(ctx context.Context, call api.Call) (result api.ToolResult) {
+	defer func() {
+		if result.NotDispatched {
+			toolDisposition(ctx, call, result.Status)
+		}
+	}()
 	plugin, id, def, source, snap, found := p.resolveTool(call.Name)
 	if !found || !api.CanCall(def, call.Origin) || !p.canRunTools(call.Actor) {
 		return api.ToolResult{Call: call.ID, Status: "refused", NotDispatched: true}

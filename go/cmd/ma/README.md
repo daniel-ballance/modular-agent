@@ -66,6 +66,7 @@ scripts/websocket-kits.sh go
 (cd go && mise exec -- go test -race -count=1 ./modular/... ./cmd/ma/... > "$TMPDIR/ma-go-race.log" 2>&1)
 ```
 
+- **Telemetry:** a loopback OTLP receiver checks binary protobuf and `service.name`. No export provider is installed without an endpoint or when `OTEL_SDK_DISABLED=true`. Phoenix received `invoke_agent ma`, `chat script` and `execute_tool codemode` from an offline scripted prompt run with `OTEL_SERVICE_NAME=ma-go`.
 - **Reference checks:** 24/24 against Go `ma`, including client identity validation, tool function values, denied ambient access, codemode results and memory failure followed by recovery.
 - **ACP with `--crash-checks --probe-checks --job-checks`:** 188/188 on stdio against Go `ma` with the SDK's Grok Provider. Earlier WebSocket runs passed 193/193 for ACP and 153/153 for plugins.
 - **Sandbox regressions:** the Go tests cover imports and function values, schema-order arguments, JSON and repr, terminal memory and time limits, which suspensions reset the active clock, a tool wait longer than the compute budget, 500 nested calls, recursion at 200 and 201, a UTF-8 print cut, worker death and cancellation, malformed messages, denied OS operations and seeded random.
@@ -74,6 +75,8 @@ scripts/websocket-kits.sh go
 - **Subscriptions:** the alias tests cover both former ids in every listed entry point, including reopening a saved session. The login test checks that the SDK's device and waiting steps retain the terminal instructions. SDK tests cover Grok device polling, request shape, encrypted reasoning and refresh, both ChatGPT sign-ins, and the Claude binding. No real sign-ins or model requests were made.
 
 ## Built so far
+
+`ma` exports metadata-only OpenTelemetry when `OTEL_EXPORTER_OTLP_ENDPOINT` or a signal endpoint is set. It supports `http/protobuf` (default) and `grpc`, including per-signal overrides. It uses `ma` as the default service name and as the agent name. `OTEL_SDK_DISABLED=true` disables recording and export. The declaration does not change. See [Telemetry](../../../docs/reference/standard-configuration.md#telemetry).
 
 `ma` uses `subscription.ChatGPT`, `subscription.Grok` and `subscription.Claude`. It handles terminal instructions and aliases; the SDK handles OAuth, token refresh and model requests.
 

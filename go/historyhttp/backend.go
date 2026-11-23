@@ -3,6 +3,7 @@ package historyhttp
 import (
 	"context"
 	"encoding/json"
+	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
 	"net/url"
 	"strconv"
 	"strings"
@@ -72,7 +73,7 @@ func (b httpBackend) info(ctx context.Context) (info struct {
 }
 
 func (b httpBackend) call(ctx context.Context, method, path string, in, out any) error {
-	return b.wire.CallMethod(ctx, method, path, api.ID(), in, out)
+	return b.wire.CallMethod(servicehttp.TraceRequest(ctx), method, path, api.ID(), in, out)
 }
 
 func (b httpBackend) Create(ctx context.Context, id string, metadata Metadata) error {
@@ -81,13 +82,15 @@ func (b httpBackend) Create(ctx context.Context, id string, metadata Metadata) e
 }
 
 func (b httpBackend) Acquire(ctx context.Context, id, owner string) (out Grant, err error) {
-	err = b.wire.CallMethod(ctx, "POST", path(id)+"/lease", "", map[string]string{"owner": owner}, &out)
+	err = b.wire.CallMethod(servicehttp.TraceRequest(ctx), "POST", path(id)+"/lease", "", map[string]string{"owner": owner}, &out)
 	return
 }
 
 func (b httpBackend) Renew(ctx context.Context, id, token string) (float64, error) {
+	ctx, span := telemetry.Start(telemetry.Session(ctx, id), "modular_agent.history.lease.renew")
 	var out Grant
-	err := b.wire.CallMethod(ctx, "POST", path(id)+"/lease/"+escape(token)+"/renew", "", nil, &out)
+	err := b.wire.CallMethod(servicehttp.TraceRequest(ctx), "POST", path(id)+"/lease/"+escape(token)+"/renew", "", nil, &out)
+	telemetry.Finish(span, err)
 	return out.TTLMS, err
 }
 

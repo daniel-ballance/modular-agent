@@ -75,6 +75,9 @@ func Declaration(a api.API, project, id string) map[string]any {
 	if caps, ok := a.(interface{ ReservationDeclaration() any }); ok {
 		d["resourceReservations"] = caps.ReservationDeclaration()
 	}
+	if profile, ok := a.(interface{ TelemetryProfile() int }); ok {
+		d["telemetry"] = profile.TelemetryProfile()
+	}
 	return d
 }
 func sessionRewinding(a api.API, project, id string) bool {
@@ -175,8 +178,8 @@ func contentBlocks(content api.Content) []any {
 	return out
 }
 func entryValue(e api.Entry) map[string]any {
-	if (e.Kind == "erasure" && len(e.Data) == 0) || e.Kind == "turn.start" || e.Kind == "tool.started" || e.Kind == "model" {
-		return portable.Entry(e)
+	if e.Kind == "modular-agent.turnTrace" || (e.Kind == "erasure" && len(e.Data) == 0) || e.Kind == "turn.start" || e.Kind == "tool.started" || e.Kind == "model" {
+		return portable.EntryWithoutTrace(e)
 	}
 	var parent any
 	if e.Parent != "" {
