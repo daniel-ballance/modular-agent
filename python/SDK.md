@@ -114,7 +114,7 @@ The launcher of a stdio ACP host is trusted for per-request trace context. Set `
 
 ## Remaining Python implementation gaps
 
-The older base build's private `MA_PLUGIN_PROCESSES` placement does not install OpenTelemetry in its worker processes. The SDK's public hosted Runtime placement records the invocation in the host and uses the plugin binding for propagation.
+The older base build's private `MA_PLUGIN_PROCESSES` placement does not install OpenTelemetry in its worker processes. The shared telemetry check does not exercise it: `create_agent` passes an empty internal worker list to the Harness, and `process:<sdk>` uses the SDK's explicit plugin binding. The SDK's public hosted Runtime placement records the invocation in the host and uses the plugin binding for propagation.
 
 Provider-owned tool dispatch, live sessions and late answers are outside the SDK 0.1 Provider port ([API, Providers](../docs/sdk/api.md#providers)).
 

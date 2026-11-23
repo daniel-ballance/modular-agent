@@ -94,6 +94,7 @@ else
   echo "(cross-language steps skipped: they need all four languages)"
 fi
 
+! $quick && want python && step "telemetry: Python runner, every placement" bash -c 'npm ci --silent --prefix conformance/telemetry && node conformance/telemetry/run.mjs python -- "$PWD/python/.venv/bin/python" -m modular_agent._scenarios'
 # ---------- binding kits against each selected language ----------
 if ! $quick; then
   want typescript && step "telemetry: TypeScript runner, every placement" bash -c "npm ci --silent --prefix conformance/telemetry && node conformance/telemetry/run.mjs typescript -- node typescript/packages/fixtures/dist/src/scenario-agent.js"

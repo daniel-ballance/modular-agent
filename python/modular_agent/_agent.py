@@ -25,6 +25,7 @@ from ma_core import Plugin as _NativePlugin
 from ma_acp.binding import declaration as _declaration
 from ma_approval import Approval as _Approval
 from ma_core import plain
+from ma_core import telemetry as ot
 from ma_core.wire import model_out, settings_in, settings_out
 from ma_durable import Durable
 from ma_harness import Harness
@@ -782,30 +783,35 @@ class Agent:
         if actors and not self._several_actors:
             raise AgentError(ErrorCode.NOT_SUPPORTED, "Several actors are not enabled")
         async with self._lock:
-            defaults = {**self._settings, **settings_in(settings or {})}
-            data = await self._session(
-                "create",
-                project=str(self._project),
-                settings=defaults,
-                tenant=tenant,
-                defer_setup=True,
-            )
-            session = self._attach(data["id"])
-            try:
-                for actor in actors:
-                    await session.join(actor)
-            except BaseException:
-                await session.close()
-                raise
-            if not data["entries"]:
-                await self._session(
-                    "append",
-                    session=session.id,
-                    kind="plugins",
-                    writer="@harness",
-                    data={"active": self._h.active_plugins()},
+            with ot.span(
+                "modular_agent.session.open", {"modular_agent.session.operation": "new"}
+            ) as operation:
+                defaults = {**self._settings, **settings_in(settings or {})}
+                data = await self._session(
+                    "create",
+                    project=str(self._project),
+                    settings=defaults,
+                    tenant=tenant,
+                    defer_setup=True,
+                    trace_at_caller=True,
                 )
-            return session
+                session = self._attach(data["id"])
+                ot.set_attrs(operation, {"gen_ai.conversation.id": session.id})
+                try:
+                    for actor in actors:
+                        await session.join(actor)
+                except BaseException:
+                    await session.close()
+                    raise
+                if not data["entries"]:
+                    await self._session(
+                        "append",
+                        session=session.id,
+                        kind="plugins",
+                        writer="@harness",
+                        data={"active": self._h.active_plugins()},
+                    )
+                return session
 
     async def open_session(self, id: str) -> Session:
         if not id or not id.isalnum():

@@ -119,7 +119,8 @@ class Turns:
             ot.Steps(sid, turn).track(),
         ):
             ot.set_attrs(operation, {"modular_agent.turn.outcome": "interrupted"})
-            segment = ot.segment(operation, parent) if self.declarations["durable"] else {}
+            # A kept turn can identify its initial segment without resuming it.
+            segment = ot.segment(operation, parent)
             if recovering and segment:
                 await self.api.session(
                     "append",

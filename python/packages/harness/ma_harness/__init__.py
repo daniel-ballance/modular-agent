@@ -1052,7 +1052,8 @@ class Harness(Authority, Erasure):
             "open": "resume" if d.get("recover", True) else "load",
             "close": "close",
         }.get(op)
-        if operation is None or d.get("draft"):
+        # SDK session creation also includes actor joins and the first commit.
+        if operation is None or d.get("draft") or (op == "create" and d.get("trace_at_caller")):
             return await self._handle(op, d, emit)
         action = "close" if op == "close" else "open"
         with ot.span(

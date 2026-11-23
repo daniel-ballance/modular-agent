@@ -9,6 +9,7 @@ import secrets
 import signal
 import sys
 from collections.abc import Iterator
+from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -16,6 +17,7 @@ from typing import Any
 from . import Agent, AgentError, JsonObject, ProcessPlugin, PromptResult, ServicePlugin, Session
 from ._event_types import EntryEvent
 from ._history import HistoryStore, file_history, http_history
+from ._scenario_telemetry import TelemetryRun, exporter
 from .fixtures import count, fixture
 from .testing import answers, test_agent
 
@@ -123,6 +125,7 @@ async def _agent(
     command: list[str],
     services: list[ServicePlugin] | None = None,
     history: HistoryStore | None = None,
+    telemetry: TelemetryRun | None = None,
 ) -> Agent:
     options = scenario["agent"]
     project = directory / "project"
@@ -130,10 +133,13 @@ async def _agent(
     plugins, processes = [], []
     for name in options.get("plugins", []) if services is None else []:
         config = _config(name, directory)
-        if command:
+        if telemetry and telemetry.process:
+            processes.append(telemetry.fixture(name, config))
+        elif command:
             processes.append(ProcessPlugin([*command, name], config=config))
         else:
-            plugins.append(fixture(name, config=config))
+            choice = telemetry.request["values"]["answer"] if telemetry else "yes"
+            plugins.append(fixture(name, config=config, choice=choice))
     return await test_agent(
         script=scenario["model"],
         project=project,
@@ -144,7 +150,8 @@ async def _agent(
         settings=options.get("settings"),
         several_actors=options.get("severalActors", False),
         plugins=plugins,
-        process_plugins=processes if command else None,
+        agent_name=telemetry.request["agentName"] if telemetry else None,
+        process_plugins=processes or None,
         service_plugins=services,
         on_question=answers(options["answers"]) if "answers" in options else None,
     )
@@ -157,6 +164,7 @@ async def _crash_child(
     command: list[str],
     services: list[ServicePlugin] | None,
     history_url: str,
+    telemetry: TelemetryRun | None = None,
 ) -> None:
     scenario = _load(path)
     store = (
@@ -166,7 +174,7 @@ async def _crash_child(
         if history_url
         else None
     )
-    async with await _agent(scenario, directory, command, services, store) as agent:
+    async with await _agent(scenario, directory, command, services, store, telemetry) as agent:
         session = await agent.session(actors=scenario["agent"].get("actors", []))
         print(session.id, flush=True)
         async for event in session.prompt_stream(scenario["steps"][index]["prompt"]):
@@ -213,7 +221,13 @@ async def _crash(
     services: list[ServicePlugin] | None,
     pool: _Services | None,
     history_url: str,
+    telemetry: TelemetryRun | None = None,
 ) -> str:
+    env = None
+    if telemetry:
+        env = {**os.environ, "MODULAR_AGENT_TELEMETRY_RUN": str(telemetry.path)}
+        if telemetry.endpoint is not None:
+            env["MODULAR_AGENT_TELEMETRY_OTLP"] = telemetry.endpoint
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",
@@ -225,6 +239,7 @@ async def _crash(
         json.dumps(services),
         history_url,
         *command,
+        env=env,
         stdout=asyncio.subprocess.PIPE,
         start_new_session=True,
     )
@@ -249,6 +264,8 @@ async def _crash(
                 raise ValueError(f"Unknown crash condition: {condition}")
         if proc.returncode is not None:
             raise RuntimeError("Crash child exited before it could be killed")
+        if telemetry:
+            telemetry.at_barrier(sid, count(directory / "count"))
         return sid
     finally:
         if pool is not None:
@@ -257,13 +274,21 @@ async def _crash(
             await _kill_groups([proc])
 
 
-async def run_scenario(path: Path, placement: str, command: list[str]) -> list[str]:
+async def run_scenario(
+    path: Path, placement: str, command: list[str], *, telemetry: TelemetryRun | None = None
+) -> list[str]:
     scenario = _load(path)
     failures: list[str] = []
     agent: Agent | None = None
     session: Session | None = None
     session_id: str | None = None
-    with TemporaryDirectory(prefix="sdk-scenario-") as temp:
+    report: dict[str, Any] | None = None
+    scratch = (
+        nullcontext(str(telemetry.directory))
+        if telemetry
+        else TemporaryDirectory(prefix="sdk-scenario-")
+    )
+    with scratch as temp:
         directory = Path(temp)
         pool = _Services(command, directory) if placement.startswith("service:") else None
         process_command = command if pool is None else []
@@ -277,7 +302,9 @@ async def run_scenario(path: Path, placement: str, command: list[str]) -> list[s
             return await pool.start(scenario["agent"].get("plugins", []))
 
         async def start_agent() -> Agent:
-            return await _agent(scenario, directory, process_command, await start_services(), store)
+            return await _agent(
+                scenario, directory, process_command, await start_services(), store, telemetry
+            )
 
         try:
             try:
@@ -329,6 +356,7 @@ async def run_scenario(path: Path, placement: str, command: list[str]) -> list[s
                     failures.append(f"{label}: want {want!r}, got success")
                 return failures
 
+            last_result: PromptResult | None = None
             for n, step in enumerate(scenario["steps"]):
                 label = f"{scenario['scenario']} ({placement}) step {n}"
                 expect = step.get("expect", {})
@@ -354,6 +382,7 @@ async def run_scenario(path: Path, placement: str, command: list[str]) -> list[s
                                 await start_services(),
                                 pool,
                                 history_url,
+                                telemetry,
                             )
                         elif any(field in step for field in ("prompt", "send", "answer", "wait")):
                             if agent is None:
@@ -405,6 +434,8 @@ async def run_scenario(path: Path, placement: str, command: list[str]) -> list[s
                         break
                     continue
 
+                if result is not None:
+                    last_result = result
                 if "error" in expect:
                     compare("error", expect["error"], "no error")
                 if "outcome" in expect:
@@ -435,6 +466,11 @@ async def run_scenario(path: Path, placement: str, command: list[str]) -> list[s
                         compare("records (in order)", expect["records"], kinds)
                 if "count" in expect:
                     compare("count", expect["count"], count(directory / "count"))
+            if telemetry and not failures:
+                assert agent is not None and session is not None and last_result is not None
+                report = await telemetry.evidence(
+                    agent, session, last_result, count(directory / "count")
+                )
         finally:
             try:
                 if agent is not None:
@@ -446,6 +482,10 @@ async def run_scenario(path: Path, placement: str, command: list[str]) -> list[s
                 finally:
                     if service is not None:
                         await _kill_groups([service])
+    if telemetry and report is not None:
+        if any(proc.returncode != 0 for proc in telemetry.fixtures):
+            return ["A telemetry fixture did not exit successfully"]
+        Path(telemetry.request["reportPath"]).write_text(json.dumps(report))
     return failures
 
 
@@ -470,19 +510,43 @@ async def _main(files: list[str]) -> int:
     return int(bool(failure))
 
 
+async def _telemetry_main(telemetry: TelemetryRun) -> int:
+    failures = await run_scenario(
+        Path(telemetry.request["scenarioPath"]),
+        telemetry.request["placement"],
+        [],
+        telemetry=telemetry,
+    )
+    if failures:
+        print("\n".join(failures), file=sys.stderr)
+    return int(bool(failures))
+
+
 if __name__ == "__main__":
+    request_path = os.environ.get("MODULAR_AGENT_TELEMETRY_RUN")
+    telemetry_run = (
+        TelemetryRun(Path(request_path), _load(Path(request_path))) if request_path else None
+    )
     if len(sys.argv) > 1 and sys.argv[1] == "--history-service":
         _history_service(Path(sys.argv[2]), Path(sys.argv[3]))
     elif len(sys.argv) > 1 and sys.argv[1] == "--child":
-        asyncio.run(
-            _crash_child(
-                Path(sys.argv[2]),
-                Path(sys.argv[3]),
-                int(sys.argv[4]),
-                sys.argv[7:],
-                json.loads(sys.argv[5]),
-                sys.argv[6],
+        with (
+            exporter(telemetry_run.endpoint if telemetry_run else None),
+            telemetry_run.observe(crash_child=True) if telemetry_run else nullcontext(),
+        ):
+            asyncio.run(
+                _crash_child(
+                    Path(sys.argv[2]),
+                    Path(sys.argv[3]),
+                    int(sys.argv[4]),
+                    sys.argv[7:],
+                    json.loads(sys.argv[5]),
+                    sys.argv[6],
+                    telemetry_run,
+                )
             )
-        )
+    elif telemetry_run:
+        with exporter(telemetry_run.endpoint), telemetry_run.observe():
+            raise SystemExit(asyncio.run(_telemetry_main(telemetry_run)))
     else:
         raise SystemExit(asyncio.run(_main(sys.argv[1:])))
