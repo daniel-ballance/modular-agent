@@ -228,6 +228,22 @@ impl interface_acp::Factory for ProjectFactory {
         self.0.history()?.0.list(project)
     }
 
+    fn list_kept(&self, project: Option<&Path>) -> base::Result<Vec<base::SessionData>> {
+        let history = self.0.history()?;
+        if !history.1 {
+            return Ok(vec![]);
+        }
+        history.0.list(project)
+    }
+
+    fn listing_view(
+        &self,
+        data: &base::SessionData,
+        principal: &interface_acp::Identity,
+    ) -> base::Result<Option<(base::Authority, bool)>> {
+        self.1.acp_listing_view(&self.0.history()?, data, principal)
+    }
+
     fn trust(&self, project: &Path) -> base::Result<()> {
         Ok(self.0.trust(project)?)
     }
@@ -358,6 +374,27 @@ impl Agent {
         .await?)
     }
 
+    fn acp_listing_view(
+        &self,
+        history: &crate::History,
+        data: &base::SessionData,
+        principal: &interface_acp::Identity,
+    ) -> base::Result<Option<(base::Authority, bool)>> {
+        use base::AgentApi;
+        let h = &self.inner.harness;
+        let rights = if history.0.check_erasure(data).is_ok() {
+            h.discovery_rights(
+                data,
+                &principal.id,
+                &principal.rights,
+                principal.join_on_open,
+            )?
+        } else {
+            base::Authority::default()
+        };
+        Ok(Some((rights, h.is_driving_turn(&data.id))))
+    }
+
     pub(crate) fn check_acp_host(&self) -> Result<()> {
         if !self.inner.plugin_host {
             return Err(Error::new(
@@ -471,6 +508,20 @@ impl interface_acp::Factory for Factory {
     }
     fn list(&self, project: Option<&Path>) -> base::Result<Vec<base::SessionData>> {
         base::AgentApi::list(self.0.inner.harness.as_ref(), project)
+    }
+    fn list_kept(&self, project: Option<&Path>) -> base::Result<Vec<base::SessionData>> {
+        if !self.0.inner.persistent {
+            return Ok(vec![]);
+        }
+        self.0.inner.history.0.list(project)
+    }
+    fn listing_view(
+        &self,
+        data: &base::SessionData,
+        principal: &interface_acp::Identity,
+    ) -> base::Result<Option<(base::Authority, bool)>> {
+        self.0
+            .acp_listing_view(&self.0.inner.history, data, principal)
     }
     fn trust(&self, _project: &Path) -> base::Result<()> {
         base::bail!("ACP cannot change project trust")

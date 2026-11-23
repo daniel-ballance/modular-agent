@@ -46,12 +46,7 @@ impl Service {
             .clients
             .get(&(d.id.clone(), a.client_id.clone()))
             .cloned();
-        let running = (self.h().is_running(&d.id)
-            && self
-                .h()
-                .writer_interruption(&d.id)
-                .is_ok_and(|w| !w.is_cancelled()))
-            || self.acp_open.is_running(&d.id);
+        let running = self.h().is_driving_turn(&d.id) || self.acp_open.is_running(&d.id);
         let summary =
             d.waiting_summary(&rights, a.id(), Some(&a.client_id), running, |q, live| {
                 if !live && q.kind != base::RequestKind::Approval {

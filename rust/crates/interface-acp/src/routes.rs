@@ -21,12 +21,7 @@ impl OpenRoutes {
             .unwrap()
             .get(id)
             .and_then(std::sync::Weak::upgrade)
-            .is_some_and(|s| {
-                s.api.is_running(id)
-                    && s.api
-                        .writer_interruption(id)
-                        .is_ok_and(|w| !w.is_cancelled())
-            })
+            .is_some_and(|s| s.api.is_driving_turn(id))
     }
 }
 

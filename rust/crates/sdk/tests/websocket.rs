@@ -129,6 +129,11 @@ async fn acp_watch_token_caps_recorded_grants_without_rewriting_them() -> modula
     std::os::unix::fs::symlink(&root, &alias)?;
     let agent = Agent::builder()
         .project(&root)
+        .data_dir(root.join("data"))
+        .durability(modular_agent::Durability::Kept)
+        .provider(modular_agent::testing::scripted_provider(
+            json!([{"text":"kept"}]),
+        ))
         .plugin_host(true)
         .several_actors(true)
         .build()
@@ -145,6 +150,7 @@ async fn acp_watch_token_caps_recorded_grants_without_rewriting_them() -> modula
         })
         .await?;
     let id = saved.id().to_owned();
+    saved.prompt("materialize").await?;
     saved.close().await?;
     let service = agent
         .serve_acp_websocket(
@@ -182,6 +188,10 @@ async fn acp_watch_token_caps_recorded_grants_without_rewriting_them() -> modula
                 }};
             }
             assert!(rpc!(1, "initialize", json!({"protocolVersion":1})).get("result").is_some());
+            let list = rpc!(10, "session/list", json!({"cwd":alias}));
+            assert_eq!(list["result"]["sessions"][0]["sessionId"], *id);
+            assert_eq!(list["result"]["sessions"][0]["_meta"]["modular-agent"]["waiting"],
+                json!({"questions":0,"toolCalls":0,"turn":"none"}));
             let hidden = rpc!(8, "session/resume", json!({"sessionId":"unknown","cwd":alias,"mcpServers":[]}));
             let denied = rpc!(9, "session/resume", json!({"sessionId":id,"cwd":subproject,"mcpServers":[]}));
             assert_eq!(hidden["error"], denied["error"]);

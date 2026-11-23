@@ -209,6 +209,13 @@ pub trait AgentApi: Send + Sync {
         Ok(false)
     }
     fn is_running(&self, session: &str) -> bool;
+    /// Lost writer access is an interruption even before the driver has exited.
+    fn is_driving_turn(&self, session: &str) -> bool {
+        self.is_running(session)
+            && self
+                .writer_interruption(session)
+                .is_ok_and(|w| !w.is_cancelled())
+    }
     fn settings(&self, scope: &Scope, patch: Value) -> Result<Value>;
     fn move_position(&self, scope: &Scope, position: Option<String>) -> Result<()>;
     async fn rewind(&self, _scope: &Scope, _position: String) -> Result<Vec<String>> {

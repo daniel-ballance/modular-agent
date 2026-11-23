@@ -117,6 +117,19 @@ pub trait Factory: Send + Sync {
         self.build(project, sink).await
     }
     fn list(&self, project: Option<&Path>) -> Result<Vec<SessionData>>;
+    /// Kept data only. In-memory compositions can still support ordinary opens.
+    fn list_kept(&self, project: Option<&Path>) -> Result<Vec<SessionData>> {
+        self.list(project)
+    }
+    /// Effective rights and local turn activity. Without an inspector, omit
+    /// the optional summary rather than guess at tenant or parent authority.
+    fn listing_view(
+        &self,
+        _data: &SessionData,
+        _principal: &Identity,
+    ) -> Result<Option<(Authority, bool)>> {
+        Ok(None)
+    }
     fn trust(&self, project: &Path) -> Result<()>;
     fn serves_project(&self, _project: &Path) -> bool {
         true
@@ -530,30 +543,43 @@ impl State {
                 {
                     return Ok(json!({"sessions": []}));
                 }
-                let mut sessions: BTreeMap<String, SessionData> = self
-                    .factory
-                    .list(project.as_deref())?
-                    .into_iter()
-                    .map(|s| (s.id.clone(), s))
-                    .collect();
-                for s in self.sessions.lock().unwrap().values() {
-                    let data = s.api.snapshot(&s.id)?;
-                    if data.entries.iter().all(|e| {
-                        matches!(e.kind.as_str(), "command" | "plugins.changed" | "tenant")
-                            || (e.kind == "actor.grant" && e.writer == "interface.acp")
-                    }) {
+                let mut rows = Vec::new();
+                for data in self.factory.list_kept(project.as_deref())? {
+                    if !self.factory.serves_project(&data.project)
+                        || !sessions::discoverable(&self.principal, &data)
+                    {
                         continue;
                     }
-                    if project
-                        .as_ref()
-                        .is_none_or(|p| p.canonicalize().ok().as_ref() == Some(&data.project))
+                    let mut row = json!({"sessionId":data.id,"cwd":data.project});
+                    if let Some((rights, running)) =
+                        self.factory.listing_view(&data, &self.principal)?
                     {
-                        sessions.insert(data.id.clone(), data);
+                        if !rights.has("watch") {
+                            continue;
+                        }
+                        let attached = self.sessions.lock().unwrap().get(&data.id).cloned();
+                        // ACP does not execute Interface tools. An approval needs an
+                        // unchanged view on this connection, not just the actor's grant.
+                        let summary = data.waiting_summary(
+                            &rights,
+                            &self.principal.id,
+                            None,
+                            running || self.routes.is_running(&data.id),
+                            |q, _| {
+                                q.kind != RequestKind::Approval
+                                    || attached.as_ref().is_some_and(|s| {
+                                        s.approval_views
+                                            .lock()
+                                            .unwrap()
+                                            .contains(&(self.principal.id.clone(), q.id.clone()))
+                                    })
+                            },
+                        )?;
+                        row["_meta"]["modular-agent"]["waiting"] = json!(summary);
                     }
+                    rows.push(row);
                 }
-                Ok(
-                    json!({"sessions":sessions.values().filter(|s| self.factory.serves_project(&s.project) && sessions::discoverable(&self.principal, s)).map(|s|json!({"sessionId":s.id,"cwd":s.project})).collect::<Vec<_>>()}),
-                )
+                Ok(json!({"sessions":rows}))
             }
             "session/close" => {
                 let _: CloseSessionRequest = serde_json::from_value(p.clone())?;
