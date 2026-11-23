@@ -47,6 +47,7 @@ Options:
   --declaration         print what this agent declares it supports
   --acp                 serve the Agent Client Protocol for an editor or host
   --agui                serve AG-UI using HTTP and SSE (requires --listen)
+  --resume-open         reopen interrupted turns in this project before serving ACP or AG-UI
   --listen ADDR [--token-file FILE]
   --policy FILE        read operator policy from FILE
                         listen on loopback; combine --acp and --agui for one listener
@@ -66,7 +67,7 @@ type options struct {
 	policy                                                                                operatorPolicy
 	clientIdentity                                                                        *string
 	prompt                                                                                *string
-	loadClaude                                                                            bool
+	loadClaude, resumeOpen, startupProject                                                bool
 	device, resume, all, trust, transient, verbose, json, history, declaration, acp, agui bool
 }
 
@@ -146,6 +147,8 @@ func parse(args []string) (o options, err error) {
 			o.history = true
 		case "--declaration":
 			o.declaration = true
+		case "--resume-open":
+			o.resumeOpen = true
 		case "--acp":
 			o.acp = true
 		case "--agui":
@@ -343,8 +346,18 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 		}
 		return nil
 	}
+	candidates, err := d.resumeCandidates(ctx, o, store, stderr)
+	if err != nil {
+		return err
+	}
 	bootstrap := o
-	if o.acp && !o.agui {
+	bootstrap.startupProject = len(candidates) > 0
+	for _, c := range candidates {
+		if strings.HasPrefix(c.row.Model, "claude/") {
+			bootstrap.loadClaude = true
+		}
+	}
+	if o.acp && !o.agui && !bootstrap.startupProject {
 		// The listener has no client project yet. The authorized factory reads
 		// client project settings after checking its scope.
 		if err := os.MkdirAll(d.state, 0700); err != nil {
@@ -381,6 +394,16 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 		return err
 	}
 	defer a.Close(context.Background())
+	for _, c := range candidates {
+		disposition := "resumed"
+		if err := a.ResumeInterrupted(ctx, c.row.ID, c.operator); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			disposition = "skipped"
+		}
+		fmt.Fprintf(stderr, "%s %s\n", disposition, c.row.ID)
+	}
 	if o.agui {
 		actors := o.policy.Actors
 		if o.tokenFile != "" {

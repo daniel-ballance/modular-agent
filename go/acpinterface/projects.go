@@ -186,6 +186,10 @@ func (s *server) projectHost(cwd, id string, extra []string, prompt *acp.SystemP
 		if !found {
 			return nil, acpError("forbidden")
 		}
+		if s.project == project && s.resources.RetainWriter != nil && s.resources.RetainWriter(id) {
+			// The operator already opened this writer at startup.
+			return s, nil
+		}
 	}
 	h := s.projects
 	h.mu.Lock()

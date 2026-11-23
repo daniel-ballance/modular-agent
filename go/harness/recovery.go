@@ -8,14 +8,10 @@ import (
 // Replay uses the branch only to select interrupted turns. Intake and terminal
 // facts belong to the whole session, including records written after a move.
 func recovery(s api.Session) (*api.Entry, []api.Input) {
-	var interrupted *api.Entry
+	interrupted := s.UnfinishedTurn()
 	var orphan *api.Input
-	ended := map[string]bool{}
 	initial := map[string]api.Input{}
 	for _, e := range s.LiveEntries() {
-		if e.WasKind("turn.end") {
-			ended[e.Turn] = true
-		}
 		if e.Kind == "input.accepted" {
 			in := api.Decode[api.Input](e.Data)
 			initial[in.ID] = in
@@ -26,13 +22,7 @@ func recovery(s api.Session) (*api.Entry, []api.Input) {
 	live.Entries = s.LiveEntries()
 	for _, e := range live.Branch() {
 		switch {
-		case e.WasKind("turn.end"):
-			orphan = nil
-		case e.Kind == "turn.start":
-			if !ended[e.Turn] {
-				copy := e
-				interrupted = &copy
-			}
+		case e.WasKind("turn.end") || e.Kind == "turn.start":
 			orphan = nil
 		case e.Kind == "input" && e.Turn == "" && interrupted == nil:
 			// Old Go records could take input before writing the turn start.

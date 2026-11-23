@@ -135,7 +135,8 @@ func (i *Interface) serve(ctx context.Context, in io.ReadCloser, out io.Writer, 
 	s := &server{declared: declared, a: i.a, project: project, actor: who, principal: principal, ctx: ctx, represents: represented, sessions: map[string]*attachment{}, resources: config}
 	if config.Compose != nil {
 		s.projects = &projectHosts{compose: config.Compose, hosts: map[projectKey]*server{}}
-	} else if principal != nil {
+	}
+	if principal != nil {
 		s.shared = &i.network
 	}
 	conn, err := acp.NewAgentSideConnectionWithOptions(s, out, in, acp.ConnectionOptions{MaxFrameSize: (64 << 20) + 2})

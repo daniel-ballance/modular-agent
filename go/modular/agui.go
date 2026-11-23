@@ -171,7 +171,12 @@ func (a *Agent) serveAGUI(ctx context.Context, opt ServeAGUIOptions, wrap func(h
 		}
 		decl, projects := a.acpResources(ServeACPOptions{})
 		projects = acpinterface.ShareCompositions(projects)
-		projects.RetainWriter = func(id string) bool { srv.mu.Lock(); defer srv.mu.Unlock(); return srv.threads[id] }
+		startupWriter := projects.RetainWriter
+		projects.RetainWriter = func(id string) bool {
+			srv.mu.Lock()
+			defer srv.mu.Unlock()
+			return srv.threads[id] || startupWriter(id)
+		}
 		ws = func(ctx context.Context, c *wswire.Conn, p agPrincipal) {
 			c.EnableACPControl(0)
 			_ = iface.ServePrincipal(ctx, c, c, decl, projects, p.Principal)

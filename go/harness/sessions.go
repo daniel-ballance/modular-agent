@@ -51,6 +51,7 @@ type session struct {
 	writerFailure        error
 	running, closing     bool
 	stopping             bool // a detach is already settling work and closing the lease
+	startupWriter        bool // retained until explicit close or process shutdown
 	opening              bool // job reports during session.start wait for recovery setup
 	cancel               context.CancelCauseFunc
 	done                 chan struct{}
@@ -248,14 +249,25 @@ func (c *client) registerNew(s *session, commit bool) error {
 }
 
 func (c *client) Open(ctx context.Context, id string) error {
-	return c.open(ctx, id, nil)
+	return c.open(ctx, id, nil, false)
 }
 
 func (c *client) OpenForHost(ctx context.Context, id string, host api.Actor) error {
-	return c.open(ctx, id, &host)
+	return c.open(ctx, id, &host, false)
 }
 
-func (c *client) open(ctx context.Context, id string, host *api.Actor) (errOut error) {
+// OpenInterruptedForHost uses normal recovery, but checks the candidate again
+// under a nonwaiting lease before it joins an actor or installs any work.
+func (c *client) OpenInterruptedForHost(ctx context.Context, id string, host api.Actor) error {
+	return c.open(ctx, id, &host, true)
+}
+
+func (c *client) StartupWriter(id string) bool {
+	s, err := c.find(id)
+	return err == nil && s.startupWriter
+}
+
+func (c *client) open(ctx context.Context, id string, host *api.Actor, interruptedOnly bool) (errOut error) {
 	ctx, span := telemetry.Start(telemetry.Session(ctx, id), "modular_agent.session.open", trace.WithAttributes(telemetry.String("modular_agent.session.operation", "load")))
 	defer func() { telemetry.Finish(span, errOut) }()
 	if err := c.seedCapacity(); err != nil {
@@ -265,7 +277,12 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) (errOut e
 	if err != nil {
 		return err
 	}
-	lease, err := acquireHistory(ctx, v.(api.Store), id)
+	var lease api.Lease
+	if interruptedOnly {
+		lease, err = tryAcquireHistory(v.(api.Store), id)
+	} else {
+		lease, err = acquireHistory(ctx, v.(api.Store), id)
+	}
 	if err != nil {
 		return err
 	}
@@ -290,6 +307,18 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) (errOut e
 		_ = lease.Close()
 		return api.ErrAuthority
 	}
+	if interruptedOnly {
+		// Startup is not a new membership grant. Apply the recorded local
+		// actor's watch right, including the session and tenant ceilings.
+		if !c.authorized(snap, host.ID, "watch") {
+			_ = lease.Close()
+			return api.ErrAuthority
+		}
+		if snap.UnfinishedTurn() == nil {
+			_ = lease.Close()
+			return errors.New("no interrupted turn")
+		}
+	}
 	savedApproval := snap.Settings.Approval
 	if conf, err := c.Get("configuration"); err == nil {
 		if defaults, err := conf.(api.Configuration).Settings(snap.Project); err == nil {
@@ -304,6 +333,7 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor) (errOut e
 	}
 	s := c.newSessionState(id, project)
 	s.tenant = snap.Tenant
+	s.startupWriter = interruptedOnly
 	s.data, s.lease, s.last, s.opening = snap, lease, recordedOutcome(snap), true
 	if err = s.reconcileErasureLocked(); err != nil {
 		_ = lease.Close()

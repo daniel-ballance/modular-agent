@@ -52,7 +52,7 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 		}
 		return modular.New(ctx, append(opts, modular.WithConformanceFixtures(), modular.WithTool(files.FixtureBash()), modular.WithTool(files.Tools("")[0]))...)
 	}
-	if !o.acp || o.agui {
+	if !o.acp || o.agui || o.startupProject {
 		opts = append(opts, mcp.WithServers(d.mcp(o.project, stderr), func(err error) { fmt.Fprintln(stderr, err) }))
 	}
 	opts = append(opts, modular.WithPlugin(files.Plugin(filepath.Join(d.state, "output"))), modular.WithTool(codemode.Tool(codemode.StandardLimits())),

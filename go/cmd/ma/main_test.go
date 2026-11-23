@@ -45,6 +45,15 @@ func isolated(t *testing.T) (layout, string, string) {
 	t.Setenv("MODULAR_AGENT_PLUGINS", "")
 	return d, project, log
 }
+func TestResumeOpenDoesNotChangePrintMode(t *testing.T) {
+	_, project, _ := isolated(t)
+	var out bytes.Buffer
+	err := run(t.Context(), []string{"--resume-open", "--project", project, "-p", "Hello."}, io.NopCloser(strings.NewReader("")), &out, io.Discard, nil)
+	if err != nil || out.String() != "First.\n" {
+		t.Fatalf("print: %q (%v)", out.String(), err)
+	}
+}
+
 func TestACPListenOptions(t *testing.T) {
 	for _, args := range [][]string{
 		{"--listen", "127.0.0.1:0", "--token-file", "token"},

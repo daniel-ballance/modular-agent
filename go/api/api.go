@@ -150,6 +150,25 @@ type Session struct {
 	Entries     []Entry          `json:"entries"`
 }
 
+// UnfinishedTurn selects the start that recovery would resume. An end on
+// another branch still settles its turn; a fork's display prefix is not work.
+func (s Session) UnfinishedTurn() *Entry {
+	s.Entries = s.LiveEntries()
+	ended := map[string]bool{}
+	for _, e := range s.Entries {
+		if e.WasKind("turn.end") {
+			ended[e.Turn] = true
+		}
+	}
+	var start *Entry
+	for _, e := range s.Branch() {
+		if e.Kind == "turn.start" && !ended[e.Turn] {
+			start = &e
+		}
+	}
+	return start
+}
+
 // InputID reads the taken admission in both old and current in-process records.
 func (e Entry) InputID() string {
 	if e.InputRef != "" {

@@ -174,7 +174,7 @@ func (c *client) EraseDetails(ctx context.Context, id string, ids []string) (api
 			current.mu.Lock()
 			_ = current.reconcileErasureLocked()
 			current.mu.Unlock()
-		} else if lease, e := tryAcquireErasure(store, sessionID); e == nil {
+		} else if lease, e := tryAcquireHistory(store, sessionID); e == nil {
 			_ = registry.PendingErasures(func(intents *[]api.ErasureIntent) error {
 				row, err := lease.Load()
 				if err != nil {
@@ -216,7 +216,7 @@ func (c *client) EraseDetails(ctx context.Context, id string, ids []string) (api
 	return report, nil
 }
 
-func tryAcquireErasure(store api.Store, id string) (api.Lease, error) {
+func tryAcquireHistory(store api.Store, id string) (api.Lease, error) {
 	if store, ok := store.(interface {
 		TryAcquire(string) (api.Lease, error)
 	}); ok {

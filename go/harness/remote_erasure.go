@@ -147,7 +147,7 @@ func (c *client) eraseRemote(ctx context.Context, store api.Store, remote api.Re
 				current.mu.Lock()
 				_ = current.reconcileRemoteErasureLocked(remote)
 				current.mu.Unlock()
-			} else if lease, err := tryAcquireErasure(store, id); err == nil {
+			} else if lease, err := tryAcquireHistory(store, id); err == nil {
 				if writer, ok := lease.(api.RemoteErasureLease); ok {
 					if actual, err := writer.LoadErasure(); err == nil {
 						if plans, _, err := remote.ErasurePlans(id); err == nil {

@@ -11,7 +11,7 @@ import (
 // An open writer is not evidence of a turn. First find the committed start
 // that recovery would select, then ask whether this Harness is running it.
 func (c *client) turnState(row api.Session) string {
-	if start, _ := recovery(row); start == nil {
+	if row.UnfinishedTurn() == nil {
 		return "none"
 	}
 	if s, err := c.find(row.ID); err == nil {
