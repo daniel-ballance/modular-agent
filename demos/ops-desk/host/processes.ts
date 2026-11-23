@@ -136,6 +136,7 @@ export function launch(projects: Projects, agent: Agent, pluginUrl: string, appr
     cmd = [
       resolve(demo, '../../rust/target/debug/ma'),
       '--agui',
+      '--resume-open',
       '--listen',
       '127.0.0.1:0',
       '--policy',

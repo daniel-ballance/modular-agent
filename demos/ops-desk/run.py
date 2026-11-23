@@ -8,6 +8,7 @@ import os
 import selectors
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -19,7 +20,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 DEMO = Path(__file__).resolve().parent
 HOST = DEMO / 'host/dist/main.js'
-CASES = ['happy', 'refusal', 'verification', 'restart', 'duplicate']
+CASES = ['happy', 'refusal', 'verification', 'restart', 'duplicate', 'host-restart']
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -116,6 +117,30 @@ def live_environment():
     return env
 
 
+def stop(proc):
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=6)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    if proc.stdout:
+        proc.stdout.close()
+
+
+@contextmanager
+def station(env, cwd, log):
+    side = subprocess.Popen(['setpriv', '--pdeathsig', 'KILL', '--', 'node', HOST.with_name('station.js')],
+                            env=env, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=log, text=True)
+    try:
+        check(side.stdout.readline().strip() == 'ready', 'agent station did not start')
+        yield
+    finally:
+        stop(side)
+
+
 @contextmanager
 def start(temp, case):
     root = temp / 'desk'
@@ -133,16 +158,26 @@ def start(temp, case):
         fixtures = sample / 'cases.json'
         fixtures.write_text(json.dumps([*json.loads(fixtures.read_text()), [135, 100]]))
         env['DESK_SAMPLE'] = str(sample)
-    with (temp / 'host.log').open('w') as log:
-        proc = subprocess.Popen(['node', HOST], cwd=temp, env=env, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=log, text=True)
+    with (temp / 'host.log').open('w') as log, station(env, temp, log):
+        def launch():
+            proc = subprocess.Popen(['node', HOST], cwd=temp, env=env, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=log, text=True)
+            try:
+                with selectors.DefaultSelector() as sel:
+                    sel.register(proc.stdout, selectors.EVENT_READ)
+                    check(sel.select(10), 'host did not print a listener address')
+                url = proc.stdout.readline().strip()
+                check(url.startswith('http://127.0.0.1:'), 'no loopback listener')
+                return proc, url
+            except BaseException:
+                stop(proc)
+                raise
+
+        desk = None
         try:
-            with selectors.DefaultSelector() as sel:
-                sel.register(proc.stdout, selectors.EVENT_READ)
-                check(sel.select(10), 'host did not print a listener address')
-            url = proc.stdout.readline().strip()
-            check(url.startswith('http://127.0.0.1:'), 'no loopback listener')
-            yield Desk(root, proc, url, time.monotonic() + 600 if case == 'live' else None)
+            desk = Desk(root, *launch(), time.monotonic() + 600 if case == 'live' else None)
+            desk.launch = launch
+            yield desk
         except Exception:
             if case == 'live':
                 print(f'Live run kept at {temp}. See host.log and desk/*.log.', file=sys.stderr)
@@ -154,14 +189,8 @@ def start(temp, case):
                         print(f'{path.name}: {detail}', file=sys.stderr)
             raise
         finally:
-            proc.terminate()
-            try:
-                proc.wait(timeout=6)
-            finally:
-                if proc.poll() is None:
-                    proc.kill()
-                    proc.wait()
-                proc.stdout.close()
+            if desk:
+                stop(desk.proc)
 
 
 def run(d, case):
@@ -203,6 +232,18 @@ def run(d, case):
               'deadline changed the checkout')
         return
     q = d.approval()
+    if case == 'host-restart':
+        d.proc.kill()
+        check(d.proc.wait() == -signal.SIGKILL, 'host was not killed')
+        d.proc.stdout.close()
+        # Erase both shortcuts. The route and event are the host's own data.
+        with sqlite3.connect(d.root / 'desk.sqlite') as db:
+            db.execute('DELETE FROM inbox')
+            db.execute('UPDATE routes SET thread=NULL WHERE id=?', (q['route'],))
+        d.proc, d.url = d.launch()
+        again = d.approval()
+        check(all(again[k] == q[k] for k in ('route', 'thread', 'id', 'message', 'toolCallId', 'expiresAt')),
+              'listing did not restore the same open approval')
     check(d.tree('coder', 'rev-parse', 'HEAD') == seed and not d.tree('coder', 'status', '--porcelain'),
           'coder wrote before approval')
     if case == 'restart':
@@ -341,7 +382,18 @@ def main():
                 'DESK_APPROVAL_MS', 'OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_SDK_DISABLED')
         env = {k: os.environ[k] for k in keys if k in os.environ}
         env['OTEL_SERVICE_NAME'] = 'ops-desk'
-        os.execvpe('node', ['node', str(HOST)], env)
+        with station(env, Path.cwd(), None):
+            while True:
+                proc = subprocess.Popen(['setpriv', '--pdeathsig', 'KILL', '--', 'node', HOST], env=env)
+                try:
+                    if proc.wait() != -signal.SIGKILL:
+                        break
+                    print('Host killed; rediscovering work from the agents.', file=sys.stderr)
+                except KeyboardInterrupt:
+                    break
+                finally:
+                    stop(proc)
+        return
     for case in [args.only] if args.only else CASES:
         with TemporaryDirectory(prefix=f'ops-desk-{case}-', dir=temp) as directory:
             with start(Path(directory), case) as desk:

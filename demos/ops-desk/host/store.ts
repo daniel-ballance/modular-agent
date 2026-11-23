@@ -29,11 +29,11 @@ const pending = "('queued','sending','admitted')";
 export class Store {
   private db: DatabaseSync;
   private owner?: DatabaseSync;
-  constructor(path: string) {
+  constructor(path: string, owner = 'owner') {
     if (path !== ':memory:') {
       // A run key is scoped to a thread. Two hosts must not create separate
       // threads for one route. A process death releases this advisory lock.
-      this.owner = new DatabaseSync(path + '.owner');
+      this.owner = new DatabaseSync(path + '.' + owner);
       try {
         this.owner.exec('BEGIN EXCLUSIVE');
       } catch {
@@ -42,7 +42,7 @@ export class Store {
       }
     }
     this.db = new DatabaseSync(path);
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
+    this.db.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY, externalId TEXT UNIQUE NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL, parent TEXT);
       CREATE TABLE IF NOT EXISTS listener(singleton INTEGER PRIMARY KEY CHECK(singleton=1), cursor INTEGER NOT NULL);
       INSERT OR IGNORE INTO listener VALUES(1,0);
@@ -104,16 +104,27 @@ export class Store {
       .get(value) as Route | undefined;
   }
   next(agent: Agent) {
-    // An admitted route at the cursor may still need its session reopened.
-    const afterCursor =
-      agent === 'triage' ? " AND (event>(SELECT cursor FROM listener) OR state='admitted')" : '';
-    return this.select(`agent=? AND state IN ${pending}${afterCursor}`, agent);
+    // Delivery and discovery are separate. Never use the queue to look for an admitted turn.
+    return this.select("agent=? AND state IN ('queued','sending')", agent);
+  }
+  activeThread(agent: Agent, thread: string) {
+    const r = this.select(`r.thread=? AND state IN ${pending}`, thread);
+    return r?.agent === agent ? r : undefined;
+  }
+  // A route key in the original desk admission also works if its debug link was lost.
+  activeKey(agent: Agent, key: string) {
+    const r = this.select(`runKey=? AND state IN ${pending}`, key);
+    return r?.agent === agent ? r : undefined;
   }
   route(id: number) {
     return this.select('r.id=?', id);
   }
   thread(r: Route, id: string) {
     this.db.prepare("UPDATE routes SET thread=?,state='sending' WHERE id=?").run(id, r.id);
+    r.thread = id;
+  }
+  link(r: Route, id: string) {
+    this.db.prepare('UPDATE routes SET thread=? WHERE id=?').run(id, r.id);
     r.thread = id;
   }
   admitted(r: Route) {

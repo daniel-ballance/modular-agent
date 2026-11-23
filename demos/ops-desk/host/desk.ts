@@ -1,15 +1,13 @@
-import { serve, tool, type ToolContext } from '@modular-agent/core';
-import { existsSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { HttpError, LostExchange, type Decision, type Snapshot } from './agui.js';
-import { launch, Projects, token } from './processes.js';
+import { HttpError, LostExchange, Agui, admission, type Decision, type Snapshot } from './agui.js';
+import { Control } from './control.js';
+import { Projects } from './processes.js';
 import { agents, Store, type Agent, type Question, type Route } from './store.js';
 
-type Process = ReturnType<typeof launch>;
+type Process = ReturnType<Control['start']>;
 class Slot {
   route?: Route;
   process?: Process;
-  presence?: AbortController;
+  present = false;
   waiting = false;
   ended = false;
   recovering = false;
@@ -26,10 +24,10 @@ class Slot {
     return result;
   }
 }
-const string = { type: 'string', minLength: 1, maxLength: 4096 } as const;
 export class Desk {
   private slots = { triage: new Slot(), coder: new Slot(), verifier: new Slot() };
-  private services = new Map<Agent, { url: string; close(): Promise<void> }>();
+  private control: Control;
+  private starting = true;
   private closing = false;
   constructor(
     readonly db: Store,
@@ -37,75 +35,27 @@ export class Desk {
     private idleMs: number,
     private approvalMs: number,
     private notify: () => void
-  ) {}
+  ) {
+    this.control = new Control(projects.root, (a, ended) => {
+      if (a && this.slots[a].route?.thread === ended) this.slots[a].ended = true;
+      if (!this.starting) this.wake();
+    });
+  }
   async start() {
     for (const a of agents) {
-      const source = (ctx: ToolContext) => {
-        const r = this.slots[a].route;
-        if (!r || !r.thread || r.thread !== ctx.sessionId) throw Error('No active work from that session');
-        return r;
-      };
-      const service = await serve(
-        {
-          name: 'desk',
-          setup: (reg) => {
-            reg.tool(
-              tool({
-                name: 'post',
-                description: 'Post a summary, change or verdict to the desk.',
-                input: {
-                  type: 'object',
-                  properties: { kind: { enum: ['summary', 'change', 'verdict'] }, text: string },
-                  required: ['kind', 'text'],
-                  additionalProperties: false
-                },
-                run: ({ text, kind }, ctx) => {
-                  this.db.post(source(ctx), ctx.callId, kind, text);
-                  this.wake();
-                  return 'Posted.';
-                }
-              })
-            );
-            if (a !== 'verifier')
-              reg.tool(
-                tool({
-                  name: 'hand_off',
-                  description: 'Queue a task for another desk agent.',
-                  input: {
-                    type: 'object',
-                    properties: { to: { type: 'string' }, task: string },
-                    required: ['to', 'task'],
-                    additionalProperties: false
-                  },
-                  run: async ({ to, task }, ctx) => {
-                    const r = source(ctx);
-                    this.db.handOff(r, to, task, this.projects.revision(a));
-                    this.wake();
-                    // Crash check: the route is committed, but the coder has no tool result yet.
-                    const marker = join(this.projects.root, 'held-handoff');
-                    if (a === 'coder' && process.env.DESK_TEST_HOLD_HANDOFF === '1' && !existsSync(marker)) {
-                      const child = this.slots.coder.process!;
-                      writeFileSync(marker, String(child.pid));
-                      await child.exited;
-                    }
-                    return 'Queued.';
-                  }
-                })
-              );
-            reg.on('turn.end', ({ sessionId }) => {
-              const s = this.slots[a];
-              if (s.route?.thread === sessionId) s.ended = true;
-            });
-          }
-        },
-        { listen: '127.0.0.1:0', tokenFile: token(this.projects.root, a + '-tools').path }
-      );
-      this.services.set(a, service);
+      const slot = this.slots[a];
+      await this.connect(a);
+      if (!slot.route) {
+        const p = slot.process!;
+        slot.process = undefined;
+        await p.stop();
+      }
     }
+    this.starting = false;
     this.wake();
   }
   wake() {
-    if (!this.closing) {
+    if (!this.closing && !this.starting) {
       this.notify();
       for (const a of agents) this.pump(a);
     }
@@ -114,7 +64,7 @@ export class Desk {
     const s = this.slots[a];
     clearTimeout(s.idle);
     if (!s.process) {
-      const p = (s.process = launch(this.projects, a, this.services.get(a)!.url, this.approvalMs));
+      const p = (s.process = this.control.start(a, this.approvalMs));
       this.notify();
       void p.exited.then(() =>
         s.serial(async () => {
@@ -127,13 +77,63 @@ export class Desk {
             else {
               s.recovering = true;
               this.detach(s);
-              await this.drive(a, s.route);
+              try {
+                await this.connect(a); // --resume-open, then list the agent again
+                if (!s.route) {
+                  this.armIdle(a);
+                  this.wake();
+                } else if (!s.waiting)
+                  this.finish(a, 'failed', 'The agent did not list the interrupted route.');
+              } catch (e) {
+                await this.problem(a, e);
+              }
             }
           }
         })
       );
+      const api = await p.ready;
+      await api.discover(null);
+      await this.findWork(a, api);
     }
     return s.process.ready;
+  }
+
+  private async findWork(a: Agent, api: Agui) {
+    const s = this.slots[a];
+    for await (const row of api.threads()) {
+      const { threadId: thread, waiting } = row;
+      let r = this.db.activeThread(a, thread);
+      if (waiting.turn === 'none' && !waiting.questions && !waiting.toolCalls) {
+        // Recovery may have finished before the listener started. A kept
+        // thread for this delivery is not a reason to submit the input again.
+        if (r) {
+          this.db.admitted(r);
+          this.db.finish(r, 'reopened', a + ' reopened the session. No new input was sent.');
+          if (s.route?.id === r.id) s.route = undefined;
+        }
+        continue;
+      }
+      const view = await api.snapshot({ thread, parent: r?.parent ?? null });
+      if (!r) {
+        // Only match the actual first admission, not model or tool output.
+        const input = view.messages.find((m) => m.role === 'user')?.content;
+        if (typeof input !== 'string' || !input.startsWith('Desk route: ')) continue;
+        const key = JSON.parse(input.split('\n', 1)[0].slice('Desk route: '.length));
+        r = typeof key === 'string' ? this.db.activeKey(a, key) : undefined;
+        if (!r || r.thread || input !== admission(r)) continue;
+        this.db.link(r, thread);
+      }
+      if (s.route && s.route.id !== r.id) throw Error(a + ' has two active routes');
+      s.route = r;
+      s.recovering = true;
+      this.db.admitted(r);
+      // A snapshot never renews an approval. An in-turn view here is
+      // answerable only while the station still holds its original presence.
+      this.db.observe(r, view.waiting.questions);
+      s.present = true;
+      s.waiting = true;
+      this.poll(a);
+    }
   }
   private armIdle(a: Agent) {
     const s = this.slots[a];
@@ -164,8 +164,9 @@ export class Desk {
     void s.serial(() => this.drive(a, r));
   }
   private detach(s: Slot) {
-    s.presence?.abort();
-    s.presence = undefined;
+    if (s.present && s.route && !s.process?.abort.signal.aborted && s.process)
+      void this.control.detach(s.route).catch(() => {}); // the agent may already have exited
+    s.present = false;
     s.waiting = false;
     clearTimeout(s.poll);
   }
@@ -181,16 +182,14 @@ export class Desk {
     const s = this.slots[a];
     try {
       const api = await this.connect(a);
-      await api.discover(r.parent);
+      if (s.route?.id !== r.id || s.waiting) return;
       if (!r.thread) {
         this.projects.prepare(r);
         this.db.thread(r, await api.create(r));
       }
       const view = await api.snapshot(r); // GET reopens the same session and runs recovery.
-      s.presence = new AbortController();
-      await api.presence(r, s.presence, () => {
-        void s.process?.stop();
-      });
+      await this.control.presence(r);
+      s.present = true;
       if (view.messages.some((m) => m.role === 'user')) {
         // Each thread belongs to one input route. A committed user message is
         // evidence of admission, even if this host died before saving its cursor.
@@ -222,9 +221,16 @@ export class Desk {
     }
     this.finish(a, 'failed', `${a}: ${e instanceof Error ? e.message : 'operation failed'}`);
   }
-  private outcome(a: Agent, outcome: { type: string; interrupts?: Question[] }) {
+  private outcome(
+    a: Agent,
+    outcome: { type: string; interrupts?: Question[]; pendingToolCallIds?: string[] }
+  ) {
     const s = this.slots[a];
-    if (outcome.type === 'success') this.finish(a, 'done');
+    if (outcome.type === 'success' && outcome.pendingToolCallIds?.length) {
+      // The desk has no executor. Never run a tool from a listing or snapshot.
+      s.waiting = true;
+      this.poll(a);
+    } else if (outcome.type === 'success') this.finish(a, 'done');
     else if (outcome.type === 'interrupt' && outcome.interrupts?.length) {
       this.db.observe(s.route!, outcome.interrupts);
       s.waiting = true;
@@ -269,7 +275,19 @@ export class Desk {
         this.notify();
       }
     this.db.observe(r, view.waiting.questions);
-    if (!view.waiting.questions.length && s.ended) this.finish(a, 'done');
+    if (!view.waiting.questions.length && !view.waiting.toolCalls.length) {
+      if (s.ended) this.finish(a, s.recovering ? 'reopened' : 'done');
+      else if (s.recovering) {
+        for await (const row of (await s.process.ready).threads())
+          if (
+            row.threadId === r.thread &&
+            row.waiting.turn === 'none' &&
+            !row.waiting.questions &&
+            !row.waiting.toolCalls
+          )
+            this.finish(a, 'reopened');
+      }
+    }
     return view;
   }
   async answer(id: number, answers: Decision[]) {
@@ -333,18 +351,16 @@ export class Desk {
     const views = await Promise.all(
       agents.filter((a) => this.slots[a].waiting).map((a) => this.slots[a].serial(() => this.refresh(a)))
     );
-    const inbox = this.db
-      .inbox()
-      .map((q) => ({
-        ...q,
-        answerable:
-          q.status === 'open' &&
-          this.slots[q.agent as Agent].route?.id === q.route &&
-          views.some(
-            (v) => v?.threadId === q.thread && v?.waiting.questions.some((open) => open.id === q.id)
-          ) &&
-          (!q.expiresAt || Date.parse(q.expiresAt) > Date.now())
-      }));
+    const inbox = this.db.inbox().map((q) => ({
+      ...q,
+      answerable:
+        q.status === 'open' &&
+        this.slots[q.agent as Agent].route?.id === q.route &&
+        views.some(
+          (v) => v?.threadId === q.thread && v?.waiting.questions.some((open) => open.id === q.id)
+        ) &&
+        (!q.expiresAt || Date.parse(q.expiresAt) > Date.now())
+    }));
     return {
       posts: this.db.conversation(),
       inbox,
@@ -374,6 +390,6 @@ export class Desk {
     }
     await Promise.all(Object.values(this.slots).map((s) => s.process?.stop()));
     await Promise.all(Object.values(this.slots).map((s) => s.tail));
-    await Promise.all([...this.services.values()].map((p) => p.close()));
+    this.control.close();
   }
 }
