@@ -238,4 +238,4 @@ Each implementation passes:
 - the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp`, and with `--connect` against `ma --acp --listen`;
 - its own tests, including that it depends only on its SDK's public API.
 
-Planned reference check, not yet counted: `telemetry-export`. Run a scripted turn without endpoints and check that it sends nothing to the default OTLP endpoint. With a loopback endpoint and always-on sampler, check the invocation and inference spans, `gen_ai.agent.name=ma`, configured `service.name` and no content. Repeat with `OTEL_SDK_DISABLED=true`; export stops and the declaration stays the same.
+Planned reference check, not yet counted: `telemetry-export`. Run a scripted turn without endpoints and check that it sends nothing to the default OTLP endpoint. With a loopback endpoint and always-on sampler, check the invocation and inference spans, `gen_ai.agent.name=ma` and no content, and check the configured `service.name` on the OTLP resource as the receiver gets it; a backend's span query may not return resource attributes. Repeat with `OTEL_SDK_DISABLED=true`; export stops and the declaration stays the same.

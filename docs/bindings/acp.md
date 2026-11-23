@@ -33,7 +33,7 @@ The agent MUST advertise `loadSession: true` and `sessionCapabilities.list`, `.r
 
 ### Metadata
 
-In `/1` and `/2`, work requests that take `params._meta` MAY carry W3C `traceparent` and optional `tracestate` directly in it, not under `"modular-agent"`. Absent, invalid or unknown trace metadata does not change the operation. Do not reuse `initialize` context for work. See [Context on the wire](../telemetry.md#context-on-the-wire).
+In `/1` and `/2`, work requests that take `params._meta` MAY carry W3C `traceparent` and optional `tracestate` directly in it, not under `"modular-agent"`. Absent, invalid or unknown trace metadata does not change the operation. Do not reuse `initialize` context for work. See [Context on the wire](../telemetry.md#context-on-the-wire). Trust for trace context is separate from authentication and rights: a receiver MAY accept it from an operator-launched stdio peer by default, but not from an authenticated network peer unless the operator includes that peer in its trace trust scope.
 
 Peers MUST use the following fields under `_meta["modular-agent"]` on the indicated messages. Fields marked optional are omitted when not applicable. For an update the namespace is on the ACP update payload (`params.update`); for a `/2` failed prompt it is under `error.data._meta`.
 
