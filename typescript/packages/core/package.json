@@ -9,6 +9,7 @@
     "./internal-cli": "./dist/src/internal-cli.js"
   },
   "dependencies": {
+    "@ag-ui/core": "1.0.5",
     "@earendil-works/pi-mcp": "1.5.2",
     "@modular-agent/approval": "*",
     "@modular-agent/context-compaction": "0.1.0",

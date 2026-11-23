@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { constants } from "node:fs";
 import { open, readFile } from "node:fs/promises";
-import { createServer as httpServer } from "node:http";
+import { createServer as httpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer as httpsServer } from "node:https";
 import { isIP, type Socket } from "node:net";
 import WebSocket, { WebSocketServer } from "ws";
@@ -12,7 +12,7 @@ export const ACP_PROTOCOL = "modular-agent-acp-1";
 
 export interface ListenOptions {
 	listen: string;
-	tls?: { certFile: string; keyFile: string };
+	tls?: { certFile: string; keyFile: string; /** Require a client certificate issued by this CA. */ clientCaFile?: string };
 }
 export interface ServiceServer {
 	readonly url: string;
@@ -43,7 +43,7 @@ async function tokenFrom(file: string): Promise<string> {
 	const fd = await open(file, constants.O_RDONLY | constants.O_NONBLOCK);
 	try {
 		const stat = await fd.stat();
-		if (!stat.isFile() || stat.mode & 0o077 || stat.size > 8192) throw new Error("Expected a regular, owner-only token file");
+		if (!stat.isFile() || stat.mode & 0o077 || process.getuid && stat.uid !== process.getuid() || stat.size > 8192) throw new Error("Expected a regular, owner-only token file");
 		const token = (await fd.readFile("utf8")).trim();
 		// Entropy is an operator requirement; reject obviously too-short tokens and header delimiters.
 		if (token.length < 16 || !/^[a-zA-Z0-9._~+/-]+=*$/.test(token)) throw new Error("Expected a bearer token with at least 128 bits of entropy");
@@ -87,13 +87,24 @@ export function receiveMessages(ws: WebSocket, receive: (bytes: Buffer) => void)
 
 export async function listenWebSocket<T>(options: ListenOptions, protocol: string,
 	actors: readonly { tokenFile: string; value: T }[],
-	connection: (ws: WebSocket, value: T, tokenKey: string) => Promise<void>,
+	connection: ((ws: WebSocket, value: T, tokenKey: string) => Promise<void>) | undefined,
+	http?: { request(req: IncomingMessage, res: ServerResponse, principal?: T): void; allowOrigin(req: IncomingMessage): boolean },
 ): Promise<ServiceServer> {
 	const { url, port, host } = listenAddress(options);
 	const entries = await Promise.all(actors.map(async ({ tokenFile, value }) => ({ value, key: digest(`Bearer ${await tokenFrom(tokenFile)}`) })));
 	if (!entries.length || new Set(entries.map(e => e.key.toString("hex"))).size !== entries.length) throw new Error("Expected distinct service tokens");
-	const rejectHttp = (_: unknown, response: import("node:http").ServerResponse) => { response.writeHead(404).end(); };
-	const server = options.tls ? httpsServer({ cert: await readFile(options.tls.certFile), key: await readFile(options.tls.keyFile) }, rejectHttp) : httpServer(rejectHttp);
+	const authenticate = (request: IncomingMessage) => {
+		const presented = digest(request.headers.authorization ?? "");
+		let selected: typeof entries[number] | undefined;
+		for (const entry of entries) if (timingSafeEqual(presented, entry.key)) selected = entry;
+		return selected;
+	};
+	const request = (req: IncomingMessage, res: ServerResponse) => {
+		if (http) http.request(req, res, authenticate(req)?.value);
+		else res.writeHead(404).end();
+	};
+	const server = options.tls ? httpsServer({ cert: await readFile(options.tls.certFile), key: await readFile(options.tls.keyFile),
+		...(options.tls.clientCaFile ? { ca: await readFile(options.tls.clientCaFile), requestCert: true, rejectUnauthorized: true } : {}) }, request) : httpServer(request);
 	server.requestTimeout = 5_000;
 	server.headersTimeout = 5_000;
 	const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE, perMessageDeflate: false,
@@ -106,11 +117,10 @@ export async function listenWebSocket<T>(options: ListenOptions, protocol: strin
 	});
 	let stopping = false;
 	server.on("upgrade", (request, socket, head) => {
-		const presented = digest(request.headers.authorization ?? "");
-		let selected: typeof entries[number] | undefined;
-		for (const entry of entries) if (timingSafeEqual(presented, entry.key)) selected = entry;
+		const selected = authenticate(request);
 		const refuse = (status: string) => socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
 		if (!selected) return refuse("401 Unauthorized");
+		if (!connection || http && !http.allowOrigin(request)) return refuse("403 Forbidden");
 		if (stopping) return refuse("503 Service Unavailable");
 		const offered = request.headers["sec-websocket-protocol"];
 		if (!offered?.split(",").some(p => p.trim() === protocol) || request.url !== url.pathname) return refuse("400 Bad Request");

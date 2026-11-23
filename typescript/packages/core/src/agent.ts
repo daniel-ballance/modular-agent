@@ -11,6 +11,8 @@ import { durableRuntime } from "@modular-agent/runtime-durable";
 import { startExternalPlugin, startPluginService, pluginSpecsFromEnv, conformanceProvider, conformanceTools, ACP_PROTOCOL, listenWebSocket, receiveMessages, type ListenOptions, type ServiceServer, type ExternalPluginSpec, type PluginSpec, type ServicePluginSpec } from "@modular-agent/plugin-wire";
 import { acpInterface, localAcpActor } from "@modular-agent/interface-acp";
 import { HistoryArchive, historyClientOptions, historyRelay, historyService, HttpHistoryStore, type HistoryServiceStore } from "@modular-agent/services";
+import { AguiBinding, type AguiProjectionOptions, type Target } from "./agui.js";
+import { fail } from "./agui-wire.js";
 import { AgentError, checked, messageOf } from "./errors.js";
 import { collect, definePlugin, type AgentInterface, type Plugin } from "./plugin.js";
 import { type Provider } from "./provider.js";
@@ -99,6 +101,10 @@ export interface AcpActorToken {
 export interface ServeAcpServiceOptions extends ServeAcpOptions, ListenOptions {
   actors: readonly AcpActorToken[];
   controlTimeoutMs?: number;
+}
+export interface ServeAguiOptions extends ServeAcpServiceOptions, AguiProjectionOptions {
+  actors: readonly (AcpActorToken & { clientId: string })[];
+  acp?: boolean; tenant?: string; origins?: readonly string[];
 }
 export interface SessionSummary { id: string; project: string; updated: number; model?: ModelRef; title?: string }
 export interface SessionInfo { id: string; project: string; created: number; updated: number; settings: Settings; tenant?: string }
@@ -194,6 +200,7 @@ export class Agent {
   #scratch: string;
   #h: Harness;
   #defaultHandler?: QuestionHandler;
+  #sources: readonly InterfaceToolSource[] = [];
   #portable = false;
   #interruption = new AbortController();
   #rebuild?: () => Promise<Agent>;
@@ -302,7 +309,8 @@ export class Agent {
       if (options.conformance) await agent.#load(conformanceTools(false, agent.#api.tools().map(t => t.name)));
       agent.#hostEnabled = options.pluginHost ?? configuredHost;
       await agent.#loadRemotes([...options.processPlugins ?? [], ...options.servicePlugins ?? [], ...(agent.#hostEnabled ? pluginSpecsFromEnv() : [])]);
-      await h.registerInterfaceTools(options.interfaceTools ?? []);
+      agent.#sources = structuredClone(options.interfaceTools ?? []);
+      await h.registerInterfaceTools(agent.#sources);
       const effectiveRuntime = h.use<Runtime>("runtime");
       // The ACP kit substitutes its own Runtime to exercise the remote bridge.
       if (durability === "durable" && effectiveRuntime?.supports.continuesAfterRestart !== true &&
@@ -563,6 +571,13 @@ export class Agent {
   serveAcp(options?: ServeAcpOptions & { listen?: never }): Promise<void>;
   serveAcp(options: ServeAcpServiceOptions): Promise<ServiceServer>;
   async serveAcp(options: (ServeAcpOptions & { listen?: never }) | ServeAcpServiceOptions = {}): Promise<void | ServiceServer> {
+    return this.#serve(options);
+  }
+  async serveAgui(options: ServeAguiOptions): Promise<ServiceServer> {
+    if (!options?.listen) throw new AgentError("invalid_composition", "AG-UI requires a service listener");
+    return await this.#serve(options, options) as ServiceServer;
+  }
+  async #serve(options: (ServeAcpOptions & { listen?: never }) | ServeAcpServiceOptions, agui?: ServeAguiOptions): Promise<void | ServiceServer> {
     this.#check();
     if (this.#acp || this.#open.size || this.#opening.size) throw new AgentError("busy", "ACP must start before opening sessions");
     this.#acp = true;
@@ -608,9 +623,34 @@ export class Agent {
         if (!(await stat(canonical)).isDirectory()) throw new AgentError("invalid_composition", "ACP project must be a directory");
         return canonical;
       })));
-      return { actor: { id: actor.id, kind: actor.kind, authority: rights }, ceiling, represents, traceTrusted: config.traceTrusted,
+      return { scopeKey: JSON.stringify([actor.id, actor.kind, [...rights].sort(), [...tenants].sort(), projects && [...projects].sort(), config.traceTrusted ?? false]), actor: { id: actor.id, kind: actor.kind, authority: rights }, ceiling, represents, traceTrusted: config.traceTrusted,
         allowTenant: (tenant: string | null) => tenants.has(tenant),
         allowProject: (project: string) => (!!options.compose || project === this.#project) && (!projects || projects.has(project)) };
+    };
+    const selectProject = async (project: string, id?: string, saved?: SessionInfo) => {
+      const key = JSON.stringify([project, saved?.id]);
+      let selected = id ? sessions.get(id) : undefined;
+      if (!selected && options.compose) {
+        let pending = agents.get(key);
+        if (!pending) {
+          pending = (async () => {
+            const agent = await options.compose!(project, saved);
+            if (agent === this) return agent;
+            try {
+              if (agent.#project !== project || agent.#open.size || agent.#acp) throw new AgentError("invalid_composition", "Factory must return a fresh agent for this project");
+              agent.#h.shareReservations(this.#h);
+              agent.#acp = true;
+              await installMcp(agent);
+              return agent;
+            } catch (error) { await agent.close(); throw error; }
+          })();
+          agents.set(key, pending);
+          void pending.catch(() => { if (agents.get(key) === pending) agents.delete(key); });
+        }
+        selected = await pending;
+      }
+      selected ??= this;
+      return selected;
     };
     const prepareConnection = (scope: Awaited<ReturnType<typeof makeScope>>, network: boolean) => {
       const attached = new Map<PluginApi, { detach(): void; agent: Agent }>();
@@ -658,28 +698,7 @@ export class Agent {
           if (!(await stat(project)).isDirectory()) throw new AgentError("invalid_params", "Project must be a directory");
           if (!scope.allowProject(project)) throw inaccessible();
           if (saved && saved.project !== project) throw new AgentError("wrong_project", "Session belongs to a different project");
-          const key = JSON.stringify([project, saved?.id]);
-          let selected = id ? sessions.get(id) : undefined;
-          if (!selected && options.compose) {
-            let pending = agents.get(key);
-            if (!pending) {
-              pending = (async () => {
-                const agent = await options.compose!(project, saved);
-                if (agent === this) return agent;
-                try {
-                  if (agent.#project !== project || agent.#open.size || agent.#acp) throw new AgentError("invalid_composition", "Factory must return a fresh agent for this project");
-                  agent.#h.shareReservations(this.#h);
-                  agent.#acp = true;
-                  await installMcp(agent);
-                  return agent;
-                } catch (error) { await agent.close(); throw error; }
-              })();
-              agents.set(key, pending);
-              void pending.catch(() => { if (agents.get(key) === pending) agents.delete(key); });
-            }
-            selected = await pending;
-          }
-          selected ??= this;
+          const selected = await selectProject(project, id, saved);
           attach(selected);
           if (id) sessions.set(id, selected);
           return { api: selected.#api, cwd: project };
@@ -715,10 +734,41 @@ export class Agent {
       const controlTimeoutMs = options.controlTimeoutMs ?? 5000;
       if (!Number.isSafeInteger(controlTimeoutMs) || controlTimeoutMs <= 0) throw new AgentError("invalid_params", "Invalid control timeout");
       const actors = await Promise.all(options.actors.map(async entry => ({
-        tokenFile: entry.tokenFile, value: await makeScope(entry.actor, entry, true),
+        tokenFile: entry.tokenFile, value: { ...await makeScope(entry.actor, entry, true), clientId: (entry as { clientId?: string }).clientId ?? "" },
       })));
+      let http: AguiBinding | undefined;
+      if (agui) {
+        const keys = new Map<string, string>();
+        for (const { value } of actors) {
+          if (!isId(value.clientId) || keys.has(value.clientId) && keys.get(value.clientId) !== value.scopeKey ||
+              this.#sources.some(s => s.routeId === value.clientId && s.actorId !== value.actor.id)) {
+            throw new AgentError("invalid_composition", "AG-UI needs a stable clientId unique to the actor and scope");
+          }
+          keys.set(value.clientId, value.scopeKey);
+        }
+        if (agui.origins && (!Array.isArray(agui.origins) || !agui.origins.every(o => { const u = new URL(o); return /^https?:$/.test(u.protocol) && o === u.origin; }))) {
+          throw new AgentError("invalid_composition", "Invalid browser origin");
+        }
+        const target = (agent: Agent): Target => ({ h: agent.#h, api: agent.#api, agent, sources: agent.#sources });
+        http = new AguiBinding({ ...agui, root: target(this), project: this.#project, principalScope: (actor, fn) => this.#h.withConnectionActor(actor, fn),
+          associate: (id, agent) => sessions.set(id, agent),
+          locate: async (p, id) => {
+            if (!p.allowProject(this.#project)) fail("not_found");
+            const owner = id && sessions.get(id) || this;
+            const live = id ? owner.#h.liveSessionInfo(id) : undefined;
+            const saved = id && !live ? await owner.sessionInfo(id).catch(e => {
+              if (e.code === "not_found" || e.cause?.code === "ENOENT") fail("not_found"); throw e;
+            }) : undefined;
+            const info = live ?? saved;
+            if (info && (info.project !== this.#project || !p.allowTenant(info.tenant ?? null))) fail("not_found");
+            if (id && !await owner.#h.canDiscoverSession(id, p.actor, owner.#authority.severalActors)) fail("not_found");
+            const agent = await selectProject(this.#project, id, saved);
+            if (id) sessions.set(id, agent);
+            return target(agent);
+          } });
+      }
       await installMcp(this);
-      const server = await listenWebSocket(options, ACP_PROTOCOL, actors, async (ws, scope) => {
+      const server = await listenWebSocket(options, ACP_PROTOCOL, actors, agui && !agui.acp ? undefined : async (ws, scope) => {
         const { binding, detach } = prepareConnection(scope, true);
         try {
           await binding.acp.serveMessages({
@@ -728,8 +778,10 @@ export class Agent {
             controlTimeoutMs, lose: () => ws.terminate(),
           });
         } finally { detach(); if (ws.readyState === ws.OPEN) ws.close(1000); }
-      });
-      this.#stopAcp = async () => { await server.close(); await disposeProjects(); };
+      }, http);
+      const stopListener = async () => { http?.close(); await server.close(); };
+      this.#stopAcp = async () => { await stopListener(); await disposeProjects(); };
+      if (agui) { serving = true; return { url: new URL(server.url.replace(/^ws/, "http")).origin, close: stopListener }; }
       serving = true;
       return { url: server.url, close: () => this.close() };
     } catch (error) { throw new AgentError("invalid_composition", messageOf(error), undefined, error); }
