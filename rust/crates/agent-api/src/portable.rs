@@ -653,7 +653,20 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                             .filter(|_| d["startedBy"]["kind"] == "actor")
                             .map(str::to_owned)
                     })
-                    .unwrap_or_else(|| "user".into()),
+                    .unwrap_or_else(|| {
+                        if k == "toolResult"
+                            && data.entries.iter().any(|checkpoint| {
+                                interface_handoff(checkpoint)
+                                    && v["sources"].as_array().is_some_and(|ids| {
+                                        ids.iter().any(|id| id == &checkpoint.id)
+                                    })
+                            })
+                        {
+                            String::new()
+                        } else {
+                            "user".into()
+                        }
+                    }),
                 turn: field("turnId"),
                 step: field("stepId"),
                 call: field("toolCallId"),

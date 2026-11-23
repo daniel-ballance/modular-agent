@@ -1693,6 +1693,13 @@ impl TurnWork {
                 ensure!(
                     ids.iter()
                         .map(Value::as_str)
+                        .filter(|id| !data.entries.iter().any(|e| {
+                            interface_handoff(e)
+                                && e.scope.turn == self.input.scope.turn
+                                && e.scope.call.as_deref() == *id
+                                && interface_result(&data, e)
+                                    .is_some_and(|r| r.scope.actor.is_empty())
+                        }))
                         .eq(open.iter().map(|call| Some(call.id.as_str()))),
                     "openToolCalls differs from committed pending calls"
                 );
@@ -1781,6 +1788,8 @@ impl TurnWork {
             "external.runtime",
             Draft::new("turn.end", false, json!(r)).copying(self.sources(api, scope, true)?),
         )?;
+        r.open_calls =
+            serde_json::from_value(entry.content.as_ref().unwrap()["open_calls"].clone())?;
         api.emit(Event::new(scope, "turn.end", json!(r))).await?;
         Ok(entry)
     }

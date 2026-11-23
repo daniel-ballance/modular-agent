@@ -1299,7 +1299,7 @@ impl Engine {
         if let Err(error) = self.hook(api, "turn.end", scope, json!(result)).await {
             eprintln!("turn.end observer failed: {error:#}");
         }
-        self.record(
+        let end = self.record(
             api,
             scope,
             "turn.end",
@@ -1307,6 +1307,8 @@ impl Engine {
             json!(result),
             entries.iter().map(|e| e.id.clone()).collect(),
         )?;
+        result.open_calls =
+            serde_json::from_value(end.content.as_ref().unwrap()["open_calls"].clone())?;
         api.emit(Event::new(scope, "turn.end", json!(result)))
             .await?;
         Ok(result)

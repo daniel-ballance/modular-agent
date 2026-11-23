@@ -36,6 +36,31 @@ async fn compact(api: Api, scope: &Scope, system: &str, force: bool) -> Result<b
     if boundary == 0 {
         boundary = visible.len();
     }
+    // A summary must not separate a handed-off call from its eventual
+    // result. Keep both in the live view if the pair cannot fit the prefix.
+    for (index, response) in visible.iter().enumerate().rev() {
+        if response.kind != "model.response" || index >= boundary {
+            continue;
+        }
+        if data
+            .entries
+            .iter()
+            .filter(|e| {
+                interface_handoff(e)
+                    && e.scope.turn == response.scope.turn
+                    && e.scope.step == response.scope.step
+            })
+            .any(|handoff| {
+                !visible[..boundary].iter().any(|e| {
+                    e.kind == "tool.result"
+                        && e.scope.call == handoff.scope.call
+                        && e.content.is_some()
+                })
+            })
+        {
+            boundary = index;
+        }
+    }
     let old = &visible[..boundary];
     if old.is_empty() {
         return Ok(false);

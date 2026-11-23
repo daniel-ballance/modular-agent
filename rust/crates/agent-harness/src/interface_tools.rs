@@ -69,13 +69,13 @@ struct Configuration {
 struct Candidate {
     id: String,
     actor: String,
-    authority: Authority,
 }
 struct Presence {
     session: String,
     route: String,
     authority: Authority,
     tools: BTreeSet<String>,
+    generation: CancellationToken,
     sender: mpsc::Sender<String>,
 }
 
@@ -270,7 +270,7 @@ impl Harness {
         let open = sessions
             .get(session)
             .ok_or_else(|| OperationError::NotFound("unknown session".into()))?;
-        let authority = executor_rights(&open.data, actor, &ceiling)?;
+        let authority = self.executor_rights(&open.data, actor, &ceiling)?;
         ensure!(
             eligible(&authority),
             OperationError::Forbidden("executor lacks watch or tools".into())
@@ -284,6 +284,7 @@ impl Harness {
                 route: route.into(),
                 authority,
                 tools: BTreeSet::new(),
+                generation: open.generation.clone(),
                 sender,
             },
         );
@@ -312,18 +313,19 @@ impl Harness {
             .find_map(|(id, p)| {
                 if p.route != source.config.route_id
                     || p.session != data.id
+                    || p.generation.is_cancelled()
                     || p.sender.is_closed()
                     || !p.tools.contains(name)
                     || connection.is_some_and(|c| id != c)
                 {
                     return None;
                 }
-                let authority =
-                    executor_rights(data, &source.config.actor_id, &p.authority).ok()?;
+                let authority = self
+                    .executor_rights(data, &source.config.actor_id, &p.authority)
+                    .ok()?;
                 eligible(&authority).then(|| Candidate {
                     id: id.clone(),
                     actor: source.config.actor_id.clone(),
-                    authority,
                 })
             })
     }
@@ -406,7 +408,7 @@ impl Harness {
             let Ok(slot) = p.sender.try_reserve() else {
                 return refused("Interface executor cannot receive a call");
             };
-            let ceiling = executor_rights(&open.data, &candidate.actor, &p.authority)?;
+            let ceiling = self.executor_rights(&open.data, &candidate.actor, &p.authority)?;
             if !eligible(&ceiling) {
                 return refused("Interface executor lacks watch or tools");
             }
@@ -676,7 +678,8 @@ impl Harness {
                     *deadline > now()
                         && eligible(ceiling)
                         && branch.iter().any(|e| e.id == checkpoint.id)
-                        && executor_rights(data, &source.config.actor_id, ceiling)
+                        && self
+                            .executor_rights(data, &source.config.actor_id, ceiling)
                             .is_ok_and(|cap| eligible(&cap))
                         && (branch.iter().any(|e| {
                             e.kind == "turn.end"
@@ -802,19 +805,21 @@ impl Harness {
             }
             let connections = self.interface_tools.connections.lock().unwrap();
             let live = connections.get(&connection.id).ok_or(Refused)?;
-            if !executor_rights(
-                data,
-                &source.config.actor_id,
-                &live.authority.intersect(&ceiling),
-            )
-            .is_ok_and(|a| eligible(&a))
+            if !self
+                .executor_rights(
+                    data,
+                    &source.config.actor_id,
+                    &live.authority.intersect(&ceiling),
+                )
+                .is_ok_and(|a| eligible(&a))
             {
                 return Err(Refused);
             }
             if let Some(result) = interface_result(data, handoff) {
                 return Err(
-                    if result.content.is_some()
-                        && result.scope.actor == source.config.actor_id
+                    if result.content.as_ref().is_some_and(|v| {
+                        matches!(v["status"].as_str(), Some("completed" | "failed"))
+                    }) && result.scope.actor == source.config.actor_id
                         && branch.iter().any(|e| e.id == result.id)
                     {
                         AlreadySettled
@@ -909,10 +914,22 @@ impl Harness {
         scope: &Scope,
         result: &mut TurnResult,
     ) -> Result<()> {
+        if !self.has_interface_tools() {
+            return Ok(());
+        }
         let mut sessions = self.sessions.lock().unwrap();
         let open = sessions
             .get_mut(&scope.session)
             .ok_or_else(|| anyhow!("session is closed"))?;
+        self.finish_open_interface_turn(open, scope, result)
+    }
+
+    pub(super) fn finish_open_interface_turn(
+        &self,
+        open: &mut OpenSession,
+        scope: &Scope,
+        result: &mut TurnResult,
+    ) -> Result<()> {
         for handoff in open
             .data
             .branch()
@@ -1146,21 +1163,44 @@ fn push(data: &mut SessionData, scope: &Scope, draft: Draft) -> Entry {
 fn eligible(cap: &Authority) -> bool {
     cap.has("watch") && cap.has("tools")
 }
-fn executor_rights(data: &SessionData, actor: &str, ceiling: &Authority) -> Result<Authority> {
-    let mut current = if actor == "user" {
-        Authority::full()
-    } else {
-        Authority::default()
-    };
-    for e in &data.entries {
-        let Some(v) = e.content.as_ref() else {
-            continue;
+impl Harness {
+    fn executor_rights(
+        &self,
+        data: &SessionData,
+        actor: &str,
+        ceiling: &Authority,
+    ) -> Result<Authority> {
+        let mut current = if actor == "user" {
+            Authority::full()
+        } else {
+            Authority::default()
         };
-        if e.kind == "actor.grant" && v["actor"] == actor {
-            current = serde_json::from_value(v["authority"].clone())?;
-        } else if e.kind == "actor.left" && v["actorId"] == actor {
-            current = Authority::default();
+        for e in &data.entries {
+            let Some(v) = e.content.as_ref() else {
+                continue;
+            };
+            if e.kind == "actor.grant" && v["actor"] == actor {
+                current = serde_json::from_value(v["authority"].clone())?;
+            } else if e.kind == "actor.left" && v["actorId"] == actor {
+                current = Authority::default();
+            }
         }
+        if let Some(rights) = data
+            .entries
+            .iter()
+            .rev()
+            .find(|e| e.kind == "limit")
+            .and_then(|e| e.content.as_ref())
+            .and_then(|v| wire::optional(v, "rights"))
+        {
+            current = current.intersect(&serde_json::from_value(rights.clone())?);
+        }
+        if let Some(tenant) = tenants::name(data) {
+            current = current.intersect(&self.check_tenant(tenant)?.rights);
+        }
+        if let Some(rights) = data.settings.get("_authority") {
+            current = current.intersect(&serde_json::from_value(rights.clone())?);
+        }
+        Ok(current.intersect(ceiling))
     }
-    Ok(current.intersect(ceiling))
 }

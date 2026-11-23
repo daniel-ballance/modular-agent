@@ -2446,12 +2446,17 @@ impl AgentApi for Harness {
         }
         Ok(entries)
     }
-    fn append(&self, scope: &Scope, writer: &str, draft: Draft) -> Result<Entry> {
+    fn append(&self, scope: &Scope, writer: &str, mut draft: Draft) -> Result<Entry> {
         let mut sessions = self.sessions.lock().unwrap();
         let open = sessions
             .get_mut(&scope.session)
             .ok_or_else(|| anyhow!("session not open"))?;
         open.check_rewind()?;
+        if draft.kind == "turn.end" && self.has_interface_tools() {
+            let mut result = serde_json::from_value(draft.content.clone())?;
+            self.finish_open_interface_turn(open, scope, &mut result)?;
+            draft.content["open_calls"] = json!(result.open_calls);
+        }
         if draft.kind == "tool.result" {
             ensure!(
                 !open

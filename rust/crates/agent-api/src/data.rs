@@ -220,9 +220,11 @@ pub fn record_erasure(data: &mut SessionData, entry_ids: Vec<String>, input_keys
                 writer: "harness".into(),
                 at: now(),
                 kind: draft.kind,
-                visible: draft.visible,
+                // This terminal settlement belongs to the erased call's copy
+                // set. Keep its identity, not a newly readable derived entry.
+                visible: false,
                 copies: draft.copies,
-                content: Some(draft.content),
+                content: None,
             };
             data.position = Some(entry.id.clone());
             data.entries.push(entry);
