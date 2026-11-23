@@ -24,7 +24,7 @@ See [Terminology](#terminology) under Settled.
 
 ### Waiting for an answer
 
-**Choice: question deadlines.** Use finite deadlines for unattended work. Approvals never outlast their turn; expiration declines the request. See [Question lifecycle](#question-lifecycle).
+**Choice: question deadlines.** Use finite deadlines for unattended work. Approvals never outlast their turn; expiration declines the request. The proposed [AG-UI binding](bindings/agui.md#interrupts-and-frontend-tools) can close an exchange and keep the turn waiting on an independently present route. See [Question lifecycle](#question-lifecycle).
 
 ### Input during a turn
 
@@ -64,11 +64,11 @@ See [Model changes](#model-changes) under Settled.
 
 ### Tools run by an Interface
 
-**Limit: Interface-supplied tools.** There is no portable profile for running tools in a client's environment. ACP client file and terminal methods are not used. Default: run tools in the agent's checked working environment instead. Host-supplied MCP servers are agent-started programs, not client-side tool execution. See [MCP servers](contracts.md#mcp-servers) and [Security](security.md).
+See the proposed [Interface-run tool rules](contracts.md#interface-run-tools) and [ADR 0033](adr/0033-interface-tools-and-ag-ui.md). ACP client file and terminal methods are still not used by the current ACP binding. Host-supplied MCP servers are agent-started programs, not Interface execution.
 
 ### Tool calls outside a turn
 
-**Limit: injecting direct results.** The default portable context excludes out-of-turn tool calls. There is no common operation for inserting their results into model context. Use an authorized input or a deployment's context handler, not direct access to the tool source. See [Tool dispatch](#tool-dispatch).
+**Limit: injecting direct results.** The default portable context excludes out-of-turn tool calls. There is no common operation for inserting their results into model context. Use an authorized input or a deployment's context handler, not direct access to the tool source. A late [Interface tool result](bindings/data.md#interface-handoff-records) is not a new out-of-turn call: it settles a recorded call from a turn. See [Tool dispatch](#tool-dispatch).
 
 ### Parallel tool calls
 
@@ -96,7 +96,7 @@ See [Erasure](#erasure) under Settled.
 
 ### The agent from outside
 
-**Limit: other Interfaces.** [Interface and Harness](contracts.md#interface-and-harness) defines the core operations; [ACP](bindings/acp.md) maps the host wire. The edition supplies no separate interoperable HTTP Interface, model gateway or network working environment profile. Default: use the specified bindings across builds. Keep other service APIs private to a deployment with its own authentication, authorization and retry rules. Refuse combinations that require an unverified version, feature or policy; matching a major version does not certify historical snapshots.
+**Limit: other Interfaces.** [Interface and Harness](contracts.md#interface-and-harness) defines the core operations; [ACP](bindings/acp.md) maps the host wire. The [proposed AG-UI binding](bindings/agui.md) maps an HTTP Interface on the shared listener. There is no model gateway or network working environment profile. Default: use the specified bindings across builds. Keep other service APIs private to a deployment with its own authentication, authorization and retry rules. Refuse combinations that require an unverified version, feature or policy; matching a major version does not certify historical snapshots.
 
 ### Agents working together
 

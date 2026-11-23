@@ -26,21 +26,23 @@ Under [ADR 0010](../adr/0010-describe-parts-not-wiring.md) we read these protoco
 
 ## AG-UI (Agent-User Interaction Protocol)
 
-- **1.0 is released**, the first version with a normative specification. The schema is the single source of truth, and SDKs are generated from it. There are HTTP and HTTP + Protobuf bindings.
+Rechecked 2026-11-23. See the [AG-UI 1.0 research note](ag-ui.md) for the full event catalog and primary sources.
+
+- **1.0 is released**, the first version with a normative specification. The schema is the single source of truth, and SDKs are generated from it. HTTP + SSE is required for HTTP implementations; HTTP + Protobuf is optional. The request is JSON in either binding.
 - **Events:**
   - run lifecycle: `RUN_STARTED`, `RUN_FINISHED`, `RUN_ERROR`; `STEP_STARTED`, `STEP_FINISHED`
   - text messages: `TEXT_MESSAGE_*`
-  - tool calls: `TOOL_CALL_START`, `TOOL_CALL_ARGS`, `TOOL_CALL_END`, `TOOL_CALL_RESULT`
+  - tool calls: `TOOL_CALL_START`, `TOOL_CALL_ARGS`, `TOOL_CALL_END`, `TOOL_CALL_CHUNK`, `TOOL_CALL_RESULT`
   - state: `STATE_SNAPSHOT`, `STATE_DELTA`, `MESSAGES_SNAPSHOT`
   - activity: `ACTIVITY_SNAPSHOT`, `ACTIVITY_DELTA`
   - reasoning: `REASONING_*`, including `REASONING_ENCRYPTED_VALUE`
   - subagents: `SUBAGENT_STARTED`, `SUBAGENT_FINISHED`, `SUBAGENT_ERROR`
   - escape hatches: `RAW`, `CUSTOM`
 - **Interrupts:** `RUN_FINISHED` carries an optional `outcome` (success, `interrupt` or `cancelled`). A later `RunAgentInput` answers the interrupt with `resume` entries (an interrupt ID, a status of resolved or cancelled, and a payload).
-- **Frontend tools:** a run that stops on a frontend tool call finishes as a success, and may list the unanswered calls in `pendingToolCallIds`.
+- **Frontend tools:** a run that stops on a frontend tool call finishes as a success, and may list the unanswered calls in `pendingToolCallIds`. The next run answers them with tool messages, not `resume` entries. If there is also a question interrupt, derive the pending calls from the unanswered tool events.
 - **Unknown versus malformed:** a malformed known value is fatal. Unknown events are dropped, and unknown fields on a known event are stripped before application code sees them; open extension data, such as `CUSTOM` and `RAW` events, is kept ([processing](https://docs.ag-ui.com/spec/1.0/basic/processing.md), last modified 2026-09-17; corrected 2026-11-22 after the [round 2 pressure test](../pressure-test/round-2/rung-4-maximal.md) found the earlier wording wrong).
 - Tool results can carry content parts. Token usage can appear on `RUN_FINISHED` and `RUN_ERROR`. The protocol version travels in-band. Capabilities can be declared, but the stream itself is authoritative.
-- **Relevance:** the closest existing protocol to our Interface ↔ Harness boundary for UIs. Its thread, run and step map onto our session, turn and step, but AG-UI's "step" is not necessarily a model call.
+- **Relevance:** the closest existing protocol to our Interface ↔ Harness boundary for UIs. A thread maps to a session; a run follows a turn or delivers answers or results that continue one, but AG-UI's "step" is not necessarily a model call.
 - Sources: <https://docs.ag-ui.com/spec/1.0/changelog>, <https://github.com/ag-ui-protocol/ag-ui>
 
 ## A2A (Agent2Agent)

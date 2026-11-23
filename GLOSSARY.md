@@ -55,6 +55,9 @@ _Avoid_: Frontend, client, UI (each is too narrow)
 The capability that offers tools and runs them, such as built-in tools, an MCP server or another agent.
 _Avoid_: Toolset, tool provider
 
+**Interface-run tool**:
+A tool whose executor is an authenticated actor's Interface. The Harness dispatches the call and receives its result.
+
 **Working environment**:
 The capability that provides where files live and commands run: the local machine, a remote host or a sandbox.
 _Avoid_: Workspace, sandbox (one kind of it), environment (too vague)
@@ -104,7 +107,7 @@ _Avoid_: Turn (Pi's word for it), iteration
 A model request a plugin makes for its own work, such as writing a summary. It has usage but is not a step.
 
 **Continuation turn**:
-A new turn that takes up pending calls from an ended turn once their questions are closed. It does not start from a new input admission.
+A new turn that takes up pending calls from an ended turn once their questions are closed and any Interface-run calls have settled. It does not start from a new input admission.
 
 **Metered identity**:
 The model attempt or job to which reported usage belongs. The same work still has the same identity after its entry is erased.

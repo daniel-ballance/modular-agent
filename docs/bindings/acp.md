@@ -29,7 +29,7 @@ Agent-managed state includes local history, settings, trust and local credential
 
 ## `initialize`
 
-The agent MUST advertise `loadSession: true` and `sessionCapabilities.list`, `.resume` and `.close` as `{}`. It MUST advertise only the ACP `promptCapabilities` and `mcpCapabilities` it supports. It MUST return `authMethods: []` and the initialization fields in the [metadata table](#metadata). The connection's `actor` is the configured [Actor](data.md#actors), not a grant in any session. The agent MUST NOT use the client's `fs/*` or `terminal/*` methods, even if offered. Tools run in the agent's working environment.
+The agent MUST advertise `loadSession: true` and `sessionCapabilities.list`, `.resume` and `.close` as `{}`. It MUST advertise only the ACP `promptCapabilities` and `mcpCapabilities` it supports. It MUST return `authMethods: []` and the initialization fields in the [metadata table](#metadata). The connection's `actor` is the configured [Actor](data.md#actors), not a grant in any session. In this binding the agent MUST NOT use the client's `fs/*` or `terminal/*` methods, even if offered. They are not the agent's working environment. A future profile could register wrappers as [Interface-run tools](../contracts.md#interface-run-tools); this binding defines no such mapping.
 
 ### Metadata
 
@@ -93,6 +93,7 @@ An agent MUST send every non-optional key and use only the values below. The ses
 | `confinesFiles` (optional) | boolean | File operations refuse paths resolving outside the project after symlinks. Default `false`. |
 | `resourceReservations` (optional) | `{ session, tenant, agent }`; each is `{ inputs, calls, jobs }` of nonnegative [Count](data.md#general-rules). These are the configured ceilings in [Resource reservations](../contracts.md#resource-reservations), not free slots. Omission does not declare reservation enforcement. |
 | `nestedToolCalls` (optional) | boolean | A running tool call can start [nested calls](../contracts.md#nested-calls). Default `false`. |
+| `interfaceTools` (optional) | boolean | Supports [Interface-run tools](../contracts.md#interface-run-tools) in the declared scope. Default `false`. This key does not add ACP executor or result methods. |
 | `telemetry` (optional) | `1` | Supports the [metadata-only profile](../telemetry.md). Omission makes no claim. |
 
 The table is the ACP projection of the core declaration; binding claims and extra hook names are published separately. In both versions a host MUST ignore unknown declaration members. An unrecognized `telemetry` value makes no supported profile claim. A host MUST reject missing required keys, other invalid values and the following inconsistent combinations:

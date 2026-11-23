@@ -119,7 +119,7 @@ Each SDK's README lists its own gaps.
 
 ## The specification
 
-The specification says **what** each part does, what passes between the parts, and what must always hold, not how a part works inside. Optional **bindings** fix the wire where two builds work together: ACP for hosts, a plugin protocol, and an HTTP history service. The current edition is [edition 4](docs/adr/0027-sdk-0-1-and-edition-4.md).
+The specification says **what** each part does, what passes between the parts, and what must always hold, not how a part works inside. Optional **bindings** fix the wire where two builds work together: ACP for hosts, a plugin protocol, and an HTTP history service. [AG-UI](docs/bindings/agui.md) is a proposed application binding, not yet implemented. The current edition is [edition 4](docs/adr/0027-sdk-0-1-and-edition-4.md).
 
 It was proven before any SDK existed. Five builds were made from the documents alone, four of them clean-room builds in Rust, Python, Go and Elixir. In the final swap round every build ran with every other build's parts and reopened every other build's sessions, through real `kill -9` crashes: 125 of 125 pairings passed ([status](docs/status.md#production-edition-3), [build notes](docs/build-notes.md#round-seven)). The SDKs and the four `ma` builds now repeat that check on every change: each SDK runs the [shared scenarios](conformance/sdk/README.md) with parts served by every other SDK.
 
@@ -133,7 +133,7 @@ It was proven before any SDK existed. Five builds were made from the documents a
 | [Security](docs/security.md) | the trust boundaries, and the rules that keep them | normative |
 | [OpenTelemetry](docs/telemetry.md) | Harness instrumentation and trace context, metadata only | optional profile |
 | [Scenarios](docs/scenarios.md) | seventeen situations, told with the parts and rules | informative |
-| [Bindings](docs/bindings/README.md) | the wire: [shared data](docs/bindings/data.md), [plugins](docs/bindings/plugin.md), [ACP](docs/bindings/acp.md), [history service](docs/bindings/history-http.md) | linked bindings are normative |
+| [Bindings](docs/bindings/README.md) | the wire: [shared data](docs/bindings/data.md), [plugins](docs/bindings/plugin.md), [ACP](docs/bindings/acp.md), [AG-UI draft](docs/bindings/agui.md), [history service](docs/bindings/history-http.md) | linked bindings are normative |
 | [Conformance kits](conformance/) | programs that check a build against the bindings | informative |
 | [Decision records](docs/adr/README.md) | why each decision was made, and what was rejected | informative |
 | [Open questions](docs/open-questions.md) | this edition's limits and implementation choices, with safe defaults | informative |
