@@ -18,6 +18,8 @@ pub struct RuntimeSupport {
     pub input_during_turn: bool,
     pub waiting_through_restart: bool,
     pub continues_after_restart: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub interface_tools: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

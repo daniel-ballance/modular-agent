@@ -233,6 +233,20 @@ pub trait AgentApi: Send + Sync {
     async fn output(&self, scope: &Scope, output: Output) -> Result<Option<Value>>;
     async fn command(&self, scope: &Scope, name: &str, args: &str) -> Result<Value>;
     fn commands(&self) -> Vec<String>;
+    fn interface_available(&self, _session: &SessionData, _name: &str) -> bool {
+        true
+    }
+    async fn handoff_interface_tool(
+        &self,
+        _scope: &Scope,
+        _call: &ToolCall,
+        _start: Draft,
+    ) -> Result<Option<ToolResult>> {
+        Ok(None)
+    }
+    fn finish_interface_calls(&self, _scope: &Scope, _result: &mut TurnResult) -> Result<()> {
+        Ok(())
+    }
     async fn dispatch_tool(
         &self,
         scope: &Scope,

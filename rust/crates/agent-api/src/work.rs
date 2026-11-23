@@ -110,12 +110,19 @@ pub fn require(api: &dyn AgentApi, scope: &Scope, right: &str) -> Result<()> {
 pub fn work_authority(api: &dyn AgentApi, scope: &Scope) -> Result<Authority> {
     let mut cap = api.authority(&scope.session, &scope.actor)?;
     if scope.turn.is_some() {
-        for e in api
-            .snapshot(&scope.session)?
-            .branch()
-            .iter()
-            .filter(|e| e.kind == "input" && e.scope.turn == scope.turn)
-        {
+        let branch = api.snapshot(&scope.session)?.branch();
+        let mut turns = BTreeSet::new();
+        let mut cursor = scope.turn.as_deref();
+        while let Some(id) = cursor {
+            ensure!(turns.insert(id), "cyclic continuation ancestry");
+            cursor = branch
+                .iter()
+                .find(|e| e.kind == "turn.start" && e.scope.turn.as_deref() == Some(id))
+                .and_then(|e| e.content.as_ref()?.get("continuesTurnId")?.as_str());
+        }
+        for e in branch.iter().filter(|e| {
+            e.kind == "input" && e.scope.turn.as_deref().is_some_and(|id| turns.contains(id))
+        }) {
             cap = cap.intersect(&api.authority(&scope.session, &e.scope.actor)?);
             if let Some(v) = e.content.as_ref().and_then(|v| v.get("authority")) {
                 cap = cap.intersect(&serde_json::from_value(v.clone())?);

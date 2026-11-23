@@ -7,7 +7,9 @@ mod bytes;
 pub use bytes::{ByteCapacity, ByteLimits};
 mod capacity;
 pub use capacity::{Capacity, Pool as ReservationPool, ResourceLimits};
+mod interface_tools;
 mod output;
+pub use interface_tools::{InterfaceConnection, InterfaceReportDisposition, InterfaceToolSource};
 pub use output::{apply_redactions, encode as output_event};
 mod rewind;
 mod tenants;
@@ -73,6 +75,7 @@ pub struct Harness {
     blocked_projects: Mutex<BTreeMap<PathBuf, String>>,
     pending_events: Mutex<Vec<Event>>,
     held_output: Mutex<HeldOutput>,
+    interface_tools: interface_tools::InterfaceTools,
     admissions: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
     erasure: tokio::sync::RwLock<()>,
     reservations: RwLock<Arc<ReservationPool>>,
@@ -99,6 +102,7 @@ impl Harness {
             blocked_projects: Mutex::default(),
             pending_events: Mutex::default(),
             held_output: Mutex::default(),
+            interface_tools: Default::default(),
             admissions: Mutex::default(),
             erasure: tokio::sync::RwLock::default(),
             reservations: RwLock::new(Arc::new(ReservationPool::new(ResourceLimits::default()))),
@@ -534,6 +538,7 @@ impl Harness {
         }
         let snapshot = self.snapshot(id)?;
         let branch = snapshot.branch();
+        self.recover_interface_tools(id, &snapshot)?;
         let mut interrupted = Vec::new();
         for start in branch.iter().filter(|e| e.kind == "turn.start") {
             if !branch
@@ -723,6 +728,7 @@ impl Harness {
             !self.is_running(id),
             "cancel and await the turn before closing"
         );
+        self.abandon_interface_calls(id, "Session closed")?;
         self.invoke(&self.points["session.end"], &Scope::session(id), json!({}))
             .await?;
         if let Ok(environment) = capability::<dyn WorkingEnvironment>(self, "environment") {
@@ -1346,6 +1352,7 @@ impl Harness {
                 .get_mut(session)
                 .ok_or_else(|| OperationError::NotFound("unknown session".into()))?;
             open.cancel.cancel();
+            self.abandon_open_interface_calls(open, "Interface call cancelled")?;
             open.queue.drain(..).collect::<Vec<_>>()
         };
         if !self.is_running(session) {
@@ -1442,7 +1449,7 @@ impl Harness {
         Ok(serde_json::from_value(view)?)
     }
     pub async fn run_next(&self, session: &str) -> Result<Option<TurnResult>> {
-        let (input, cancel, parent, resume, turn_id, erasure) = {
+        let (input, cancel, parent, resume, turn_id, erasure, interface) = {
             let mut sessions = self.sessions.lock().unwrap();
             let open = sessions
                 .get_mut(session)
@@ -1454,9 +1461,18 @@ impl Harness {
             );
             self.check_open_writer(open)?;
             self.refresh_open_erasure(open)?;
-            let continuation = next_continuation(&open.data)?;
+            let interface = if self.has_interface_tools() {
+                interface_tools::next_interface_continuation(&open.data)?
+            } else {
+                None
+            };
+            let continuation = if interface.is_none() {
+                next_continuation(&open.data)?
+            } else {
+                None
+            };
             let queued = open.queue.iter().position(|i| i.timing != Timing::Propose);
-            if continuation.is_none() && queued.is_none() {
+            if interface.is_none() && continuation.is_none() && queued.is_none() {
                 return Ok(None);
             }
             // An idle driver wake-up must not take a reservation against
@@ -1465,16 +1481,25 @@ impl Harness {
                 .erasure
                 .try_read()
                 .map_err(|_| anyhow!("erasure in progress"))?;
-            let (input, resume) = match continuation {
-                Some(continuation) => continuation,
-                None => (open.queue.remove(queued.unwrap()).unwrap(), vec![]),
+            let (input, resume) = match (&interface, continuation) {
+                (Some(interface), _) => (interface.input.clone(), interface.calls.clone()),
+                (_, Some(continuation)) => continuation,
+                _ => (open.queue.remove(queued.unwrap()).unwrap(), vec![]),
             };
             let turn_id = id();
             open.active = Some(ActiveTurn::Running(turn_id.clone()));
             open.steer_closed = false;
             open.cancel = CancellationToken::new();
             let parent = open.input_contexts.remove(&input.id).unwrap_or_default();
-            (input, open.cancel.clone(), parent, resume, turn_id, erasure)
+            (
+                input,
+                open.cancel.clone(),
+                parent,
+                resume,
+                turn_id,
+                erasure,
+                interface,
+            )
         };
         let activity = TurnActivity {
             harness: self,
@@ -1499,14 +1524,21 @@ impl Harness {
         let mut invocation = None;
         let result = telemetry::within(
             parent,
-            self.prepare_and_run(&scope, input, cancel.clone(), resume, &mut invocation),
+            self.prepare_and_run(
+                &scope,
+                input,
+                cancel.clone(),
+                resume,
+                interface.as_ref(),
+                &mut invocation,
+            ),
         )
         .await;
         self.check_writer(session)?;
         let result = match result {
             Ok(r) => r,
             Err(e) => {
-                let r = TurnResult {
+                let mut r = TurnResult {
                     outcome: if cancel.is_cancelled() {
                         Outcome::Cancelled
                     } else {
@@ -1521,6 +1553,7 @@ impl Harness {
                     .iter()
                     .any(|e| e.kind == "turn.end" && e.scope.turn == scope.turn)
                 {
+                    self.finish_interface_turn(&scope, &mut r)?;
                     let mut end = json!(r);
                     end["inputId"] = json!(admitted_input);
                     let _span = invocation.as_ref().map(Operation::enter);
@@ -1567,6 +1600,7 @@ impl Harness {
         input: Input,
         cancel: CancellationToken,
         resume: Vec<ToolCall>,
+        interface: Option<&interface_tools::Continuation>,
         invocation: &mut Option<Operation>,
     ) -> Result<TurnResult> {
         let data = self.snapshot(&scope.session)?;
@@ -1628,7 +1662,7 @@ impl Harness {
         for name in self.capability_names("tools.") {
             let source: Arc<dyn ToolSource> = capability(self, &name)?;
             for tool in source.tools(&data) {
-                if !tool.allows("model") {
+                if !tool.allows("model") || !self.interface_offer(&data, &tool.name) {
                     continue;
                 }
                 // `model_tools` names the only tools the model is offered.
@@ -1655,7 +1689,9 @@ impl Harness {
                 _ => "runtime",
             },
         )?;
-        let started_by = if !resume.is_empty() {
+        let started_by = if let Some(interface) = interface {
+            interface.started_by.clone()
+        } else if !resume.is_empty() {
             let request = data
                 .entries
                 .iter()
@@ -1684,7 +1720,9 @@ impl Harness {
             system.push_str(&format!("\n\nFor the final answer, return only one JSON value matching this schema:\n{shape}"));
         }
         let mut start = json!({"startedBy":started_by,"model":info,"system":system,"tools":tools,"settings":settings,"resume":resume,"context":context});
-        if let Some(origin) = resume
+        if let Some(interface) = interface {
+            start["continuesTurnId"] = json!(interface.origin);
+        } else if let Some(origin) = resume
             .first()
             .and_then(|c| {
                 data.entries
@@ -1703,7 +1741,7 @@ impl Harness {
         }
         let mut entries = vec![];
         let input_id =
-            if resume.is_empty() {
+            if resume.is_empty() || interface.is_some() {
                 input.id.clone()
             } else {
                 let input_id = id();
@@ -1755,6 +1793,9 @@ impl Harness {
         if let Some(context) = op.own_carrier() {
             start["traceContext"] = context;
         }
+        if let Some(interface) = interface {
+            sources.extend(interface.sources.iter().cloned());
+        }
         entries.push(Draft::new("turn.start", false, start).copying(sources));
         let mut taken = json!({"text":input.text,"inputId":input_id,"key":input.key,"authority":cap,"context":context});
         if let Some(value) = source.and_then(|s| s.content.as_ref()) {
@@ -1768,7 +1809,9 @@ impl Harness {
                 }
             }
         }
-        entries.push(Draft::new("input", true, taken).copying(vec![input.id]));
+        if interface.is_none() {
+            entries.push(Draft::new("input", true, taken).copying(vec![input.id]));
+        }
         op.run(async {
             self.publish(scope, "harness", entries, None, None)?;
             if budget_reached {
@@ -1811,6 +1854,9 @@ impl Harness {
             self.registry.read().unwrap().declaration(),
         );
         declaration["telemetry"] = json!(1);
+        if self.has_interface_tools() {
+            declaration["interface_tools"] = json!(true);
+        }
         declaration["resource_reservations"] = json!(self.reservations().limits());
         Ok(declaration)
     }
@@ -2400,12 +2446,17 @@ impl AgentApi for Harness {
         }
         Ok(entries)
     }
-    fn append(&self, scope: &Scope, writer: &str, draft: Draft) -> Result<Entry> {
+    fn append(&self, scope: &Scope, writer: &str, mut draft: Draft) -> Result<Entry> {
         let mut sessions = self.sessions.lock().unwrap();
         let open = sessions
             .get_mut(&scope.session)
             .ok_or_else(|| anyhow!("session not open"))?;
         open.check_rewind()?;
+        if draft.kind == "turn.end" && self.has_interface_tools() {
+            let mut result = serde_json::from_value(draft.content.clone())?;
+            self.finish_open_interface_turn(open, scope, &mut result)?;
+            draft.content["open_calls"] = json!(result.open_calls);
+        }
         if draft.kind == "tool.result" {
             ensure!(
                 !open
@@ -2582,6 +2633,12 @@ impl AgentApi for Harness {
         );
         let mut next = open.data.clone();
         let original = next.branch();
+        ensure!(
+            !original
+                .iter()
+                .any(|e| interface_handoff(e) && interface_result(&next, e).is_none()),
+            "settle Interface calls before moving position"
+        );
         let mut additions: Vec<(Scope, Draft)> = vec![];
         for q in questions(&next)?.into_iter().filter(|q| q.answerable) {
             additions.push((
@@ -2700,7 +2757,10 @@ impl AgentApi for Harness {
         let branch: Vec<_> = branch
             .iter()
             .filter(|e| {
-                e.writer != "rust.derived" && e.content.is_some() && e.kind != telemetry::TURN_TRACE
+                e.writer != "rust.derived"
+                    && e.content.is_some()
+                    && e.kind != telemetry::TURN_TRACE
+                    && !interface_handoff(e)
             })
             .collect();
         for original in &branch {
@@ -3093,6 +3153,20 @@ impl AgentApi for Harness {
     fn commands(&self) -> Vec<String> {
         self.registry.read().unwrap().commands()
     }
+    fn interface_available(&self, data: &SessionData, name: &str) -> bool {
+        self.interface_offer(data, name)
+    }
+    async fn handoff_interface_tool(
+        &self,
+        scope: &Scope,
+        call: &ToolCall,
+        start: Draft,
+    ) -> Result<Option<ToolResult>> {
+        self.stage_interface_call(scope, call, start).await
+    }
+    fn finish_interface_calls(&self, scope: &Scope, result: &mut TurnResult) -> Result<()> {
+        self.finish_interface_turn(scope, result)
+    }
     async fn dispatch_tool(
         &self,
         scope: &Scope,
@@ -3298,7 +3372,10 @@ fn next_continuation(data: &SessionData) -> Result<Option<(Input, Vec<ToolCall>)
     for e in branch.iter().filter(|e| e.kind == "tool.call") {
         if branch
             .iter()
-            .any(|r| r.kind == "tool.result" && r.scope.call == e.scope.call)
+            .any(|r| interface_handoff(r) && r.scope.turn == e.scope.turn)
+            || branch
+                .iter()
+                .any(|r| r.kind == "tool.result" && r.scope.call == e.scope.call)
         {
             continue;
         }

@@ -55,7 +55,7 @@ pub(crate) struct TurnWork {
 
 fn committed_pending(data: &SessionData, turn: Option<&str>, call: Option<&str>) -> bool {
     data.entries.iter().any(|e| {
-        e.kind == "tool.pending"
+        (e.kind == "tool.pending" || interface_handoff(e))
             && e.content.is_some()
             && e.scope.turn.as_deref() == turn
             && e.scope.call.as_deref() == call
@@ -86,10 +86,21 @@ fn matches_registration(decision: &Allowance, current: Option<&(Value, ToolDefin
 impl Runtime for RemoteRuntime {
     fn declaration(&self) -> Value {
         let s = &self.registration["supports"];
-        json!({"id":self.registration["id"],"transient":s["continuesAfterRestart"]!=true,"input_during_turn":s["inputDuringTurn"]==true,"continues_after_restart":s["continuesAfterRestart"]==true,"waits_through_restart":s["waitingThroughRestart"]==true,"rewinding":false,"cancel_cancels_jobs":false})
+        json!({"id":self.registration["id"],"transient":s["continuesAfterRestart"]!=true,"input_during_turn":s["inputDuringTurn"]==true,"continues_after_restart":s["continuesAfterRestart"]==true,"waits_through_restart":s["waitingThroughRestart"]==true,"rewinding":false,"cancel_cancels_jobs":false,"interface_tools":s["interfaceTools"]==true})
     }
     async fn run(&self, api: Api, input: TurnInput) -> Result<TurnResult> {
-        let method = if input.resume.is_empty() {
+        let continuation = api
+            .snapshot(&input.scope.session)?
+            .branch()
+            .iter()
+            .any(|e| {
+                e.kind == "turn.start"
+                    && e.scope.turn == input.scope.turn
+                    && e.content
+                        .as_ref()
+                        .is_some_and(|c| c["continuesTurnId"].is_string())
+            });
+        let method = if input.resume.is_empty() && !continuation {
             "runtime/runTurn"
         } else {
             "runtime/continueOpenCalls"
@@ -1453,13 +1464,19 @@ impl TurnWork {
             self.running_tools.lock().unwrap().insert(call.id.clone()),
             "call already ran for this request"
         );
-        let start = api.append(
-            &scope,
-            "external.runtime",
-            Draft::new("tool.started", false, json!({"call":call,"source":registration,
+        let start = Draft::new("tool.started", false, json!({"call":call,"source":registration,
                 "definition":wire::registered_definition(&definition),"openWorld":definition.open_world(),
-                "safeToRepeat":definition.safe_to_repeat && capability::<dyn WorkingEnvironment>(api.as_ref(),"environment")?.declaration()["stops_commands_after_sigkill"]==true})).copying(vec![entry.id.clone()]),
-        )?;
+                "safeToRepeat":definition.safe_to_repeat && capability::<dyn WorkingEnvironment>(api.as_ref(),"environment")?.declaration()["stops_commands_after_sigkill"]==true})).copying(vec![entry.id.clone()]);
+        if let Some(result) = api.handoff_interface_tool(&scope, &call, start.clone()).await? {
+            self.running_tools.lock().unwrap().remove(&call.id);
+            if result.status == ToolStatus::Waiting {
+                return Ok(json!({"callId":result.call,"pending":result.text}));
+            }
+            telemetry::disposition(&scope, &call, &result.status);
+            let result = self.settle_tool(api, &scope, &entry, result).await?;
+            return Ok(wire::result(&result));
+        }
+        let start = api.append(&scope, "external.runtime", start)?;
         drop(commit);
         api.emit(Event::new(&scope, "tool.started", json!(call)))
             .await?;
@@ -1531,6 +1548,10 @@ impl TurnWork {
         self.active()?;
         ensure!(v.is_object(), "entry must be an object");
         let kind = wire::string(v, "kind")?;
+        ensure!(
+            kind != INTERFACE_HANDOFF,
+            "only the Harness records Interface handoffs"
+        );
         let mut visible = false;
         let mut sources = vec![];
         let (native, content) = match kind {
@@ -1672,6 +1693,13 @@ impl TurnWork {
                 ensure!(
                     ids.iter()
                         .map(Value::as_str)
+                        .filter(|id| !data.entries.iter().any(|e| {
+                            interface_handoff(e)
+                                && e.scope.turn == self.input.scope.turn
+                                && e.scope.call.as_deref() == *id
+                                && interface_result(&data, e)
+                                    .is_some_and(|r| r.scope.actor.is_empty())
+                        }))
                         .eq(open.iter().map(|call| Some(call.id.as_str()))),
                     "openToolCalls differs from committed pending calls"
                 );
@@ -1708,6 +1736,7 @@ impl TurnWork {
         Ok(r)
     }
     async fn finish(&self, api: &Api, scope: &Scope, r: &mut TurnResult) -> Result<Entry> {
+        api.finish_interface_calls(scope, r)?;
         let data = api.snapshot(&scope.session)?;
         for (call_entry, call) in self.unsettled(&data)? {
             if r.open_calls.iter().any(|c| c.id == call.id) {
@@ -1759,6 +1788,8 @@ impl TurnWork {
             "external.runtime",
             Draft::new("turn.end", false, json!(r)).copying(self.sources(api, scope, true)?),
         )?;
+        r.open_calls =
+            serde_json::from_value(entry.content.as_ref().unwrap()["open_calls"].clone())?;
         api.emit(Event::new(scope, "turn.end", json!(r))).await?;
         Ok(entry)
     }

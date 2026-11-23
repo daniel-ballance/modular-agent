@@ -78,9 +78,10 @@ pub fn current_model_tools(
     Ok(offer
         .iter()
         .filter(|d| {
-            current
-                .iter()
-                .any(|c| same_json(&wire::definition(d), &wire::definition(c)))
+            current.iter().any(|c| {
+                same_json(&wire::definition(d), &wire::definition(c))
+                    && api.interface_available(&data, &c.name)
+            })
         })
         .cloned()
         .collect())

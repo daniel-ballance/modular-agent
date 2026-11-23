@@ -1054,15 +1054,18 @@ impl HistoryStore for HttpHistory {
             let (mut data, raw) = self.fetch(session)?;
             if !raw.iter().any(|e| e["id"] == plan.record_id) {
                 let keys = erased_input_keys(&data, &targets);
+                let first = data.entries.len();
                 record_erasure(&mut data, targets.clone(), keys);
-                let record = data.entries.last_mut().unwrap();
-                record.id = plan.record_id.clone();
-                let entry = portable::entry(data.entries.last().unwrap(), &data)?;
+                data.entries.last_mut().unwrap().id = plan.record_id.clone();
+                let entries = data.entries[first..]
+                    .iter()
+                    .map(|entry| portable::entry(entry, &data))
+                    .collect::<Result<Vec<_>>>()?;
                 state.acquire(self.ttl)?;
                 checked(state.observe_write(self.guarded_append(
                     session,
                     &lease,
-                    &[entry],
+                    &entries,
                     Some(&revision),
                 ))?)?;
             } else {

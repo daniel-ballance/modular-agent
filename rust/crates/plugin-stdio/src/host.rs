@@ -441,6 +441,12 @@ async fn load_transport(
             .map(|runtime| {
                 wire::string(runtime, "id")?;
                 ensure!(runtime["supports"].is_object(), "missing runtime supports");
+                ensure!(
+                    runtime["supports"]
+                        .get("interfaceTools")
+                        .is_none_or(Value::is_boolean),
+                    "interfaceTools Runtime support must be a boolean"
+                );
                 let points = harness.runtime_points();
                 ensure!(
                     !points.is_empty(),

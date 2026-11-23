@@ -33,7 +33,8 @@ fn kind(native: &str) -> String {
         | "tenant"
         | "resultFeedback"
         | crate::recovery::STEP_AFTER
-        | telemetry::TURN_TRACE => native,
+        | telemetry::TURN_TRACE
+        | INTERFACE_HANDOFF => native,
         s => return format!("rust.{s}"),
     }
     .into()
@@ -191,7 +192,7 @@ pub fn public_entry(e: &Entry, session: &SessionData) -> Result<Value> {
 }
 
 pub fn omit_trace_metadata(entry: &mut Value) {
-    if entry["kind"] == telemetry::TURN_TRACE {
+    if entry["kind"] == telemetry::TURN_TRACE || entry["kind"] == INTERFACE_HANDOFF {
         if let Some(object) = entry.as_object_mut() {
             object.remove("data");
         }
@@ -237,6 +238,9 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
         return Ok(erased);
     };
     let mut v = json!({"id":e.id,"parentId":e.parent,"sessionId":e.scope.session,"kind":k,"time":e.at,"writer":e.writer,"modelVisible":e.visible,"actorId":e.scope.actor});
+    if e.scope.actor.is_empty() {
+        v.as_object_mut().unwrap().remove("actorId");
+    }
     for (key, value) in [
         ("turnId", &e.scope.turn),
         ("stepId", &e.scope.step),
@@ -649,7 +653,20 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                             .filter(|_| d["startedBy"]["kind"] == "actor")
                             .map(str::to_owned)
                     })
-                    .unwrap_or_else(|| "user".into()),
+                    .unwrap_or_else(|| {
+                        if k == "toolResult"
+                            && data.entries.iter().any(|checkpoint| {
+                                interface_handoff(checkpoint)
+                                    && v["sources"].as_array().is_some_and(|ids| {
+                                        ids.iter().any(|id| id == &checkpoint.id)
+                                    })
+                            })
+                        {
+                            String::new()
+                        } else {
+                            "user".into()
+                        }
+                    }),
                 turn: field("turnId"),
                 step: field("stepId"),
                 call: field("toolCallId"),
@@ -817,6 +834,9 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                     settings["result_shape"] = shape.clone();
                 }
                 let mut start = json!({"startedBy":d["startedBy"],"model":model,"system":d["system"],"tools":tools,"settings":settings,"resume":optional(d, "rust.resume").cloned().unwrap_or(json!([])),"point":d["point"],"context":d["context"]});
+                if let Some(origin) = optional(v, "continuesTurnId") {
+                    start["continuesTurnId"] = origin.clone();
+                }
                 if let Some(trace) = d.get("traceContext") {
                     start["traceContext"] = trace.clone();
                 }
@@ -954,7 +974,12 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                     reason: d["reason"].as_str().map(str::to_owned)
                 }),
             ),
-            "position" | "erasure" | "tenant" | "limit" | telemetry::TURN_TRACE => (k, d.clone()),
+            "position"
+            | "erasure"
+            | "tenant"
+            | "limit"
+            | telemetry::TURN_TRACE
+            | INTERFACE_HANDOFF => (k, d.clone()),
             name if name.starts_with("rust.") => (&name[5..], d.clone()),
             _ => ("runtime.private", v.clone()),
         };

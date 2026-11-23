@@ -138,6 +138,12 @@ pub fn messages_with_origins(entries: &[Entry], branch: &[Entry]) -> Result<Vec<
                         // The same text before and after a reopen, so that the
                         // model's context does not change with a restart.
                         serde_json::from_value::<ToolResult>(v.clone())?.text
+                    } else if branch.iter().any(|checkpoint| {
+                        interface_handoff(checkpoint)
+                            && checkpoint.content.is_some()
+                            && checkpoint.scope.call.as_ref() == Some(&call.id)
+                    }) {
+                        "Waiting for an Interface tool result. This is a view placeholder, not the call's result.".into()
                     } else {
                         "Waiting for an answer. This is a view placeholder, not the call's result."
                             .into()
