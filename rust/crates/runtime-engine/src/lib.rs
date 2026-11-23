@@ -59,6 +59,13 @@ fn current_registration(
     Ok(None)
 }
 
+type ModelReply = std::result::Result<ModelResponse, ModelFailure>;
+
+enum AttemptDecision {
+    Settled(ModelReply),
+    Retry(Option<ModelRequest>),
+}
+
 struct Engine {
     hooks: BTreeMap<&'static str, HookPoint>,
     durable: bool,
@@ -152,9 +159,10 @@ impl Engine {
         &self,
         api: &Api,
         input: &TurnInput,
-        scope: &Scope,
+        scope: &mut Scope,
+        step: &mut telemetry::Operation,
         usage: &Usage,
-    ) -> Result<std::result::Result<(Scope, ModelResponse), ModelFailure>> {
+    ) -> Result<ModelReply> {
         let prior = self.turn_entries(api, scope)?;
         // The declaration controls replay even if a Provider later gains state.
         if prior.iter().any(|e| {
@@ -190,193 +198,202 @@ impl Engine {
             {
                 return Err(ModelAttemptLimit("steps").into());
             }
-            refresh_tool_sources(api, scope).await?;
-            let offer = current_model_tools(api, scope, &input.tools)?;
-            let data = api.snapshot(&scope.session)?;
-            input
-                .model
-                .refresh(api, scope, input.cancel.clone())
-                .await?;
-            let info = input.model.info();
-            let request = ModelRequest {
-                session: scope.session.clone(),
-                system: input.system.clone(),
-                messages: model_messages(&data.branch(), scope.turn.as_deref())?,
-                tools: offer.clone(),
-                provider_tools: if work_authority(api.as_ref(), scope)?.has("tools") {
-                    input.model.provider_tools()
-                } else {
-                    vec![]
-                },
-                thinking: wire::lower_reasoning(
-                    input.settings["thinking"].as_str().unwrap_or(""),
-                    &info.thinking,
-                )
-                .into(),
-                extra: Value::Null,
-                output_limit: input.settings["output_limit"]
-                    .as_u64()
-                    .unwrap_or(info.output_limit)
-                    .min(info.output_limit),
-            };
-            let request = retry_request.take().unwrap_or(request);
-            let value = self
-                .hook(
-                    api,
-                    "before.step",
-                    scope,
-                    json!({"request":request,"limits":input.model.info(),"usage":usage}),
-                )
+            if attempt > 0 {
+                scope.step = Some(id());
+                // `request` runs under the turn, not under the previous step.
+                *step = telemetry::Operation::internal("modular_agent.step", scope);
+            }
+            match step
+                .run(self.request_in_step(api, input, scope, usage, attempt, retry_request))
                 .await?
-                .value;
-            let mut request: ModelRequest = serde_json::from_value(value["request"].clone())?;
-            let provider_tools = std::mem::take(&mut request.provider_tools);
-            let request = api
-                .output(
-                    scope,
-                    Output {
-                        recipient: "model".into(),
-                        value: json!(request),
-                        stream: None,
-                        end: true,
-                    },
-                )
-                .await?
-                .ok_or_else(|| anyhow!("model request blocked by output gate"))?;
-            let branch = api.snapshot(&scope.session)?.branch();
-            let sources = branch
-                .iter()
-                .filter(|e| e.visible && e.kind != "resultFeedback")
-                .chain(pending_result_feedback(&branch, scope.turn.as_deref()))
-                .map(|e| e.id.clone())
-                .collect();
-            let attempt_scope = if attempt == 0 {
-                scope.clone()
-            } else {
-                Scope {
-                    step: Some(id()),
-                    ..scope.clone()
-                }
-            };
-            let mut dispatch: ModelRequest = serde_json::from_value(request.clone())?;
-            dispatch.provider_tools = provider_tools;
-            let retry_step = (attempt > 0)
-                .then(|| telemetry::Operation::internal("modular_agent.step", &attempt_scope));
-            let parent = retry_step
-                .as_ref()
-                .map_or_else(telemetry::current, telemetry::Operation::context);
-            let generated = telemetry::within(
-                parent,
-                input.model.generate_attempt(
-                    api.clone(),
-                    attempt_scope.clone(),
-                    dispatch,
-                    input.cancel.clone(),
-                    ModelAttempt {
-                        writer: if self.durable {
-                            "runtime.durable"
-                        } else {
-                            "runtime.transient"
-                        },
-                        tools: offer,
-                        sources,
-                        auxiliary: false,
-                        safe_to_repeat: input.model.safe_to_repeat(),
-                        close_attempt: None,
-                        replay: None,
-                        authorized_wire: None,
-                    },
-                ),
-            )
-            .await;
-            let response = match generated {
-                Ok(r) => r,
-                Err(e) if e.downcast_ref::<ModelAttemptLimit>().is_some() => return Err(e),
-                Err(e) => {
-                    let error = e
-                        .downcast_ref::<ModelFailure>()
-                        .cloned()
-                        .unwrap_or_else(|| ModelFailure {
-                            kind: if input.cancel.is_cancelled() {
-                                FailureKind::Cancelled
-                            } else {
-                                FailureKind::Other
-                            },
-                            message: e.to_string(),
-                        });
-                    wire::parse_response(
-                        json!({"role":"assistant","stop":if error.kind == FailureKind::Cancelled {"aborted"} else {"failed"},
-                        "content":[],"error":wire::failure(&error)}),
-                    )?
-                }
-            };
-            let intent = self
-                .turn_entries(api, scope)?
-                .into_iter()
-                .find(|e| e.kind == "model.request" && e.scope.step == attempt_scope.step);
-            if matches!(response.stop.as_str(), "failed" | "aborted") {
-                let mut error = wire::parse_failure(&wire::response(&response)["error"]);
-                if response.stop == "aborted" && input.cancel.is_cancelled() {
-                    error.kind = FailureKind::Cancelled;
-                }
-                if let Some(intent) = intent {
-                    self.record(
-                        api,
-                        &attempt_scope,
-                        "model.response",
-                        !response.parts.is_empty(),
-                        json!(response),
-                        vec![intent.id],
-                    )?;
-                }
-                if error.kind != FailureKind::Cancelled
-                    && let Some(reason) = self.step_after(api, &attempt_scope, &response).await?
-                {
-                    bail!("{reason}");
-                }
-                {
-                    self.record(
-                        api,
-                        scope,
-                        "model.failure",
-                        false,
-                        json!(error),
-                        api.snapshot(&scope.session)?
-                            .branch()
-                            .iter()
-                            .filter(|e| e.visible)
-                            .map(|e| e.id.clone())
-                            .collect(),
-                    )?;
-                    if error.kind == FailureKind::Cancelled || input.cancel.is_cancelled() {
-                        return Ok(Err(error));
-                    }
-                    let reply = self
-                        .hook(
-                            api,
-                            "model.failed",
-                            scope,
-                            json!({"failure":error,"attempt":attempt,"request":request}),
-                        )
-                        .await?;
-                    if attempt == 0 && reply.value["retry"] == true {
-                        input.model.discard(&scope.session).await?;
-                        retry_request = reply
-                            .value
-                            .get("request")
-                            .filter(|v| !v.is_null())
-                            .cloned()
-                            .map(serde_json::from_value)
-                            .transpose()?;
-                    } else {
-                        return Ok(Err(error));
-                    }
-                }
-            } else {
-                return Ok(Ok((attempt_scope, response)));
+            {
+                AttemptDecision::Settled(reply) => return Ok(reply),
+                AttemptDecision::Retry(request) => retry_request = request,
             }
         }
         unreachable!()
+    }
+
+    async fn request_in_step(
+        &self,
+        api: &Api,
+        input: &TurnInput,
+        scope: &Scope,
+        usage: &Usage,
+        attempt: usize,
+        retry_request: Option<ModelRequest>,
+    ) -> Result<AttemptDecision> {
+        refresh_tool_sources(api, scope).await?;
+        let offer = current_model_tools(api, scope, &input.tools)?;
+        let data = api.snapshot(&scope.session)?;
+        input
+            .model
+            .refresh(api, scope, input.cancel.clone())
+            .await?;
+        let info = input.model.info();
+        let request = ModelRequest {
+            session: scope.session.clone(),
+            system: input.system.clone(),
+            messages: model_messages(&data.branch(), scope.turn.as_deref())?,
+            tools: offer.clone(),
+            provider_tools: if work_authority(api.as_ref(), scope)?.has("tools") {
+                input.model.provider_tools()
+            } else {
+                vec![]
+            },
+            thinking: wire::lower_reasoning(
+                input.settings["thinking"].as_str().unwrap_or(""),
+                &info.thinking,
+            )
+            .into(),
+            extra: Value::Null,
+            output_limit: input.settings["output_limit"]
+                .as_u64()
+                .unwrap_or(info.output_limit)
+                .min(info.output_limit),
+        };
+        let request = retry_request.unwrap_or(request);
+        let value = self
+            .hook(
+                api,
+                "before.step",
+                scope,
+                json!({"request":request,"limits":input.model.info(),"usage":usage}),
+            )
+            .await?
+            .value;
+        let mut request: ModelRequest = serde_json::from_value(value["request"].clone())?;
+        let provider_tools = std::mem::take(&mut request.provider_tools);
+        let request = api
+            .output(
+                scope,
+                Output {
+                    recipient: "model".into(),
+                    value: json!(request),
+                    stream: None,
+                    end: true,
+                },
+            )
+            .await?
+            .ok_or_else(|| anyhow!("model request blocked by output gate"))?;
+        let branch = api.snapshot(&scope.session)?.branch();
+        let sources = branch
+            .iter()
+            .filter(|e| e.visible && e.kind != "resultFeedback")
+            .chain(pending_result_feedback(&branch, scope.turn.as_deref()))
+            .map(|e| e.id.clone())
+            .collect();
+        let mut dispatch: ModelRequest = serde_json::from_value(request.clone())?;
+        dispatch.provider_tools = provider_tools;
+        let generated = input
+            .model
+            .generate_attempt(
+                api.clone(),
+                scope.clone(),
+                dispatch,
+                input.cancel.clone(),
+                ModelAttempt {
+                    writer: if self.durable {
+                        "runtime.durable"
+                    } else {
+                        "runtime.transient"
+                    },
+                    tools: offer,
+                    sources,
+                    auxiliary: false,
+                    safe_to_repeat: input.model.safe_to_repeat(),
+                    close_attempt: None,
+                    replay: None,
+                    authorized_wire: None,
+                },
+            )
+            .await;
+        let response = match generated {
+            Ok(r) => r,
+            Err(e) if e.downcast_ref::<ModelAttemptLimit>().is_some() => return Err(e),
+            Err(e) => {
+                let error = e
+                    .downcast_ref::<ModelFailure>()
+                    .cloned()
+                    .unwrap_or_else(|| ModelFailure {
+                        kind: if input.cancel.is_cancelled() {
+                            FailureKind::Cancelled
+                        } else {
+                            FailureKind::Other
+                        },
+                        message: e.to_string(),
+                    });
+                wire::parse_response(
+                    json!({"role":"assistant","stop":if error.kind == FailureKind::Cancelled {"aborted"} else {"failed"},
+                    "content":[],"error":wire::failure(&error)}),
+                )?
+            }
+        };
+        let intent = self
+            .turn_entries(api, scope)?
+            .into_iter()
+            .find(|e| e.kind == "model.request" && e.scope.step == scope.step);
+        if matches!(response.stop.as_str(), "failed" | "aborted") {
+            let mut error = wire::parse_failure(&wire::response(&response)["error"]);
+            if response.stop == "aborted" && input.cancel.is_cancelled() {
+                error.kind = FailureKind::Cancelled;
+            }
+            if let Some(intent) = intent {
+                self.record(
+                    api,
+                    scope,
+                    "model.response",
+                    !response.parts.is_empty(),
+                    json!(response),
+                    vec![intent.id],
+                )?;
+            }
+            if error.kind != FailureKind::Cancelled
+                && let Some(reason) = self.step_after(api, scope, &response).await?
+            {
+                bail!("{reason}");
+            }
+            {
+                self.record(
+                    api,
+                    scope,
+                    "model.failure",
+                    false,
+                    json!(error),
+                    api.snapshot(&scope.session)?
+                        .branch()
+                        .iter()
+                        .filter(|e| e.visible)
+                        .map(|e| e.id.clone())
+                        .collect(),
+                )?;
+                if error.kind == FailureKind::Cancelled || input.cancel.is_cancelled() {
+                    return Ok(AttemptDecision::Settled(Err(error)));
+                }
+                let reply = self
+                    .hook(
+                        api,
+                        "model.failed",
+                        scope,
+                        json!({"failure":error,"attempt":attempt,"request":request}),
+                    )
+                    .await?;
+                if attempt == 0 && reply.value["retry"] == true {
+                    input.model.discard(&scope.session).await?;
+                    let request = reply
+                        .value
+                        .get("request")
+                        .filter(|v| !v.is_null())
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()?;
+                    return Ok(AttemptDecision::Retry(request));
+                }
+            }
+            Ok(AttemptDecision::Settled(Err(error)))
+        } else {
+            Ok(AttemptDecision::Settled(Ok(response)))
+        }
     }
     async fn execute(
         &self,
@@ -883,27 +900,60 @@ impl Engine {
                 result.outcome = Outcome::Cancelled;
                 return Ok(result);
             }
-            let step = telemetry::Operation::internal("modular_agent.step", &scope);
+            let mut step = telemetry::Operation::internal("modular_agent.step", &scope);
+            if start.is_none() {
+                step.run(async {
+                    api.take_steering(&scope)?;
+                    self.record(
+                        api,
+                        &scope,
+                        "step.start",
+                        false,
+                        json!({"index":index}),
+                        vec![],
+                    )?;
+                    api.emit(Event::new(&scope, "step.start", json!({"index":index})))
+                        .await?;
+                    Ok(()) as Result<()>
+                })
+                .await?;
+            }
+            let recorded = entries
+                .iter()
+                .find(|e| e.kind == "model.response" && e.scope.step == scope.step);
+            let generated = if recorded.is_none() {
+                result.usage = self.usage(&entries)?;
+                match self
+                    .request(api, input, &mut scope, &mut step, &result.usage)
+                    .await
+                {
+                    Err(error) if error.is::<ModelAttemptLimit>() => {
+                        let limit = error.downcast_ref::<ModelAttemptLimit>().unwrap();
+                        result.outcome = Outcome::Limit;
+                        result.limit = Some(limit.0.into());
+                        return Ok(result);
+                    }
+                    Ok(Err(error)) => {
+                        result.outcome = if error.kind == FailureKind::Cancelled
+                            || input.cancel.is_cancelled()
+                        {
+                            Outcome::Cancelled
+                        } else {
+                            Outcome::Failed
+                        };
+                        result.error = Some(error.to_string());
+                        return Ok(result);
+                    }
+                    Ok(Ok(response)) => Some(response),
+                    Err(error) => return Err(error),
+                }
+            } else {
+                None
+            };
             let carry_on: Result<bool> = step
                 .run(async {
-                    if start.is_none() {
-                        api.take_steering(&scope)?;
-                        self.record(
-                            api,
-                            &scope,
-                            "step.start",
-                            false,
-                            json!({"index":index}),
-                            vec![],
-                        )?;
-                        api.emit(Event::new(&scope, "step.start", json!({"index":index})))
-                            .await?;
-                    }
                     let mut capacity_limit = false;
-                    let (response_entry, response) = if let Some(entry) = entries
-                        .iter()
-                        .find(|e| e.kind == "model.response" && e.scope.step == scope.step)
-                    {
+                    let (response_entry, response) = if let Some(entry) = recorded {
                         (
                             entry.clone(),
                             serde_json::from_value(
@@ -914,32 +964,7 @@ impl Engine {
                             )?,
                         )
                     } else {
-                        result.usage = self.usage(&entries)?;
-                        let generated = self.request(api, input, &scope, &result.usage).await;
-                        if let Err(e) = &generated
-                            && let Some(limit) = e.downcast_ref::<ModelAttemptLimit>()
-                        {
-                            result.outcome = Outcome::Limit;
-                            result.limit = Some(limit.0.into());
-                            return Ok(false);
-                        }
-                        let mut response = match generated? {
-                            Ok((step, response)) => {
-                                scope = step;
-                                response
-                            }
-                            Err(error) => {
-                                result.outcome = if error.kind == FailureKind::Cancelled
-                                    || input.cancel.is_cancelled()
-                                {
-                                    Outcome::Cancelled
-                                } else {
-                                    Outcome::Failed
-                                };
-                                result.error = Some(error.to_string());
-                                return Ok(false);
-                            }
-                        };
+                        let mut response = generated.expect("model response for new step");
                         capacity_limit = bound_model_response(api.as_ref(), &scope, &mut response)?;
                         let copies = self
                             .turn_entries(api, &scope)?

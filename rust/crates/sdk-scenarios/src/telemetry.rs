@@ -321,27 +321,26 @@ impl HistoryStore for ObservedStore {
         self.store.save(data)?;
         let batch = &data.entries[previous..];
         let mut journal = self.evidence.0.lock().unwrap();
-        if self.observe_commits {
-            if let Some(entry) = batch.last() {
-                // The first-turn script has only admission, turn and step writers.
-                let scope = &entry.scope;
-                let parent = match (&scope.turn, &scope.step) {
-                    (None, _) => json!({"name":"modular_agent.input.admit"}),
-                    (Some(turn), None) => json!({"name":"invoke_agent", "turnId":turn}),
-                    (Some(turn), Some(step)) => {
-                        json!({"name":"modular_agent.step", "turnId":turn, "stepId":step})
-                    }
-                };
-                let mut commit =
-                    json!({"count":batch.len(), "status":"committed", "parent":parent});
-                if let Some(turn) = &scope.turn {
-                    commit["turnId"] = json!(turn);
+        if self.observe_commits
+            && let Some(entry) = batch.last()
+        {
+            // The first-turn script has only admission, turn and step writers.
+            let scope = &entry.scope;
+            let parent = match (&scope.turn, &scope.step) {
+                (None, _) => json!({"name":"modular_agent.input.admit"}),
+                (Some(turn), None) => json!({"name":"invoke_agent", "turnId":turn}),
+                (Some(turn), Some(step)) => {
+                    json!({"name":"modular_agent.step", "turnId":turn, "stepId":step})
                 }
-                if let Some(step) = &scope.step {
-                    commit["stepId"] = json!(step);
-                }
-                journal.commits.push(commit);
+            };
+            let mut commit = json!({"count":batch.len(), "status":"committed", "parent":parent});
+            if let Some(turn) = &scope.turn {
+                commit["turnId"] = json!(turn);
             }
+            if let Some(step) = &scope.step {
+                commit["stepId"] = json!(step);
+            }
+            journal.commits.push(commit);
         }
         if self.observe_recovery {
             for entry in batch

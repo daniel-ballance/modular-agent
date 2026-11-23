@@ -125,6 +125,7 @@ Run from `rust/` with `TMPDIR` off `/tmp`. Run the ACP kit after builds complete
 export TMPDIR="$HOME/.cache/ma-std-tmp"; mkdir -p "$TMPDIR"
 (cd ../conformance/acp && npm ci)
 (cd ../conformance/tools && npm ci)
+(cd ../conformance/telemetry && npm ci)
 mise exec -- cargo build --locked -p standard --bin ma
 mise exec -- cargo build --locked -p agent-base
 node ../conformance/reference/run.mjs --agent rust
@@ -135,7 +136,11 @@ mise exec -- cargo test --workspace --no-fail-fast -- --test-threads=1 > "$TMPDI
 mise exec -- cargo fmt --all -- --check
 mise exec -- cargo clippy --workspace --all-targets -- -D warnings
 ../scripts/websocket-kits.sh rust
+mise exec -- cargo build -p sdk-scenarios --bins
+node ../conformance/telemetry/run.mjs rust -- "$PWD/target/debug/scenario-agent"
 ```
+
+Build the other three fixture programs before running the full Rust telemetry matrix. Their build commands are in the [fixture registry](../conformance/sdk/fixtures/).
 
 - **Standard reference checks:** 24/24, including client identity, tool values, denial of ambient access, result formatting, timeout and print-limit errors, memory limits, and both Runtime crash cases.
 - **ACP with `--crash-checks --probe-checks --job-checks`:** `ma` passed 188/188 on stdio and 193/193 on its built-in loopback WebSocket listener. The base build passes 214/214 on stdio. The expanded run covers late answers and job report turns, including after a crash.

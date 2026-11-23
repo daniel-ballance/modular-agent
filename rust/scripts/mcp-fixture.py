@@ -12,6 +12,9 @@ changed = False
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get("method")
+    if wire := os.environ.get("MCP_FIXTURE_WIRE"):
+        with open(wire, "a") as f:
+            f.write(line)
     if "id" not in request:
         continue
     response = {"jsonrpc": "2.0", "id": request["id"]}
@@ -19,7 +22,12 @@ for line in sys.stdin:
         response["result"] = {"protocolVersion": "2025-11-25", "capabilities": {"tools": {"listChanged": True}}, "serverInfo": {"name": "offline-fixture", "version": "1"}}
     elif method == "tools/list":
         names = ["echo", "mutate", "fail", "slow"] + (["added"] if changed else [])
+        if "MCP_FIXTURE_WIRE" in os.environ:
+            second_page = request.get("params", {}).get("cursor") == "next"
+            names = names[2:] if second_page else names[:2]
         response["result"] = {"tools": [{"name": name, "description": "Offline " + name, "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}}, "annotations": {"readOnlyHint": name != "mutate", "destructiveHint": name == "mutate", "idempotentHint": name == "mutate", "openWorldHint": False}} for name in names]}
+        if "MCP_FIXTURE_WIRE" in os.environ and not second_page:
+            response["result"]["nextCursor"] = "next"
     elif method == "tools/call":
         name = request["params"]["name"]
         if name == "slow":
