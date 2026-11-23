@@ -6,13 +6,14 @@ license.workspace = true
 description = "Build agents from interchangeable parts. The Rust SDK, following docs/sdk."
 
 [features]
-agui = ["dep:axum", "dep:chrono", "dep:log", "transport-websocket/http"]
+agui = ["dep:axum", "dep:chrono", "dep:form_urlencoded", "dep:log", "transport-websocket/http"]
 
 [[test]]
 name = "agui"
 required-features = ["agui"]
 
 [dependencies]
+form_urlencoded = { version = "1.2", optional = true }
 axum = { version = "0.8", default-features = false, optional = true }
 chrono = { version = "0.4", default-features = false, features = ["std"], optional = true }
 transport-websocket = { path = "../transport-websocket" }

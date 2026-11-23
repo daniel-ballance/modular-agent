@@ -13,6 +13,23 @@ pub struct OpenRoutes {
     pub(crate) rewind_blocks: Mutex<BTreeMap<PathBuf, String>>,
 }
 
+impl OpenRoutes {
+    /// An AG-UI listener may share this service with per-session ACP Harnesses.
+    pub fn is_running(&self, id: &str) -> bool {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(id)
+            .and_then(std::sync::Weak::upgrade)
+            .is_some_and(|s| {
+                s.api.is_running(id)
+                    && s.api
+                        .writer_interruption(id)
+                        .is_ok_and(|w| !w.is_cancelled())
+            })
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Fanout {
     senders: Mutex<BTreeMap<String, mpsc::Sender<Message>>>,

@@ -1,5 +1,7 @@
 //! Shared in-process plugin API. No concrete plugins live here.
 mod interface_tools;
+mod listing;
+pub use listing::*;
 pub mod portable;
 pub mod recovery;
 pub mod schema;

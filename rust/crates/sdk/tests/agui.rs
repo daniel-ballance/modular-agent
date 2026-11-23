@@ -84,6 +84,40 @@ async fn authenticated_listener_serves_a_scripted_turn_and_detaches_on_close() -
 }
 
 #[tokio::test]
+async fn listing_returns_only_kept_threads_without_their_content() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let agent = Agent::builder()
+        .project(dir.path())
+        .data_dir(dir.path().join("data"))
+        .durability(modular_agent::Durability::Kept)
+        .provider(scripted_provider(json!([{"text":"Private answer."}])))
+        .build()
+        .await?;
+    let server = serve(&agent, dir.path()).await?;
+    let _provisional = thread(&server).await?;
+    let id = thread(&server).await?;
+    exchange(&server, input(&id, "start", json!("Private input"))).await?;
+    let page: Value = reqwest::Client::new()
+        .get(url(&server, "/threads"))
+        .bearer_auth(TOKEN)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let updated = page["threads"][0]["updatedAt"].as_str().unwrap();
+    chrono::DateTime::parse_from_rfc3339(updated)?;
+    assert_eq!(
+        page,
+        json!({"threads":[{"threadId":id,"updatedAt":updated,
+        "waiting":{"questions":0,"toolCalls":0,"turn":"none"}}]})
+    );
+    server.close().await;
+    agent.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn service_rejects_an_ambiguous_route_before_listening() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let agent=Agent::builder().project(dir.path()).plugin_host(true).interface_tools([InterfaceToolSource{source_id:"selection".into(),route_id:"application".into(),actor_id:"alice".into(),result_timeout_ms:1000,tools:vec![json!({"name":"selected","description":"Read selection","parameters":{},"callers":["model"]})]}]).build().await?;

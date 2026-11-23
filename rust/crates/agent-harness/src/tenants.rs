@@ -8,12 +8,7 @@ pub struct Tenant {
 }
 
 pub fn name(data: &SessionData) -> Option<&str> {
-    data.entries
-        .iter()
-        .find(|e| e.kind == "tenant")?
-        .content
-        .as_ref()?["tenant"]
-        .as_str()
+    data.tenant_id()
 }
 
 // Completed turns carry the portable total. Count individual responses only

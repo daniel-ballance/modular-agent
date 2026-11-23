@@ -228,13 +228,16 @@ pub enum RequestReply {
     Declined,
 }
 pub fn questions(data: &SessionData) -> Result<Vec<Question>> {
+    questions_in(&data.branch())
+}
+pub(crate) fn questions_in(branch: &[Entry]) -> Result<Vec<Question>> {
     let mut result: Vec<Question> = vec![];
-    for e in data.branch() {
-        let Some(v) = e.content else { continue };
+    for e in branch {
+        let Some(v) = &e.content else { continue };
         match e.kind.as_str() {
-            "request.open" => result.push(serde_json::from_value(v)?),
+            "request.open" => result.push(serde_json::from_value(v.clone())?),
             "request.answer" => {
-                let a: Answer = serde_json::from_value(v)?;
+                let a: Answer = serde_json::from_value(v.clone())?;
                 if let Some(q) = result.iter_mut().find(|q| q.id == a.request) {
                     q.answer = Some(a);
                     q.answerable = false;

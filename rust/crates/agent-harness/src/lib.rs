@@ -216,6 +216,52 @@ impl Harness {
     pub fn tenant_rights(&self, name: &str) -> Result<Authority> {
         Ok(self.check_tenant(name)?.rights)
     }
+    /// Effective rights for discovery, without joining a prospective member.
+    pub fn discovery_rights(
+        &self,
+        data: &SessionData,
+        actor: &str,
+        ceiling: &Authority,
+        join: bool,
+    ) -> Result<Authority> {
+        let rights = data.recorded_rights(actor)?.unwrap_or_else(|| {
+            if join {
+                ceiling.clone()
+            } else {
+                Authority::default()
+            }
+        });
+        self.limit_rights(data, actor, rights.intersect(ceiling))
+    }
+    fn limit_rights(
+        &self,
+        data: &SessionData,
+        actor: &str,
+        rights: Authority,
+    ) -> Result<Authority> {
+        let mut rights = ConnectionCeiling::narrow(&data.id, actor, rights);
+        if let Some(cap) = data
+            .entries
+            .iter()
+            .rev()
+            .find(|e| e.kind == "limit")
+            .and_then(|e| e.content.as_ref())
+            .and_then(|v| wire::optional(v, "rights"))
+        {
+            rights = rights.intersect(&serde_json::from_value(cap.clone())?);
+        }
+        if let Some(tenant) = data.tenant_id() {
+            rights = rights.intersect(&self.check_tenant(tenant)?.rights);
+        }
+        if let Some(cap) = data.settings.get("_authority") {
+            rights = rights.intersect(&serde_json::from_value(cap.clone())?);
+        }
+        if let Some(parent) = data.settings["_parent"]["session"].as_str() {
+            let parent_actor = data.settings["_parent"]["actor"].as_str().unwrap_or("user");
+            rights = rights.intersect(&self.authority(parent, parent_actor)?);
+        }
+        Ok(rights)
+    }
     fn check_tenant(&self, name: &str) -> Result<tenants::Tenant> {
         self.tenants
             .read()
@@ -571,13 +617,8 @@ impl Harness {
         let branch = snapshot.branch();
         self.recover_interface_tools(id, &snapshot)?;
         let mut interrupted = Vec::new();
-        for start in branch.iter().filter(|e| e.kind == "turn.start") {
-            if !branch
-                .iter()
-                .any(|e| e.kind == "turn.end" && e.scope.turn == start.scope.turn)
-            {
-                interrupted.push((session_runtime(self, &snapshot)?, start.scope.clone()));
-            }
+        for scope in unfinished_turns(&branch) {
+            interrupted.push((session_runtime(self, &snapshot)?, scope.clone()));
         }
         let mut handed_back = Vec::new();
         for (input_id, entry) in snapshot.pending_inputs() {
@@ -2387,43 +2428,14 @@ impl AgentApi for Harness {
             }
             return Ok(cap);
         }
-        let mut authority = if actor == "user" {
-            Authority::full()
-        } else {
-            Authority::default()
-        };
-        // Grants are session security state, not a branch-local approval.
-        for e in &data.entries {
-            if let Some(v) = &e.content {
-                if e.kind == "actor.grant" && v["actor"] == actor {
-                    authority = serde_json::from_value(v["authority"].clone())?;
-                } else if e.kind == "actor.left" && v["actorId"] == actor {
-                    authority = Authority::default();
-                }
+        let rights = data.recorded_rights(actor)?.unwrap_or_else(|| {
+            if actor == "user" {
+                Authority::full()
+            } else {
+                Authority::default()
             }
-        }
-        authority = ConnectionCeiling::narrow(session, actor, authority);
-        if let Some(cap) = data
-            .entries
-            .iter()
-            .rev()
-            .find(|e| e.kind == "limit")
-            .and_then(|e| e.content.as_ref())
-            .and_then(|v| wire::optional(v, "rights"))
-        {
-            authority = authority.intersect(&serde_json::from_value(cap.clone())?);
-        }
-        if let Some(tenant) = tenants::name(&data) {
-            authority = authority.intersect(&self.check_tenant(tenant)?.rights);
-        }
-        if let Some(cap) = data.settings.get("_authority") {
-            authority = authority.intersect(&serde_json::from_value(cap.clone())?);
-        }
-        if let Some(parent) = data.settings["_parent"]["session"].as_str() {
-            let parent_actor = data.settings["_parent"]["actor"].as_str().unwrap_or("user");
-            authority = authority.intersect(&self.authority(parent, parent_actor)?);
-        }
-        Ok(authority)
+        });
+        self.limit_rights(&data, actor, rights)
     }
     fn grant(&self, scope: &Scope, actor: &str, authority: Authority) -> Result<()> {
         require(self, scope, "grant")?;

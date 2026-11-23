@@ -20,7 +20,7 @@ pub(super) fn epoch(d: &SessionData) -> Option<String> {
         .find(|e| matches!(e.kind.as_str(), "erasure" | "position"))
         .map(|e| e.id.clone())
 }
-fn iso(ms: u64) -> Option<String> {
+pub(super) fn iso(ms: u64) -> Option<String> {
     DateTime::from_timestamp_millis(i64::try_from(ms).ok()?)
         .map(|d| d.to_rfc3339_opts(SecondsFormat::Millis, true))
 }
