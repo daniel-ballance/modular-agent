@@ -765,6 +765,11 @@ impl Exchange {
             }
         }
         *self.c.cursor.lock().unwrap() = Some(cursor);
+        for call in pending {
+            if let Some(id) = call.as_str() {
+                log::debug!(target:"modular_agent::agui::handoff","{} {}",self.id,id);
+            }
+        }
         Ok(bytes)
     }
 }

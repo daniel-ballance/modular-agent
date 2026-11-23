@@ -737,13 +737,7 @@ impl Harness {
         let session = handoff.scope.session.clone();
         let id = handoff.id.clone();
         tokio::spawn(async move {
-            loop {
-                let delay = deadline.saturating_sub(now());
-                if delay == 0 {
-                    break;
-                }
-                tokio::select! { biased; _ = generation.cancelled() => return, _ = tokio::time::sleep(std::time::Duration::from_millis(delay)) => {} }
-            }
+            tokio::select! { biased; _ = generation.cancelled() => return, _ = wait_until(deadline) => {} }
             if let Some(h) = harness.upgrade()
                 && !generation.is_cancelled()
             {

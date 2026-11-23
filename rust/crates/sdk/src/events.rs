@@ -27,6 +27,7 @@ pub struct EventData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
     pub data: Value,
+    #[cfg(feature = "agui")]
     #[serde(skip)]
     pub(crate) emitter: Option<String>,
     #[serde(flatten)]
@@ -169,6 +170,7 @@ impl Event {
     pub(crate) fn new(scope: &base::Scope, time: u64, event_type: &str, data: Value) -> Self {
         EventData {
             event_type: event_type.into(),
+            #[cfg(feature = "agui")]
             emitter: base::EMITTER.try_with(Clone::clone).ok(),
             time,
             session_id: scope.session.clone(),

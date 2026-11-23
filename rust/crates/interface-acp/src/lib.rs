@@ -156,7 +156,10 @@ impl Plugin for AcpPlugin {
             Order::First,
             handler(|api, scope, _| {
                 Box::pin(async move {
-                    sessions::join_host(api.as_ref(), &scope.session)?;
+                    // Another Interface on this agent is not an ACP connection.
+                    if PRINCIPAL.try_with(|_| ()).is_ok() {
+                        sessions::join_host(api.as_ref(), &scope.session)?;
+                    }
                     Ok(HookResult::default())
                 })
             }),

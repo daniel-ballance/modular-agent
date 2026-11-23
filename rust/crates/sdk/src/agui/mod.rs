@@ -39,12 +39,14 @@ impl AguiActor {
         }
     }
 }
+type StateSnapshot = dyn Fn(&str) -> Option<(String, Value)> + Send + Sync;
+
 /// The plugin supplies its current revision and document. A withheld snapshot
 /// cannot establish a base for subsequent patches.
 #[derive(Clone)]
 pub struct AguiState {
     pub plugin: String,
-    pub snapshot: Arc<dyn Fn(&str) -> Option<(String, Value)> + Send + Sync>,
+    pub snapshot: Arc<StateSnapshot>,
 }
 #[derive(Default)]
 pub struct AguiOptions {
@@ -138,7 +140,7 @@ fn encode(v: &Value) -> R<Vec<u8>> {
     Ok(b)
 }
 fn warn(field: &str) {
-    eprintln!("AG-UI: ignored {field}");
+    log::warn!(target:"modular_agent::agui::warning", "{field}");
 }
 fn scope(id: &str, actor: &str) -> Scope {
     Scope {

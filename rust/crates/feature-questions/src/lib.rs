@@ -3,7 +3,6 @@ use agent_api::*;
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 use tokio::sync::Notify;
 #[derive(Default)]
@@ -108,7 +107,7 @@ impl InputRequests for Questions {
         {
             return Ok(RequestReply::Declined);
         }
-        let timeout = q.timeout_ms;
+        let deadline = now().saturating_add(q.timeout_ms.unwrap_or(u64::MAX / 2));
         let q = self.open(api.as_ref(), q)?;
         if let Some(answer) = q.answer.clone() {
             return Ok(RequestReply::Answer(answer));
@@ -156,7 +155,7 @@ impl InputRequests for Questions {
         }
         api.emit(Event::new(&q.scope, "request.opened", json!(q)))
             .await?;
-        let deadline = tokio::time::sleep(Duration::from_millis(timeout.unwrap_or(u64::MAX / 2)));
+        let deadline = wait_until(deadline);
         tokio::pin!(deadline);
         loop {
             // Register before inspecting the ledger, so an answer cannot lose a wake.

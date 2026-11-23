@@ -38,6 +38,7 @@ use tokio_tungstenite::{
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+#[cfg(feature = "http")]
 pub mod http;
 
 pub const LIMIT: usize = 64 * 1024 * 1024;

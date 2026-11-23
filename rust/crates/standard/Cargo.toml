@@ -13,7 +13,7 @@ path = "src/main.rs"
 opentelemetry.workspace = true
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "metrics", "rt-tokio", "experimental_trace_batch_span_processor_with_async_runtime", "experimental_metrics_periodicreader_with_async_runtime"] }
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["trace", "metrics", "http-proto", "reqwest-client", "reqwest-rustls", "grpc-tonic", "tls-ring", "tls-roots"] }
-modular-agent = { path = "../sdk" }
+modular-agent = { path = "../sdk", features = ["agui"] }
 modular-agent-files = { path = "../tools-files" }
 modular-agent-mcp = { path = "../sdk-mcp" }
 credentials-auth = { path = "../credentials-auth" }
@@ -31,4 +31,10 @@ monty-types = "=1.6.0"
 tempfile.workspace = true
 
 [dev-dependencies]
+agent-api.workspace = true
+history-fs = { path = "../history-fs" }
+transport-websocket = { path = "../transport-websocket" }
+axum = "0.8"
+opentelemetry_sdk = { version = "0.33.1", features = ["testing"] }
+log = { version = "0.4", features = ["std"] }
 libc.workspace = true

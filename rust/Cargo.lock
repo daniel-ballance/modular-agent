@@ -2665,6 +2665,7 @@ dependencies = [
  "history-fs",
  "history-http",
  "interface-acp",
+ "log",
  "opentelemetry",
  "opentelemetry_sdk",
  "plugin-stdio",
@@ -4875,11 +4876,15 @@ dependencies = [
 name = "standard"
 version = "0.1.0"
 dependencies = [
+ "agent-api",
  "anyhow",
+ "axum",
  "credentials-auth",
  "futures-util",
+ "history-fs",
  "jiff",
  "libc",
+ "log",
  "modular-agent",
  "modular-agent-files",
  "modular-agent-mcp",
@@ -4894,6 +4899,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tools-code",
+ "transport-websocket",
 ]
 
 [[package]]
