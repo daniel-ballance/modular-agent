@@ -20,8 +20,12 @@ printf 'Stress logs: %s\n' "$root"
 # virtual environment and node_modules (npm ci removes the old tree).
 git ls-files -z | tar -cf "$root/source.tar" --null -T -
 for ((run = 1; run <= count; run++)); do
-  mkdir -p "$root/$run/src" "$root/$run/tmp"
-  tar -xf "$root/source.tar" -C "$root/$run/src"
+  src="$root/$run/src"
+  mkdir -p "$src" "$root/$run/tmp"
+  tar -xf "$root/source.tar" -C "$src"
+  # The link checker uses git ls-files. Only a local index is needed.
+  git -C "$src" init -q
+  git -C "$src" add -f -- .
 done
 rm "$root/source.tar"
 
