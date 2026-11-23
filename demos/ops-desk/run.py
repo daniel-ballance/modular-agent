@@ -283,7 +283,20 @@ def check_live_result(d, s):
     print(f'PASS live: verifier tested {commit}', flush=True)
 
 
-def run_live(d):
+def allow_approvals(d, inbox):
+    # The page submits one decision for every open question on a route. Never
+    # pass an approval off as a text answer or answer a partly stale group.
+    for route in sorted({q['route'] for q in inbox if q['status'] == 'open'}):
+        group = [q for q in inbox if q['route'] == route and q['status'] == 'open']
+        if not all(q['answerable'] and q['reason'] == 'approval' for q in group):
+            continue
+        for q in group:
+            print(f"Allow ({q['agent']}): {q['message']}", flush=True)
+        d.request('/answers', {'route': route, 'answers': [
+            {'interruptId': q['id'], 'status': 'resolved', 'payload': {'allow': True}} for q in group]})
+
+
+def run_live(d, approve):
     print(f'Desk: {d.url} (username desk; password in {d.root / "page.token"})', flush=True)
     started = time.monotonic()
     check(d.event(payload='The percentage tests failed: percentage(37) returned 0, expected 37. '
@@ -294,6 +307,8 @@ def run_live(d):
         for p in s['posts'][seen:]:
             print(f"{time.monotonic() - started:.1f}s {p['kind']}: {p['text']}", flush=True)
         seen = len(s['posts'])
+        if approve == 'auto':
+            allow_approvals(d, s['inbox'])
         if s['routes'] and all(r['state'] in ('done', 'reopened') for r in s['routes']):
             check_live_result(d, s)
             return
@@ -306,7 +321,10 @@ def main():
     mode.add_argument('--only', choices=CASES)
     mode.add_argument('--live', action='store_true', help='send one event using your model subscriptions')
     mode.add_argument('--serve', action='store_true', help='start a persistent, scripted desk')
+    p.add_argument('--approve', choices=('auto', 'manual'), help='live approvals: answer via the page API or leave for the page (default: manual)')
     args = p.parse_args()
+    if args.approve and not args.live:
+        p.error('--approve requires --live')
     os.umask(0o077)
     temp = Path(os.environ.get('TMPDIR') or Path.home() / '.cache/ma-std-tmp').resolve()
     temp.mkdir(parents=True, exist_ok=True)
@@ -315,7 +333,7 @@ def main():
         # Keep the live posts, checkouts and logs for inspection after shutdown.
         directory = Path(mkdtemp(prefix='ops-desk-live-', dir=temp))
         with start(directory, 'live') as desk:
-            run_live(desk)
+            run_live(desk, args.approve or 'manual')
         return
     if args.serve:
         # Never pass sign-ins, provider keys or the operator's plugin settings.
