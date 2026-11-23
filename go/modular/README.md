@@ -144,6 +144,4 @@ None open. `--agui` is in the standard configuration.
 
 ### Known gaps
 
-Core limits that matter for this binding:
-
-- The [plugin binding](../../docs/bindings/plugin.md#held-output) says: “Each gate's `events` array MUST fit in 4 MiB of its [encoded bytes](../../docs/bindings/data.md#general-rules), including for a replacement.” It also says: “The host MUST block the stream on overflow or if one event cannot fit in a segment.” The Go core bounds a held model or tool stream by piece count, individual piece size and reserved bytes. It can drop pieces at those limits without telling the follower the whole stream overflowed. It does not implement the full remote segmentation rule. The AG-UI adapter cannot recover withheld pieces and does not use `CUSTOM` to bypass the gate.
+Held output uses the session, tenant and agent byte limits. The Harness gates ordered segments of at most 4 MiB, checks replacements and releases no pieces until the last segment passes. An overflow ends the affected AG-UI exchange with `RUN_ERROR`.

@@ -3,6 +3,7 @@ package harness
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/portable"
@@ -38,6 +39,12 @@ func (c *client) deliverOutput(ctx context.Context, final api.Event, events []ap
 	}
 	c.h.mu.RUnlock()
 	perRecipient := map[string][]api.Event{}
+	var charges []func()
+	defer func() {
+		for _, release := range charges {
+			release()
+		}
+	}()
 	for _, listener := range listeners {
 		func() {
 			defer func() { _ = recover() }()
@@ -48,7 +55,17 @@ func (c *client) deliverOutput(ctx context.Context, final api.Event, events []ap
 			}
 			gated, found := perRecipient[recipient]
 			if !found {
-				gated, _ = c.gateBatch(ctx, final.Session, recipient, clone(events))
+				if events == nil {
+					gated = []api.Event{overflowNotice(final)}
+				} else {
+					var err error
+					var release func()
+					gated, release, err = c.gateBatch(ctx, final.Session, recipient, events)
+					charges = append(charges, release)
+					if errors.Is(err, api.ErrOutputOverflow) && (final.Kind == "model.stream.end" || final.Kind == "tool.end") {
+						gated = []api.Event{overflowNotice(final)}
+					}
+				}
 				// Some Interfaces use the end marker to replay a response if the
 				// model never streamed it. Do not trigger that fallback if the
 				// gate deliberately removed the visible pieces of a stream.
@@ -65,7 +82,8 @@ func (c *client) deliverOutput(ctx context.Context, final api.Event, events []ap
 				if err != nil || epoch != final.ErasureEpoch {
 					return
 				}
-				view := clone(event)
+				view := event
+				view.Data = slices.Clone(event.Data)
 				if strings.HasPrefix(final.Kind, "plugin.") {
 					view.OutputChanged = final.OutputChanged || !bytes.Equal(view.Data, final.Data)
 				}
@@ -74,6 +92,18 @@ func (c *client) deliverOutput(ctx context.Context, final api.Event, events []ap
 			}
 		}()
 	}
+}
+
+func overflowNotice(final api.Event) api.Event {
+	return api.Event{Kind: "output.overflow", Session: final.Session, Turn: final.Turn, Step: final.Step, Call: final.Call}
+}
+
+func cloneOutput(events []api.Event) []api.Event {
+	out := slices.Clone(events)
+	for i := range out {
+		out[i].Data = slices.Clone(out[i].Data)
+	}
+	return out
 }
 
 func visibleDelta(e api.Event) bool {
@@ -114,15 +144,91 @@ func (c *client) output(ctx context.Context, e api.Event) (api.Output, error) {
 	return v.(api.Output), nil
 }
 
-func (c *client) gateBatch(ctx context.Context, session, recipient string, events []api.Event) ([]api.Event, error) {
+// Keep every accepted segment private until the last gate has decided on the
+// last segment. Registration is fixed while sessions are open.
+func (c *client) gateBatch(ctx context.Context, session, recipient string, events []api.Event) ([]api.Event, func(), error) {
+	c.h.mu.RLock()
+	handlers := slices.Clone(c.h.hooks["output.batch"].handlers)
+	c.h.mu.RUnlock()
+	var charges []func()
+	release := func() {
+		for _, r := range charges {
+			r()
+		}
+	}
+	if len(handlers) == 0 {
+		return events, release, nil
+	}
 	if recipient == "" {
 		recipient = "interface"
 	}
-	v, err := c.h.API().Invoke(ctx, "output.batch", api.OutputBatch{Session: session, Recipient: recipient, Events: events})
-	if err != nil {
-		return nil, err
+	var accepted []api.Event
+	for start := 0; start < len(events); {
+		end, size := start, 2
+		for end < len(events) {
+			n := len(api.JSON(portable.ProjectOutput(events[end])))
+			if n+2 > portable.GateSegmentBytes {
+				return nil, release, api.ErrOutputOverflow
+			}
+			if end > start && (size+1+n > portable.GateSegmentBytes || events[end].Kind == "model.stream.end" || events[end].Kind == "tool.end") {
+				break
+			}
+			if end > start {
+				size++
+			}
+			size += n
+			end++
+		}
+		segment := events[start:end]
+		charged := size
+		for _, h := range handlers {
+			d, err := safeHandle(ctx, h.fn, api.OutputBatch{Session: session, Recipient: recipient, Events: cloneOutput(segment)})
+			if err != nil {
+				return nil, release, err
+			}
+			if d.Refuse {
+				return nil, release, api.ErrOutputWithheld
+			}
+			if d.Value == nil {
+				continue
+			}
+			after, ok := d.Value.(api.OutputBatch)
+			if !ok || len(after.Events) != len(segment) {
+				return nil, release, api.ErrOutputWithheld
+			}
+			size = 2
+			for i, v := range after.Events {
+				before := segment[i]
+				wire := portable.ProjectOutput(v)
+				n := len(api.JSON(wire))
+				if size+n > portable.GateSegmentBytes {
+					return nil, release, api.ErrOutputOverflow
+				}
+				if v.Kind != before.Kind || v.Session != before.Session || v.Turn != before.Turn || v.Step != before.Step || v.Call != before.Call || !portable.ValidOutputEdit(portable.ProjectOutput(before), wire) {
+					return nil, release, api.ErrOutputWithheld
+				}
+				if i > 0 {
+					size++
+				}
+				size += n
+			}
+			if size > portable.GateSegmentBytes {
+				return nil, release, api.ErrOutputOverflow
+			}
+			if size > charged {
+				r := c.reserveOutputBytes(session, int64(size-charged))
+				if r == nil {
+					return nil, release, api.ErrOutputOverflow
+				}
+				charges = append(charges, r)
+				charged = size
+			}
+			segment = after.Events
+		}
+		accepted = append(accepted, segment...)
+		start = end
 	}
-	return v.(api.OutputBatch).Events, nil
+	return accepted, release, nil
 }
 
 // OutputValue gates a non-stream Interface response once, without publishing it.
@@ -143,7 +249,8 @@ func (c *client) OutputValueFor(ctx context.Context, recipient string, e api.Eve
 	if out.Hold {
 		return api.Event{}, api.ErrOutputWithheld
 	}
-	events, err := c.gateBatch(ctx, e.Session, recipient, []api.Event{out.Event})
+	events, release, err := c.gateBatch(ctx, e.Session, recipient, []api.Event{out.Event})
+	defer release()
 	if err != nil {
 		return api.Event{}, fmt.Errorf("%w: %w", api.ErrOutputWithheld, err)
 	}
@@ -158,78 +265,94 @@ func (c *client) OutputValueFor(ctx context.Context, recipient string, e api.Eve
 
 // streamOutput keeps model deltas and tool progress until their end markers.
 // The raw ledger and the local, piece-oriented gate are not changed.
-func (c *client) streamOutput(e api.Event, held bool) ([]api.Event, func()) {
+func (c *client) streamOutput(boundary, e api.Event, held bool) ([]api.Event, func(), bool) {
 	nothing := func() {}
 	if !c.HoldsOutput() {
 		if held {
-			return nil, nothing
+			return nil, nothing, false
 		}
 		buffered, ok := api.BufferEvent(c, e)
 		if !ok {
-			return nil, nothing
+			return nil, nothing, false
 		}
-		return []api.Event{e}, buffered.Release
+		return []api.Event{e}, buffered.Release, true
 	}
 	var key outputStream
 	final := false
-	switch e.Kind {
+	switch boundary.Kind {
 	case "model.delta", "model.stream.end":
 		key = outputStream{e.Session, e.Turn, e.Step, "model"}
-		final = e.Kind == "model.stream.end"
+		final = boundary.Kind == "model.stream.end"
 	case "tool.progress", "tool.end":
 		key = outputStream{e.Session, e.Turn, e.Call, "tool"}
-		final = e.Kind == "tool.end"
+		final = boundary.Kind == "tool.end"
 	}
 	if key.kind == "" {
 		if held {
-			return nil, nothing
+			return nil, nothing, false
 		}
 		buffered, ok := api.BufferEvent(c, e)
 		if !ok {
-			return nil, nothing
+			return nil, nothing, false
 		}
-		return []api.Event{e}, buffered.Release
+		return []api.Event{e}, buffered.Release, true
 	}
 	c.h.outputMu.Lock()
 	buffer := c.h.outputStreams[key]
-	if len(buffer) > 0 && buffer[0].ErasureEpoch != e.ErasureEpoch {
-		for _, old := range buffer {
-			old.Release()
-		}
-		delete(c.h.outputStreams, key)
-		buffer = nil
+	if buffer == nil {
+		buffer = &heldStream{epoch: e.ErasureEpoch}
+		c.h.outputStreams[key] = buffer
 	}
-	if !held && len(buffer) < 256 && len(e.Data) <= 64<<10 {
-		if event, ok := api.BufferEvent(c, e); ok {
-			buffer = append(buffer, event)
-			c.h.outputStreams[key] = buffer
+	if buffer.epoch != e.ErasureEpoch {
+		buffer.block()
+	}
+	if !held && !buffer.blocked {
+		// Charge both the retained native event and its projected size when
+		// larger (a tool progress view can contain both chunk and content).
+		n := len(api.JSON(portable.ProjectOutput(e)))
+		if n+2 > portable.GateSegmentBytes {
+			buffer.block()
+		} else if r := c.reserveOutputBytes(e.Session, int64(130+max(n, len(e.Data))+len(e.Session)+len(e.Step)+len(e.Turn)+len(e.Actor)+len(e.Call))); r != nil {
+			buffer.events = append(buffer.events, e)
+			buffer.charges = append(buffer.charges, r)
+		} else {
+			buffer.block()
 		}
 	}
 	if !final {
 		c.h.outputMu.Unlock()
-		return nil, nothing
+		return nil, nothing, false
 	}
 	delete(c.h.outputStreams, key)
 	c.h.outputMu.Unlock()
-	events := make([]api.Event, 0, len(buffer))
-	for _, event := range buffer {
-		events = append(events, event.Event)
+	return buffer.events, buffer.release, buffer.blocked || len(buffer.events) > 0
+}
+
+type heldStream struct {
+	epoch   int
+	blocked bool
+	events  []api.Event
+	charges []func()
+}
+
+func (s *heldStream) release() {
+	for _, r := range s.charges {
+		r()
 	}
-	return events, func() {
-		for _, event := range buffer {
-			event.Release()
-		}
-	}
+	s.charges = nil
+}
+func (s *heldStream) block() {
+	s.release()
+	s.events = nil
+	s.blocked = true
 }
 
 func (c *client) dropOutput(id string) {
 	c.h.outputMu.Lock()
 	defer c.h.outputMu.Unlock()
-	for key, events := range c.h.outputStreams {
+	for key, stream := range c.h.outputStreams {
 		if key.session == id {
-			for _, event := range events {
-				event.Release()
-			}
+			stream.release()
 			delete(c.h.outputStreams, key)
 		}
 	}

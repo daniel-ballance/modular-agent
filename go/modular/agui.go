@@ -235,7 +235,7 @@ func agStatus(err error) (int, agCode) {
 	var c agCode
 	if !errors.As(err, &c) {
 		switch {
-		case errors.Is(err, api.ErrResultTooLarge):
+		case errors.Is(err, api.ErrResultTooLarge), errors.Is(err, api.ErrOutputOverflow):
 			c = tooLarge
 		case errors.Is(err, api.ErrOutputWithheld):
 			c = withheld
