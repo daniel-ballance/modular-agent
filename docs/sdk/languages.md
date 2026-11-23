@@ -45,6 +45,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 
 ## Rust
 
+- Use `agent.session_summary(id, &viewer)?` to read kept work without opening the session. An inaccessible or missing session returns `None`.
 - The core crate is `modular-agent`, imported as `modular_agent`. It requires Tokio.
 - A tool is built with `Tool::new(name, description).run(|input: T, cx| async move { … })`. Hints are builder methods: `.read_only()`, `.safe_to_repeat()`.
 - A plugin is built with `Plugin::new(name)` and chained registrations: `.tool(tool)`, `.on_tool_before(handler)`, `.replaces(item)`, `.config(settings)`, and `.setup(|r| …)` for items that depend on settings.
@@ -64,6 +65,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 
 ## TypeScript
 
+- Use `await agent.sessionSummary(id, viewer)` to read kept work without opening the session. An inaccessible or missing session returns `undefined`.
 - The core package is `@modular-agent/core`, an ES module with its own type declarations. It runs on Node.js 22 or later.
 - A tool is `tool({ name, description, input, run })`. Hints are fields: `readOnly: true`.
 - A plugin is an object: `{ name, replaces?, setup(registrar), stop? }`, or `definePlugin({ name, tools, hooks, … })` for the common case.
@@ -78,6 +80,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 
 ## Go
 
+- Use `agent.SessionSummary(ctx, id, viewer)` to read kept work without opening the session. An inaccessible or missing session returns `nil, nil`.
 - The module is `github.com/daniel-ballance/modular-agent/go` until the repository is published; import `github.com/daniel-ballance/modular-agent/go/modular` and construct an agent with `modular.New(ctx, …)`.
 - Every operation that can wait takes a `context.Context` first. Cancellation is the context's.
 - A tool is `modular.NewTool(name, description, func(ctx context.Context, in T, tc *modular.ToolContext) (Out, error), opts…)`, with type parameters for input and output.
@@ -94,6 +97,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 
 ## Python
 
+- Use `await agent.session_summary(id, actor=..., rights=..., route_id=..., scope=...)` to read kept work without opening the session. An inaccessible or missing session returns `None`.
 - The distribution is `modular-agent`, imported as `modular_agent`. Official plugins are extras: `modular-agent[openai]`.
 - Attributes and keyword arguments are `snake_case`. A dictionary that is shared wire data, such as a raw history entry, a hook payload or a Provider request, keeps the shared field names; passing or returning it never renames its keys.
 - Durations are seconds, as `float`, the Python convention; the SDK converts them to the binding's integer milliseconds.

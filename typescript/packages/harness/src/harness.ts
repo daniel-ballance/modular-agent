@@ -122,10 +122,11 @@ export interface FollowOptions { recipient: string; fromEntry?: number; raw?: bo
 
 /** A content-free view of committed work. Reading it never attaches a writer or an Interface. */
 export interface WaitingSummary { questions: number; toolCalls: number; turn: "none" | "running" | "interrupted" }
-export interface SessionListing { id: string; project: string; tenant?: string; updated: number; waiting: WaitingSummary }
+export interface SessionSummary { id: string; project: string; tenant?: string; updated: number; waiting: WaitingSummary }
 export interface ListingViewer {
 	actor: Actor;
 	allowJoin: boolean;
+	scope?(project: string, tenant?: string): boolean;
 	routeId?: string;
 	/** In-turn question views held by this connection. Late non-approval questions need no presence. */
 	inTurn?: readonly string[] | true;
@@ -170,7 +171,7 @@ export interface PluginApi {
 	presenceChanged(sessionId: string): void;
 	/** Sessions in this project, another project, or every project (null). */
 	listSessions(project?: string | null): Promise<StoredSession[]>;
-	sessionListing(id: string, viewer: ListingViewer): Promise<SessionListing | undefined>;
+	sessionSummary(id: string, viewer: ListingViewer): Promise<SessionSummary | undefined>;
 	forkSession(sessionId: string, entryId: string): Promise<string>;
 	closeSession(sessionId: string, actorId?: string, delegatedBy?: string, authority?: readonly Authority[]): Promise<void>;
 	sessionInterruption(sessionId: string): AbortSignal;
@@ -453,7 +454,7 @@ export class Harness {
 			presentActors: (id) => this.presentActors(this.session(id)),
 			presenceChanged: (id) => { const s = this.sessions.get(id); if (s) this.closeUnanswerable(s); },
 			listSessions: async (project) => (await this.use<HistoryStore>("history-store")?.list(project === null ? undefined : { project: project ?? this.project })) ?? [],
-			sessionListing: (id, viewer) => this.sessionListing(id, viewer),
+			sessionSummary: (id, viewer) => this.sessionSummary(id, viewer),
 			forkSession: (sessionId, entryId) => this.forkSession(sessionId, entryId),
 			closeSession: (id, actorId, delegatedBy, authority) => this.closeSession(id, actorId, delegatedBy, authority),
 			session: (id) => {
@@ -1074,12 +1075,15 @@ export class Harness {
 		return actor.authority.filter(right => this.withinLimits(s, right) && (!s.meta.parentSessionId || right === "watch"));
 	}
 
-	private async sessionListing(id: string, viewer: ListingViewer): Promise<SessionListing | undefined> {
+	private async sessionSummary(id: string, viewer: ListingViewer): Promise<SessionSummary | undefined> {
 		const store = this.use<HistoryStore>("history-store");
 		if (!store || store.supports.persistent !== true && store.supports.portableSessions !== true) return;
 		const live = this.sessions.get(id);
-		const s = live && !live.interruption.signal.aborted ? live : await this.loadInto(id);
-		if (!s || s.ephemeral || s.provisional) return;
+		const s = live && !live.interruption.signal.aborted ? live : await this.loadInto(id).catch(error => {
+			if (["not_found", "ENOENT", "unknown_session"].includes(error?.code)) return undefined;
+			throw error;
+		});
+		if (!s || s.ephemeral || s.provisional || viewer.scope && !viewer.scope(s.meta.project, s.tenant)) return;
 		await this.admitHistory(s);
 		const rights = this.discoveryRights(s, viewer.actor, viewer.allowJoin);
 		if (!rights.includes("watch")) return;

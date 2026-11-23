@@ -283,6 +283,14 @@ func agHTTPError(w http.ResponseWriter, err error) {
 	w.WriteHeader(status)
 	_, _ = w.Write(api.JSON(agObject{"code": code}))
 }
+func (a *Agent) threadMember(s api.Session, host Actor, join bool) bool {
+	_, recorded := s.Actors[host.ID]
+	if !recorded && host.ID != s.Actor && (!join || !a.severalActors) {
+		return false
+	}
+	return a.a.(agHost).DiscoverForHost(s, host)
+}
+
 func (q *agRequest) scope(project, tenant string) bool {
 	return project == q.a.project && (q.Projects == nil || slices.Contains(q.Projects, project)) && (q.Tenants == nil && tenant == "" || slices.Contains(q.Tenants, tenant))
 }

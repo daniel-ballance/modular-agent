@@ -88,7 +88,10 @@ for (const runtime of ["durable", "transient"] as const) {
     const reader = await createAgent({project:p.work, dataDir, durability:"kept", providers:[scriptedProvider([])]});
     try {
       const actor = defaultAcpActor();
-      while ((await reader.sessionListing(id, {actor}))?.waiting.turn !== "none") await delay(10, undefined, {signal:t.signal});
+      assert.equal(await reader.sessionSummary("missing", {actor}), undefined);
+      assert.equal(await reader.sessionSummary(id, {actor, scope:() => false}), undefined);
+      assert.equal(await reader.sessionSummary(id, {actor:{...actor, rights:[]}}), undefined);
+      while ((await reader.sessionSummary(id, {actor}))?.waiting.turn !== "none") await delay(10, undefined, {signal:t.signal});
       await resumed.stop();
       assert.equal(resumed.stderr().trim(), "ma: resumed " + id);
       const s = await reader.openSession(id);

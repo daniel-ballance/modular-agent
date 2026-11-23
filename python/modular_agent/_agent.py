@@ -481,6 +481,7 @@ class Agent:
         kind: str | None = None,
         rights: Collection[str] | None = None,
         route_id: str | None = None,
+        scope: Callable[[Path, str | None], bool] | None = None,
         live_questions: Collection[str] | None = None,
         approval_views: Collection[str] = (),
         represents: Collection[str] = (),
@@ -504,6 +505,7 @@ class Agent:
                 state
                 and state["entries"]
                 and not state.get("provisional")
+                and (scope is None or scope(Path(state["project"]), state.get("tenant")))
                 and h.can_open(state, actor, local=local, kind=kind)
                 and (rights is None or "watch" in rights)
             )

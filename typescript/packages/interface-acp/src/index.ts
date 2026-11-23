@@ -295,8 +295,8 @@ export class AcpInterface implements InterfaceCapability {
 			for (const {id, project:cwd} of all) {
 				if (project && project !== cwd || this.options.allowSession && !await this.options.allowSession(id, cwd)) continue;
 				const { api, allowJoin } = this.options.listOwner?.(id) ?? { api:this.apiFor(id), allowJoin:true };
-				const inspect = () => api.sessionListing(id, {
-					actor:this.actor(), allowJoin, inTurn:this.attached(id) || undefined, secrets:true,
+				const inspect = () => api.sessionSummary(id, {
+					actor:this.actor(), allowJoin, scope:this.options.allowAttached, inTurn:this.attached(id) || undefined, secrets:true,
 					represented:[...this.options.represents ?? []], present:this.presentActors(id),
 				});
 				try {

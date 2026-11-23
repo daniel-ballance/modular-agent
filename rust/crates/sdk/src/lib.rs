@@ -84,8 +84,8 @@ pub use grok::{GrokOptions, GrokProvider, grok};
 pub use history::{
     EntryPage, ErasedEntry, ErasureReport, History, HistoryFault, HistoryResult, HistoryServer,
     HistoryStore, LeaseGrant, PortableHistoryStore, ServeHistoryOptions, SessionInfo, SessionPage,
-    file_history, http_history, http_history_from_env, listen_history, memory_history,
-    portable_file_history, serve_history,
+    SessionSummary, SessionViewer, TurnState, WaitingSummary, file_history, http_history,
+    http_history_from_env, listen_history, memory_history, portable_file_history, serve_history,
 };
 pub use hooks::*;
 pub use jobs::{Job, JobOutcome, JobOwner, JobStart, StartJobs};

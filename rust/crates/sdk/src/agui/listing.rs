@@ -35,10 +35,6 @@ impl Pages {
 
 impl Service {
     fn thread_row(&self, a: &AguiActor, d: &SessionData) -> R<Option<Value>> {
-        let rights = self.discovery_rights(a, d)?;
-        if !rights.has("watch") || self.agent.inner.history.0.check_erasure(d).is_err() {
-            return Ok(None);
-        }
         let c = self
             .routes
             .lock()
@@ -46,24 +42,36 @@ impl Service {
             .clients
             .get(&(d.id.clone(), a.client_id.clone()))
             .cloned();
-        let running = || {
-            self.h().is_driving_turn(&d.id)
-                || self.acp_open.is_running(&d.id)
-                || self.agent.inner.history.0.confirms_writer(&d.id)
-        };
-        let summary =
-            d.waiting_summary(&rights, a.id(), Some(&a.client_id), running, |q, live| {
-                if !live && q.kind != base::RequestKind::Approval {
-                    return true;
-                }
+        let viewer = crate::SessionViewer {
+            actor: a.id(),
+            rights: &a.principal.actor.rights,
+            route_id: Some(&a.client_id),
+            join_on_open: a.join_on_open
+                && (self.agent.inner.several_actors || a.id() == base::ACP_HOST_ACTOR),
+            scope: &|project, tenant| {
+                project == self.agent.inner.project
+                    && tenant == self.tenant.as_deref()
+                    && a.allows(project, tenant)
+            },
+            in_turn: &|id, _approval| {
                 c.as_ref().is_some_and(|c| {
                     let route = c.presence.lock().unwrap();
-                    route.is_some() && c.questions.lock().unwrap().get(&q.id) == Some(&*route)
+                    route.is_some() && c.questions.lock().unwrap().get(id) == Some(&*route)
                 })
-            })?;
-        let updated = view::iso(d.entries.last().map_or(0, |e| e.at)).ok_or(Fail::Lost)?;
+            },
+        };
+        let Some(row) = self.agent.session_summary_from(
+            &self.agent.inner.history,
+            d,
+            &viewer,
+            self.acp_open.is_running(&d.id),
+        )?
+        else {
+            return Ok(None);
+        };
+        let updated = view::iso(row.updated_at).ok_or(Fail::Lost)?;
         Ok(Some(
-            json!({"threadId": d.id, "updatedAt": updated, "waiting": summary}),
+            json!({"threadId": row.id, "updatedAt": updated, "waiting": row.waiting}),
         ))
     }
 
@@ -132,7 +140,7 @@ impl Service {
         page["threads"].as_array_mut().unwrap().retain(|row| {
             row["threadId"]
                 .as_str()
-                .and_then(|id| history.load(id).ok())
+                .and_then(|id| history.inspect(id).ok())
                 .and_then(|d| self.thread_row(a, &d).ok().flatten())
                 .is_some_and(|fresh| fresh["waiting"] == row["waiting"])
         });
