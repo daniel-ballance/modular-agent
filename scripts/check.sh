@@ -62,6 +62,27 @@ acp_kit() {
   (cd conformance/acp && MODULAR_AGENT_CONFORMANCE=1 node run.mjs --crash-checks --probe-checks --job-checks -- "${command[@]}" --acp)
 }
 
+telemetry_kit() { # language, scope (empty for every placement)
+  local language="$1" scope="$2"
+  local -a adapter filters=()
+  if [ -n "$scope" ]; then filters+=("$scope"); fi
+  case "$language" in
+    rust)
+      if [ "$scope" != --peers ]; then
+        (cd rust && mise exec -- cargo build -q -p sdk-scenarios --bin scenario-agent) || return
+      fi
+      adapter=("$repo/rust/target/debug/scenario-agent") ;;
+    typescript) adapter=(node typescript/packages/fixtures/dist/src/scenario-agent.js) ;;
+    go)
+      if [ "$scope" != --peers ]; then
+        (cd go && mise exec -- go test -c -o .bin/telemetry-scenarios ./modular/scenarios) || return
+      fi
+      adapter=(go/.bin/telemetry-scenarios -test.run=^TestTelemetryScenario$) ;;
+    python) adapter=("$repo/python/.venv/bin/python" -m modular_agent._scenarios) ;;
+  esac
+  node conformance/telemetry/run.mjs "$language" "${filters[@]}" -- "${adapter[@]}"
+}
+
 # Language suites may discover peer fixture builds. Leave those placements for
 # the shared phase, where all builds are ready and nobody is rewriting them.
 only_lane_fixtures() {
@@ -75,9 +96,12 @@ only_lane_fixtures() {
 
 # The plan keeps the serial order. Each parallel worker follows only its own entries.
 plan() {
-  local selection="$1" runtime binding language
+  local selection="$1" runtime binding language label scope=--in-process telemetry_label=in-process
   local -a matrix_options=()
-  if $serial; then matrix_options+=(--serial); fi
+  if $serial; then
+    matrix_options+=(--serial)
+    if $all; then scope=; telemetry_label='every placement'; fi
+  fi
   step setup "kits: npm ci (conformance/acp, conformance/tools)" bash -c 'npm ci --silent --prefix conformance/acp && npm ci --silent --prefix conformance/tools'
   if ! $quick; then
     step setup "kits: npm ci (conformance/telemetry)" npm ci --silent --prefix conformance/telemetry
@@ -122,10 +146,9 @@ plan() {
   fi
 
   if ! $quick; then
-    step rust "telemetry: Rust runner, every placement" bash -c '(cd rust && mise exec -- cargo build -q -p sdk-scenarios --bin scenario-agent) && node conformance/telemetry/run.mjs rust -- "$PWD/rust/target/debug/scenario-agent"'
-    step typescript "telemetry: TypeScript runner, every placement" node conformance/telemetry/run.mjs typescript -- node typescript/packages/fixtures/dist/src/scenario-agent.js
-    step go "telemetry: Go runner, every placement" bash -c '(cd go && mise exec -- go test -c -o .bin/telemetry-scenarios ./modular/scenarios) && node conformance/telemetry/run.mjs go -- go/.bin/telemetry-scenarios -test.run=^TestTelemetryScenario$'
-    step python "telemetry: Python runner, every placement" bash -c 'node conformance/telemetry/run.mjs python -- "$PWD/python/.venv/bin/python" -m modular_agent._scenarios'
+    for label in Rust TypeScript Go Python; do
+      step "${label,,}" "telemetry: $label runner, $telemetry_label" telemetry_kit "${label,,}" "$scope"
+    done
     step rust "rust: build history service example" bash -c "cd rust && mise exec -- cargo build -q -p modular-agent --example history_service"
     step go "go: build history service" bash -c "cd go && mise exec -- go build -o .bin/modular-service ./cmd/modular-service"
     for language in rust typescript go python; do
@@ -134,6 +157,11 @@ plan() {
       step "$language" "ADR 0030 kits: $language ACP and history" scripts/production-kits.sh "$language"
     done
     if $all; then
+      if ! $serial; then
+        for label in Rust TypeScript Go Python; do
+          step shared "telemetry: $label runner, peer placements" telemetry_kit "${label,,}" --peers
+        done
+      fi
       step shared "ADR 0030: erasure across languages (12 pairings)" scripts/erasure-matrix.sh "${matrix_options[@]}"
     fi
   fi
