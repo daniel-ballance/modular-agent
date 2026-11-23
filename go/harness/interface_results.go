@@ -160,6 +160,9 @@ func (i *InterfaceConnection) checkReportLocked(ctx context.Context, id string) 
 		i.c.h.startInterfaceContinuationsLocked(s)
 		return refuse()
 	}
+	if s.interfaceUnreleased[id] {
+		return refuse()
+	}
 	for _, e := range s.data.Branch() {
 		if e.Kind == "turn.end" && e.Turn == cp.Turn && api.Decode[api.Outcome](e.Data).Status == "completed" && slices.ContainsFunc(api.Decode[api.Outcome](e.Data).Open, func(c api.Call) bool { return c.ID == id }) {
 			return cp, call, "", nil
@@ -252,7 +255,7 @@ func (h *Harness) queueInterfaceContinuationsLocked(s *session) {
 				continue
 			}
 			hasQuestion := false
-			for _, q := range questions {
+			for requestID, q := range questions {
 				if q.call != c.ID {
 					continue
 				}
@@ -261,7 +264,7 @@ func (h *Harness) queueInterfaceContinuationsLocked(s *session) {
 					eligible = false
 					break
 				}
-				add(q.closed, "answer", q.closed.ID)
+				add(q.closed, "answer", requestID)
 			}
 			if !hasQuestion {
 				eligible = false

@@ -277,6 +277,10 @@ func (p *turnPorts) DispatchInterface(ctx context.Context, call api.Call, lineag
 	}
 	s.interfaceSpans[call.ID] = span.SpanContext()
 	endTool(span, api.ToolResult{Status: "pending"}, nil)
+	if s.interfaceUnreleased == nil {
+		s.interfaceUnreleased = map[string]bool{}
+	}
+	s.interfaceUnreleased[call.ID] = true
 	conn.staged[checkpoint.ID] = stagedInterfaceCall{ports: p, entry: checkpoint, validate: validate}
 	conn.wakeLocked()
 	p.c.h.armInterfaceTimerLocked(s)
@@ -329,7 +333,7 @@ func (i *InterfaceConnection) NextHandoff(ctx context.Context) (api.Call, error)
 		current, handoff, valid := i.c.h.restoreInterface(s.data, ticket.entry)
 		valid = valid && ctx.Err() == nil && s.checkWriterLocked() == nil && i.canReceiveLocked(i.c.h.interfaceTools[call.Name], call.Name) && interfaceTerminal(s.data, call.ID).ID == "" && handoff.Deadline > time.Now().UnixMilli() && ticket.ports.canRunToolsLocked(call.Actor) && !interfaceTurnFailed(s.data, ticket.entry.Turn)
 		if err == nil && valid {
-			err = s.withErasureCheck(s.data, func() error { return nil })
+			err = s.withErasureCheck(s.data, func() error { delete(s.interfaceUnreleased, call.ID); return nil })
 		}
 		s.mu.Unlock()
 		if err != nil {
@@ -432,6 +436,7 @@ func (h *Harness) appendInterfaceResultLocked(s *session, checkpoint api.Entry, 
 	err = s.commitLocked(next, ctx)
 	if err == nil {
 		delete(s.interfaceSpans, checkpoint.Call)
+		delete(s.interfaceUnreleased, checkpoint.Call)
 		for _, conn := range s.interfaceConnections {
 			delete(conn.staged, checkpoint.ID)
 		}
@@ -441,6 +446,9 @@ func (h *Harness) appendInterfaceResultLocked(s *session, checkpoint api.Entry, 
 
 func (h *Harness) settleInterfaceUnknownLocked(s *session, cp api.Entry, reason string) error {
 	result := api.ToolResult{Status: "unknown", Content: api.Text(reason)}
+	if s.interfaceUnreleased[cp.Call] {
+		result.Status, result.Content = "not_started", api.Text("The Interface handoff was staged but not released.")
+	}
 	for _, e := range s.data.LiveEntries() {
 		if e.ID == cp.Parent && !e.IsErased() {
 			c := api.Decode[api.Call](e.Data)

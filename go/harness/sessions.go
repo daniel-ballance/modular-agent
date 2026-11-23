@@ -22,6 +22,7 @@ import (
 type session struct {
 	interfaceConnections []*InterfaceConnection
 	interfaceSpans       map[string]trace.SpanContext
+	interfaceUnreleased  map[string]bool
 	interfaceTimer       *time.Timer
 	interfaceReports     sync.Mutex
 	queuedContinuations  map[string]bool
@@ -1082,11 +1083,19 @@ func (h *Harness) run(ctx context.Context, s *session, in api.Input) {
 		outcome := h.runOne(ctx, s, in)
 		s.mu.Lock()
 		if !errors.Is(context.Cause(ctx), api.ErrProcessStopped) && (ctx.Err() != nil || outcome.Status == "cancelled") {
-			outcome.Returned = append([]api.Input(nil), s.queue...)
-			if len(s.queue) > 0 {
+			outcome.Returned = nil
+			var continuations []api.Input
+			for _, queued := range s.queue {
+				if queued.Continuation != "" {
+					continuations = append(continuations, queued)
+				} else {
+					outcome.Returned = append(outcome.Returned, queued)
+				}
+			}
+			if len(outcome.Returned) > 0 {
 				next := s.data
 				next.Entries = slices.Clip(next.Entries)
-				for _, queued := range s.queue {
+				for _, queued := range outcome.Returned {
 					appendEntry(&next, api.Entry{Kind: "input.returned", Actor: queued.Actor, InputRef: queued.ID,
 						Data: api.JSON(map[string]string{"reason": "cancelled"})}, "harness", true)
 				}
@@ -1094,7 +1103,7 @@ func (h *Harness) run(ctx context.Context, s *session, in api.Input) {
 					outcome.Error = err.Error()
 				}
 			}
-			s.queue = nil
+			s.queue = continuations
 		}
 		s.last = outcome
 		h.queueInterfaceContinuationsLocked(s)
@@ -1103,6 +1112,9 @@ func (h *Harness) run(ctx context.Context, s *session, in api.Input) {
 			s.running = false
 			s.cancel(nil)
 			done := s.done
+			if !errors.Is(context.Cause(ctx), api.ErrProcessStopped) {
+				h.startInterfaceContinuationsLocked(s)
+			}
 			s.mu.Unlock()
 			if len(outcome.Returned) > 0 {
 				h.API().Emit(context.Background(), api.Event{Kind: "input.returned", Session: s.id, Data: api.JSON(outcome.Returned)})
