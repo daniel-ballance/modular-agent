@@ -236,10 +236,8 @@ func (l *lease) mutateRegistry(path string, body func(string) any, publish bool)
 	if l.token == "" || !l.c.ErasureCoordinated() {
 		return result, api.ErrErasureUnavailable
 	}
-	ctx, cancel := context.WithTimeout(l.c.ctx, time.Duration(l.cutoff.Load()-leaseClock()))
-	defer cancel()
 	var out fields
-	if err := l.c.profileCall(ctx, "POST", path, body(l.token), &out, ""); err != nil {
+	if err := l.c.profileCall(l.writer, "POST", path, body(l.token), &out, ""); err != nil {
 		var refusal *servicehttp.ResponseError
 		if errors.As(err, &refusal) && refusal.Code == "lost" {
 			l.fence()
@@ -287,9 +285,7 @@ func (l *lease) SaveErasure(next api.Session) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(l.c.ctx, time.Duration(l.cutoff.Load()-leaseClock()))
-	defer cancel()
-	if _, err := l.c.backend.Erase(ctx, l.id, l.token, ids); err != nil {
+	if _, err := l.c.backend.Erase(l.writer, l.id, l.token, ids); err != nil {
 		l.fence()
 		return err
 	}
