@@ -104,6 +104,7 @@ func Event(ctx context.Context, name string, attrs ...attribute.KeyValue) {
 // state, so neither tracestate nor baggage crosses a trust boundary.
 type Wire struct {
 	Parent string `json:"traceparent"`
+	State  string `json:"tracestate,omitempty"` // filtered state on local work and its recovery checkpoint only
 }
 
 func Inject(ctx context.Context) *Wire {
@@ -113,6 +114,49 @@ func Inject(ctx context.Context) *Wire {
 		return &Wire{Parent: p}
 	}
 	return nil
+}
+
+type trustedStateKey struct{}
+
+// HTTPParent extracts only operator-allowed vendor state; it never extracts baggage.
+func HTTPParent(ctx context.Context, parent, state string, allow []string) context.Context {
+	sc := Parse(&Wire{Parent: parent})
+	if !sc.IsValid() {
+		return ctx
+	}
+	ts, err := trace.ParseTraceState(state)
+	if err == nil {
+		var parts []string
+		for _, k := range allow {
+			if v := ts.Get(k); v != "" {
+				parts = append(parts, k+"="+v)
+			}
+		}
+		if filtered, err := trace.ParseTraceState(strings.Join(parts, ",")); err == nil {
+			sc = sc.WithTraceState(filtered)
+		}
+	}
+	return context.WithValue(trace.ContextWithRemoteSpanContext(ctx, sc), trustedStateKey{}, sc.TraceState().String())
+}
+func WorkWire(ctx context.Context) *Wire {
+	w := Inject(ctx)
+	if w != nil {
+		w.State, _ = ctx.Value(trustedStateKey{}).(string)
+	}
+	return w
+}
+func WorkParent(ctx context.Context, w *Wire) context.Context {
+	if w == nil {
+		return ctx
+	}
+	sc := Parse(w)
+	if !sc.IsValid() {
+		return ctx
+	}
+	if ts, err := trace.ParseTraceState(w.State); err == nil {
+		sc = sc.WithTraceState(ts)
+	}
+	return context.WithValue(trace.ContextWithRemoteSpanContext(ctx, sc), trustedStateKey{}, sc.TraceState().String())
 }
 
 func Parse(w *Wire) trace.SpanContext {
@@ -148,7 +192,7 @@ func Extract(ctx context.Context, w *Wire) context.Context {
 func Own(ctx context.Context, span trace.Span) *Wire {
 	// The API no-op implementation returns the parent itself, not a new span.
 	if sc := span.SpanContext(); sc.IsValid() && sc.SpanID() != trace.SpanContextFromContext(ctx).SpanID() {
-		return Inject(trace.ContextWithSpan(ctx, span))
+		return WorkWire(trace.ContextWithSpan(ctx, span))
 	}
 	return nil
 }

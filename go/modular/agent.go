@@ -203,6 +203,8 @@ func WithRefusedSettingsDuringTurn() Option {
 }
 
 type Agent struct {
+	tenantGrants                          map[string]Tenant
+	interfaceSources                      []harness.InterfaceSource
 	h                                     *harness.Harness
 	a                                     api.API
 	project                               string
@@ -328,7 +330,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	}
 	h.HandBackQueuedOnOpen()
 	h.ConfigureSessions(o.jobReports, o.lateAnswers, o.refuseSettings)
-	a := &Agent{severalActors: o.severalActors, sessionLimits: o.sessionLimits, tenants: o.tenants != nil, jobReports: o.jobReports, lateAnswers: o.lateAnswers, h: h, a: h.API(), project: project, pluginHost: host, persistent: o.durability != Ephemeral, erasure: o.history.make == nil || o.history.erasure}
+	a := &Agent{tenantGrants: o.tenants, interfaceSources: o.interfaceTools, severalActors: o.severalActors, sessionLimits: o.sessionLimits, tenants: o.tenants != nil, jobReports: o.jobReports, lateAnswers: o.lateAnswers, h: h, a: h.API(), project: project, pluginHost: host, persistent: o.durability != Ephemeral, erasure: o.history.make == nil || o.history.erasure}
 	state := o.dataDir
 	if state == "" || (o.durability == Ephemeral && o.environment == nil) {
 		a.scratch, err = os.MkdirTemp("", "modular-go-")

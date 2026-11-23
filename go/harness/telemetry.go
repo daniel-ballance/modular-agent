@@ -28,7 +28,7 @@ func savedTurn(s api.Session, turn string) (sc trace.SpanContext) {
 		w := api.Decode[struct {
 			TraceContext *telemetry.Wire `json:"traceContext"`
 		}](e.Data).TraceContext
-		if v := telemetry.Parse(w); v.IsValid() {
+		if v := trace.SpanContextFromContext(telemetry.WorkParent(context.Background(), w)); v.IsValid() {
 			sc = v
 		}
 	}

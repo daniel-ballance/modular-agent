@@ -15,11 +15,13 @@ import (
 
 // Projects supplies composition and resources for ACP projects.
 type Projects struct {
-	Compose  func(ctx context.Context, project, sessionID string) (Project, error)
-	Settings func(project string, defaults api.Settings) (api.Settings, error)
-	MCP      func(project string) ([]mcptools.Server, error)
-	WarnMCP  func(error)
-	pool     *projectPool
+	// RetainWriter reports sessions also held by another Interface on this listener.
+	RetainWriter func(string) bool
+	Compose      func(ctx context.Context, project, sessionID string) (Project, error)
+	Settings     func(project string, defaults api.Settings) (api.Settings, error)
+	MCP          func(project string) ([]mcptools.Server, error)
+	WarnMCP      func(error)
+	pool         *projectPool
 }
 
 // ShareCompositions gives one listener a project pool. Each connection still

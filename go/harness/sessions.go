@@ -1,12 +1,14 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
+	"github.com/daniel-ballance/modular-agent/go/internal/worktime"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 	"go.opentelemetry.io/otel/trace"
 	"os"
@@ -22,8 +24,9 @@ import (
 type session struct {
 	interfaceConnections []*InterfaceConnection
 	interfaceSpans       map[string]trace.SpanContext
+	interfaceParents     map[string]*telemetry.Wire
 	interfaceUnreleased  map[string]bool
-	interfaceTimer       *time.Timer
+	interfaceTimer       worktime.Timer
 	interfaceReports     sync.Mutex
 	queuedContinuations  map[string]bool
 	jobSpans             map[string]context.Context
@@ -636,7 +639,7 @@ func appendEntry(next *api.Session, e api.Entry, writer string, advance bool) ap
 	}
 	e.Parent = next.Position
 	e.Session = next.ID
-	e.Time = time.Now().UTC()
+	e.Time = worktime.Now().UTC()
 	if (e.Kind != "job.start" && e.Kind != "job.end") || e.Writer == "" {
 		e.Writer = writer
 	}
@@ -969,6 +972,10 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (receipt a
 		s.mu.Unlock()
 		return api.Receipt{}, err
 	}
+	if !api.InputWatermarkMatches(ctx, s.data) {
+		s.mu.Unlock()
+		return api.Receipt{}, api.ErrInputConflict
+	}
 	if r, ok := duplicate(s.data, in); ok {
 		s.mu.Unlock()
 		return r, nil
@@ -996,6 +1003,9 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (receipt a
 	if !api.SessionScopeAllows(ctx, s.data.Project, s.data.Tenant) || !c.canAdmit(s.data, in) {
 		return api.Receipt{}, api.ErrAuthority
 	}
+	if !api.InputWatermarkMatches(ctx, s.data) {
+		return api.Receipt{}, api.ErrInputConflict
+	}
 	if r, ok := duplicate(s.data, in); ok {
 		return r, nil
 	}
@@ -1007,7 +1017,7 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (receipt a
 		}
 	}
 	in.ConnectionRights = &starting
-	in.TraceContext = telemetry.Inject(ctx)
+	in.TraceContext = telemetry.WorkWire(ctx)
 	r, err := c.admitLocked(s, in, ctx)
 	if errors.Is(err, api.ErrCapacity) {
 		telemetry.Event(ctx, "modular_agent.capacity.refused")
@@ -1182,7 +1192,7 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 	if resume != nil {
 		turnID = resume.Turn
 	}
-	ctx = telemetry.Scope(telemetry.Extract(ctx, in.TraceContext), snap.ID, turnID, "", h.agentName)
+	ctx = telemetry.Scope(telemetry.WorkParent(ctx, in.TraceContext), snap.ID, turnID, "", h.agentName)
 	ctx = api.WithExecution(api.AsActor(ctx, in.Actor), api.Execution{Session: snap.ID, Turn: turnID})
 	ctx = api.WithJobContributors(api.WithConnectionRights(ctx, in.ConnectionRights), in.Actor, in.ViaActor, in.ReleasedBy)
 	var tools []api.Tool
@@ -1193,7 +1203,7 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 				return api.Outcome{Status: "failed", Error: "duplicate tool " + tool.Name}
 			}
 			seen[tool.Name] = true
-			if registered := h.interfaceTools[tool.Name]; registered != nil && (access != nil && access.Model().RunsTools || !runtime.Declaration().InterfaceTools || !h.interfaceAvailable(s, registered, tool.Name)) {
+			if registered := h.interfaceTools[tool.Name]; registered != nil && (access != nil && access.Model().RunsTools || !runtime.Declaration().InterfaceTools || !h.interfaceAvailable(s, registered, tool.Name, in, turnID)) {
 				continue
 			}
 			tools = append(tools, tool)
@@ -1487,6 +1497,9 @@ func (c *client) Emit(ctx context.Context, e api.Event) {
 	e.Time = time.Now().UTC()
 	out, err := c.output(ctx, e)
 	if err == nil && !out.Hold {
+		if strings.HasPrefix(e.Kind, "plugin.") && !bytes.Equal(e.Data, out.Event.Data) {
+			out.Event.OutputChanged = true
+		}
 		out.Event.ErasureEpoch = e.ErasureEpoch
 		e = out.Event
 	}

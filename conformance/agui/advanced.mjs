@@ -176,7 +176,7 @@ export const advanced = {
         assert.equal(entries(evidence, 'turnStart').length, 1, 'resumed question uses original turn');
         const answers = entries(evidence, 'inputAnswer');
         assert.equal(answers.length, 1, 'question decision commits once');
-        assert.equal(answers[0].data.declined, status !== 'resolved');
+        assert.equal(answers[0].data.declined ?? false, status !== 'resolved');
         if (status === 'expired') assert.equal(answers[0].data.reason, 'timeLimit');
       } finally { await presence.close(); }
     }

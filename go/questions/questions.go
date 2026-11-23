@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
+	"github.com/daniel-ballance/modular-agent/go/internal/worktime"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"slices"
@@ -162,7 +163,7 @@ func questionDeadline(at time.Time, wait time.Duration) *time.Time {
 }
 
 func expired(q api.Question) bool {
-	return q.Deadline != nil && !q.Defer && !time.Now().Before(*q.Deadline)
+	return q.Deadline != nil && !q.Defer && !worktime.Now().Before(*q.Deadline)
 }
 
 func (m *Manager) valid(q api.Question, a api.Answer) bool {
@@ -342,11 +343,11 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 			return api.Answer{}, e
 		}
 	}
-	var deadline <-chan time.Time
+	var deadline chan struct{}
 	if q.Deadline != nil {
-		timer := time.NewTimer(time.Until(*q.Deadline))
+		deadline = make(chan struct{})
+		timer := worktime.At(*q.Deadline, func() { close(deadline) })
 		defer timer.Stop()
-		deadline = timer.C
 	}
 	for {
 		m.mu.Lock()

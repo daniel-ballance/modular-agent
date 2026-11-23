@@ -46,9 +46,10 @@ Options:
   --history             print the session's history
   --declaration         print what this agent declares it supports
   --acp                 serve the Agent Client Protocol for an editor or host
+  --agui                serve AG-UI using HTTP and SSE (requires --listen)
   --listen ADDR [--token-file FILE]
   --policy FILE        read operator policy from FILE
-                        with --acp, listen on a loopback WebSocket instead of stdio
+                        listen on loopback; combine --acp and --agui for one listener
   -h, --help            print help
   -V, --version         print the version
 
@@ -60,13 +61,13 @@ Files: settings.json, mcp.json, models.json, AGENTS.md and skills/ in
 ~/.config/modular-agent. Sessions are kept in ~/.local/state/modular-agent/go.`
 
 type options struct {
-	command, provider, project, session, model, thinking                            string
-	listen, tokenFile, policyPath                                                   string
-	policy                                                                          operatorPolicy
-	clientIdentity                                                                  *string
-	prompt                                                                          *string
-	loadClaude                                                                      bool
-	device, resume, all, trust, transient, verbose, json, history, declaration, acp bool
+	command, provider, project, session, model, thinking                                  string
+	listen, tokenFile, policyPath                                                         string
+	policy                                                                                operatorPolicy
+	clientIdentity                                                                        *string
+	prompt                                                                                *string
+	loadClaude                                                                            bool
+	device, resume, all, trust, transient, verbose, json, history, declaration, acp, agui bool
 }
 
 func parse(args []string) (o options, err error) {
@@ -147,6 +148,8 @@ func parse(args []string) (o options, err error) {
 			o.declaration = true
 		case "--acp":
 			o.acp = true
+		case "--agui":
+			o.agui = true
 		case "--listen":
 			o.listen, err = take()
 			if err == nil && o.listen == "" {
@@ -179,11 +182,14 @@ func parse(args []string) (o options, err error) {
 	if o.all && o.command != "sessions" {
 		return o, errors.New("--all is for ma sessions")
 	}
-	if o.acp && (o.prompt != nil || o.session != "" || o.resume || o.trust || o.command != "") {
+	if o.agui && o.listen == "" {
+		return o, errors.New("--agui requires --listen")
+	}
+	if (o.acp || o.agui) && (o.prompt != nil || o.session != "" || o.resume || o.trust || o.command != "") {
 		return o, errors.New("with --acp the client creates sessions and grants trust")
 	}
-	if o.listen != "" && !o.acp || o.tokenFile != "" && o.listen == "" {
-		return o, errors.New("--listen requires --acp; --token-file requires --listen")
+	if o.listen != "" && !o.acp && !o.agui || o.tokenFile != "" && o.listen == "" {
+		return o, errors.New("--listen requires --acp or --agui; --token-file requires --listen")
 	}
 	return o, nil
 }
@@ -338,7 +344,7 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 		return nil
 	}
 	bootstrap := o
-	if o.acp {
+	if o.acp && !o.agui {
 		// The listener has no client project yet. The authorized factory reads
 		// client project settings after checking its scope.
 		if err := os.MkdirAll(d.state, 0700); err != nil {
@@ -375,6 +381,25 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 		return err
 	}
 	defer a.Close(context.Background())
+	if o.agui {
+		actors := o.policy.Actors
+		if o.tokenFile != "" {
+			actors = []modular.ACPActor{{TokenFile: o.tokenFile, Actor: modular.LocalACPActor(), ClientID: "local"}}
+		}
+		service, err := a.ServeAGUI(ctx, modular.ServeAGUIOptions{Listen: o.listen, Actors: actors, ACP: o.acp})
+		if err != nil {
+			return err
+		}
+		defer service.Close()
+		if _, err = fmt.Fprintln(out, service.URL); err != nil {
+			return err
+		}
+		select {
+		case <-service.Done():
+		case <-interrupts:
+		}
+		return service.Close()
+	}
 	if o.acp {
 		acpOptions := modular.ServeACPOptions{
 			Compose: func(ctx context.Context, project string) (*modular.Agent, error) {

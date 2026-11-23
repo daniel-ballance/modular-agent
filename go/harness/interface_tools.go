@@ -10,6 +10,7 @@ import (
 
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
+	"github.com/daniel-ballance/modular-agent/go/internal/worktime"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -45,7 +46,7 @@ func (h *Harness) RegisterInterfaceTools(sources []InterfaceSource) error {
 	routes, ids := map[string]string{}, map[string]bool{}
 	byName := map[string]*interfaceSource{}
 	for _, spec := range sources {
-		if spec.ID == "" || ids[spec.ID] || spec.Actor == "" || spec.Route == "" || spec.TimeoutMS <= 0 || spec.TimeoutMS > api.MaxSharedTime-time.Now().UnixMilli() || len(spec.Definitions) == 0 {
+		if spec.ID == "" || ids[spec.ID] || spec.Actor == "" || spec.Route == "" || spec.TimeoutMS <= 0 || spec.TimeoutMS > api.MaxSharedTime-worktime.Now().UnixMilli() || len(spec.Definitions) == 0 {
 			return errors.New("invalid Interface tool source")
 		}
 		if actor := routes[spec.Route]; actor != "" && actor != spec.Actor {
@@ -80,15 +81,16 @@ func (h *Harness) RegisterInterfaceTools(sources []InterfaceSource) error {
 // InterfaceConnection is an independently authenticated, session-scoped route.
 // The transport supplies the principal, scope and ceiling from operator configuration.
 type InterfaceConnection struct {
-	s            *session
-	c            *client
-	actor, route string
-	rights       *[]string
-	scope        func(project, tenant string) bool
-	advertised   map[string]bool
-	notify       chan struct{}
-	staged       map[string]stagedInterfaceCall
-	closed       bool
+	s                    *session
+	c                    *client
+	actor, route         string
+	rights               *[]string
+	scope                func(project, tenant string) bool
+	advertised           map[string]bool
+	inputKey, originTurn string
+	notify               chan struct{}
+	staged               map[string]stagedInterfaceCall
+	closed               bool
 }
 
 type stagedInterfaceCall struct {
@@ -132,7 +134,10 @@ func (i *InterfaceConnection) allowedLocked(right string, saved []string) bool {
 		(i.rights == nil || slices.Contains(*i.rights, right)) && (saved == nil || slices.Contains(saved, right)) && i.c.authorized(i.s.data, i.actor, right)
 }
 
-func (i *InterfaceConnection) Advertise(names []string) error {
+func (i *InterfaceConnection) Advertise(names []string) error { return i.AdvertiseFor(names, "", "") }
+
+// AdvertiseFor limits the offer to the named input or the continuation of the named turn.
+func (i *InterfaceConnection) AdvertiseFor(names []string, inputKey, origin string) error {
 	i.s.mu.Lock()
 	defer i.s.mu.Unlock()
 	if !i.allowedLocked("watch", nil) {
@@ -147,6 +152,7 @@ func (i *InterfaceConnection) Advertise(names []string) error {
 		available[name] = true
 	}
 	i.advertised = available
+	i.inputKey, i.originTurn = inputKey, origin
 	return nil
 }
 
@@ -170,10 +176,13 @@ func (i *InterfaceConnection) canReceiveLocked(source *interfaceSource, name str
 	return i.actor == source.Actor && i.route == source.Route && i.advertised[name] && i.allowedLocked("watch", nil) && i.allowedLocked("tools", nil)
 }
 
-func (h *Harness) interfaceAvailable(s *session, source *interfaceSource, name string) bool {
+func (i *InterfaceConnection) forWork(in api.Input, turn string) bool {
+	return i.inputKey == "" && i.originTurn == "" || i.inputKey != "" && in.Key == i.inputKey || i.originTurn != "" && (turn == i.originTurn || in.Continuation == i.originTurn)
+}
+func (h *Harness) interfaceAvailable(s *session, source *interfaceSource, name string, in api.Input, turn string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return slices.ContainsFunc(s.interfaceConnections, func(i *InterfaceConnection) bool { return i.canReceiveLocked(source, name) })
+	return slices.ContainsFunc(s.interfaceConnections, func(i *InterfaceConnection) bool { return i.forWork(in, turn) && i.canReceiveLocked(source, name) })
 }
 
 func (p *turnPorts) PruneSettledInterfaceCalls(open []api.Call) []api.Call {
@@ -217,7 +226,9 @@ func (p *turnPorts) DispatchInterface(ctx context.Context, call api.Call, lineag
 	}
 	s := p.s
 	s.mu.Lock()
-	at := slices.IndexFunc(s.interfaceConnections, func(i *InterfaceConnection) bool { return i.canReceiveLocked(src, call.Name) })
+	at := slices.IndexFunc(s.interfaceConnections, func(i *InterfaceConnection) bool {
+		return i.forWork(p.input, p.id) && i.canReceiveLocked(src, call.Name)
+	})
 	if at < 0 {
 		s.mu.Unlock()
 		return refuse("Interface tool is unavailable.")
@@ -239,13 +250,13 @@ func (p *turnPorts) DispatchInterface(ctx context.Context, call api.Call, lineag
 	if err := s.reconcileErasureLocked(); err != nil {
 		return refuse("Interface handoff could not check erasure.")
 	}
-	if ctx.Err() != nil || s.checkWriterLocked() != nil || !p.canRunToolsLocked(call.Actor) || !conn.canReceiveLocked(src, call.Name) || !offeredInterface(s.data, p.id, call) {
+	if ctx.Err() != nil || s.checkWriterLocked() != nil || !p.canRunToolsLocked(call.Actor) || !conn.forWork(p.input, p.id) || !conn.canReceiveLocked(src, call.Name) || !offeredInterface(s.data, p.id, call) {
 		return refuse("Interface tool is no longer authorized or available.")
 	}
 	if api.InterfaceHandoffs(s.data)[call.ID].ID != "" || interfaceTerminal(s.data, call.ID).ID != "" {
 		return refuse("Interface tool call already started or settled.")
 	}
-	deadline := time.Now().UnixMilli() + src.TimeoutMS
+	deadline := worktime.Now().UnixMilli() + src.TimeoutMS
 	if deadline > api.MaxSharedTime {
 		return refuse("Interface deadline cannot be represented.")
 	}
@@ -331,7 +342,7 @@ func (i *InterfaceConnection) NextHandoff(ctx context.Context) (api.Call, error)
 		s.mu.Lock()
 		err := s.reconcileErasureLocked()
 		current, handoff, valid := i.c.h.restoreInterface(s.data, ticket.entry)
-		valid = valid && ctx.Err() == nil && s.checkWriterLocked() == nil && i.canReceiveLocked(i.c.h.interfaceTools[call.Name], call.Name) && interfaceTerminal(s.data, call.ID).ID == "" && handoff.Deadline > time.Now().UnixMilli() && ticket.ports.canRunToolsLocked(call.Actor) && !interfaceTurnFailed(s.data, ticket.entry.Turn)
+		valid = valid && ctx.Err() == nil && s.checkWriterLocked() == nil && i.canReceiveLocked(i.c.h.interfaceTools[call.Name], call.Name) && interfaceTerminal(s.data, call.ID).ID == "" && handoff.Deadline > worktime.Now().UnixMilli() && ticket.ports.canRunToolsLocked(call.Actor) && !interfaceTurnFailed(s.data, ticket.entry.Turn)
 		if err == nil && valid {
 			err = s.withErasureCheck(s.data, func() error { delete(s.interfaceUnreleased, call.ID); return nil })
 		}
@@ -478,7 +489,7 @@ func (h *Harness) recoverInterfaceLocked(s *session) error {
 			continue
 		}
 		_, saved, valid := h.restoreInterface(s.data, cp)
-		if !valid || saved.Deadline <= time.Now().UnixMilli() || interfaceTurnFailed(s.data, cp.Turn) {
+		if !valid || saved.Deadline <= worktime.Now().UnixMilli() || interfaceTurnFailed(s.data, cp.Turn) {
 			if err := h.settleInterfaceUnknownLocked(s, cp, "Interface call expired or its handoff could not be restored; outcome unknown."); err != nil {
 				return err
 			}
@@ -509,8 +520,8 @@ func (h *Harness) armInterfaceTimerLocked(s *session) {
 	if next == 0 {
 		return
 	}
-	var timer *time.Timer
-	timer = time.AfterFunc(time.Until(time.UnixMilli(next)), func() {
+	var timer worktime.Timer
+	timer = worktime.At(time.UnixMilli(next), func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.interfaceTimer != timer || s.closing || s.writerFailure != nil {
@@ -537,7 +548,7 @@ func (p *turnPorts) recordInterfaceTurnEnd(ctx context.Context, e api.Entry) (ap
 			continue
 		}
 		_, saved, valid := p.c.h.restoreInterface(s.data, cp)
-		if out.Status != "completed" || !valid || saved.Deadline <= time.Now().UnixMilli() {
+		if out.Status != "completed" || !valid || saved.Deadline <= worktime.Now().UnixMilli() {
 			if err := p.c.h.settleInterfaceUnknownLocked(s, cp, "Turn ended without a confirmed Interface tool outcome."); err != nil {
 				s.mu.Unlock()
 				return e, err

@@ -1,11 +1,13 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 	"slices"
+	"strings"
 )
 
 type outputListener struct {
@@ -64,6 +66,9 @@ func (c *client) deliverOutput(ctx context.Context, final api.Event, events []ap
 					return
 				}
 				view := clone(event)
+				if strings.HasPrefix(final.Kind, "plugin.") {
+					view.OutputChanged = final.OutputChanged || !bytes.Equal(view.Data, final.Data)
+				}
 				view.ErasureEpoch = epoch
 				listener.deliver(view)
 			}
@@ -122,6 +127,11 @@ func (c *client) gateBatch(ctx context.Context, session, recipient string, event
 
 // OutputValue gates a non-stream Interface response once, without publishing it.
 func (c *client) OutputValue(ctx context.Context, e api.Event) (api.Event, error) {
+	return c.OutputValueFor(ctx, api.Acting(ctx), e)
+}
+
+// OutputValueFor separates a client-specific recipient from the authenticated actor.
+func (c *client) OutputValueFor(ctx context.Context, recipient string, e api.Event) (api.Event, error) {
 	epoch, err := c.ErasureEpoch(e.Session)
 	if err != nil {
 		return api.Event{}, err
@@ -133,7 +143,7 @@ func (c *client) OutputValue(ctx context.Context, e api.Event) (api.Event, error
 	if out.Hold {
 		return api.Event{}, api.ErrOutputWithheld
 	}
-	events, err := c.gateBatch(ctx, e.Session, api.Acting(ctx), []api.Event{out.Event})
+	events, err := c.gateBatch(ctx, e.Session, recipient, []api.Event{out.Event})
 	if err != nil {
 		return api.Event{}, fmt.Errorf("%w: %w", api.ErrOutputWithheld, err)
 	}
