@@ -25,6 +25,10 @@ export function carrier(parent: SpanContext | undefined): TraceContext | undefin
 	return { traceparent: `00-${parent.traceId}-${parent.spanId}-${(parent.traceFlags & 255).toString(16).padStart(2, "0")}` };
 }
 
+function withoutState({ traceId, spanId, traceFlags, isRemote }: SpanContext): SpanContext {
+	return { traceId, spanId, traceFlags, isRemote };
+}
+
 export function currentSpan(): SpanContext | undefined {
 	return trace.getSpanContext(scope.getStore()?.context ?? context.active());
 }
@@ -42,14 +46,15 @@ export function startOperation(name: string, attributes: Attributes = {}, option
 	kind?: SpanKind; parent?: SpanContext | null; links?: SpanContext[];
 } = {}) {
 	const active = scope.getStore();
-	const parent = options.parent === undefined ? currentSpan() : options.parent;
+	const candidate = options.parent === undefined ? currentSpan() : options.parent;
+	const parent = candidate && isSpanContextValid(candidate) ? withoutState(candidate) : undefined;
 	const parentContext = parent ? trace.setSpanContext(ROOT_CONTEXT, parent) : ROOT_CONTEXT;
 	const inherited = active && (options.parent === undefined || (parent && trace.getSpanContext(active.context)?.traceId === parent.traceId)) ? active.attributes : {};
 	const all = { ...inherited, ...attributes };
 	let span: Span | undefined;
 	let sc: SpanContext | undefined;
 	try {
-		span = trace.getTracer("modular-agent").startSpan(name, { kind: options.kind, attributes: all, links: options.links?.map(context => ({ context })) }, parentContext);
+		span = trace.getTracer("modular-agent").startSpan(name, { kind: options.kind, attributes: all, links: options.links?.map(context => ({ context: withoutState(context) })) }, parentContext);
 		const candidate = span.spanContext();
 		if (isSpanContextValid(candidate) && candidate.spanId !== parent?.spanId) sc = candidate;
 	} catch { /* The application's instrumentation must not affect work. */ }
@@ -64,6 +69,7 @@ export class Operation {
 		this.ctx = span && spanContext ? trace.setSpan(ROOT_CONTEXT, span) : parent;
 		for (const key of scopeKeys) if (attributes[key] !== undefined) this.scopeAttributes[key] = attributes[key];
 	}
+	get isOpen(): boolean { return !this.ended; }
 	run<T>(work: () => T): T {
 		return scope.run({ context: this.ctx, operation: this, attributes: this.scopeAttributes }, () => context.with(this.ctx, work));
 	}

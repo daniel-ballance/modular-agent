@@ -658,115 +658,115 @@ export async function historyService(options: HistoryServiceOptions) {
 				throw new BindingError(401, "unauthorized", "A valid service token is required");
 			}
 			return await withTrace(readTrace(req.headers), async () => {
-			const target = req.url ?? "/";
-			const q = target.indexOf("?");
-			const path = q < 0 ? target : target.slice(0, q);
-			const rawQuery = q < 0 ? undefined : target.slice(q + 1);
-			// Do not use a URL parser that normalizes dot segments or backslashes.
-			if (path.split("/").some((s) => [".", ".."].includes(decode(s)))) invalid("Dot path segments are forbidden");
-			const route = routes.find(([re, , op]) => (profile || (op !== "plans" && op !== "complete")) && re.test(path));
-			if (!route) throw new BindingError(404, "not_found", "Unknown path");
-			const [re, methods, op] = route;
-			if (!(methods as readonly string[]).includes(req.method ?? "")) {
-				res.setHeader("Allow", methods.join(", "));
-				throw new BindingError(405, "method_not_allowed", "Method is not allowed on this path");
-			}
-			if (pendingBodies >= 8 && (req.headers["transfer-encoding"] || Number(req.headers["content-length"]) > 0 && Number(req.headers["content-length"]) <= maxBody)) throw unavailable();
-			pendingBodies++;
-			let raw: Buffer;
-			try { raw = await bodyBytes(req); } finally { pendingBodies--; }
-			if (req.headers["content-encoding"] !== undefined) throw new BindingError(415, "unsupported_media_type", "Content-Encoding must be omitted");
-			if (raw.length && req.headers["content-type"]?.split(";", 1)[0].trim().toLowerCase() !== "application/json") throw new BindingError(415, "unsupported_media_type", "Expected application/json");
-			const reading = req.method === "GET";
-			const [sid, param] = re.exec(path)!.slice(1).map(decode);
-			if ((op === "renew" || op === "release") && !validLease(param)) return invalid("Invalid lease");
-			const { after, limit, project } = query(rawQuery, op === "list" ? ["after", "limit", "project"] : (op === "session" || op === "plans") && reading ? ["after", "limit"] : []);
-			const b = bodyObject(raw, req.method === "PUT" || op === "acquire" || op === "append" || op === "erase" || op === "complete" || (op === "plans" && !reading));
-			if (op !== "version") records?.check();
-			let result: unknown = {};
-			switch (op) {
-				case "version": result = { binding: HISTORY_BINDING, ttlMs, retention, ...(profile && { pendingErasure: 1 }) }; break;
-				case "list": {
-					const page = await store.list({ project, after, limit });
-					return send(res, 200, encodePage(typeof page === "string" ? page : {
-						sessions: page.sessions, ...(page.next === undefined ? {} : { next: page.next }),
-					}));
+				const target = req.url ?? "/";
+				const q = target.indexOf("?");
+				const path = q < 0 ? target : target.slice(0, q);
+				const rawQuery = q < 0 ? undefined : target.slice(q + 1);
+				// Do not use a URL parser that normalizes dot segments or backslashes.
+				if (path.split("/").some((s) => [".", ".."].includes(decode(s)))) invalid("Dot path segments are forbidden");
+				const route = routes.find(([re, , op]) => (profile || (op !== "plans" && op !== "complete")) && re.test(path));
+				if (!route) throw new BindingError(404, "not_found", "Unknown path");
+				const [re, methods, op] = route;
+				if (!(methods as readonly string[]).includes(req.method ?? "")) {
+					res.setHeader("Allow", methods.join(", "));
+					throw new BindingError(405, "method_not_allowed", "Method is not allowed on this path");
 				}
-				case "session": {
-					if (reading) {
-						const page = await store.read(sid, { after, limit });
+				if (pendingBodies >= 8 && (req.headers["transfer-encoding"] || Number(req.headers["content-length"]) > 0 && Number(req.headers["content-length"]) <= maxBody)) throw unavailable();
+				pendingBodies++;
+				let raw: Buffer;
+				try { raw = await bodyBytes(req); } finally { pendingBodies--; }
+				if (req.headers["content-encoding"] !== undefined) throw new BindingError(415, "unsupported_media_type", "Content-Encoding must be omitted");
+				if (raw.length && req.headers["content-type"]?.split(";", 1)[0].trim().toLowerCase() !== "application/json") throw new BindingError(415, "unsupported_media_type", "Expected application/json");
+				const reading = req.method === "GET";
+				const [sid, param] = re.exec(path)!.slice(1).map(decode);
+				if ((op === "renew" || op === "release") && !validLease(param)) return invalid("Invalid lease");
+				const { after, limit, project } = query(rawQuery, op === "list" ? ["after", "limit", "project"] : (op === "session" || op === "plans") && reading ? ["after", "limit"] : []);
+				const b = bodyObject(raw, req.method === "PUT" || op === "acquire" || op === "append" || op === "erase" || op === "complete" || (op === "plans" && !reading));
+				if (op !== "version") records?.check();
+				let result: unknown = {};
+				switch (op) {
+					case "version": result = { binding: HISTORY_BINDING, ttlMs, retention, ...(profile && { pendingErasure: 1 }) }; break;
+					case "list": {
+						const page = await store.list({ project, after, limit });
 						return send(res, 200, encodePage(typeof page === "string" ? page : {
-							session: page.session, entries: page.entries, ...(page.next === undefined ? {} : { next: page.next }),
+							sessions: page.sessions, ...(page.next === undefined ? {} : { next: page.next }),
 						}));
 					}
-					validateMetadata(sid, b);
-					await mutate(() => store.create(sid, b));
-					break;
-				}
-				case "acquire": {
-					const owner = b.owner;
-					if (!id(owner)) return invalid("owner is required");
-					const lease = await mutate(() => store.acquire(sid, owner));
-					if (!validLease(lease)) throw new UncertainCommit();
-					result = { lease, ttlMs };
-					break;
-				}
-				case "renew":
-					await mutate(() => store.renew(sid, param));
-					result = { ttlMs };
-					break;
-				case "release":
-					await mutate(() => store.release(sid, param));
-					break;
-				case "append": {
-					const { lease, entries } = b;
-					if (!validLease(lease) || !Array.isArray(entries) || !entries.every((e) => object(e) && id(e.id) && (e.parentId === null || id(e.parentId)) && e.erased !== true)) return invalid("Invalid lease or entries");
-					const revisions = profile && req.headersDistinct["history-revision"];
-					if (revisions && (revisions.length !== 1 || !validLease(revisions[0]))) return invalid("Invalid History-Revision header");
-					const kept = await mutate(() => store.append(sid, lease, entries as JsonObject[], revisions ? revisions[0] : undefined));
-					if (!Number.isSafeInteger(kept) || kept < 0 || kept > entries.length) throw new UncertainCommit();
-					result = { kept };
-					if (drop > 0) { drop--; res.destroy(); return; }
-					break;
-				}
-				case "plans": {
-					if (reading) {
-						res.setHeader("Cache-Control", "no-store");
-						const json = records!.plans(sid, after, limit);
-						return send(res, 200, json);
+					case "session": {
+						if (reading) {
+							const page = await store.read(sid, { after, limit });
+							return send(res, 200, encodePage(typeof page === "string" ? page : {
+								session: page.session, entries: page.entries, ...(page.next === undefined ? {} : { next: page.next }),
+							}));
+						}
+						validateMetadata(sid, b);
+						await mutate(() => store.create(sid, b));
+						break;
 					}
-					const { lease, revision, intentId, entryIds, copies } = b;
-					if (!fields(b, "lease", "revision", "intentId", "entryIds", "copies") || !validLease(lease) || !validLease(revision) ||
-						!id(intentId) || intentId === "." || intentId === ".." || !distinctIds(entryIds) || !Array.isArray(copies) || !copies.length) return invalid("Invalid erasure publication");
-					const sets = new Map<string, CopySet>();
-					for (const copy of copies) {
-						if (!object(copy) || !fields(copy, "sessionId", "recordId", "entryIds") || !id(copy.sessionId) || copy.sessionId === "." || copy.sessionId === ".." ||
-							!id(copy.recordId) || !distinctIds(copy.entryIds) || sets.has(copy.sessionId)) return invalid("Invalid erasure copy set");
-						sets.set(copy.sessionId, { sessionId: copy.sessionId, recordId: copy.recordId, entryIds: copy.entryIds });
+					case "acquire": {
+						const owner = b.owner;
+						if (!id(owner)) return invalid("owner is required");
+						const lease = await mutate(() => store.acquire(sid, owner));
+						if (!validLease(lease)) throw new UncertainCommit();
+						result = { lease, ttlMs };
+						break;
 					}
-					const source = new Set(sets.get(sid)?.entryIds);
-					if (entryIds.some(id => !source.has(id))) return invalid("Copy sets must cover the source targets");
-					if (!records!.session(sid, expired)) throw unknownSession();
-					result = records!.publish(sid, { revision, intentId, entryIds, copies: [...sets.values()] }, () => requireLease(sid, lease), expired);
-					break;
+					case "renew":
+						await mutate(() => store.renew(sid, param));
+						result = { ttlMs };
+						break;
+					case "release":
+						await mutate(() => store.release(sid, param));
+						break;
+					case "append": {
+						const { lease, entries } = b;
+						if (!validLease(lease) || !Array.isArray(entries) || !entries.every((e) => object(e) && id(e.id) && (e.parentId === null || id(e.parentId)) && e.erased !== true)) return invalid("Invalid lease or entries");
+						const revisions = profile && req.headersDistinct["history-revision"];
+						if (revisions && (revisions.length !== 1 || !validLease(revisions[0]))) return invalid("Invalid History-Revision header");
+						const kept = await mutate(() => store.append(sid, lease, entries as JsonObject[], revisions ? revisions[0] : undefined));
+						if (!Number.isSafeInteger(kept) || kept < 0 || kept > entries.length) throw new UncertainCommit();
+						result = { kept };
+						if (drop > 0) { drop--; res.destroy(); return; }
+						break;
+					}
+					case "plans": {
+						if (reading) {
+							res.setHeader("Cache-Control", "no-store");
+							const json = records!.plans(sid, after, limit);
+							return send(res, 200, json);
+						}
+						const { lease, revision, intentId, entryIds, copies } = b;
+						if (!fields(b, "lease", "revision", "intentId", "entryIds", "copies") || !validLease(lease) || !validLease(revision) ||
+							!id(intentId) || intentId === "." || intentId === ".." || !distinctIds(entryIds) || !Array.isArray(copies) || !copies.length) return invalid("Invalid erasure publication");
+						const sets = new Map<string, CopySet>();
+						for (const copy of copies) {
+							if (!object(copy) || !fields(copy, "sessionId", "recordId", "entryIds") || !id(copy.sessionId) || copy.sessionId === "." || copy.sessionId === ".." ||
+								!id(copy.recordId) || !distinctIds(copy.entryIds) || sets.has(copy.sessionId)) return invalid("Invalid erasure copy set");
+							sets.set(copy.sessionId, { sessionId: copy.sessionId, recordId: copy.recordId, entryIds: copy.entryIds });
+						}
+						const source = new Set(sets.get(sid)?.entryIds);
+						if (entryIds.some(id => !source.has(id))) return invalid("Copy sets must cover the source targets");
+						if (!records!.session(sid, expired)) throw unknownSession();
+						result = records!.publish(sid, { revision, intentId, entryIds, copies: [...sets.values()] }, () => requireLease(sid, lease), expired);
+						break;
+					}
+					case "complete": {
+						const { lease, entryIds } = b;
+						if (!fields(b, "lease", "entryIds") || !validLease(lease) || !distinctIds(entryIds)) return invalid("Invalid erasure completion");
+						if (!records!.session(sid, expired)) throw unknownSession();
+						records!.complete(sid, param, entryIds, () => requireLease(sid, lease));
+						break;
+					}
+					case "erase": {
+						const { entryIds, lease } = b;
+						if (!ids(entryIds) || (Object.hasOwn(b, "lease") && !validLease(lease))) return invalid("Invalid entry IDs or lease");
+						const erased = await mutate(() => store.erase(sid, entryIds, lease as string | undefined));
+						if (!Array.isArray(erased) || !erased.every(id)) throw new UncertainCommit();
+						result = { erased };
+						break;
+					}
 				}
-				case "complete": {
-					const { lease, entryIds } = b;
-					if (!fields(b, "lease", "entryIds") || !validLease(lease) || !distinctIds(entryIds)) return invalid("Invalid erasure completion");
-					if (!records!.session(sid, expired)) throw unknownSession();
-					records!.complete(sid, param, entryIds, () => requireLease(sid, lease));
-					break;
-				}
-				case "erase": {
-					const { entryIds, lease } = b;
-					if (!ids(entryIds) || (Object.hasOwn(b, "lease") && !validLease(lease))) return invalid("Invalid entry IDs or lease");
-					const erased = await mutate(() => store.erase(sid, entryIds, lease as string | undefined));
-					if (!Array.isArray(erased) || !erased.every(id)) throw new UncertainCommit();
-					result = { erased };
-					break;
-				}
-			}
-			send(res, 200, JSON.stringify(result));
+				send(res, 200, JSON.stringify(result));
 			});
 		} catch (e) {
 			if (e instanceof UncertainCommit || res.headersSent) { res.destroy(); return; }

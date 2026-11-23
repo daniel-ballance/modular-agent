@@ -172,6 +172,8 @@ export interface PluginApi {
 	history(sessionId: string, options?: { all?: boolean }): HistoryEntry[];
 	checkPending(sessionId: string): Promise<string>;
 	readHistory(sessionId: string, options?: { all?: boolean }): HistoryEntry[] | Promise<HistoryEntry[]>;
+	/** Inspect a fresh snapshot and register any follow-up observer without yielding. */
+	inspectHistory<T>(sessionId: string, options: { all?: boolean }, inspect: (entries: HistoryEntry[]) => T): T | Promise<T>;
 	/** The history as a recipient may see it: every entry passes the output gate for that recipient. */
 	gatedHistory(sessionId: string, options: { recipient: string; all?: boolean }): Promise<HistoryEntry[]>;
 	append(sessionId: string, draft: EntryDraft): Promise<HistoryEntry>;
@@ -445,16 +447,8 @@ export class Harness {
 			setLimit: (id, rights, actorId) => this.setLimit(this.session(id), rights, actorId, pluginName),
 			tenant: (id) => this.tenantInfo(this.session(id)),
 			checkPending: id => this.admitHistory(this.session(id)),
-			readHistory: (id, options) => {
-				const s = this.session(id);
-				const snapshot = () => {
-					this.checkScopedWork(s, "watch");
-					return options?.all ? s.order.map(id => s.entries.get(id)!) : s.branch();
-				};
-				if (this.httpErasure() && !s.provisional) return this.admitHistory(s).then(snapshot);
-				this.checkPending(s);
-				return snapshot();
-			},
+			readHistory: (id, options) => this.inspectHistory(id, options ?? {}, entries => entries),
+			inspectHistory: (id, options, inspect) => this.inspectHistory(id, options, inspect),
 			history: (sessionId, options) => {
 				const s = this.session(sessionId);
 				this.checkScopedWork(s, "watch");
@@ -1454,6 +1448,17 @@ export class Harness {
 		return store ? store.pendingErasure : this.ephemeralErasure;
 	}
 
+	private inspectHistory<T>(id: string, options: { all?: boolean }, inspect: (entries: HistoryEntry[]) => T): T | Promise<T> {
+		const s = this.session(id);
+		const snapshot = () => {
+			this.checkScopedWork(s, "watch");
+			return inspect(options.all ? s.order.map(id => s.entries.get(id)!) : s.branch());
+		};
+		if (this.httpErasure() && !s.provisional) return this.admitHistory(s).then(snapshot);
+		this.checkPending(s);
+		return snapshot();
+	}
+
 	private checkPending(s: Session): string {
 		const intents = this.pendingRegistry()?.intents().filter(intent => intent.copies.some(copy => copy.sessionId === s.id)) ?? [];
 		if (intents.some(intent => intent.copies.some(copy =>
@@ -2183,33 +2188,33 @@ export class Harness {
 		}
 		const span = this.turnSpan(s, turnId, queued.trace ?? null, undefined, continuesTurnId);
 		return span.run(async () => {
-		try {
-		const traceContext = runtime?.supports.continuesAfterRestart ? carrier(span.spanContext) : undefined;
-		await this.commit(s, [
-			{ kind: "turnStart", writer: "harness", modelVisible: false, turnId, continuesTurnId, actorId: queued.actorId, data: { ...snapshot, ...(traceContext ? { traceContext } : {}), startedBy: queued.startedBy, resultShape: failure ? undefined : resultShape, point, rights: state.startingRights,
-				authorizers: [...actors].map(actorId => ({ sessionId: s.id, actorId })), ...(continuing ? { authorityActors: [...actors], authorityJobs: [...jobs] } : {}) } },
-			...(continuing ? [] : [this.inputEntry(s, queued, turnId)]),
-		]);
-		this.emit(s, "turn.started", { startedBy: queued.startedBy }, "harness", { turnId });
-		let outcome: TurnOutcome;
-		if (limited) outcome = this.tenantLimitOutcome();
-		else if (failure) outcome = this.failedOutcome(failure);
-		else if (!runtime) outcome = this.failedOutcome("No Runtime is loaded");
-		else if (!model) outcome = this.failedOutcome("No model is selected, or its Provider is not loaded");
-		else {
 			try {
-				const input = {
-					sessionId: s.id, turnId, startedBy: queued.startedBy, model: this.turnModel(s, turnId, state, model),
-					settings, resultShape,
-				};
-				const host = this.runtimeHost(s, turnId, state, resultShape);
-				outcome = continuing ? await runtime.continueOpenCalls(input, host, signal, continuing) : await runtime.runTurn(input, host, signal);
-			} catch (error) {
-				outcome = this.failedOutcome(error instanceof Error ? error.message : String(error));
-			}
-		}
-		await this.finishTurn(s, turnId, outcome, state, signal, resultShape);
-		} finally { this.endSteps(state); span.end(); }
+				const traceContext = runtime?.supports.continuesAfterRestart ? carrier(span.spanContext) : undefined;
+				await this.commit(s, [
+					{ kind: "turnStart", writer: "harness", modelVisible: false, turnId, continuesTurnId, actorId: queued.actorId, data: { ...snapshot, ...(traceContext ? { traceContext } : {}), startedBy: queued.startedBy, resultShape: failure ? undefined : resultShape, point, rights: state.startingRights,
+						authorizers: [...actors].map(actorId => ({ sessionId: s.id, actorId })), ...(continuing ? { authorityActors: [...actors], authorityJobs: [...jobs] } : {}) } },
+					...(continuing ? [] : [this.inputEntry(s, queued, turnId)]),
+				]);
+				this.emit(s, "turn.started", { startedBy: queued.startedBy }, "harness", { turnId });
+				let outcome: TurnOutcome;
+				if (limited) outcome = this.tenantLimitOutcome();
+				else if (failure) outcome = this.failedOutcome(failure);
+				else if (!runtime) outcome = this.failedOutcome("No Runtime is loaded");
+				else if (!model) outcome = this.failedOutcome("No model is selected, or its Provider is not loaded");
+				else {
+					try {
+						const input = {
+							sessionId: s.id, turnId, startedBy: queued.startedBy, model: this.turnModel(s, turnId, state, model),
+							settings, resultShape,
+						};
+						const host = this.runtimeHost(s, turnId, state, resultShape);
+						outcome = continuing ? await runtime.continueOpenCalls(input, host, signal, continuing) : await runtime.runTurn(input, host, signal);
+					} catch (error) {
+						outcome = this.failedOutcome(error instanceof Error ? error.message : String(error));
+					}
+				}
+				await this.finishTurn(s, turnId, outcome, state, signal, resultShape);
+			} finally { this.endSteps(state); span.end(); }
 		});
 	}
 
@@ -2435,28 +2440,28 @@ export class Harness {
 			prepareStep: ({ stepId, usage }) => {
 				this.endSteps(state, stepId);
 				return inStep(stepId, async () => {
-				await checkRead();
-				if (state.capacityLimit) throw turnLimit("capacity");
-				if (state.tenantLimit || await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
-				const attempts = s.order.map((id) => s.entries.get(id)!).filter((e) => e.turnId === turnId && e.kind === "modelRequest" && !(e.data as { auxiliary?: boolean })?.auxiliary).length;
-				if (state.settings.maxSteps !== undefined && attempts >= state.settings.maxSteps) throw turnLimit("steps");
-				const model = this.modelAccess(s, state.model);
-				const branch = s.branch();
-				const lastAttempt = branch.findLastIndex((e) => e.turnId === turnId && e.kind === "modelRequest" && !(e.data as { auxiliary?: boolean })?.auxiliary);
-				const feedback = branch.slice(lastAttempt + 1).filter((e) => !e.erased && e.turnId === turnId && e.kind === "resultFeedback");
-				const request: ModelRequest = {
-					systemPrompt: state.system, messages: s.modelMessages(branch, turnId), tools: state.tools, providerTools: "none",
-					settings: { reasoning: state.settings.reasoning, maxOutput: state.settings.maxOutput },
-				};
-				const payload = { sessionId: s.id, turnId, stepId, usage, model: model?.model, history: s.branch(), request };
-				const transformed = (await withAuthority(() => this.hooks.transform("step.before", payload))).value.request;
-				await checkRead();
-				if (!Array.isArray(transformed?.tools) || transformed.tools.some(t => !request.tools.some(offered => isDeepStrictEqual(offered, t)))) throw new Error("step.before cannot widen the tool offer");
-				const prepared: ModelRequest = feedback.length ? { ...transformed, messages: [...transformed.messages,
-					...feedback.map((e): ModelMessage => ({ role: "user", content: [text((e.data as { reason: string }).reason)] }))] } : transformed;
-				// Hooks may copy or transform messages, so conservatively name their visible sources.
-				state.sources.set(stepId, [...new Set([...branch.filter((e) => !e.erased && ((e.modelVisible && e.kind !== "resultFeedback") || e.kind === "summary" || (e.kind === "turnStart" && e.turnId === turnId && state.context?.length))), ...feedback].map((e) => e.id))]);
-				return prepared;
+					await checkRead();
+					if (state.capacityLimit) throw turnLimit("capacity");
+					if (state.tenantLimit || await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
+					const attempts = s.order.map((id) => s.entries.get(id)!).filter((e) => e.turnId === turnId && e.kind === "modelRequest" && !(e.data as { auxiliary?: boolean })?.auxiliary).length;
+					if (state.settings.maxSteps !== undefined && attempts >= state.settings.maxSteps) throw turnLimit("steps");
+					const model = this.modelAccess(s, state.model);
+					const branch = s.branch();
+					const lastAttempt = branch.findLastIndex((e) => e.turnId === turnId && e.kind === "modelRequest" && !(e.data as { auxiliary?: boolean })?.auxiliary);
+					const feedback = branch.slice(lastAttempt + 1).filter((e) => !e.erased && e.turnId === turnId && e.kind === "resultFeedback");
+					const request: ModelRequest = {
+						systemPrompt: state.system, messages: s.modelMessages(branch, turnId), tools: state.tools, providerTools: "none",
+						settings: { reasoning: state.settings.reasoning, maxOutput: state.settings.maxOutput },
+					};
+					const payload = { sessionId: s.id, turnId, stepId, usage, model: model?.model, history: s.branch().map(historyForPeer), request };
+					const transformed = (await withAuthority(() => this.hooks.transform("step.before", payload))).value.request;
+					await checkRead();
+					if (!Array.isArray(transformed?.tools) || transformed.tools.some(t => !request.tools.some(offered => isDeepStrictEqual(offered, t)))) throw new Error("step.before cannot widen the tool offer");
+					const prepared: ModelRequest = feedback.length ? { ...transformed, messages: [...transformed.messages,
+						...feedback.map((e): ModelMessage => ({ role: "user", content: [text((e.data as { reason: string }).reason)] }))] } : transformed;
+					// Hooks may copy or transform messages, so conservatively name their visible sources.
+					state.sources.set(stepId, [...new Set([...branch.filter((e) => !e.erased && ((e.modelVisible && e.kind !== "resultFeedback") || e.kind === "summary" || (e.kind === "turnStart" && e.turnId === turnId && state.context?.length))), ...feedback].map((e) => e.id))]);
+					return prepared;
 				});
 			},
 			hook: (name, payload) => inStep(payload?.stepId ?? payload?.call?.stepId, async () => {
@@ -2857,13 +2862,13 @@ export class Harness {
 		});
 		state?.dispatched.add(call.id);
 		return span.run(async () => {
-		try {
-		const result = await this.invokeTool(s, found, call, signal, turnId, state, nested, owners, allowed, env, start);
-		const status = isPending(result) ? "pending" : result.status;
-		span.set("modular_agent.tool.status", status);
-		if (status === "failed" || status === "outcomeUnknown") span.fail(status);
-		return result;
-		} finally { span.end(); }
+			try {
+				const result = await this.invokeTool(s, found, call, signal, turnId, state, nested, owners, allowed, env, start);
+				const status = isPending(result) ? "pending" : result.status;
+				span.set("modular_agent.tool.status", status);
+				if (status === "failed" || status === "outcomeUnknown") span.fail(status);
+				return result;
+			} finally { span.end(); }
 		});
 	}
 
@@ -3248,7 +3253,7 @@ export class Harness {
 			telemetryEvent("modular_agent.question.close", { "modular_agent.question.id": request.id,
 				"modular_agent.question.kind": request.kind, "modular_agent.question.disposition": kept.declined ? system ?? "declined" : kept.stored ? "stored" : "answered" });
 		};
-		if (activeOperation()?.spanContext) await record();
+		if (activeOperation()?.isOpen && activeOperation()?.spanContext) await record();
 		else await startOperation("modular_agent.question.answer", { ...conversation(s.id), "modular_agent.turn.id": request.turnId, "modular_agent.step.id": stepId }).observe(record);
 		if (request.kind === "secret" && kept.declined) await this.discardSecret(s, request.id);
 		return kept;
@@ -3420,7 +3425,8 @@ export class Harness {
 		if (!this.mayAnswer(s, request, answer.actorId)) return { accepted: false, reason: `${answer.actorId} may not answer this request` };
 		s.lateAnswers.add(request.id);
 		const previous = s.settling ?? Promise.resolve();
-		const work = previous.then(async () => {
+		const span = startOperation("modular_agent.question.answer", { ...conversation(s.id), "modular_agent.turn.id": request.turnId });
+		const work = previous.then(() => span.observe(async () => {
 			const kept = await this.recordAnswer(s, request, answer,
 				s.order.map(id => s.entries.get(id)!).find(e => e.requestId === request.id)?.stepId,
 				request.kind === "secret" && !answer.declined);
@@ -3428,8 +3434,8 @@ export class Harness {
 			for (const i of this.viewersFor(s, request)) i.onInputRequestClosed?.(request.id);
 			this.emitAnswer(s, request, kept, true);
 			s.waiting.delete(request.id);
-			this.continueOpenCalls(s, kept);
-		});
+			this.continueOpenCalls(s, kept, currentSpan());
+		}));
 		s.settling = work.catch((error) => this.problem("harness", "late answer", error)).finally(() => {
 			if (s.settling === tracked) s.settling = undefined;
 		});
@@ -3464,7 +3470,7 @@ export class Harness {
 		this.continueOpenCalls(s, answers.at(-1)!.data as Answer);
 	}
 
-	private continueOpenCalls(s: Session, answer: Answer): void {
+	private continueOpenCalls(s: Session, answer: Answer, trace?: ReturnType<typeof currentSpan>): void {
 		const calls = this.openCalls(s);
 		if (!calls.length) return;
 		const stillWaiting = new Set(this.waitingRequests(s).map((r) => r.toolCallId));
@@ -3482,7 +3488,7 @@ export class Harness {
 		}
 		const queued: QueuedInput = {
 			id: this.newId(), content: [], actorId: [...owners][0] ?? answer.actorId, authorityActors: [...owners], authorityJobs: [...jobs], startingRights: intersectRights(...ceilings),
-			when: "after", startedBy: { kind: "answer", id: answer.requestId }, kind: "continue", continueCalls: [...callIds],
+			when: "after", startedBy: { kind: "answer", id: answer.requestId }, kind: "continue", continueCalls: [...callIds], trace,
 		};
 		if (s.isBusy()) {
 			if (!s.followUps.some((q) => q.continueCalls)) s.followUps.push(queued);

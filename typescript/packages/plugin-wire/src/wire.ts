@@ -92,11 +92,11 @@ export class WirePeer {
 	private workSpan(method: string, params: unknown, kind: SpanKind, parent?: ReturnType<typeof readTrace> | null) {
 		const p = objectParams(params) ? params : {};
 		const turn = objectParams(p.turn) ? p.turn : {};
-		const id = safeName(p.sessionId ?? turn.sessionId);
+		const id = kind === SpanKind.SERVER && this.trace?.callbackScope ? undefined : safeName(p.sessionId ?? turn.sessionId);
 		const span = startOperation("modular_agent.plugin.request", { ...(id ? conversation(id) : {}),
 			"modular_agent.plugin.name": safeName(this.trace?.name), "modular_agent.plugin.method": method,
 		}, { kind, parent });
-		span.set("modular_agent.turn.id", safeName(turn.turnId));
+		if (kind === SpanKind.CLIENT || !this.trace?.callbackScope) span.set("modular_agent.turn.id", safeName(turn.turnId));
 		return span;
 	}
 

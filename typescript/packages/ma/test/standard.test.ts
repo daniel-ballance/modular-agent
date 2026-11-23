@@ -578,17 +578,21 @@ for (const remote of [false, true]) test(`ma ACP session/new is provisional with
   }
 });
 
-test("ma composes only the public SDK and official SDK plugin entry points", async () => {
+test("ma uses public SDK entry points and keeps OTLP dependencies in its telemetry setup", async () => {
   const pkg = join(root, "typescript/packages/ma");
   const manifest = JSON.parse(await readFile(join(pkg, "package.json"), "utf8"));
   const allowed = ["@modular-agent/claude", "@modular-agent/core", "@modular-agent/subscription", "@modular-agent/tools-files", "@modular-agent/tools-mcp", "@pydantic/monty", "protobufjs"]; // Monty's worker wire codec
-  assert.deepEqual(Object.keys(manifest.dependencies).sort(), allowed.slice().sort());
+  const telemetry = ["@opentelemetry/api", "@opentelemetry/context-async-hooks", "@opentelemetry/resources",
+    "@opentelemetry/sdk-metrics", "@opentelemetry/sdk-trace", "@opentelemetry/exporter-metrics-otlp-grpc",
+    "@opentelemetry/exporter-metrics-otlp-proto", "@opentelemetry/exporter-trace-otlp-grpc", "@opentelemetry/exporter-trace-otlp-proto"];
+  assert.deepEqual(Object.keys(manifest.dependencies).sort(), [...allowed, ...telemetry].sort());
   for (const file of await readdir(join(pkg, "src"))) if (file.endsWith(".ts")) {
     const source = await readFile(join(pkg, "src", file), "utf8");
     for (const entry of source.matchAll(/(?:\bfrom\s+|\bimport\s*\(\s*)["']([^"']+)/g)) {
       const spec = entry[1];
       assert.ok(spec.startsWith("node:") || /^\.\/[\w-]+\.(js|json)$/.test(spec) ||
         (file === "monty-worker.ts" && spec === "protobufjs") ||
+        (file === "telemetry.ts" && telemetry.includes(spec)) ||
         ["@modular-agent/claude", "@modular-agent/core", "@modular-agent/core/testing", "@modular-agent/subscription", "@modular-agent/tools-files/sdk", "@modular-agent/tools-mcp/sdk", "@pydantic/monty"].includes(spec), `${file}: ${spec}`);
     }
   }

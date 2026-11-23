@@ -725,26 +725,29 @@ export class AcpInterface implements InterfaceCapability {
 			}
 			return this.gateReply(sessionId, "session/prompt", promptResponse(receipt.inputId, { kind: "completed" }, receipt.duplicate ? { duplicate: true } : {}));
 		}
-		const all = await this.apiFor(sessionId).readHistory(sessionId, { all: true });
-		const taken = all.find((e) => e.kind === "input" && inputIdOf(e) === receipt.inputId);
-		const end = taken?.turnId ? all.find((e) => e.kind === "turnEnd" && e.turnId === taken.turnId) : undefined;
-		const latest = all.findLast((e) => e.kind === "inputAccepted" && inputIdOf(e) === receipt.inputId);
-		if (receipt.duplicate && !taken && ((latest?.data as { when?: string } | undefined)?.when === "propose" ||
-			all.some((e) => e.kind === "inputHandedBack" && inputHandedBackIds(e).includes(receipt.inputId)))) {
-			throw RequestError.invalidParams(undefined, "The input was not taken by a turn");
-		}
-		if (end) {
-			const data = (end.data ?? {}) as { outcome?: Outcome; result?: { openToolCalls?: string[] } };
-			const response = await this.response(sessionId, receipt.inputId, data.outcome ?? { kind: "completed" }, {
-				...(receipt.duplicate ? { duplicate: true } : {}),
-				...(data.result?.openToolCalls?.length ? { openToolCalls: data.result.openToolCalls } : {}),
+		// Take the snapshot and install the waiter in the same synchronous callback.
+		// An input or turn end committed in between would never reach this waiter.
+		return this.apiFor(sessionId).inspectHistory(sessionId, { all: true }, async all => {
+			const taken = all.find((e) => e.kind === "input" && inputIdOf(e) === receipt.inputId);
+			const end = taken?.turnId ? all.find((e) => e.kind === "turnEnd" && e.turnId === taken.turnId) : undefined;
+			const latest = all.findLast((e) => e.kind === "inputAccepted" && inputIdOf(e) === receipt.inputId);
+			if (receipt.duplicate && !taken && ((latest?.data as { when?: string } | undefined)?.when === "propose" ||
+				all.some((e) => e.kind === "inputHandedBack" && inputHandedBackIds(e).includes(receipt.inputId)))) {
+				throw RequestError.invalidParams(undefined, "The input was not taken by a turn");
+			}
+			if (end) {
+				const data = (end.data ?? {}) as { outcome?: Outcome; result?: { openToolCalls?: string[] } };
+				const response = await this.response(sessionId, receipt.inputId, data.outcome ?? { kind: "completed" }, {
+					...(receipt.duplicate ? { duplicate: true } : {}),
+					...(data.result?.openToolCalls?.length ? { openToolCalls: data.result.openToolCalls } : {}),
+				});
+				if (response instanceof Error) throw response;
+				return response;
+			}
+			state.ownInputs.add(receipt.inputId);
+			return new Promise((resolve, reject) => {
+				state.waiters.push({ inputId: receipt.inputId, turnId: taken?.turnId, duplicate: receipt.duplicate, resolve, reject });
 			});
-			if (response instanceof Error) throw response;
-			return response;
-		}
-		state.ownInputs.add(receipt.inputId);
-		return new Promise((resolve, reject) => {
-			state.waiters.push({ inputId: receipt.inputId, turnId: taken?.turnId, duplicate: receipt.duplicate, resolve, reject });
 		});
 	}
 

@@ -12,7 +12,7 @@ export type McpServerConfig =
 class TracedMcpClient extends McpClient {
   override request<Result = unknown>(method: string, params?: Record<string, unknown>, options?: Parameters<McpClient["request"]>[2]): Promise<Result> {
     const trace = carrier(currentSpan());
-    return super.request<Result>(method, trace && method !== "initialize" && method !== "ping" ? { ...params, _meta: trace } : params, options);
+    return super.request<Result>(method, trace && method !== "initialize" && method !== "ping" ? { ...params, _meta: { ...(params?._meta as object | undefined), ...trace } } : params, options);
   }
 }
 

@@ -75,6 +75,8 @@ export interface ServeAcpOptions {
   showApproval?: boolean;
   /** Permit client-supplied MCP servers. Defaults to stdio only. */
   hostMcpServers?: boolean;
+  /** Accept trace context from the stdio peer (default true). */
+  traceTrusted?: boolean;
 }
 export function defaultAcpActor(): Actor {
   const { id, kind, authority } = localAcpActor();
@@ -82,6 +84,8 @@ export function defaultAcpActor(): Actor {
 }
 export interface AcpActorToken {
   tokenFile: string;
+  /** Opt this authenticated network peer into trace context. */
+  traceTrusted?: boolean;
   actor: Actor;
   tenants?: readonly (string | null)[];
   projects?: readonly string[];
@@ -575,7 +579,7 @@ export class Agent {
       if (!Array.isArray(items) || !Array.from(items).every(valid)) throw new AgentError("invalid_composition", `Invalid ACP ${name}`);
       return [...items];
     };
-    const makeScope = async (actor: Actor, config: Pick<ServeAcpOptions, "tenants" | "projects" | "represents">, ceiling: boolean) => {
+    const makeScope = async (actor: Actor, config: Pick<ServeAcpOptions, "tenants" | "projects" | "represents" | "traceTrusted">, ceiling: boolean) => {
       if (!actor || !isId(actor.id) || !["host", "user", "agent", "program"].includes(actor.kind) || !actor.rights) {
         throw new AgentError("invalid_composition", "Invalid ACP actor");
       }
@@ -588,7 +592,7 @@ export class Agent {
         if (!(await stat(canonical)).isDirectory()) throw new AgentError("invalid_composition", "ACP project must be a directory");
         return canonical;
       })));
-      return { actor: { id: actor.id, kind: actor.kind, authority: rights }, ceiling, represents,
+      return { actor: { id: actor.id, kind: actor.kind, authority: rights }, ceiling, represents, traceTrusted: config.traceTrusted,
         allowTenant: (tenant: string | null) => tenants.has(tenant),
         allowProject: (project: string) => (!!options.compose || project === this.#project) && (!projects || projects.has(project)) };
     };
@@ -628,6 +632,7 @@ export class Agent {
         listProject: cwd => realpath(cwd),
         showApproval: options.showApproval ?? this.#approval,
         hostMcpServers: options.hostMcpServers ?? !network,
+        traceTrusted: scope.traceTrusted ?? !network,
         declaration: id => (id && sessions.get(id) || this).declaration(),
         projectSettings: options.projectSettings ? async project => await options.projectSettings!(project) : undefined,
         associate: (id, api) => { sessions.set(id, attached.get(api)?.agent ?? this); },
