@@ -76,7 +76,7 @@ impl Harness {
         );
         let data = &open.data;
         ensure!(
-            !open.active && open.environment_work == 0 && open.queue.is_empty(),
+            open.active.is_none() && open.environment_work == 0 && open.queue.is_empty(),
             RewindError::Busy("settle pending work before rewinding".into())
         );
         ensure!(

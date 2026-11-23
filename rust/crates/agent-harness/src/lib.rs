@@ -28,7 +28,7 @@ struct OpenSession {
     input_contexts: BTreeMap<String, Context>,
     question_contexts: BTreeMap<String, String>,
     interrupted: Vec<(Arc<dyn Runtime>, Scope)>,
-    active: bool,
+    active: Option<ActiveTurn>,
     rewinding: bool,
     journal_uncertain: bool,
     environment_work: usize,
@@ -38,6 +38,23 @@ struct OpenSession {
 impl Drop for OpenSession {
     fn drop(&mut self) {
         self.generation.cancel();
+    }
+}
+
+enum ActiveTurn {
+    Recovery,
+    Running(String),
+}
+
+struct TurnActivity<'a> {
+    harness: &'a Harness,
+    session: &'a str,
+}
+impl Drop for TurnActivity<'_> {
+    fn drop(&mut self) {
+        if let Some(open) = self.harness.sessions.lock().unwrap().get_mut(self.session) {
+            open.active = None;
+        }
     }
 }
 
@@ -329,7 +346,7 @@ impl Harness {
                         input_contexts: BTreeMap::new(),
                         question_contexts: BTreeMap::new(),
                         interrupted: Vec::new(),
-                        active: false,
+                        active: None,
                         rewinding: false,
                         journal_uncertain: false,
                         environment_work: 0,
@@ -467,7 +484,7 @@ impl Harness {
                     input_contexts: BTreeMap::new(),
                     question_contexts: BTreeMap::new(),
                     interrupted: Vec::new(),
-                    active: false,
+                    active: None,
                     rewinding: recovery,
                     journal_uncertain: false,
                     environment_work: 0,
@@ -581,8 +598,8 @@ impl Harness {
         let mut sessions = self.sessions.lock().unwrap();
         let open = sessions.get_mut(id).unwrap();
         // Reserve the session until recovery settles, even before its driver runs.
-        open.active = !interrupted.is_empty();
-        open.steer_closed = open.active;
+        open.active = (!interrupted.is_empty()).then_some(ActiveTurn::Recovery);
+        open.steer_closed = open.active.is_some();
         open.interrupted = interrupted;
         Ok(handed_back)
     }
@@ -637,7 +654,7 @@ impl Harness {
             Ok(())
         }
         .await;
-        self.sessions.lock().unwrap().get_mut(id).unwrap().active = false;
+        self.sessions.lock().unwrap().get_mut(id).unwrap().active = None;
         result
     }
 
@@ -654,6 +671,14 @@ impl Harness {
             .validate_tools(&self.snapshot(id)?)?;
         Ok(())
     }
+    /// Whether the named turn still holds the session even if its end is journaled.
+    pub fn is_turn_running(&self, session: &str, turn: &str) -> bool {
+        matches!(
+            self.sessions.lock().unwrap().get(session).and_then(|s| s.active.as_ref()),
+            Some(ActiveTurn::Running(id)) if id == turn
+        )
+    }
+
     pub fn open_session_ids(&self) -> Vec<String> {
         self.sessions.lock().unwrap().keys().cloned().collect()
     }
@@ -669,7 +694,7 @@ impl Harness {
             let mut sessions = self.sessions.lock().unwrap();
             if let Some(open) = sessions.get(id)
                 && open.interruption.is_cancelled()
-                && !open.active
+                && open.active.is_none()
             {
                 if open.journal_uncertain || open.data.unresolved_rewind().is_some() {
                     self.blocked_projects
@@ -711,6 +736,27 @@ impl Harness {
             .unwrap()
             .remove(id)
             .ok_or_else(|| OperationError::NotFound("unknown session".into()))?;
+        Ok(())
+    }
+    fn refresh_open_erasure(&self, open: &mut OpenSession) -> Result<()> {
+        if !open.provisional
+            && let Some(store) = self.store()
+            && let Err(error) = store.check_erasure(&open.data)
+        {
+            if open.active.is_some()
+                || open.environment_work > 0
+                || open.rewinding
+                || open.lease.is_none()
+            {
+                return Err(error);
+            }
+            self.check_open_writer(open)?;
+            let Some((data, _)) = store.reconcile_erasure(&open.data.id)? else {
+                return Err(error);
+            };
+            store.check_erasure(&data)?;
+            self.install_erased_data(open, data)?;
+        }
         Ok(())
     }
     fn install_erased_data(&self, open: &mut OpenSession, data: SessionData) -> Result<()> {
@@ -1230,7 +1276,7 @@ impl Harness {
             next.position = Some(baseline.id.clone());
             next.entries.push(baseline);
         }
-        let timing = if open.steer_closed && open.active && timing == Timing::Steer {
+        let timing = if open.steer_closed && open.active.is_some() && timing == Timing::Steer {
             Timing::After
         } else {
             timing
@@ -1243,7 +1289,7 @@ impl Harness {
                 "input.accepted",
                 false,
                 json!({"text":text,"content":content,"key":key,"timing":timing,
-                       "authority":authority,"sponsor":sponsor,"submittedBy":submitter,"taken":input_taken(open.active, timing)}),
+                       "authority":authority,"sponsor":sponsor,"submittedBy":submitter,"taken":input_taken(open.active.is_some(), timing)}),
             ),
         );
         let content = entry.content.as_mut().unwrap();
@@ -1396,118 +1442,43 @@ impl Harness {
         Ok(serde_json::from_value(view)?)
     }
     pub async fn run_next(&self, session: &str) -> Result<Option<TurnResult>> {
-        let _erasure = self
-            .erasure
-            .try_read()
-            .map_err(|_| anyhow!("erasure in progress"))?;
-        let data = self.snapshot(session)?;
-        let _workspace = self.begin_environment_work(session)?;
-        let branch = data.branch();
-        let qs = questions(&data)?;
-        let mut resume = vec![];
-        for e in branch.iter().filter(|e| e.kind == "tool.call") {
-            if branch
-                .iter()
-                .any(|r| r.kind == "tool.result" && r.scope.call == e.scope.call)
-            {
-                continue;
-            }
-            let ended = e.scope.turn.is_none()
-                || branch.iter().any(|r| {
-                    r.kind == "turn.end"
-                        && r.scope.turn == e.scope.turn
-                        && r.content.as_ref().is_some_and(|v| {
-                            v["open_calls"].as_array().is_some_and(|a| {
-                                a.iter().any(|c| {
-                                    Some(c["id"].as_str().unwrap_or("")) == e.scope.call.as_deref()
-                                })
-                            })
-                        })
-                });
-            let related: Vec<_> = qs.iter().filter(|q| q.scope.call == e.scope.call).collect();
-            if ended
-                && !related.is_empty()
-                && related.iter().all(|q| !q.answerable)
-                && related.iter().any(|q| q.answer.is_some())
-            {
-                resume.push(serde_json::from_value::<ToolCall>(
-                    e.content
-                        .clone()
-                        .ok_or_else(|| anyhow!("erased open call"))?,
-                )?);
-            }
-        }
-        let ready: std::collections::BTreeSet<_> = resume.iter().map(|c| c.id.clone()).collect();
-        resume.retain(|call| {
-            let source = branch
-                .iter()
-                .find(|e| e.kind == "tool.call" && e.scope.call.as_ref() == Some(&call.id))
-                .unwrap();
-            source.scope.turn.is_none()
-                || branch
-                    .iter()
-                    .filter(|e| e.kind == "tool.call" && e.scope.turn == source.scope.turn)
-                    .all(|e| {
-                        branch
-                            .iter()
-                            .any(|r| r.kind == "tool.result" && r.scope.call == e.scope.call)
-                            || e.scope.call.as_ref().is_some_and(|id| ready.contains(id))
-                    })
-        });
-        if let Some(first) = resume.first() {
-            let first = first.id.clone();
-            let origin = branch
-                .iter()
-                .find(|e| e.kind == "tool.call" && e.scope.call.as_ref() == Some(&first))
-                .unwrap()
-                .scope
-                .turn
-                .clone();
-            resume.retain(|c| {
-                if origin.is_none() {
-                    c.id == first
-                } else {
-                    branch.iter().any(|e| {
-                        e.kind == "tool.call"
-                            && e.scope.call.as_ref() == Some(&c.id)
-                            && e.scope.turn == origin
-                    })
-                }
-            });
-        }
-        let (input, cancel, parent) = {
+        let (input, cancel, parent, resume, turn_id, erasure) = {
             let mut sessions = self.sessions.lock().unwrap();
             let open = sessions
                 .get_mut(session)
                 .ok_or_else(|| OperationError::NotFound("unknown session".into()))?;
             open.check_rewind()?;
             ensure!(
-                !open.active,
+                open.active.is_none(),
                 OperationError::Busy("a turn is already running".into())
             );
-            let input = if !resume.is_empty() {
-                let source = branch
-                    .iter()
-                    .find(|e| e.scope.call.as_ref() == Some(&resume[0].id))
-                    .unwrap();
-                Input {
-                    id: source.id.clone(),
-                    actor: source.scope.actor.clone(),
-                    text: "Continue after the answered input requests.".into(),
-                    timing: Timing::Now,
-                    key: None,
-                }
-            } else if let Some(i) = open.queue.iter().position(|i| i.timing != Timing::Propose) {
-                open.queue.remove(i).unwrap()
-            } else {
+            self.check_open_writer(open)?;
+            self.refresh_open_erasure(open)?;
+            let continuation = next_continuation(&open.data)?;
+            let queued = open.queue.iter().position(|i| i.timing != Timing::Propose);
+            if continuation.is_none() && queued.is_none() {
                 return Ok(None);
+            }
+            // An idle driver wake-up must not take a reservation against
+            // erasure or rewind. Decide and claim real work under one lock.
+            let erasure = self
+                .erasure
+                .try_read()
+                .map_err(|_| anyhow!("erasure in progress"))?;
+            let (input, resume) = match continuation {
+                Some(continuation) => continuation,
+                None => (open.queue.remove(queued.unwrap()).unwrap(), vec![]),
             };
-
-            open.active = true;
+            let turn_id = id();
+            open.active = Some(ActiveTurn::Running(turn_id.clone()));
             open.steer_closed = false;
             open.cancel = CancellationToken::new();
             let parent = open.input_contexts.remove(&input.id).unwrap_or_default();
-            (input, open.cancel.clone(), parent)
+            (input, open.cancel.clone(), parent, resume, turn_id, erasure)
+        };
+        let activity = TurnActivity {
+            harness: self,
+            session,
         };
         let scope = Scope {
             actor: input.actor.clone(),
@@ -1521,7 +1492,7 @@ impl Harness {
                             || e.content.as_ref().is_some_and(|d| d["inputId"] == input.id))
                 })
                 .and_then(|e| e.scope.job.clone()),
-            turn: Some(id()),
+            turn: Some(turn_id),
             ..Scope::session(session)
         };
         let admitted_input = input.id.clone();
@@ -1531,12 +1502,6 @@ impl Harness {
             self.prepare_and_run(&scope, input, cancel.clone(), resume, &mut invocation),
         )
         .await;
-        self.sessions
-            .lock()
-            .unwrap()
-            .get_mut(session)
-            .unwrap()
-            .active = false;
         self.check_writer(session)?;
         let result = match result {
             Ok(r) => r,
@@ -1571,9 +1536,6 @@ impl Harness {
                 op.error("turn_failed");
             }
         }
-        let mut event = json!(result);
-        event["inputId"] = json!(admitted_input);
-        self.emit(Event::new(&scope, "turn.result", event)).await?;
         let view = self
             .output(
                 &scope,
@@ -1585,6 +1547,13 @@ impl Harness {
                 },
             )
             .await?;
+        // The journal can already contain turn.end. Do not make completion
+        // visible until all of the turn's idle-operation guards are gone.
+        drop(erasure);
+        drop(activity);
+        let mut event = json!(result);
+        event["inputId"] = json!(admitted_input);
+        self.emit(Event::new(&scope, "turn.result", event)).await?;
         Ok(Some(serde_json::from_value(view.unwrap_or_else(|| {
             json!(TurnResult {
                 outcome: result.outcome,
@@ -2093,7 +2062,7 @@ impl AgentApi for Harness {
         let i = pending_proposal(open, input)?;
         open.check_rewind()?;
         let timing = if timing == Timing::Steer
-            && (admitted["parked"] == true || (open.active && open.steer_closed))
+            && (admitted["parked"] == true || (open.active.is_some() && open.steer_closed))
         {
             Timing::After
         } else {
@@ -2108,10 +2077,10 @@ impl AgentApi for Harness {
         } else {
             let ready_work = open.queue.iter().any(|i| i.timing != Timing::Propose)
                 || !open.interrupted.is_empty();
-            let taken = if !open.active && ready_work {
+            let taken = if open.active.is_none() && ready_work {
                 "after"
             } else {
-                input_taken(open.active, timing)
+                input_taken(open.active.is_some(), timing)
             };
             let mut value = admitted.clone();
             value["inputId"] = json!(input);
@@ -2247,20 +2216,7 @@ impl AgentApi for Harness {
         let open = sessions
             .get_mut(session)
             .ok_or_else(|| anyhow!("session not open"))?;
-        if !open.provisional
-            && let Some(store) = self.store()
-            && let Err(error) = store.check_erasure(&open.data)
-        {
-            if open.active || open.environment_work > 0 || open.rewinding || open.lease.is_none() {
-                return Err(error);
-            }
-            self.check_open_writer(open)?;
-            let Some((data, _)) = store.reconcile_erasure(session)? else {
-                return Err(error);
-            };
-            store.check_erasure(&data)?;
-            self.install_erased_data(open, data)?;
-        }
+        self.refresh_open_erasure(open)?;
         Ok(open.data.clone())
     }
     fn authority(&self, session: &str, actor: &str) -> Result<Authority> {
@@ -2523,7 +2479,7 @@ impl AgentApi for Harness {
             .lock()
             .unwrap()
             .get(session)
-            .is_some_and(|s| s.active)
+            .is_some_and(|s| s.active.is_some())
     }
     fn settings(&self, scope: &Scope, mut patch: Value) -> Result<Value> {
         require(self, scope, "settings")?;
@@ -2860,7 +2816,7 @@ impl AgentApi for Harness {
                 input_contexts: BTreeMap::new(),
                 question_contexts: BTreeMap::new(),
                 interrupted: Vec::new(),
-                active: false,
+                active: None,
                 rewinding: false,
                 journal_uncertain: false,
                 environment_work: 0,
@@ -2901,7 +2857,7 @@ impl AgentApi for Harness {
             ensure!(
                 sessions
                     .values()
-                    .all(|s| !s.active && s.check_rewind().is_ok())
+                    .all(|s| s.active.is_none() && s.check_rewind().is_ok())
                     && self.blocked_projects.lock().unwrap().is_empty(),
                 "erasure requires all local turns to be idle"
             );
@@ -3335,6 +3291,97 @@ fn saved_turn_trace(data: &SessionData, turn: Option<&str>) -> Option<Context> {
         .find_map(telemetry::extract)
 }
 
+fn next_continuation(data: &SessionData) -> Result<Option<(Input, Vec<ToolCall>)>> {
+    let branch = data.branch();
+    let qs = questions(data)?;
+    let mut resume = vec![];
+    for e in branch.iter().filter(|e| e.kind == "tool.call") {
+        if branch
+            .iter()
+            .any(|r| r.kind == "tool.result" && r.scope.call == e.scope.call)
+        {
+            continue;
+        }
+        let ended = e.scope.turn.is_none()
+            || branch.iter().any(|r| {
+                r.kind == "turn.end"
+                    && r.scope.turn == e.scope.turn
+                    && r.content.as_ref().is_some_and(|v| {
+                        v["open_calls"].as_array().is_some_and(|a| {
+                            a.iter().any(|c| {
+                                Some(c["id"].as_str().unwrap_or("")) == e.scope.call.as_deref()
+                            })
+                        })
+                    })
+            });
+        let related: Vec<_> = qs.iter().filter(|q| q.scope.call == e.scope.call).collect();
+        if ended
+            && !related.is_empty()
+            && related.iter().all(|q| !q.answerable)
+            && related.iter().any(|q| q.answer.is_some())
+        {
+            resume.push(serde_json::from_value::<ToolCall>(
+                e.content
+                    .clone()
+                    .ok_or_else(|| anyhow!("erased open call"))?,
+            )?);
+        }
+    }
+    let ready: std::collections::BTreeSet<_> = resume.iter().map(|c| c.id.clone()).collect();
+    resume.retain(|call| {
+        let source = branch
+            .iter()
+            .find(|e| e.kind == "tool.call" && e.scope.call.as_ref() == Some(&call.id))
+            .unwrap();
+        source.scope.turn.is_none()
+            || branch
+                .iter()
+                .filter(|e| e.kind == "tool.call" && e.scope.turn == source.scope.turn)
+                .all(|e| {
+                    branch
+                        .iter()
+                        .any(|r| r.kind == "tool.result" && r.scope.call == e.scope.call)
+                        || e.scope.call.as_ref().is_some_and(|id| ready.contains(id))
+                })
+    });
+    if let Some(first) = resume.first() {
+        let first = first.id.clone();
+        let origin = branch
+            .iter()
+            .find(|e| e.kind == "tool.call" && e.scope.call.as_ref() == Some(&first))
+            .unwrap()
+            .scope
+            .turn
+            .clone();
+        resume.retain(|c| {
+            if origin.is_none() {
+                c.id == first
+            } else {
+                branch.iter().any(|e| {
+                    e.kind == "tool.call"
+                        && e.scope.call.as_ref() == Some(&c.id)
+                        && e.scope.turn == origin
+                })
+            }
+        });
+    }
+    let Some(first) = resume.first() else {
+        return Ok(None);
+    };
+    let source = branch
+        .iter()
+        .find(|e| e.kind == "tool.call" && e.scope.call.as_ref() == Some(&first.id))
+        .unwrap();
+    let input = Input {
+        id: source.id.clone(),
+        actor: source.scope.actor.clone(),
+        text: "Continue after the answered input requests.".into(),
+        timing: Timing::Now,
+        key: None,
+    };
+    Ok(Some((input, resume)))
+}
+
 fn recorded_outcome(data: &SessionData, scope: &Scope) -> Option<&'static str> {
     let entry = data
         .branch()
@@ -3359,5 +3406,20 @@ impl Drop for Harness {
         for plugin in self.plugins.get_mut().unwrap().iter().rev() {
             let _ = plugin.stop();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_idle_turn_probe_does_not_compete_with_erasure() -> Result<()> {
+        let harness = Harness::new();
+        let session = harness.create(Path::new("."), json!({})).await?;
+        let erasure = harness.erasure.try_write()?;
+        assert!(harness.run_next(&session).await?.is_none());
+        drop(erasure);
+        harness.close(&session).await
     }
 }
