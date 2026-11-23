@@ -128,6 +128,3 @@ A repeated publication returns the original intent ID and destinations in publis
 
 ### Specification findings
 
-**`CONTRIBUTING.md`, Phoenix verification.** Replace the sentence starting “Phoenix shows” with:
-> Phoenix shows `invoke_agent`, `chat` and `execute_tool` spans as agent, model and tool steps, and groups them by `gen_ai.conversation.id`. The `/v1/projects/default/spans` response does not show OTLP resource attributes. Check `service.name` on the OTLP request if you need to verify the resource identity as well as span arrival.
-

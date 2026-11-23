@@ -63,7 +63,7 @@ To run only the ADR 0030 kits for a built language, use `scripts/production-kits
 
 A check that fails intermittently is a bug to fix, not to retry until it passes.
 
-To look at traces while working on [telemetry](docs/telemetry.md), run `scripts/phoenix.sh start`. It starts [Arize Phoenix](https://arize.com/docs/phoenix) in podman or docker on loopback, with authentication off, from a pinned image. Point an exporter at it with `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:6006` and `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`; its HTTP endpoint does not take JSON. Phoenix shows `invoke_agent`, `chat` and `execute_tool` spans as agent, model and tool steps, and groups them by `gen_ai.conversation.id`. `scripts/phoenix.sh stop` removes it and its traces. The checks do not need it.
+To look at traces while working on [telemetry](docs/telemetry.md), run `scripts/phoenix.sh start`. It starts [Arize Phoenix](https://arize.com/docs/phoenix) in podman or docker on loopback, with authentication off, from a pinned image. Point an exporter at it with `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:6006` and `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`; its HTTP endpoint does not take JSON. Phoenix shows `invoke_agent`, `chat` and `execute_tool` spans as agent, model and tool steps, and groups them by `gen_ai.conversation.id`. Its span API (`/v1/projects/default/spans`) does not return resource attributes such as `service.name`; check those at an OTLP receiver. `scripts/phoenix.sh stop` removes it and its traces. The checks do not need it.
 
 ## Commits
 
