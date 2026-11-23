@@ -21,10 +21,14 @@ tokio::task_local! { static CATALOG_PARENT: Value; }
 /// Serve a plugin on stdin and stdout until the agent closes the connection. A plugin
 /// program writes nothing else to stdout.
 pub async fn serve(plugin: Plugin) -> Result<()> {
+    serve_stdio(plugin, true).await
+}
+
+pub(crate) async fn serve_stdio(plugin: Plugin, accept_trace_offer: bool) -> Result<()> {
     if let Some(item) = plugin.local_items.first() {
         return Err(cannot_serve(item));
     }
-    let endpoint = Served::new(plugin);
+    let endpoint = Served::with_scope(plugin, None, true, accept_trace_offer);
     let peer = Peer::start(tokio::io::stdin(), tokio::io::stdout(), endpoint.clone());
     peer.finished.cancelled().await;
     endpoint.startup_error().map_or(Ok(()), Err)
@@ -54,7 +58,7 @@ pub async fn serve_websocket(
         &options.listen,
         options.token_file,
         options.tls,
-        move || Served::with_scope(plugin.clone(), Some(projects.clone()), false),
+        move || Served::with_scope(plugin.clone(), Some(projects.clone()), false, true),
     )
     .await?)
 }
@@ -70,7 +74,7 @@ pub async fn serve_websocket_factory(
         &options.listen,
         options.token_file,
         options.tls,
-        move || Served::with_scope(factory(), Some(projects.clone()), true),
+        move || Served::with_scope(factory(), Some(projects.clone()), true, true),
     )
     .await?)
 }
@@ -97,6 +101,7 @@ pub(crate) struct Served {
     plugin: Plugin,
     projects: Option<Arc<[std::path::PathBuf]>>,
     fresh_instance: bool,
+    accept_trace_offer: bool,
     registered: Mutex<Option<Arc<Registrar>>>,
     initializing: tokio::sync::Mutex<()>,
     startup: Mutex<Option<Error>>,
@@ -106,18 +111,20 @@ pub(crate) struct Served {
 
 impl Served {
     pub(crate) fn new(plugin: Plugin) -> Arc<Self> {
-        Self::with_scope(plugin, None, true)
+        Self::with_scope(plugin, None, true, true)
     }
 
     fn with_scope(
         plugin: Plugin,
         projects: Option<Arc<[std::path::PathBuf]>>,
         fresh_instance: bool,
+        accept_trace_offer: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             plugin,
             projects,
             fresh_instance,
+            accept_trace_offer,
             registered: Mutex::default(),
             initializing: tokio::sync::Mutex::new(()),
             startup: Mutex::default(),
@@ -370,7 +377,7 @@ impl Endpoint for Served {
                     *self.environment.lock().unwrap() = Some(Arc::new(env));
                 }
                 *self.registered.lock().unwrap() = Some(Arc::new(r));
-                let agreed = p["traceContext"] == 1;
+                let agreed = self.accept_trace_offer && p["traceContext"] == 1;
                 if agreed {
                     v["traceContext"] = json!(1);
                 }

@@ -275,6 +275,14 @@ impl Session {
         }
     }
 
+    /// What the agent supports for this session, as the ACP declaration.
+    pub fn declaration(&self) -> Result<Value> {
+        crate::Agent {
+            inner: self.inner.clone(),
+        }
+        .declaration_for(Some(&self.id), false)
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }

@@ -901,6 +901,15 @@ impl Harness {
         let pool = self.reservations();
         let mut write_failed = false;
         let committed = pool.commit(&open.data, data, admission, || {
+            let Some(store) = self.store().filter(|_| Self::should_save(data)) else {
+                return Ok(());
+            };
+            // The first write also commits any setup entries kept only in memory.
+            let previous = if Self::should_save(&open.data) {
+                open.data.entries.len()
+            } else {
+                0
+            };
             let scope = data
                 .entries
                 .last()
@@ -909,10 +918,10 @@ impl Harness {
             let op = Operation::internal("modular_agent.history.commit", &scope);
             op.attr(
                 "modular_agent.history.entry.count",
-                data.entries.len().saturating_sub(open.data.entries.len()) as i64,
+                data.entries.len().saturating_sub(previous) as i64,
             );
             let _guard = op.enter();
-            let result = self.save(data);
+            let result = store.save(data);
             write_failed = result.is_err();
             op.attr(
                 "modular_agent.history.commit.status",
@@ -945,20 +954,20 @@ impl Harness {
         }
         Ok(())
     }
-    fn save(&self, data: &SessionData) -> Result<()> {
+    fn should_save(data: &SessionData) -> bool {
         // An ACP connection joins even a new session, but that join alone
         // must not leave an unused session in the store.
-        if data.entries.iter().all(|e| {
+        !data.entries.iter().all(|e| {
             matches!(e.kind.as_str(), "command" | "plugins.changed" | "tenant")
                 || (e.kind == "actor.grant"
                     && e.writer == "interface.acp"
                     && e.content
                         .as_ref()
                         .is_some_and(|v| v["operatorAdmission"] == true))
-        }) {
-            return Ok(());
-        }
-        if let Some(store) = self.store() {
+        })
+    }
+    fn save(&self, data: &SessionData) -> Result<()> {
+        if let Some(store) = self.store().filter(|_| Self::should_save(data)) {
             store.save(data)?;
         }
         Ok(())
@@ -1774,9 +1783,7 @@ impl Harness {
             .into_iter()
             .collect();
         let op = invocation.insert(self.invocation(scope, &telemetry::current(), links, false));
-        if runtime.declaration()["continues_after_restart"] == true
-            && let Some(context) = op.own_carrier()
-        {
+        if let Some(context) = op.own_carrier() {
             start["traceContext"] = context;
         }
         entries.push(Draft::new("turn.start", false, start).copying(sources));

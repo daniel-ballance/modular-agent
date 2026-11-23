@@ -1,4 +1,5 @@
 //! A runner for the shared SDK scenarios (docs/sdk/testing.md#the-shared-scenarios).
+pub mod telemetry;
 use modular_agent::{
     Agent, Answer, Approval, Code, Durability, Error, HistoryServer, ProcessPlugin,
     ServeHistoryOptions, ServicePlugin, Session, SessionOptions, Timing, file_history,
@@ -8,11 +9,15 @@ use modular_agent::{
 use serde_json::Value;
 use std::{
     io::{BufRead, BufReader, Write},
-    os::unix::{fs::OpenOptionsExt, process::CommandExt},
+    os::unix::{
+        fs::OpenOptionsExt,
+        process::{CommandExt, ExitStatusExt},
+    },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
+use telemetry::{Evidence, Request};
 
 /// Where the fixture plugins run.
 #[derive(Clone, Debug)]
@@ -213,6 +218,23 @@ async fn start_history(
 
 /// Build the scenario's agent over this run's files.
 pub async fn agent(scenario: &Value, run: &Run) -> modular_agent::Result<(Agent, Option<Answers>)> {
+    compose(scenario, run, None).await
+}
+
+pub async fn crash_agent(
+    scenario: &Value,
+    run: &Run,
+    request: Option<&Request>,
+) -> modular_agent::Result<(Agent, Option<Answers>)> {
+    let evidence = Evidence::default();
+    compose(scenario, run, request.map(|r| (r, &evidence))).await
+}
+
+async fn compose(
+    scenario: &Value,
+    run: &Run,
+    telemetry: Option<(&Request, &Evidence)>,
+) -> modular_agent::Result<(Agent, Option<Answers>)> {
     let spec = &scenario["agent"];
     std::fs::create_dir_all(run.project())?;
     let mut builder = test_agent()
@@ -232,6 +254,10 @@ pub async fn agent(scenario: &Value, run: &Run) -> modular_agent::Result<(Agent,
             builder = builder.history(http_history(&url, run.history_token())?);
         }
         _ => (),
+    }
+    if let Some((request, evidence)) = telemetry {
+        let persistent = matches!(spec["durability"].as_str(), Some("kept" | "durable"));
+        builder = evidence.attach(request, run, persistent, request.configure(builder))?;
     }
     if let Some(settings) = spec["settings"].as_object() {
         for (key, value) in settings {
@@ -254,12 +280,20 @@ pub async fn agent(scenario: &Value, run: &Run) -> modular_agent::Result<(Agent,
         let name = name.as_str().unwrap();
         builder = match &run.placement {
             Placement::InProcess => builder.plugin(
-                fixtures::fixture(name)
+                telemetry
+                    .map_or_else(
+                        || fixtures::fixture(name),
+                        |(request, _)| request.fixture(name),
+                    )
                     .unwrap_or_else(|| panic!("no fixture named {name}"))
                     .config(config.clone()),
             ),
             Placement::Process { command, .. } => builder.process_plugin(
-                ProcessPlugin::new(command.iter().cloned().chain([name.to_string()]))
+                telemetry
+                    .map_or_else(
+                        || ProcessPlugin::new(command.iter().cloned().chain([name.to_string()])),
+                        |(request, _)| request.process_plugin(name),
+                    )
                     .config(config.clone()),
             ),
             Placement::Service { .. } => builder,
@@ -378,8 +412,6 @@ pub fn applies(scenario: &Value, placement: &Placement) -> bool {
 /// Run a scenario. Returns every failed expectation, or none.
 /// `crash_agent` is the `scenario-agent` binary, for steps that crash.
 pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<String> {
-    let scenario = load(path);
-    let name = scenario["scenario"].as_str().unwrap_or("?").to_string();
     let tmp = tempfile::Builder::new()
         .prefix("sdk-scenario-")
         .tempdir()
@@ -388,12 +420,35 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
         dir: tmp.path().to_path_buf(),
         placement: placement.clone(),
     };
-    let label = placement.name();
+    run_at(path, &run, crash_agent, None).await
+}
+
+pub async fn run_telemetry(request: &Request, crash_agent: &Path) -> Vec<String> {
+    run_at(
+        &request.scenario_path,
+        &request.run(),
+        crash_agent,
+        Some(request),
+    )
+    .await
+}
+
+async fn run_at(
+    path: &Path,
+    run: &Run,
+    crash_agent: &Path,
+    request: Option<&Request>,
+) -> Vec<String> {
+    let scenario = load(path);
+    let name = scenario["scenario"].as_str().unwrap_or("?").to_string();
+    let label = run.placement.name();
+    let evidence = Evidence::default();
+    let telemetry = request.map(|r| (r, &evidence));
     let mut failures = vec![];
     let mut fail =
         |step: usize, what: String| failures.push(format!("{name} ({label}) step {step}: {what}"));
 
-    let _history = match start_history(&scenario, &run).await {
+    let _history = match start_history(&scenario, run).await {
         Ok(history) => history,
         Err(e) => {
             fail(0, format!("start history fixture: {e}"));
@@ -401,14 +456,14 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
         }
     };
     if let Some(want) = scenario.get("expectCreateError") {
-        let mut services = match start_services(&scenario, &run) {
+        let mut services = match start_services(&scenario, run) {
             Ok(children) => children,
             Err(e) => {
                 fail(0, format!("start fixture services: {e}"));
                 return failures;
             }
         };
-        match agent(&scenario, &run).await {
+        match compose(&scenario, run, telemetry).await {
             Ok((a, _)) => {
                 let _ = a.close().await;
                 fail(0, format!("createAgent: expected {want}, got success"));
@@ -435,27 +490,39 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
 
     let mut current: Option<(Agent, modular_agent::Session, Option<Answers>)> = None;
     let mut session_id = None;
+    let mut before_crash = None;
     let mut services = Vec::new();
     for (index, step) in scenario["steps"].as_array().unwrap().iter().enumerate() {
         let expect = &step["expect"];
         let result;
         if step["reopen"] != true {
             if let Some(crash) = step.get("crashWhen") {
-                match crash_run(crash_agent, path, &scenario, &run, index, crash) {
-                    Ok(id) => session_id = Some(id),
+                match crash_run(
+                    crash_agent,
+                    path,
+                    &scenario,
+                    run,
+                    index,
+                    crash,
+                    request.is_some(),
+                ) {
+                    Ok((id, observed)) => {
+                        session_id = Some(id);
+                        before_crash = observed;
+                    }
                     Err(e) => fail(index, e),
                 }
                 continue;
             }
             if current.is_none() {
-                match start_services(&scenario, &run) {
+                match start_services(&scenario, run) {
                     Ok(children) => services = children,
                     Err(e) => {
                         fail(index, e);
                         break;
                     }
                 }
-                match agent(&scenario, &run).await {
+                match compose(&scenario, run, telemetry).await {
                     Ok((a, queue)) => match new_session(&a, &scenario).await {
                         Ok(s) => {
                             session_id = Some(s.id().to_string());
@@ -495,14 +562,14 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
                 fail(index, e);
                 break;
             }
-            match start_services(&scenario, &run) {
+            match start_services(&scenario, run) {
                 Ok(children) => services = children,
                 Err(e) => {
                     fail(index, e);
                     break;
                 }
             }
-            let (a, queue) = match agent(&scenario, &run).await {
+            let (a, queue) = match compose(&scenario, run, telemetry).await {
                 Ok(composition) => composition,
                 Err(e) => {
                     fail(index, format!("compose for reopen: {e}"));
@@ -635,21 +702,32 @@ pub async fn run(path: &Path, placement: &Placement, crash_agent: &Path) -> Vec<
             }
         }
     }
+    let report = if failures.is_empty()
+        && let (Some(request), Some((a, session, _))) = (request, &current)
+    {
+        Some(evidence.report(request, run, a, session, before_crash))
+    } else {
+        None
+    };
     if let Some((a, _, queue)) = current {
-        let _ = a.close().await;
+        if let Err(e) = a.close().await {
+            failures.push(format!("{name} ({label}): agent close: {e}"));
+        }
         if let Some(Err(e)) = queue.map(|q| q.assert_done()) {
-            fail(
-                scenario["steps"]
-                    .as_array()
-                    .unwrap()
-                    .len()
-                    .saturating_sub(1),
-                e.to_string(),
-            );
+            failures.push(format!("{name} ({label}): scripted answers: {e}"));
         }
     }
     if let Err(e) = stop_groups(&mut services) {
-        fail(scenario["steps"].as_array().unwrap().len(), e);
+        failures.push(format!("{name} ({label}): stop services: {e}"));
+    }
+    if failures.is_empty()
+        && let Some(request) = request
+    {
+        match report.expect("telemetry scenario completed with a session") {
+            Ok(report) => std::fs::write(&request.report_path, report.to_string())
+                .expect("write evidence report"),
+            Err(error) => failures.push(format!("read telemetry evidence: {error}")),
+        }
     }
     failures
 }
@@ -671,9 +749,17 @@ fn crash_run(
     run: &Run,
     step: usize,
     crash: &Value,
-) -> Result<String, String> {
+    observe: bool,
+) -> Result<(String, Option<Value>), String> {
     let mut groups = start_services(scenario, run)?;
-    let child = Command::new(bin)
+    let mut command = Command::new(bin);
+    if observe {
+        command.env(
+            telemetry::ENDPOINT,
+            std::env::var_os(telemetry::ENDPOINT).expect("crash receiver endpoint"),
+        );
+    }
+    let child = command
         .arg(path)
         .arg(&run.dir)
         .arg(step.to_string())
@@ -682,7 +768,7 @@ fn crash_run(
         .process_group(0)
         .spawn()
         .map_err(|e| format!("spawn: {e}"))?;
-    groups.push(ChildGroup(Some(child)));
+    groups.push(ChildGroup(Some(child), observe));
     let child = groups.last_mut().unwrap().0.as_mut().unwrap();
     let result = (|| {
         let mut line = String::new();
@@ -722,7 +808,11 @@ fn crash_run(
             // Do not reap here: keep the child's group id until we have signalled it.
             std::thread::sleep(Duration::from_millis(20));
         }
-        Ok(id)
+        let evidence = observe
+            .then(|| Evidence::before_crash(run, &id))
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        Ok((id, evidence))
     })();
     stop_groups(&mut groups)?;
     result
@@ -730,7 +820,7 @@ fn crash_run(
 
 /// A service has its own group, distinct from the agent and all other services.
 /// The parent owns these guards even when the crash agent is unconditionally killed.
-struct ChildGroup(Option<Child>);
+struct ChildGroup(Option<Child>, bool);
 impl ChildGroup {
     fn signal(&self) -> std::io::Result<()> {
         let Some(child) = &self.0 else {
@@ -749,7 +839,7 @@ impl ChildGroup {
             return Ok(());
         };
         let pid = child.id() as i32;
-        child.wait()?;
+        let status = child.wait()?;
         let deadline = Instant::now() + Duration::from_secs(5);
         while group_can_run(pid)? {
             if Instant::now() > deadline {
@@ -758,6 +848,11 @@ impl ChildGroup {
                 ));
             }
             std::thread::sleep(Duration::from_millis(20));
+        }
+        if self.1 && status.signal() != Some(libc::SIGKILL) {
+            return Err(std::io::Error::other(format!(
+                "agent did not exit from SIGKILL: {status}"
+            )));
         }
         Ok(())
     }
@@ -836,7 +931,7 @@ fn start_services(scenario: &Value, run: &Run) -> Result<Vec<ChildGroup>, String
             .process_group(0)
             .spawn()
             .map_err(|e| format!("start {name} service: {e}"))?;
-        groups.push(ChildGroup(Some(child)));
+        groups.push(ChildGroup(Some(child), false));
         let mut line = String::new();
         let child = groups.last_mut().unwrap().0.as_mut().unwrap();
         BufReader::new(child.stdout.take().unwrap())

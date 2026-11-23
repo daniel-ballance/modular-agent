@@ -1,6 +1,7 @@
 //! The Rust fixture program (docs/sdk/testing.md#the-fixture-plugins): serves the named
 //! fixture plugin over stdio or WebSocket.
 use modular_agent::{ServeOptions, serve, serve_websocket, testing::fixtures::fixture};
+use sdk_scenarios::telemetry;
 use std::io::Write;
 
 #[tokio::main]
@@ -39,6 +40,7 @@ async fn main() {
         eprintln!("no fixture named {name:?}");
         std::process::exit(2);
     };
+    let export = telemetry::install(std::env::var_os(telemetry::ENDPOINT).is_some());
     let result = if let Some(options) = options {
         async {
             let server = serve_websocket(plugin, options).await?;
@@ -49,9 +51,12 @@ async fn main() {
             Ok(stopped?)
         }
         .await
+    } else if std::env::var(telemetry::HANDSHAKE).as_deref() == Ok("no-acceptance") {
+        modular_agent::testing::serve_without_trace_acceptance(plugin).await
     } else {
         serve(plugin).await
     };
+    telemetry::flush(export).await;
     if let Err(e) = result {
         eprintln!("{e}");
         std::process::exit(1);
