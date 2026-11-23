@@ -15,7 +15,7 @@ Two choices are made when an agent is put together, never in a plugin's code: wh
 | History store | yes | no | yes, the [history service](../bindings/history-http.md) |
 | Credential store, configuration | yes | no | no |
 | Interfaces | yes | no | no |
-| The whole agent | embedded in an app | driven over [ACP](../bindings/acp.md) on stdio | driven over ACP on a WebSocket |
+| The whole agent | embedded in an app | driven over [ACP](../bindings/acp.md) on stdio | ACP on WebSocket; proposed [AG-UI](../bindings/agui.md) on HTTP and SSE |
 
 "In its own process" means the [plugin binding](../bindings/plugin.md): the agent starts the plugin as a child process and speaks JSON-RPC over its stdio. "As a service" means the same binding over the [WebSocket transport](../bindings/websocket.md): the plugin listens, and the agent connects to it. In both, the two sides can be in different languages.
 
@@ -67,6 +67,18 @@ Agents in any language that share a history service and the same actor ids can r
 - **As a service.** `agent.serveAcp({ listen, actors, tls? })` serves ACP on a WebSocket. `actors` lists, for each token file, the actor its connections act as: `{ tokenFile, actor: { id, kind, rights }, tenants?, projects?, represents? }`. A connection presenting no listed token is refused. The token, not anything the client sends, decides the actor ([WebSocket transport](../bindings/websocket.md#an-agent-service)). Once ready, the listener returns `url` and `close()`. Closing it stops accepting connections and closes the existing ones.
 
 Omit `tenants` to allow only sessions without a tenant. Include `null` in an explicit `tenants` list to allow such sessions. `projects` matches exact canonical project paths, not subdirectories. Omit it to use the serving composition's project scope. An empty list permits nothing in its scope. At connection time the service intersects the token's rights with the actor's recorded grants; it does not rewrite the grants. Session and tenant authority checks still apply. `represents` names additional actors the operator permits the connection to act for; it does not join them. Stdio takes its scope and optional rights ceiling and representation from [operator options](api.md#the-agent).
+
+### Serving AG-UI
+
+Proposed; no SDK implements this binding yet.
+
+Call `agent.serveAgui({ listen, actors, tls?, tenant?, acp?, origins? })` instead of `serveAcp` when the app speaks AG-UI. Set `acp: true` to serve ACP WebSocket upgrades at the same address. Do not start a second listener on that address. The listener handle has `url` (the HTTP origin) and `close()`. Closing it detaches streams; it does not erase sessions or confirm cancellation of external calls.
+
+Use the same token files and actor entries as for `serveAcp`, adding a distinct `clientId` for each AG-UI client. The agent's project and the operator's optional `tenant` select the creation scope. The token must permit that scope. `origins` is the optional browser origin allowlist. The app makes authenticated requests to the [binding routes](../bindings/agui.md#listener-and-authentication), keeps its history cursor and replaces stale copies from a snapshot. Open the presence stream if the app will answer questions while the turn waits.
+
+To let a client run a tool such as `pick_color`, include its definition in `createAgent({ interfaceTools: [...] })`. Set a unique `sourceId`, the client's configured `actorId`, and `routeId` equal to its AG-UI `clientId`. Set a finite positive `resultTimeoutMs` and `callers: ["model"]` on each definition. Do not pass a tool handler: the Interface is the executor. The SDK rejects a conflicting registration, a nonpositive timeout or an incompatible Runtime at composition. Serving rejects a route that matches a different actor or is ambiguous. The SDK does not register tools from a browser request.
+
+The app advertises the exact definitions it can run. On a live, eligible terminal event it runs or declines the named calls, then supplies the results in a later run. It does not execute from replay or use a tool message to approve a call. For a JSON result, send it as text or use a declared content part; this binding does not fill shared `ToolResult.value`. An application that needs durable result delivery can retain a report under the call ID until it is accepted or expires, subject to its own erasure policy.
 
 ## Durability
 
