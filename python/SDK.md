@@ -112,18 +112,6 @@ Call `await claude_provider.available()` before displaying account-specific mode
 
 The launcher of a stdio ACP host is trusted for per-request trace context. Set `trace_trusted=True` in an embedded network ACP `actors` entry only for a peer allowed to share trace IDs. Network principals are not trace-trusted by default. Configured history and plugin destinations get context per request. The SDK does not accept or send baggage or vendor trace state.
 
-Suggested replacement for the ACP row in [Context on the wire](../docs/telemetry.md#context-on-the-wire), after the sentence about `initialize`:
-
-> Treat the launcher of an operator-configured stdio Interface as trusted for trace context unless the operator disables that trust. For authenticated network ACP, use the principal's operator-configured trace trust, which defaults to false. Authentication alone does not grant trace trust. Apply the same trust decision when injecting context into questions or permission requests.
-
-Suggested replacement for the endpoint timeout sentence in [Telemetry](../docs/reference/standard-configuration.md#telemetry):
-
-> Export request headers and timeout in milliseconds. Convert the timeout if the official exporter takes seconds as a constructor argument.
-
-Phoenix's `/v1/projects/default/spans` response does not return OpenTelemetry resources. Suggested replacement for a Phoenix verification instruction that asks for `service.name` from that response:
-
-> Match the trace ID and span names in Phoenix. Verify `service.name` in the OTLP resource for the same trace; the Phoenix spans response does not expose it.
-
 ## Remaining Python implementation gaps
 
 The older base build's private `MA_PLUGIN_PROCESSES` placement does not install OpenTelemetry in its worker processes. The SDK's public hosted Runtime placement records the invocation in the host and uses the plugin binding for propagation.
