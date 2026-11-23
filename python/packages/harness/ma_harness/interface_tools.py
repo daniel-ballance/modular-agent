@@ -100,7 +100,9 @@ def handoff_fold(entries):
         if recorded_as(e, "tool_result"):
             terminal.setdefault(cid, e)
     ids = checkpoints.keys() | {
-        cid for cid, e in starts.items() if (e["data"].get("source") or {}).get("plugin") == SOURCE
+        cid
+        for cid, e in starts.items()
+        if (e.get("data", {}).get("source") or {}).get("plugin") == SOURCE
     }
     return {cid: (starts.get(cid), checkpoints.get(cid, []), terminal.get(cid)) for cid in ids}
 
@@ -283,8 +285,8 @@ class InterfaceTools:
             if provider_id := ot.name(self.provider_trace_ids.pop((sid, cid), None)):
                 attributes["gen_ai.tool.call.id"] = provider_id
             try:
-                await self.guard_erasure(sid)
                 await self._assert_writable(sid)
+                await self.guard_erasure(sid)
                 deliver = clock() < deadline and current(cx) is not None
             except AgentError:
                 deliver = False
@@ -491,7 +493,7 @@ class InterfaceTools:
                     "visible": not suppress_continuation,
                     "copies": [e["id"] for e in ([start] if start else []) + checkpoints],
                     "content": [] if suppress_continuation else result["content"],
-                    "data": {"erased": True, "originalKind": "toolResult"}
+                    "data": {"erased": True, "originalKind": "toolResult", "interfaceErasure": True}
                     if suppress_continuation
                     else {
                         "status": result["status"],
@@ -658,7 +660,7 @@ class InterfaceTools:
             )
             if start is None:
                 continue
-            triggers, resume = [], []
+            triggers, resume, lineage = [], [], [start["id"], end["id"]]
             for cid in ids:
                 if cid in handoffs:
                     dispatch, checkpoints, result = handoffs[cid]
@@ -675,6 +677,7 @@ class InterfaceTools:
                     ):
                         break
                     triggers.append((order[result["id"]], "toolResult", result["id"]))
+                    lineage.extend([*(cp["id"] for cp in checkpoints), result["id"]])
                 else:
                     questions = [
                         e["data"]["id"]
@@ -705,6 +708,7 @@ class InterfaceTools:
                         "content": [],
                         "interface_continuation": True,
                         "ready_order": max(index, order[end["id"]]),
+                        "continuation_sources": lineage,
                         "data": {
                             "when": "after",
                             "source": {"continuesTurnId": origin},

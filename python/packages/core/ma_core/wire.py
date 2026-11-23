@@ -419,7 +419,7 @@ def entry_out(e):
             "kind": e.get("data", {}).get("originalKind", kind),
             "erased": True,
             **{TAGS[k]: e[k] for k in ("turn", "step", "call", "job") if e.get(k) is not None},
-            **({"sources": e["copies"]} if e.get("copies") else {}),
+            **({"sources": e["copies"]} if e.get("data", {}).get("interfaceErasure") else {}),
             **{
                 k: e["wire_fields"][k]
                 for k in ("inputId", "inputIds", "requestId", "sources", "usage", "jobKey")

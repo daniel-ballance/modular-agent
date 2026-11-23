@@ -9,7 +9,7 @@ from ma_core.wire import provider_projection, recorded_as
 
 from .authority import Authority, PERMISSIONS, read_tenants
 from .erasure import Erasure
-from .interface_tools import HANDOFF, InterfaceTools, branch_entries, handoff_fold
+from .interface_tools import HANDOFF, SOURCE, InterfaceTools, branch_entries, handoff_fold
 from .output import gate
 from .reservations import Reservations, size
 
@@ -364,6 +364,11 @@ class Harness(Authority, Erasure, InterfaceTools):
                     )
                 definitions = [*definitions, *self.interface_definitions(sid, data.get("turn"))]
             return clone(definitions)
+        if target == "runtime" and operation == "cancel" and self.interface_enabled():
+            result = await method(data, emit)
+            if sid in self.sessions and await self.interface_ready(sid):
+                await self.interface_kick(sid)
+            return clone(result)
         if target != "tools" or operation != "run" or "call" not in data:
             if effect:
                 return clone(
@@ -737,7 +742,7 @@ class Harness(Authority, Erasure, InterfaceTools):
         return cancellation
 
     def active_plugins(self):
-        return [
+        active = [
             {"name": name}
             for name in dict.fromkeys(
                 getattr(plugin, "registration", {}).get("name", key)
@@ -745,6 +750,9 @@ class Harness(Authority, Erasure, InterfaceTools):
                 if not getattr(plugin, "connection_local", False)
             )
         ]
+        if self.interface_tools:
+            active.append({"name": SOURCE})
+        return active
 
     async def _position(self, sid, target, actor, restore=None):
         current = self.sessions[sid]
@@ -820,6 +828,16 @@ class Harness(Authority, Erasure, InterfaceTools):
         # An entry may attribute an effect to a historical actor who has left.
         s = self._session(d, check_actor=False)
         sid = s["id"]
+        if d["kind"] == "turn_end" and (listed := d["data"].get("open_calls")):
+            settled = {cid for cid, (_, _, result) in handoff_fold(s["entries"]).items() if result}
+            if settled.intersection(listed):
+                data = {**d["data"], "open_calls": [cid for cid in listed if cid not in settled]}
+                if "shared_result" in data:
+                    data["shared_result"] = {
+                        **data["shared_result"],
+                        "openToolCalls": data["open_calls"],
+                    }
+                d = {**d, "data": data}
         if d["kind"] not in {
             "input_queued",
             "setting",

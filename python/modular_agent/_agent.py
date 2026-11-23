@@ -1586,6 +1586,13 @@ def create_agent(
                 }
                 if not h.interface_enabled():
                     raise ValueError("The Runtime does not support Interface tools")
+                if hasattr(h, "external_tool_names"):
+                    h.external_tool_names.update(
+                        {
+                            name: (SOURCE, registration[0])
+                            for name, registration in registered.items()
+                        }
+                    )
             runtime_owner = h.capabilities["runtime"][0]
             continues = bool(h.plugins[runtime_owner].declarations.get("durable"))
             # Offline ACP fixtures exercise both Runtime kinds with persistent

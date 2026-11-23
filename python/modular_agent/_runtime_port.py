@@ -19,6 +19,7 @@ class RuntimeSupports(TypedDict):
     waitingThroughRestart: bool
     inputDuringTurn: bool
     rewinding: NotRequired[bool]
+    interfaceTools: NotRequired[bool]
 
 
 class RuntimeDeclaration(TypedDict):

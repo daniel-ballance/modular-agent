@@ -251,6 +251,7 @@ class Turns:
                     if queued.get("interface_continuation")
                     else {"first_input": self._taken_input(queued)}
                 ),
+                copies=queued.get("continuation_sources", []),
                 data={
                     **self._start_trigger(queued),
                     **snapshot,
@@ -571,10 +572,11 @@ class Turns:
             for e in es
             if e.get("turn") == turn and e["kind"] in {"response", "tool_result"}
         ]
-        await self._record(sid, turn, "turn_end", data=answer, copies=sources)
+        end = await self._record(sid, turn, "turn_end", data=answer, copies=sources)
+        answer = end["data"]
         await self.api.hook("turn.end", answer)
         await self.api.event("turn_ended", **answer)
-        if open_calls:
+        if answer["open_calls"]:
             await self.wake({"session": sid}, None)
         return answer
 

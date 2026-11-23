@@ -116,6 +116,7 @@ class HostedRuntime(Runtime):
                     if queued.get("interface_continuation")
                     else {"first_input": self._taken_input(queued)}
                 ),
+                copies=queued.get("continuation_sources", []),
                 data={
                     **self._start_trigger(queued),
                     "startedBy": started_by,
@@ -549,7 +550,7 @@ class TurnHost:
                 await self.runtime._return(self.sid, queued)
         if not end:
             await self.settle(answer)
-            await self.append(
+            committed = await self.append(
                 "turn_end",
                 data=answer,
                 copies=[
@@ -558,6 +559,7 @@ class TurnHost:
                     if e.get("turn") == self.turn and e["kind"] in {"response", "tool_result"}
                 ],
             )
+            answer = committed["data"]
         if not self.final_hook:
             await self.api.hook("turn.end", answer)
         await self.api.event("turn_ended", **answer)
