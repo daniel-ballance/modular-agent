@@ -1,10 +1,38 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { execFile } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { cases as basic } from './cases.mjs';
 import { advanced } from './advanced.mjs';
-const cases = { ...basic, ...advanced };
 import { fake } from './fake.mjs';
-import { at } from './wire.mjs';
+import { at, deadline } from './wire.mjs';
+
+const cases = { ...basic, ...advanced };
+const here = name => fileURLToPath(new URL(name, import.meta.url));
+const exec = promisify(execFile);
+
+test('runner launches a scripted agent command', async () => {
+  const { stdout } = await exec(process.execPath, [here('run.mjs'), '--only', 'history', '--', process.execPath, here('fake-agent.mjs')], { signal: deadline() });
+  assert.match(stdout, /1\/1 AG-UI cases passed/);
+});
+
+test('runner connects to an existing scripted agent with a token file', async () => {
+  const server = await fake();
+  const folder = await mkdtemp(join(tmpdir(), 'agui-connect-'));
+  const tokenFile = join(folder, 'token');
+  try {
+    await writeFile(tokenFile, server.tokens.owner + '\n', { mode: 0o600 });
+    const { stdout } = await exec(process.execPath, [here('run.mjs'), '--only', 'stock-conversation', '--url', server.origin, '--token-file', tokenFile], { signal: deadline() });
+    assert.match(stdout, /1\/1 AG-UI cases passed/);
+  } finally {
+    await server.close();
+    await rm(folder, { recursive: true, force: true });
+  }
+});
 
 async function run(name, fault) {
   const scenario = cases[name];
