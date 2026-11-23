@@ -41,4 +41,11 @@ SDK specification 0.1 after the fifth build round. Each runner ran all seventeen
 
 ## Proposed, not yet written
 
+[ADR 0034](../../docs/adr/0034-approvals-that-wait.md) needs these [shared checks and runner extensions](../../docs/sdk/testing.md#planned-checks-for-approvals-that-wait). No scenario files or results exist for them yet.
+
+- **waiting-approval:** opt in, finish the turn with one open call and counter zero, return as a present approver, then count one initial dispatch in one continuation. Keep the live-only and unsupported cases as controls.
+- **waiting-approval-cutoff:** compare explicit decline, expiry while unanswered and an allow that reaches dispatch too late. No effect in any case; expiry of an unstarted call gives `notStarted`.
+- **waiting-approval-changed:** mutate the registration or final gated input, or revoke the worker or approver after allow. Expect `refused`, not a second question or a modified call.
+- **waiting-approval-reopen:** stop before the answer and again after commit in separate runs. Restore the same deadline, call and queue identity. Never inherit a live delivery; never repeat a dispatch with an unknown outcome.
+
 - **queued-cancel:** an input queued `after` a held call, then cancel, then a retry with the same key returns `handedBack` without another turn. Needs receipt expectations in the format.

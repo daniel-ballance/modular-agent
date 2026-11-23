@@ -21,6 +21,15 @@ The kit never retries a case. The library entry points are `startReceiver` in
 `receiver.mjs`, `compareTrace` in `compare.mjs`, and `caseMatrix` and
 `runCase` in `runner.mjs`.
 
+## Planned checks for ADR 0034
+
+Not part of the current telemetry results. For [a waiting approval](../../docs/contracts.md#approvals-that-wait), compare records, the fixture counter and spans at the receiver:
+
+- Pause after the completed origin. Its `invoke_agent` and step spans end. Observe `modular_agent.question.open` with the request ID; there is no `execute_tool` and no span held open for the wait.
+- Accept a late allow. The close event belongs to the answer operation, not the ended step. The continuation gets a new turn span linked to the origin when its context is available. Only the actual dispatch has an execution span, under the continuation with the original call ID.
+- Decline, expire while stopped, and revoke authority after allow but before dispatch. Expect the factual question closure and pre-dispatch disposition, no tool execution span. Recovery does not invent spans for the idle interval or require a killed process to have exported.
+- Look for fixture sentinels in every exported field. The approval text, arguments, answer body and view/route proof never appear. Export being off does not change any decision or counter.
+
 ## Adapter contract
 
 The adapter runs one case. It gets a clean temporary home and no inherited OpenTelemetry
