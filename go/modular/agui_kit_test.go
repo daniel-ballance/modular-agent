@@ -480,9 +480,25 @@ func TestAGUIKitProgram(t *testing.T) {
 	provider.Request = func(ctx context.Context, ref modular.ModelRef, r modular.ModelRequest, pc *modular.ProviderContext) (modular.AssistantMessage, error) {
 		messages := []any{}
 		for _, m := range r.Messages {
-			messages = append(messages, map[string]any{"role": m.Role, "text": m.Content.Text(), "name": m.ToolName})
+			entry := map[string]any{"role": m.Role, "text": m.Content.Text()}
+			switch m.Role {
+			case "assistant":
+				calls := []any{}
+				for _, part := range m.Content {
+					if part.Type == "toolCall" {
+						calls = append(calls, map[string]any{"name": part.Fields["name"], "input": part.Fields["arguments"]})
+					}
+				}
+				entry["toolCalls"] = calls
+			case "toolResult":
+				entry["name"] = m.ToolName
+			case "user":
+			default:
+				continue
+			}
+			messages = append(messages, entry)
 		}
-		var tools []string
+		tools := []string{}
 		for _, d := range r.Tools {
 			tools = append(tools, d.Name)
 		}

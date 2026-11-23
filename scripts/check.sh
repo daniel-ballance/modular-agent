@@ -142,6 +142,7 @@ plan() {
     step typescript "typescript: tests" bash -c 'cd typescript && NODE_OPTIONS="$1" npm test' _ "$ts_options"
     step typescript "typescript: tests with remote parts" bash -c 'cd typescript && NODE_OPTIONS="$1" MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test' _ "$ts_options"
     step typescript "typescript: Claude sidecar tests" bash -c "cd typescript/sidecars/claude && npm ci --silent && npm test"
+    step go "AG-UI kit: Go ma and SDK fixture" go/scripts/check-agui.sh
     step go "go: all tests" bash -c 'cd go && mise exec -- go test -count=1 "$@" ./...' _ "${go_shared[@]}"
     step go "go: race detector on SDK and ma" bash -c 'cd go && mise exec -- go test -race -count=1 "$@" ./modular/... ./cmd/ma/...' _ "${go_shared[@]}"
     for runtime in transient durable; do

@@ -18,7 +18,7 @@ The first invocation of `run.mjs` with a command runs every case, with a fresh f
 
 ## Launching a fixture
 
-The fixture is an SDK app, not a replacement AG-UI adapter. Use the real listener, Harness, Runtime, output gate and history store. There is no SDK implementation to launch yet. See [Serving AG-UI](../../docs/sdk/placement.md#serving-ag-ui) for the proposed setup. `fake-agent.mjs` is only a launch-mode self-test for the basic cases.
+The fixture is an SDK app, not a replacement AG-UI adapter. Use the real listener, Harness, Runtime, output gate and history store. The Go launcher is `go.mjs`. From the repository root, `go/scripts/check-agui.sh` builds Go `ma` and the fixture, installs the pinned kit dependencies in scratch, and runs every case. Four cases launch `ma`; cases that need operator-only setup launch the test executable. See [Serving AG-UI](../../docs/sdk/placement.md#serving-ag-ui) for the proposed setup. `fake-agent.mjs` is only a launch-mode self-test for the basic cases.
 
 The kit starts the command in a new process group, with a fresh home, working directory and data directory, and without the inherited environment except `PATH`. It sets:
 
