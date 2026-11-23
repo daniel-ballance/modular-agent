@@ -77,8 +77,8 @@ export function handoffRecords(kept: HistoryEntry[]): Map<string, HandoffRecord>
 		if (!id) continue;
 		if (entry.kind === "toolStarted" && (entry.data as StartData | undefined)?.source?.plugin === INTERFACE_SOURCE) {
 			const item = record(id);
-			item.start = entry;
-			item.dispatch = entry.data as StartData;
+			if (item.start || item.checkpoint) { item.data = undefined; item.dispatch = undefined; }
+			else { item.start = entry; item.dispatch = entry.data as StartData; }
 		} else if (entry.kind === INTERFACE_HANDOFF) {
 			const item = record(id);
 			const duplicate = !!item.checkpoint;
@@ -86,7 +86,8 @@ export function handoffRecords(kept: HistoryEntry[]): Map<string, HandoffRecord>
 			const start = kept[i - 1];
 			const data = entry.data as (HandoffData & { toolCallId?: string; turnId?: string; stepId?: string }) | undefined;
 			if (start?.kind === "toolStarted" && start.toolCallId === id) item.start ??= start;
-			item.data = !duplicate && entry.writer === "harness" && !entry.erased && !!item.dispatch && !start?.erased && entry.parentId === start?.id &&
+			item.data = !duplicate && entry.writer === "harness" && !entry.erased && !!item.dispatch && item.start === start && !start?.erased && start?.writer === "harness" && entry.parentId === start?.id &&
+				item.dispatch.definition?.name === item.dispatch.call?.name &&
 				item.dispatch.safeToRepeat === false && item.dispatch.openWorld === true && item.dispatch.call?.id === id &&
 				item.dispatch.call.startedBy === "model" && item.dispatch.call.stepId === entry.stepId && !!entry.turnId && !!entry.stepId &&
 				start?.turnId === entry.turnId && start?.stepId === entry.stepId && data?.toolStartedId === start?.id &&
@@ -121,9 +122,13 @@ export function validReportContent(content: unknown): content is ContentPart[] {
 		if (!part || Array.isArray(part) || typeof part !== "object") return false;
 		switch (part.type) {
 			case "text": return typeof part.text === "string";
-			case "image": case "audio": case "resource":
-				return typeof part.mimeType === "string" && typeof part.data === "string";
-			case "toolCall": case "reasoning": return false;
+			case "image": return typeof part.mimeType === "string" && /^image\/[\w!#$&^.+-]+$/i.test(part.mimeType) &&
+				typeof part.data === "string" && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(part.data);
+			case "toolCall": return typeof part.id === "string" && !!part.id && typeof part.name === "string" && !!part.name &&
+				!!part.arguments && typeof part.arguments === "object" && !Array.isArray(part.arguments) &&
+				(part.providerCallId === undefined || typeof part.providerCallId === "string" && !!part.providerCallId);
+			case "reasoning": return (part.text !== undefined || part.providerData !== undefined) &&
+				(part.text === undefined || typeof part.text === "string");
 			default: return typeof part.type === "string" && !!part.type;
 		}
 	});

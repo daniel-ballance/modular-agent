@@ -154,6 +154,33 @@ for (const remote of [false, true]) {
     assert.equal(history.filter(e => e.kind === "turnStart").length, 1);
   });
 
+  test(`${placement}: a mixed continuation waits for both kinds of result and reruns only the question call`, async t => {
+    let notes = 0;
+    const note = tool({ name: "note", description: "Ask for a note", input: { type: "object" }, async run(_, cx) {
+      notes++;
+      const answer = await cx.ask({ kind: "text", question: "A note?" }, { wait: 0, then: "leaveOpen" });
+      return typeof answer === "object" && "value" in answer ? answer.value : "declined";
+    } });
+    const { session, conn, handoffs } = await fixture(t, remote, { questionsOutlastTurns: true, tools: [note],
+      providers: [scriptedProvider([{ toolCalls: [...requested.toolCalls, { name: "note", input: {} }] }, { text: "Both checked." }])] });
+    const origin = await session.prompt("Pick a color and write a note.");
+    assert.equal(origin.outcome?.kind, "completed");
+    assert.equal(origin.openToolCalls.length, 2);
+    const [question] = await session.questions();
+    assert.deepEqual(await conn.reportInterfaceToolResult(report(handoffs[0].call.id)), completed);
+    await session.waitIdle();
+    assert.equal((await session.lastTurn())?.turnId, origin.turnId);
+    await session.answer(question.id, { value: "from the answerer" });
+    await session.waitIdle();
+    assert.equal((await session.lastTurn())?.text, "Both checked.");
+    assert.equal(handoffs.length, 1);
+    assert.equal(notes, 2);
+    const history = await session.history();
+    const continued = history.find(e => e.continuesTurnId === origin.turnId)!;
+    assert.deepEqual((continued.data as { startedBy: unknown }).startedBy, { kind: "answer", id: question.id });
+    assert.equal(history.filter(e => e.kind === "toolStarted" && e.toolCallId === handoffs[0].call.id).length, 1);
+  });
+
   for (const [cutoff, durability] of [["ended", "kept"], ["handoff", "durable"], ["handoff", "kept"]] as const) {
     test(`${placement}: SIGKILL ${cutoff}, then reopen ${durability} history`, { skip: process.platform === "win32", timeout: 15_000 }, async t => {
       const dataDir = await mkdtemp(join(tmpdir(), "ma-interface-crash-"));

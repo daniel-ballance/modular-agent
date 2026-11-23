@@ -240,7 +240,7 @@ interface LiveHandoff {
 	released: boolean;
 	check: () => boolean;
 }
-interface TurnState extends TurnSnapshot { interfaceOffer?: Map<string, InterfaceConnection>; interfaceAllowances?: Map<string, ToolCall | null>; dispatched: Set<string>; steps: Map<string, Operation>; startingRights?: Authority[]; connectionRights?: ConnectionRights; endedHook?: boolean; sources: Map<string, string[]>; actors: Set<string>; jobs: Set<string>; tenantLimit?: boolean; capacityLimit?: boolean; stepAfterRunning?: boolean; toolResultError?: string }
+interface TurnState extends TurnSnapshot { interfaceOffer?: Map<string, InterfaceConnection>; interfaceAllowances?: Map<string, { call: ToolCall; approval: unknown } | null>; dispatched: Set<string>; steps: Map<string, Operation>; startingRights?: Authority[]; connectionRights?: ConnectionRights; endedHook?: boolean; sources: Map<string, string[]>; actors: Set<string>; jobs: Set<string>; tenantLimit?: boolean; capacityLimit?: boolean; stepAfterRunning?: boolean; toolResultError?: string }
 
 /**
  * The Harness: hosts plugins, offers the plugin API, keeps sessions.
@@ -2551,9 +2551,10 @@ export class Harness {
 						response?.message?.role !== "assistant" || !response.message.content.some(part => isToolCall(part) &&
 							part.id === call.id && part.name === call.name && isDeepStrictEqual(part.arguments, call.input))) return refused("Interface tool was not offered for this call");
 					state.interfaceAllowances.set(call.id, null);
+					const approval = s.settings.approval;
 					const gate = await withAuthority(() => this.toolGate({ ...scope, definition: registration.definition }, s.running?.abort.signal));
 					if (gate.pending !== undefined) return refused("An Interface handoff cannot wait on a question");
-					if (gate.refused === undefined) state.interfaceAllowances.set(call.id, structuredClone(gate.value.call));
+					if (gate.refused === undefined) state.interfaceAllowances.set(call.id, { call: structuredClone(gate.value.call), approval });
 					return gate;
 				}
 				if (name === "tool.after") {
@@ -2969,19 +2970,21 @@ export class Harness {
 	}
 
 	private async handoffInterfaceCall(s: Session, source: InterfaceToolSource, connection: InterfaceConnection, call: ToolCall,
-		turnId: string, state: TurnState, signal: AbortSignal, allowed: () => boolean): Promise<ToolResult | (ToolPending & { callId: string })> {
+		turnId: string, state: TurnState, signal: AbortSignal, allowed: () => boolean, approval: unknown): Promise<ToolResult | (ToolPending & { callId: string })> {
 		const refused = (): ToolResult => ({ callId: call.id, status: "refused", content: [text("Interface handoff is not authorized")] });
 		const definition = source.tools.find(t => t.name === call.name)!;
 		const eligible = () => {
 			const current = this.findTool(s, call.name);
 			const rights = this.executorRights(s, connection);
-			return !signal.aborted && !s.moving && !s.erasing && allowed() && this.interfacePresent(s, connection) &&
+			return !signal.aborted && !s.moving && !s.erasing && allowed() && approval === s.settings.approval && this.interfacePresent(s, connection) &&
 				rights.includes("watch") && rights.includes("tools") && connection.tools.get(call.name) === definition &&
 				current?.plugin === INTERFACE_SOURCE && current.source.id === source.sourceId && sameDefinition(current.definition, definition) &&
 				state.tools.some(t => t.name === call.name && sameDefinition(t, definition));
 		};
 		const deadline = this.now() + source.resultTimeoutMs;
 		if (!Number.isSafeInteger(deadline) || !eligible()) return refused();
+		await this.admitHistory(s);
+		if (!eligible()) return refused();
 		const request = { sessionId: s.id, turnId, deadline, call };
 		if (!(await this.gateHandoff(s, connection, request))) return refused();
 		return this.admit(s, async () => {
@@ -2995,7 +2998,8 @@ export class Harness {
 				rights: this.executorRights(s, connection), deadline };
 			const committed = await this.commit(s, [
 				{ ...scope, id: startId, kind: "toolStarted", writer: "harness", modelVisible: false, actorId: call.actorId,
-					data: { call, source: { plugin: INTERFACE_SOURCE, toolSource: source.sourceId }, definition, safeToRepeat: false, openWorld: true } },
+					data: { call, source: { plugin: INTERFACE_SOURCE, toolSource: source.sourceId }, definition, safeToRepeat: false, openWorld: true,
+						authorizers: [...state.actors].map(actorId => ({ sessionId: s.id, actorId })), rights: this.workRights(s, state.actors, state.jobs) } },
 				{ ...scope, kind: INTERFACE_HANDOFF, writer: "harness", modelVisible: false, sources: [startId], data: { ...scope, ...data } },
 			], false, () => eligible() && deadline > this.now() && data.rights.every(r => this.executorRights(s, connection).includes(r)) &&
 				(!this.pendingRegistry() || this.checkPending(s) === freshness));
@@ -3046,8 +3050,9 @@ export class Harness {
 			if (!item || item.result || !live || !this.validHandoff(s, item)) return false;
 			const { data, dispatch, checkpoint } = item;
 			const request = { sessionId: s.id, turnId: checkpoint!.turnId!, deadline: data!.deadline, call: dispatch!.call };
+			const freshness = await this.admitHistory(s);
 			if (!live.check() || !(await this.gateHandoff(s, connection, request))) return false;
-			await this.admitHistory(s);
+			if (await this.admitHistory(s) !== freshness) return false;
 			this.checkWriter(s);
 			if (!live.check()) return false;
 			this.deliverHandoff(s, live, request);
@@ -3192,6 +3197,7 @@ export class Harness {
 
 	private findTool(s: Session | undefined, name: string): { plugin: string; source: ToolSource; definition: ToolDefinition } | undefined {
 		for (const { plugin, impl } of this.caps.get("tool-source") ?? []) {
+			if (this.interfaceSources.has(name) && plugin !== INTERFACE_SOURCE) continue;
 			const source = impl as ToolSource;
 			const definition = source.tools(s?.id).find((t) => t.name === name && !this.replacedFor(plugin, `tool:${t.name}`));
 			if (definition) return { plugin, source, definition };
@@ -3205,6 +3211,7 @@ export class Harness {
 		for (const { plugin, impl } of this.caps.get("tool-source") ?? []) {
 			const source = impl as ToolSource;
 			for (const t of source.tools(s?.id)) {
+				if (this.interfaceSources.has(t.name) && plugin !== INTERFACE_SOURCE) continue;
 				if (this.replacedFor(plugin, `tool:${t.name}`)) continue;
 				if (seen.has(t.name)) {
 					// A name is never silently shadowed: the later source's tool is refused, and said so once.
@@ -3244,10 +3251,11 @@ export class Harness {
 			const registration = this.interfaceSources.get(call.name);
 			const connection = state?.interfaceOffer?.get(call.name);
 			const allowance = state?.interfaceAllowances?.get(call.id);
-			if (!allowance || !isDeepStrictEqual({ ...allowance, actorId: call.actorId }, call)) return refused();
+			if (!allowance || !isDeepStrictEqual({ ...allowance.call, actorId: call.actorId }, call) ||
+				call.actorId !== (owners[0] ?? this.actorForJob(s, state?.jobs))) return refused();
 			state?.interfaceAllowances?.set(call.id, null);
 			if (!registration || !connection || !turnId || !call.stepId || !state || nested || call.startedBy !== "model" || !call.actorId) return refused();
-			return this.handoffInterfaceCall(s, registration, connection, call, turnId, state, signal, allowed);
+			return this.handoffInterfaceCall(s, registration, connection, call, turnId, state, signal, allowed, allowance.approval);
 		}
 		const env = await this.environmentFor(s);
 		const safeToRepeat = found.definition.hints?.safeToRepeat === true && env?.containment === "strong";
