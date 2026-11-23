@@ -427,7 +427,7 @@ While an intent is unresolved, the Harness MUST block project work and keep othe
 
 ## Changes
 
-- **Proposed with [ADR 0033](../adr/0033-interface-tools-and-ag-ui.md).** Add a private Interface handoff checkpoint and result-only continuations. Existing call and question forms are unchanged.
+- **Accepted with [ADR 0033](../adr/0033-interface-tools-and-ag-ui.md).** Add a private Interface handoff checkpoint and result-only continuations. Existing call and question forms are unchanged.
 
 - **2026-11-22.** Add optional Harness trace context on turn start and a private segment checkpoint for recovery. Exclude both from fork copies and model views.
 

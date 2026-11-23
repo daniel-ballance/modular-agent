@@ -24,7 +24,7 @@ The shape of the API, in language-neutral terms. [Languages](languages.md) says 
 | `credentials` | a credential store | environment variables. To answer a `secret` question, use a writable store that implements [secret staging](#the-other-parts), such as `fileCredentials(path)`. |
 | `providers` | Providers | none |
 | `tools` | tools | none |
-| `interfaceTools` (proposed) | list of `{ sourceId, actorId, routeId, resultTimeoutMs, tools: ToolDefinition[] }` | none; no Interface tool source is registered |
+| `interfaceTools` | list of `{ sourceId, actorId, routeId, resultTimeoutMs, tools: ToolDefinition[] }` | none; no Interface tool source is registered |
 | `plugins` | plugins, in load order | none |
 | `processPlugins` | ordered list of `{ command: string[], env?: object, config?: object }` | none; see [Placement](placement.md#a-plugin-in-another-process) |
 | `model` | ModelRef or `"provider/id"` | the only model offered, if exactly one; otherwise none |
@@ -63,7 +63,7 @@ There is no `createAgent` switch to turn tracing on or off. Without an OpenTelem
 | `sessionInfo(id)` | one stored session's project, settings, creation time and last activity, without opening it or starting recovery |
 | `declaration()` | what this agent supports, as a [Declaration](../contracts.md#declaration) |
 | `models()` | the models its Providers offer, as ModelInfo |
-| `serveAgui(options)` (proposed) | a listener for the [AG-UI binding](../bindings/agui.md), with `url` and `close()`; see [Serving AG-UI](placement.md#serving-ag-ui) |
+| `serveAgui(options)` | a listener for the [AG-UI binding](../bindings/agui.md), with `url` and `close()`; see [Serving AG-UI](placement.md#serving-ag-ui) |
 | `serveAcp(options?)` | serves the agent over [ACP](../bindings/acp.md). On stdio it returns when the client disconnects. With `listen`, `actors` and optional `tls`, it returns a listener with `url` and `close()` once ready ([Placement](placement.md#the-whole-agent)). See composition options below. |
 | `close()` | closes open sessions, stops plugins in reverse load order and releases what it holds |
 
@@ -80,7 +80,7 @@ An Agent is safe to use from several tasks at once. Sessions have separate work 
 | Key | Value |
 |---|---|
 | `continuesAfterRestart` | true under `durable`; false otherwise ([Durability](placement.md#durability)) |
-| `interfaceTools` (proposed) | true only if the composition supports [Interface handoff and result-only continuation](../contracts.md#interface-run-tools) in this scope. Omission means no support. |
+| `interfaceTools` | true only if the composition supports [Interface handoff and result-only continuation](../contracts.md#interface-run-tools) in this scope. Omission means no support. |
 | `waitingThroughRestart` | true only when the chosen durable Runtime and the host re-ask an interrupted in-turn question on recovery ([ACP](../bindings/acp.md#questions)); otherwise false |
 | `queuedInputAfterRestart` | the policy the agent implements for queued input on reopen; `handedBack` with the shipped parts |
 | `queuedJobReportsAfterRestart` | the policy the agent implements for queued job reports on reopen; omit when it equals `queuedInputAfterRestart`, which also supplies the fallback when absent |

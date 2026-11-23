@@ -15,7 +15,7 @@ Two choices are made when an agent is put together, never in a plugin's code: wh
 | History store | yes | no | yes, the [history service](../bindings/history-http.md) |
 | Credential store, configuration | yes | no | no |
 | Interfaces | yes | no | no |
-| The whole agent | embedded in an app | driven over [ACP](../bindings/acp.md) on stdio | ACP on WebSocket; proposed [AG-UI](../bindings/agui.md) on HTTP and SSE |
+| The whole agent | embedded in an app | driven over [ACP](../bindings/acp.md) on stdio | ACP on WebSocket; [AG-UI](../bindings/agui.md) on HTTP and SSE |
 
 "In its own process" means the [plugin binding](../bindings/plugin.md): the agent starts the plugin as a child process and speaks JSON-RPC over its stdio. "As a service" means the same binding over the [WebSocket transport](../bindings/websocket.md): the plugin listens, and the agent connects to it. In both, the two sides can be in different languages.
 

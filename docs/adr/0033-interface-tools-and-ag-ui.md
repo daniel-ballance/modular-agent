@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-11-23
 ---
 
@@ -20,11 +20,11 @@ date: 2026-11-23
 - **Take the client history as the record.** A stale or edited copy could erase or invent facts. Taking no new messages at all would not allow an ordinary prompt or tool reply.
 - **Make shared state a Harness store.** There is no second binding to show what would be common. Document merge and lifetime belong to the owner of the document.
 - **Tunnel AG-UI through ACP or use an independent listener.** Neither is needed. The specified HTTP response works on the existing agent service listener. Protobuf and older unversioned clients are not part of this profile.
-- **Let approval survive a turn.** Not needed to close an AG-UI stream. The proposed live presence route can carry an answer while the turn remains open. Without an eligible route the normal refusal applies.
+- **Let approval survive a turn.** Not needed to close an AG-UI stream. The optional presence route can carry an answer while the turn remains open. Without an eligible route the normal refusal applies.
 
 ## Consequences
 
 - An interrupted stream does not prove a tool ran. The binding does not replay executable handoffs. It can accept a result from another connection on the same authenticated executor route. Deadline expiry settles an ambiguous start as `outcomeUnknown`.
 - The declaration and handoff records are additive. A Runtime that opts in must handle a continuation with results and no calls to rerun. Existing ACP methods do not change. ACP may later wrap its client file or terminal methods as tools on that actor's route, not as the agent's working environment. A2A may later use an authenticated peer's task result as a report for a registered call. Its task state cannot grant authority. Neither mapping is specified here.
-- Clients need the binding's history cursor and snapshot recovery rules. Clients answering in-turn questions also need the presence route. `CUSTOM` and `RAW` preserve gated extensions without changing the upstream schema.
+- A stock AG-UI client works for ordinary conversations and Interface-run tools: the history cursor is optional, and without it the server checks the client's copy against the last snapshot it offered that client. Only a client that opens the optional presence route can answer approvals; without one the core refusal applies. Both choices are the owner's (2026-11-23). `CUSTOM` and `RAW` preserve gated extensions without changing the upstream schema.
 - The [binding](../bindings/agui.md) and [SDK draft](../sdk/placement.md#serving-ag-ui) describe the proposal. No implementation, kit or change to the edition to pin is claimed.

@@ -133,7 +133,7 @@ It was proven before any SDK existed. Five builds were made from the documents a
 | [Security](docs/security.md) | the trust boundaries, and the rules that keep them | normative |
 | [OpenTelemetry](docs/telemetry.md) | Harness instrumentation and trace context, metadata only | optional profile |
 | [Scenarios](docs/scenarios.md) | seventeen situations, told with the parts and rules | informative |
-| [Bindings](docs/bindings/README.md) | the wire: [shared data](docs/bindings/data.md), [plugins](docs/bindings/plugin.md), [ACP](docs/bindings/acp.md), [AG-UI draft](docs/bindings/agui.md), [history service](docs/bindings/history-http.md) | linked bindings are normative |
+| [Bindings](docs/bindings/README.md) | the wire: [shared data](docs/bindings/data.md), [plugins](docs/bindings/plugin.md), [ACP](docs/bindings/acp.md), [AG-UI](docs/bindings/agui.md), [history service](docs/bindings/history-http.md) | linked bindings are normative |
 | [Conformance kits](conformance/) | programs that check a build against the bindings | informative |
 | [Decision records](docs/adr/README.md) | why each decision was made, and what was rejected | informative |
 | [Open questions](docs/open-questions.md) | this edition's limits and implementation choices, with safe defaults | informative |

@@ -12,7 +12,7 @@ This document defines conformance for agents, plugins, services and hosts, and h
 | [Shared data](bindings/data.md) | JSON shapes and portable sessions |
 | [Plugin binding](bindings/plugin.md) | Plugins in another process, in any language |
 | [ACP binding](bindings/acp.md) | Driving an agent over ACP |
-| [AG-UI binding](bindings/agui.md) (proposed) | Driving an agent over HTTP and SSE |
+| [AG-UI binding](bindings/agui.md) | Driving an agent over HTTP and SSE |
 | [History service binding](bindings/history-http.md) | A history store as an HTTP service |
 
 | Optional profile | Holds |
@@ -62,7 +62,7 @@ A component claiming a role MUST follow the rules for that side of the connectio
 |---|---|---|
 | [ACP](bindings/acp.md) | Agent | ACP kit, including checks for declared features |
 | [ACP](bindings/acp.md) | Client host | No standalone client kit |
-| [AG-UI](bindings/agui.md) (proposed) | Agent | No kit yet; see the [planned checks](sdk/testing.md#planned-ag-ui-kit) |
+| [AG-UI](bindings/agui.md) | Agent | No kit yet; see the [planned checks](sdk/testing.md#planned-ag-ui-kit) |
 | [Plugin](bindings/plugin.md) | Plugin | Plugin kit for its registered roles |
 | [Plugin](bindings/plugin.md) | Host | Plugin-host probes driven through the ACP kit where applicable |
 | [WebSocket transport](bindings/websocket.md) | Plugin service, agent service | The plugin and ACP kits in their `--connect` modes |
@@ -86,7 +86,7 @@ Passing a kit does not prove all requirements. Cross-build swaps test behavior t
 Each binding has a name and a major version, such as `modular-agent-plugin/1`. A peer MUST establish the binding version before using its operations, through the mechanism in that binding:
 
 - **ACP:** `initialize` selects `/1` by default, or `/2` when requested ([Versions](bindings/acp.md#versions)).
-- **AG-UI (proposed):** `GET /agui/v1` reports the binding. AG-UI's own version is declared in run input and `RUN_STARTED` ([Framing and versions](bindings/agui.md#framing-and-versions)).
+- **AG-UI:** `GET /agui/v1` reports the binding. AG-UI's own version is declared in run input and `RUN_STARTED` ([Framing and versions](bindings/agui.md#framing-and-versions)).
 - **Plugin:** `plugin/initialize` names the plugin binding and shared data version ([Starting: the handshake](bindings/plugin.md#starting-the-handshake)).
 - **History service:** `GET /v1` reports the binding ([What the service declares](bindings/history-http.md#what-the-service-declares)).
 

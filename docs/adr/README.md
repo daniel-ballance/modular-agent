@@ -36,4 +36,4 @@ The records keep the original decisions and evidence. [Contracts](../contracts.m
 | [0030](0030-production-gaps.md) | Per-connection isolation, resource reservations and cross-session erasure coordination | Accepted | [Security](../security.md) |
 | [0031](0031-subscription-providers.md) | Subscription Providers in every SDK: `chatgpt` and `grok` by OAuth, `claude` through the Claude Agent SDK; `openai-codex` and `xai` become aliases | Accepted | [Subscription Providers](../sdk/subscription-providers.md) |
 | [0032](0032-telemetry.md) | Harness-owned OpenTelemetry instrumentation and trace continuity across restart | Accepted | [Telemetry profile](../telemetry.md) |
-| [0033](0033-interface-tools-and-ag-ui.md) | Interface-run tools and AG-UI over HTTP and SSE | Proposed | [Draft binding](../bindings/agui.md) |
+| [0033](0033-interface-tools-and-ag-ui.md) | Interface-run tools and AG-UI over HTTP and SSE | Accepted | [AG-UI binding](../bindings/agui.md) |
