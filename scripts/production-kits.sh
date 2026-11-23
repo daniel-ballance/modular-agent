@@ -56,9 +56,10 @@ history_service() { # Store directory; sets history_url when the service is read
   openssl rand -hex 32 >"$dir/token"
   case "$history_language" in
     rust)
-      # The SDK example takes a fixed address and does not print its bound URL.
+      # The SDK example uses 2500 ms outside of the registry restart phases.
+      # It takes a fixed address and does not print its bound URL.
       address="127.0.0.1:$(free_port)"
-      service=("$repo/rust/target/debug/examples/history_service" "$address" "$dir/token" "$dir/store")
+      service=(env -u MODULAR_AGENT_KIT_RESTART_PHASE "$repo/rust/target/debug/examples/history_service" "$address" "$dir/token" "$dir/store")
       ;;
     typescript)
       local settings
@@ -79,7 +80,7 @@ from modular_agent import file_history, serve_history
 
 root = Path(sys.argv[1])
 listener = serve_history(file_history(root / "store"), address=("127.0.0.1", 0),
-                         token_file=root / "token", witness=root / "witness")
+                         token_file=root / "token", witness=root / "witness", lease_ttl=2.5)
 print(listener.url, flush=True)
 signal.pause()
 ' "$dir")
@@ -139,7 +140,7 @@ from pathlib import Path
 from modular_agent import file_history, serve_history
 root = Path(sys.argv[1])
 serve_history(file_history(root / "store"), address=("127.0.0.1", int(sys.argv[2])),
-              token_file=root / "token", witness=root / "witness")
+              token_file=root / "token", witness=root / "witness", lease_ttl=2.5)
 signal.pause()
 ' "$work/registry" "$port") ;;
   esac

@@ -366,7 +366,7 @@ def main():
         ):
             parser.error("build the Claude sidecar first (see the demo README)")
 
-    temp = Path.home() / ".cache/ma-std-tmp"
+    temp = Path(os.environ.get("TMPDIR") or Path.home() / ".cache/ma-std-tmp").resolve()
     temp.mkdir(parents=True, exist_ok=True)
     os.environ["TMPDIR"] = str(temp)
     os.umask(0o077)

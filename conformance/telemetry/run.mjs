@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 import { caseMatrix, runCase, sdks } from "./runner.mjs";
 
-const [host, action, ...command] = process.argv.slice(2);
+const [host, ...args] = process.argv.slice(2);
+const scope = ["--in-process", "--peers"].includes(args[0]) ? args.shift() : null;
+const [action, ...command] = args;
+const selected = ({ placement }) => scope === null || (placement === "inProcess") === (scope === "--in-process");
 if (!sdks.includes(host) || !(action === "--list" && command.length === 0 || action === "--" && command.length)) {
-  console.error("Usage: node run.mjs <rust|typescript|go|python> --list | -- ADAPTER [ARG ...]");
+  console.error("Usage: node run.mjs <rust|typescript|go|python> [--in-process|--peers] (--list | -- ADAPTER [ARG ...])");
   process.exitCode = 2;
 } else if (action === "--list") {
-  for (const item of caseMatrix(host)) console.log(JSON.stringify(item));
+  for (const item of caseMatrix(host).filter(selected)) console.log(JSON.stringify(item));
 } else {
   let passed = 0;
-  const matrix = caseMatrix(host);
+  const matrix = caseMatrix(host).filter(selected);
   for (const testCase of matrix) {
     const label = [host, testCase.scenario, testCase.placement, testCase.handshake ?? (testCase.sdk ? "SDK" : "no SDK")].join(" ");
     try {
