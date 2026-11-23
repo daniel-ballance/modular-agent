@@ -252,6 +252,7 @@ pub struct Peer {
     plugin: OnceLock<String>,
     trace_agreed: AtomicBool,
     serves_plugin: AtomicBool,
+    jobs: Mutex<BTreeMap<String, (Scope, telemetry::Operation)>>,
     next: AtomicU64,
     pending: Mutex<BTreeMap<String, Pending>>,
     activity: tokio::sync::Notify,
@@ -317,6 +318,7 @@ impl Peer {
             plugin: OnceLock::new(),
             trace_agreed: false.into(),
             serves_plugin: false.into(),
+            jobs: Mutex::default(),
             next: AtomicU64::new(1),
             pending: Mutex::default(),
             activity: tokio::sync::Notify::new(),
@@ -675,6 +677,20 @@ impl Peer {
             let cx = telemetry::same_trace_or(remote, &parent.context);
             return (cx, Some(work.scope.clone()));
         }
+        drop(pending);
+        if params["parentRequestId"].is_null()
+            && job_callback(method, params)
+            && let Some(job) = params["jobId"].as_str()
+            && let Some((scope, op)) = self.jobs.lock().unwrap().get(job)
+            && params["sessionId"]
+                .as_str()
+                .is_none_or(|id| id == scope.session)
+        {
+            return (
+                telemetry::same_trace_or(remote, &op.context()),
+                Some(scope.clone()),
+            );
+        }
         (telemetry::Context::new(), None)
     }
 
@@ -713,8 +729,38 @@ impl Peer {
         result
     }
 
+    pub(crate) fn observe_job(&self, job: &Job) {
+        let op = telemetry::Operation::internal("modular_agent.job", &job.scope)
+            .interrupted("modular_agent.job.outcome");
+        op.attr("modular_agent.job.id", job.id.clone());
+        self.jobs
+            .lock()
+            .unwrap()
+            .insert(job.id.clone(), (job.scope.clone(), op));
+    }
+
+    pub(crate) fn job_context(&self, job: &str) -> Option<telemetry::Context> {
+        self.jobs
+            .lock()
+            .unwrap()
+            .get(job)
+            .map(|(_, op)| op.context())
+    }
+
+    pub(crate) fn finish_job(&self, job: &str, outcome: &'static str) {
+        let ended = self.jobs.lock().unwrap().remove(job);
+        if let Some((_, mut op)) = ended {
+            op.outcome("modular_agent.job.outcome", outcome);
+            if outcome == "failed" {
+                op.error("job_failed");
+            }
+        }
+    }
+
     pub fn close(&self) {
         self.closed.cancel();
+        let observations = std::mem::take(&mut *self.jobs.lock().unwrap());
+        drop(observations);
         for (_, pending) in std::mem::take(&mut *self.pending.lock().unwrap()) {
             let _ = pending
                 .reply

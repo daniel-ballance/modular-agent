@@ -277,7 +277,7 @@ where
         if let Some(reason) = match r.stop.as_str() {
             "finished" | "stop" => Some("stop"),
             "tools" | "toolUse" => Some("tool_calls"),
-            "length" => Some("length"),
+            "length" | "limit" => Some("length"),
             _ => None,
         } {
             op.attr(

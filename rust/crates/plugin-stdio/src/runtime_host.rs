@@ -47,6 +47,8 @@ pub(crate) struct TurnWork {
     limit: Mutex<Option<(String, bool)>>,
     running_tools: Mutex<BTreeSet<String>>,
     active_step: Mutex<Option<String>>,
+    turn_context: telemetry::Context,
+    step_spans: Mutex<BTreeMap<String, telemetry::Operation>>,
     retry: AtomicBool,
     replacement: Mutex<Option<Value>>,
 }
@@ -191,6 +193,8 @@ impl RemoteRuntime {
             limit: Mutex::default(),
             running_tools: Mutex::default(),
             active_step: Mutex::default(),
+            turn_context: telemetry::current(),
+            step_spans: Mutex::default(),
             retry: AtomicBool::new(false),
             replacement: Mutex::default(),
         });
@@ -409,6 +413,33 @@ fn failed(e: impl ToString) -> TurnResult {
 }
 
 impl TurnWork {
+    fn step_context(&self, scope: &Scope) -> telemetry::Context {
+        let Some(step) = &scope.step else {
+            return telemetry::current();
+        };
+        self.step_spans
+            .lock()
+            .unwrap()
+            .entry(step.clone())
+            .or_insert_with(|| {
+                telemetry::Operation::start(
+                    "modular_agent.step",
+                    telemetry::SpanKind::Internal,
+                    Some(scope),
+                    vec![],
+                    &self.turn_context,
+                    vec![],
+                )
+            })
+            .context()
+    }
+
+    fn finish_step_span(&self, scope: &Scope) {
+        if let Some(step) = &scope.step {
+            let op = self.step_spans.lock().unwrap().remove(step);
+            drop(op);
+        }
+    }
     pub(crate) fn active(&self) -> Result<()> {
         ensure!(!self.ended.load(Ordering::Acquire), "turn has ended");
         Ok(())
@@ -556,59 +587,63 @@ impl TurnWork {
                 && !self.prepared.lock().unwrap().contains_key(step),
             "step id was not allocated or was already prepared"
         );
-        self.check_step_boundary()?;
-        self.close_unmatched(api, scope, false)?;
-        let data = api.snapshot(&scope.session)?;
-        let (_, counted) = self.account(&data)?;
-        ensure!(
-            same_json(&json!(counted), &json!(wire::parse_usage(usage))),
-            "usage differs from committed responses"
-        );
-        refresh_tool_sources(api, scope).await?;
-        self.input.model.refresh(api, scope, token.clone()).await?;
-        let info = self.input.model.info();
-        let request = ModelRequest {
-            session: scope.session.clone(),
-            system: self.input.system.clone(),
-            messages: model_messages(&data.branch(), scope.turn.as_deref())?,
-            tools: current_model_tools(api, scope, &self.input.tools)?,
-            provider_tools: if work_authority(api.as_ref(), scope)?.has("tools") {
-                self.input.model.provider_tools()
-            } else {
-                vec![]
-            },
-            thinking: wire::lower_reasoning(
-                self.input.settings["thinking"].as_str().unwrap_or(""),
-                &info.thinking,
-            )
-            .into(),
-            extra: Value::Null,
-            output_limit: self.input.settings["output_limit"]
-                .as_u64()
-                .unwrap_or(info.output_limit)
-                .min(info.output_limit),
-        };
-        let value = api
-            .invoke(
-                &self.points["runtime.before.step"],
-                scope,
-                json!({"request":request,"limits":info,"usage":wire::parse_usage(usage)}),
-            )
-            .await?
-            .value;
-        let request: ModelRequest = serde_json::from_value(value["request"].clone())?;
-        let projected = wire::request(&request, Some(&api.snapshot(&scope.session)?));
-        ensure!(!token.is_cancelled(), "cancelled");
-        self.prepared.lock().unwrap().insert(
-            step.clone(),
-            PreparedStep {
-                wire: projected.clone(),
-                provider_tools: request.provider_tools,
-            },
-        );
-        *self.active_step.lock().unwrap() = scope.step.clone();
-        api.emit(Event::new(scope, "step.start", json!({}))).await?;
-        Ok(projected)
+        let cx = self.step_context(scope);
+        telemetry::within(cx, async {
+            self.check_step_boundary()?;
+            self.close_unmatched(api, scope, false)?;
+            let data = api.snapshot(&scope.session)?;
+            let (_, counted) = self.account(&data)?;
+            ensure!(
+                same_json(&json!(counted), &json!(wire::parse_usage(usage))),
+                "usage differs from committed responses"
+            );
+            refresh_tool_sources(api, scope).await?;
+            self.input.model.refresh(api, scope, token.clone()).await?;
+            let info = self.input.model.info();
+            let request = ModelRequest {
+                session: scope.session.clone(),
+                system: self.input.system.clone(),
+                messages: model_messages(&data.branch(), scope.turn.as_deref())?,
+                tools: current_model_tools(api, scope, &self.input.tools)?,
+                provider_tools: if work_authority(api.as_ref(), scope)?.has("tools") {
+                    self.input.model.provider_tools()
+                } else {
+                    vec![]
+                },
+                thinking: wire::lower_reasoning(
+                    self.input.settings["thinking"].as_str().unwrap_or(""),
+                    &info.thinking,
+                )
+                .into(),
+                extra: Value::Null,
+                output_limit: self.input.settings["output_limit"]
+                    .as_u64()
+                    .unwrap_or(info.output_limit)
+                    .min(info.output_limit),
+            };
+            let value = api
+                .invoke(
+                    &self.points["runtime.before.step"],
+                    scope,
+                    json!({"request":request,"limits":info,"usage":wire::parse_usage(usage)}),
+                )
+                .await?
+                .value;
+            let request: ModelRequest = serde_json::from_value(value["request"].clone())?;
+            let projected = wire::request(&request, Some(&api.snapshot(&scope.session)?));
+            ensure!(!token.is_cancelled(), "cancelled");
+            self.prepared.lock().unwrap().insert(
+                step.clone(),
+                PreparedStep {
+                    wire: projected.clone(),
+                    provider_tools: request.provider_tools,
+                },
+            );
+            *self.active_step.lock().unwrap() = scope.step.clone();
+            api.emit(Event::new(scope, "step.start", json!({}))).await?;
+            Ok(projected)
+        })
+        .await
     }
     async fn model(
         &self,
@@ -629,165 +664,169 @@ impl TurnWork {
             self.allocated.lock().unwrap().remove(step),
             "step id was not allocated or was already used"
         );
-        let prepared = self.prepared.lock().unwrap().remove(step);
-        let replacement = self.replacement.lock().unwrap().take();
-        let matched = prepared
-            .as_ref()
-            .filter(|step| same_json(&step.wire, request_wire));
-        let replay = if matched.is_some()
-            || replacement
+        let cx = self.step_context(scope);
+        telemetry::within(cx, async {
+            let prepared = self.prepared.lock().unwrap().remove(step);
+            let replacement = self.replacement.lock().unwrap().take();
+            let matched = prepared
                 .as_ref()
-                .is_some_and(|v| same_json(v, request_wire))
-        {
-            if prepared.is_none() {
+                .filter(|step| same_json(&step.wire, request_wire));
+            let replay = if matched.is_some()
+                || replacement
+                    .as_ref()
+                    .is_some_and(|v| same_json(v, request_wire))
+            {
+                if prepared.is_none() {
+                    self.check_step_boundary()?;
+                }
+                None
+            } else {
                 self.check_step_boundary()?;
+                let pending = self.unmatched(api, scope)?;
+                Some(
+                    pending
+                        .last()
+                        .filter(|e| {
+                            self.replayable(e)
+                                && e.content
+                                    .as_ref()
+                                    .is_some_and(|v| same_json(&v["request"], request_wire))
+                        })
+                        .cloned()
+                        .ok_or_else(|| {
+                            anyhow!("model request does not match preparation or authorized replay")
+                        })?,
+                )
+            };
+            let mut request = wire::parse_request(request_wire, &scope.session)?;
+            if self.retry.swap(false, Ordering::AcqRel) {
+                model.discard(&scope.session).await?;
             }
-            None
-        } else {
-            self.check_step_boundary()?;
-            let pending = self.unmatched(api, scope)?;
-            Some(
-                pending
-                    .last()
-                    .filter(|e| {
-                        self.replayable(e)
-                            && e.content
-                                .as_ref()
-                                .is_some_and(|v| same_json(&v["request"], request_wire))
-                    })
-                    .cloned()
-                    .ok_or_else(|| {
-                        anyhow!("model request does not match preparation or authorized replay")
-                    })?,
-            )
-        };
-        let mut request = wire::parse_request(request_wire, &scope.session)?;
-        if self.retry.swap(false, Ordering::AcqRel) {
-            model.discard(&scope.session).await?;
-        }
-        if replay.is_none() {
-            let prepared = api
-                .output(
-                    scope,
-                    Output {
-                        recipient: "model".into(),
-                        value: json!(request),
-                        stream: None,
-                        end: true,
+            if replay.is_none() {
+                let prepared = api
+                    .output(
+                        scope,
+                        Output {
+                            recipient: "model".into(),
+                            value: json!(request),
+                            stream: None,
+                            end: true,
+                        },
+                    )
+                    .await?
+                    .ok_or_else(|| anyhow!("model request blocked by output gate"))?;
+                request = serde_json::from_value(prepared)?;
+                if let Some(step) = matched {
+                    request.provider_tools.clone_from(&step.provider_tools);
+                }
+            }
+            let branch = api.snapshot(&scope.session)?.branch();
+            let sources = if let Some(old) = &replay {
+                old.copies.clone()
+            } else {
+                branch
+                    .iter()
+                    .filter(|e| e.visible && e.kind != "resultFeedback")
+                    .chain(pending_result_feedback(&branch, scope.turn.as_deref()))
+                    .map(|e| e.id.clone())
+                    .collect()
+            };
+            let step_started = self.active_step.lock().unwrap().as_deref() == Some(step);
+            *self.active_step.lock().unwrap() = scope.step.clone();
+            if !step_started {
+                api.emit(Event::new(scope, "step.start", json!({}))).await?;
+            }
+            let relay: Api = if let Some(peer) = peer {
+                Arc::new(Relay {
+                    inner: api.clone(),
+                    peer,
+                    id: callback,
+                    route: Route::RuntimeModel,
+                })
+            } else {
+                api.clone()
+            };
+            let result = model
+                .generate_attempt(
+                    relay,
+                    scope.clone(),
+                    request,
+                    token.clone(),
+                    ModelAttempt {
+                        writer: "external.runtime",
+                        tools: current_model_tools(api, scope, &self.input.tools)?,
+                        sources,
+                        auxiliary: false,
+                        safe_to_repeat: model.safe_to_repeat(),
+                        close_attempt: replay.clone(),
+                        replay: replay.map(|_| request_wire.clone()),
+                        authorized_wire: None,
                     },
                 )
-                .await?
-                .ok_or_else(|| anyhow!("model request blocked by output gate"))?;
-            request = serde_json::from_value(prepared)?;
-            if let Some(step) = matched {
-                request.provider_tools.clone_from(&step.provider_tools);
-            }
-        }
-        let branch = api.snapshot(&scope.session)?.branch();
-        let sources = if let Some(old) = &replay {
-            old.copies.clone()
-        } else {
-            branch
-                .iter()
-                .filter(|e| e.visible && e.kind != "resultFeedback")
-                .chain(pending_result_feedback(&branch, scope.turn.as_deref()))
-                .map(|e| e.id.clone())
-                .collect()
-        };
-        let step_started = self.active_step.lock().unwrap().as_deref() == Some(step);
-        *self.active_step.lock().unwrap() = scope.step.clone();
-        if !step_started {
-            api.emit(Event::new(scope, "step.start", json!({}))).await?;
-        }
-        let relay: Api = if let Some(peer) = peer {
-            Arc::new(Relay {
-                inner: api.clone(),
-                peer,
-                id: callback,
-                route: Route::RuntimeModel,
-            })
-        } else {
-            api.clone()
-        };
-        let result = model
-            .generate_attempt(
-                relay,
-                scope.clone(),
-                request,
-                token.clone(),
-                ModelAttempt {
-                    writer: "external.runtime",
-                    tools: current_model_tools(api, scope, &self.input.tools)?,
-                    sources,
-                    auxiliary: false,
-                    safe_to_repeat: model.safe_to_repeat(),
-                    close_attempt: replay.clone(),
-                    replay: replay.map(|_| request_wire.clone()),
-                    authorized_wire: None,
-                },
-            )
-            .await;
-        let answer = match result {
-            Ok(mut response) => {
-                let data = api.snapshot(&scope.session)?;
-                let mut names: BTreeSet<String> = data
-                    .entries
-                    .iter()
-                    .filter_map(|e| e.scope.call.clone())
-                    .collect();
-                for part in &mut response.parts {
-                    if let Part::ToolCall { call } = part
-                        && !names.insert(call.id.clone())
-                    {
-                        call.id = agent_api::id();
-                        names.insert(call.id.clone());
-                    }
-                }
-                if bound_model_response(api.as_ref(), scope, &mut response)? {
-                    *self.limit.lock().unwrap() = Some(("capacity".into(), false));
-                }
-                wire::response(&response)
-            }
-            Err(e) => {
-                if let Some(limit) = e.downcast_ref::<ModelAttemptLimit>() {
-                    return Err(self.signal_limit(limit.0).into());
-                }
-                if let Some(fault) = e.downcast_ref::<Fault>() {
-                    if fault.code == "turn_limit" {
-                        return Err(self
-                            .signal_limit(fault.limit.as_deref().unwrap_or("tenantTokens"))
-                            .into());
-                    }
-                    return Err(e);
-                }
-                if token.is_cancelled() {
-                    bail!("cancelled");
-                }
-                let fail = e
-                    .downcast_ref::<ModelFailure>()
-                    .cloned()
-                    .unwrap_or(ModelFailure {
-                        kind: FailureKind::Other,
-                        message: e.to_string(),
-                    });
-                ensure!(
-                    self.unmatched(api, scope)?
+                .await;
+            let answer = match result {
+                Ok(mut response) => {
+                    let data = api.snapshot(&scope.session)?;
+                    let mut names: BTreeSet<String> = data
+                        .entries
                         .iter()
-                        .any(|e| e.scope.step == scope.step),
-                    "{}",
-                    fail.message
-                );
-                wire::response(&wire::parse_response(
-                    json!({"role":"assistant","stop":"failed",
+                        .filter_map(|e| e.scope.call.clone())
+                        .collect();
+                    for part in &mut response.parts {
+                        if let Part::ToolCall { call } = part
+                            && !names.insert(call.id.clone())
+                        {
+                            call.id = agent_api::id();
+                            names.insert(call.id.clone());
+                        }
+                    }
+                    if bound_model_response(api.as_ref(), scope, &mut response)? {
+                        *self.limit.lock().unwrap() = Some(("capacity".into(), false));
+                    }
+                    wire::response(&response)
+                }
+                Err(e) => {
+                    if let Some(limit) = e.downcast_ref::<ModelAttemptLimit>() {
+                        return Err(self.signal_limit(limit.0).into());
+                    }
+                    if let Some(fault) = e.downcast_ref::<Fault>() {
+                        if fault.code == "turn_limit" {
+                            return Err(self
+                                .signal_limit(fault.limit.as_deref().unwrap_or("tenantTokens"))
+                                .into());
+                        }
+                        return Err(e);
+                    }
+                    if token.is_cancelled() {
+                        bail!("cancelled");
+                    }
+                    let fail = e
+                        .downcast_ref::<ModelFailure>()
+                        .cloned()
+                        .unwrap_or(ModelFailure {
+                            kind: FailureKind::Other,
+                            message: e.to_string(),
+                        });
+                    ensure!(
+                        self.unmatched(api, scope)?
+                            .iter()
+                            .any(|e| e.scope.step == scope.step),
+                        "{}",
+                        fail.message
+                    );
+                    wire::response(&wire::parse_response(
+                        json!({"role":"assistant","stop":"failed",
                     "content":[],"error":wire::failure(&fail)}),
-                )?)
-            }
-        };
-        self.expected
-            .lock()
-            .unwrap()
-            .insert(step.clone(), answer.clone());
-        Ok(answer)
+                    )?)
+                }
+            };
+            self.expected
+                .lock()
+                .unwrap()
+                .insert(step.clone(), answer.clone());
+            Ok(answer)
+        })
+        .await
     }
     fn account(&self, data: &SessionData) -> Result<(usize, Usage)> {
         let branch = data.branch();
@@ -1327,6 +1366,8 @@ impl TurnWork {
         let mut call = wire::parse_call(&p["call"])?;
         let (scope, entry, original) = self.call_scope(api, scope, &call.id)?;
         call.started_by = original.started_by.clone();
+        let cx = self.step_context(&scope);
+        telemetry::within(cx, async {
         let data = api.snapshot(&scope.session)?;
         ensure!(
             !data
@@ -1448,6 +1489,7 @@ impl TurnWork {
             let r = self.settle_tool(api, &scope, &entry, r).await?;
             Ok(wire::result(&r))
         }
+        }).await
     }
     fn record_pending(&self, api: &Api, scope: &Scope, start: Option<&str>) -> Result<()> {
         let data = api.snapshot(&scope.session)?;
@@ -1783,8 +1825,21 @@ impl TurnWork {
                     );
                     scope.step = Some(step.into());
                 }
-                self.hook(api, &scope, hook, p, work.cancel.is_cancelled())
-                    .await
+                if hook == "step.after" {
+                    let cx = self.step_context(&scope);
+                    let result = telemetry::within(
+                        cx,
+                        self.hook(api, &scope, hook, p, work.cancel.is_cancelled()),
+                    )
+                    .await;
+                    if result.is_ok() {
+                        self.finish_step_span(&scope);
+                    }
+                    result
+                } else {
+                    self.hook(api, &scope, hook, p, work.cancel.is_cancelled())
+                        .await
+                }
             }
             "host/runtime/definition" => {
                 refresh_tool_sources(api, &scope).await?;

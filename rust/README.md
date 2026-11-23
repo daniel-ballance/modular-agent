@@ -111,7 +111,13 @@ In Rust code, set `client_identity` in `ChatGptOptions`, `GrokOptions` or
 `SignInOptions`. The SDK does not read `MA_CLIENT_IDENTITY`. The label does
 not change the OAuth client IDs. See the [SDK subscription API](crates/sdk/README.md#subscription-providers).
 
+## Built so far: telemetry
+
+`ma` declares `telemetry: 1` and names the agent `ma` on invocation and tool spans. It exports metadata only: no prompts, completions, tool payloads or credentials. Export is off unless an endpoint is configured. Set `OTEL_EXPORTER_OTLP_ENDPOINT` for both signals. `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` override it for individual signals. HTTP/protobuf is the default; set `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` for gRPC. `OTEL_SDK_DISABLED=true` disables recording and export. `OTEL_SERVICE_NAME` sets the resource name, not the agent name. See the [standard telemetry settings](../docs/reference/standard-configuration.md#telemetry).
+
 ## What is checked
+
+Telemetry checks cover endpoint and protocol selection. A scripted loopback run sent no requests without an endpoint or with `OTEL_SDK_DISABLED=true`. The OTLP receiver observed `service.name=ma-rust` on traces and metrics. A scripted turn against Phoenix showed `invoke_agent ma`, `chat script` and `execute_tool codemode` in the same trace. No model service was called. This run passed 24/24 reference checks, 188/188 stdio ACP checks and 193/193 WebSocket ACP checks.
 
 Run from `rust/` with `TMPDIR` off `/tmp`. Run the ACP kit after builds complete; it measures command startup and cancellation against fixed deadlines.
 

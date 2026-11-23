@@ -3260,19 +3260,26 @@ fn observe_question(data: &SessionData, entry: &Entry) {
                     "answered"
                 }
             } else {
-                match body["reason"].as_str() {
-                    Some(
-                        r @ ("timeLimit" | "noLongerAnswerable" | "superseded" | "cancelled"
-                        | "turnEnded" | "restart"),
-                    ) => r,
-                    _ => "declined",
-                }
+                body["reason"]
+                    .as_str()
+                    .filter(|r| {
+                        matches!(
+                            *r,
+                            "timeLimit"
+                                | "noLongerAnswerable"
+                                | "superseded"
+                                | "cancelled"
+                                | "turnEnded"
+                                | "restart"
+                        )
+                    })
+                    .unwrap_or("declined")
             };
             (q, Some(disposition))
         }
         _ => return,
     };
-    let (Some(id), Some(kind @ ("approval" | "text" | "form" | "secret"))) =
+    let (Some(id), Some(kind @ ("approval" | "text" | "choice" | "form" | "secret"))) =
         (q["id"].as_str(), q["kind"].as_str())
     else {
         return;

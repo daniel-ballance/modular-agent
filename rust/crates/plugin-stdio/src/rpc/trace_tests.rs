@@ -7,6 +7,7 @@ fn peer(agreed: bool, serves: bool) -> Arc<Peer> {
         plugin: OnceLock::new(),
         trace_agreed: false.into(),
         serves_plugin: false.into(),
+        jobs: Mutex::default(),
         next: 1.into(),
         pending: Mutex::default(),
         activity: tokio::sync::Notify::new(),
