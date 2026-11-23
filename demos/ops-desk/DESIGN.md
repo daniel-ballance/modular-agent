@@ -36,13 +36,13 @@ An ops desk for a small sample repository:
                     each exports OpenTelemetry to Phoenix
 ```
 
-- **The host** is a TypeScript program in `demos/ops-desk/host/`. It owns everything that spans agents: the conversation, the inbox, the routing between agents, the listener and its cursor, and starting agent processes. It drives each agent as an authenticated AG-UI client and keeps the optional presence stream open, so approvals can be answered.
-- **The `desk` tool plugin** is served by the host over the [WebSocket transport](../../docs/bindings/websocket.md), one token per agent. Its tools:
+- **The host** is a TypeScript program in `demos/ops-desk/host/`. It owns everything that spans agents: the conversation, the inbox, the routing between agents, the listener and its cursor, and starting agent processes. It drives each agent as an authenticated AG-UI client. A local station holds that client's presence stream for the life of the agent, so restarting the host does not detach the answer route.
+- **The `desk` tool plugin** is served by the station over the [WebSocket transport](../../docs/bindings/websocket.md), one token per agent. Its tools:
   - `post(text, kind)`: adds a post to the conversation, with a link to the agent's session as the debug view. `kind` is `summary`, `change` or `verdict`.
   - `hand_off(to, task)`: asks the host to give work to another agent. The host's routing rules decide whether to accept it. The call returns once the host has queued it; it does not wait for the other agent.
 
   A tool result from the host is data, never authority. The host checks each call against which agent may hand to which.
-- **Each agent** runs as its own process with durable history in its own data directory, serving AG-UI on a loopback port the host picks. The host starts an agent when work arrives for it and stops it after it has been idle for a set time. That exercises reopening sessions after a restart.
+- **Each agent** runs as its own process with durable history in its own data directory, serving AG-UI on a loopback port the host picks. The host starts each agent to check for open work, and starts it again when work arrives. It stops idle agents. That exercises reopening sessions after a restart.
 
 ### Why posts are plugin tools, not Interface-run tools
 
@@ -78,6 +78,7 @@ All three agents can export to Phoenix (`scripts/phoenix.sh`). The host starts a
 3. **Failing verification:** the verifier's first verdict fails; the coder gets one more try; the second verdict passes.
 4. **Restart:** the coder's process is killed with `SIGKILL` during its turn. The host restarts it, reopens the session, and the work completes or settles as the recovery rules say. No hand-off is delivered twice.
 5. **Duplicate event:** the same event ID twice starts one piece of work.
+6. **Host restart:** kill the HTTP host with `SIGKILL` during approval. Delete its inbox rows and the coder route's thread link. The replacement finds the same question in the listing, answers it and finishes the route once.
 
 With real models (`--live`) the same flow runs against your sign-ins; it is not part of `check.sh`.
 
@@ -86,7 +87,8 @@ With real models (`--live`) the same flow runs against your sign-ins; it is not 
 Expected findings (checked against the scripted desk):
 
 - **Approvals cannot wait past a turn — confirmed.** The [interrupt rules](../../docs/bindings/agui.md#interrupts-and-frontend-tools) require an existing presence and forbid extending an approval past its turn. In the deadline check the question disappeared from `waiting.questions`, the change tool was refused, and the file and commit stayed unchanged. A stored inbox row did not make a late answer valid.
-- **Finding work is not starting a process.** [AG-UI now specifies a thread list](../../docs/bindings/agui.md#listing-threads) with counts of waits for this client; ACP `session/list` may supply the same summary. Both need a running agent. The desk launches the executable and keeps the thread ID for each route. Opening a post's snapshot after idle shutdown reopens the same session. The desk does not use [`--resume-open`](../../docs/reference/standard-configuration.md#resuming-at-start-up): that option (off by default) starts recovery of interrupted turns when `ma` starts, not when `ma` is stopped.
+- **Finding and waking open work — resolved for a running desk.** At start-up and at each agent launch the host pages [the thread listing](../../docs/bindings/agui.md#listing-threads), then reads the gated snapshots of open work. SQLite still owns events, routes and debug links; it is not an index of agent waits. The coder starts with [`--resume-open`](../../docs/reference/standard-configuration.md#resuming-at-start-up). Triage uses the Python server's `resume_open` option. The Go verifier calls `ResumeInterrupted` on unfinished sessions before it accepts clients.
+- **Someone still has to start the processes and keep the answer route alive.** The local agent station owns the three processes, their tool listeners and the original presence streams. Killing the HTTP host does not move an approval to a new presence. If the station or agent dies, that approval cannot be restored; ordinary recovery settles the turn. A listed Interface call without a received handoff cannot be executed from its snapshot. Listing is not a wake-up signal for a stopped service.
 - **Posts during a turn — confirmed for Interface tools.** A frontend handoff ends the exchange; it cannot acknowledge a post and continue that step. A server tool can. A plugin can also emit a gated custom event, but that is a live notification, not a committed, acknowledged post. The desk authenticates each tool service separately and stores posts by session and call ID.
 - **Traces across agents — confirmed for hand-off links, not for propagation in general.** At a local OTLP/HTTP receiver, the triage and verifier `invoke_agent` spans had the desk event's trace ID. Neither had a link to the other agent's `hand_off` call. The host carried its own event parent across the queue; [telemetry v1](../../docs/telemetry.md#what-later-versions-add) does not do this for it. The Rust `ma` invocation arrived on a different trace: network parents require operator trust, and `ma`'s actor policy exposes `clientId` but no trace-trust option. Authentication alone is not trace trust.
 
@@ -127,6 +129,6 @@ Triage and the verifier shared the event trace in both runs. The coder still had
 
 1. Host skeleton: store, webhook and listener, the `desk` plugin, the page. TypeScript.
 2. The three agents, with scripted models: triage (Python), verifier (Go), coder (`ma` with the `desk` plugin and a scripted model).
-3. `run.py` with the five checks, and its `check.sh` step.
+3. `run.py` with the scripted checks, and its `check.sh` step.
 4. Traces end to end, and a `--live` run.
 5. Write up the findings, with each one in [docs/status.md](../../docs/status.md) or an open question.

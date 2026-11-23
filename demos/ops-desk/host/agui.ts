@@ -6,10 +6,17 @@ export type Snapshot = {
   threadId: string;
   messages: { role: string; content?: unknown }[];
   cursor: string;
-  waiting: { questions: Question[] };
+  waiting: { questions: Question[]; toolCalls: { toolCallId: string; expiresAt: string }[] };
 };
 export type Decision = { interruptId: string; status: 'resolved' | 'cancelled'; payload?: unknown };
-type Outcome = { type: string; interrupts?: Question[] };
+type Outcome = { type: string; interrupts?: Question[]; pendingToolCallIds?: string[] };
+export type Listed = {
+  threadId: string;
+  waiting: { questions: number; toolCalls: number; turn: 'none' | 'running' | 'interrupted' };
+};
+export function admission(r: Route) {
+  return 'Desk route: ' + JSON.stringify(r.runKey) + '\n\n' + r.task;
+}
 // EOF is a transport loss, not a terminal outcome from the agent.
 export class LostExchange extends Error {}
 export class HttpError extends Error {
@@ -55,6 +62,15 @@ export class Agui {
     if (d.binding !== 'modular-agent-agui/1' || d.protocolVersion !== '1.0')
       throw Error('Unsupported AG-UI binding');
   }
+  async *threads(): AsyncGenerator<Listed> {
+    let after: string | undefined;
+    do {
+      const path = '/threads' + (after ? '?after=' + encodeURIComponent(after) : '');
+      const page = await (await this.request(path, null)).json();
+      for (const row of page.threads) yield row;
+      after = page.next;
+    } while (after);
+  }
   async create(r: Route): Promise<string> {
     const res = await this.request('/threads', r.parent, {
       method: 'POST',
@@ -65,16 +81,21 @@ export class Agui {
     if (typeof threadId !== 'string' || !threadId) throw Error('Missing thread ID');
     return threadId;
   }
-  private path(r: Route) {
+  private path(r: Pick<Route, 'thread'>) {
     return '/threads/' + encodeURIComponent(r.thread!);
   }
-  async snapshot(r: Route): Promise<Snapshot> {
+  async snapshot(r: Pick<Route, 'thread' | 'parent'>): Promise<Snapshot> {
     const s = await (await this.request(this.path(r), r.parent)).json();
-    if (s.threadId !== r.thread || !Array.isArray(s.messages) || !Array.isArray(s.waiting?.questions))
+    if (
+      s.threadId !== r.thread ||
+      !Array.isArray(s.messages) ||
+      !Array.isArray(s.waiting?.questions) ||
+      !Array.isArray(s.waiting.toolCalls)
+    )
       throw Error('Invalid thread snapshot');
     return s;
   }
-  async presence(r: Route, stop: AbortController, lost: () => void) {
+  async presence(r: Pick<Route, 'thread' | 'parent'>, stop: AbortController, lost: () => void) {
     const signal = AbortSignal.any([this.signal, stop.signal]);
     const res = await this.request(this.path(r) + '/presence', r.parent, { signal });
     const reader = res.body!.getReader();
@@ -101,7 +122,7 @@ export class Agui {
     const runId = decisions ? randomUUID() : r.runKey;
     const messages = decisions
       ? view.messages
-      : [...view.messages, { id: randomUUID(), role: 'user', content: r.task }];
+      : [...view.messages, { id: randomUUID(), role: 'user', content: admission(r) }];
     const res = await this.request('/run', r.parent, {
       method: 'POST',
       headers: {

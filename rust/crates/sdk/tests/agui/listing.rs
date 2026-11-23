@@ -126,6 +126,18 @@ async fn running_and_interrupted_are_distinct_and_listing_never_recovers() -> an
     let agent = restart(agent).await?;
     let server = clients(&agent, dir.path()).await?;
     assert_eq!(row(list_ok(&server, TOKEN, "").await?), "interrupted");
+    let rights = Rights::full();
+    let mut viewer = modular_agent::SessionViewer::new("user", &rights);
+    let summary = agent.session_summary(s.id(), &viewer)?.unwrap();
+    assert_eq!(summary.waiting.turn, modular_agent::TurnState::Interrupted);
+    assert_eq!(
+        (summary.id.as_str(), summary.project.as_path()),
+        (s.id(), dir.path())
+    );
+    assert!(summary.updated_at > 0);
+    assert!(agent.session_summary("missing", &viewer)?.is_none());
+    viewer.scope = &|_, _| false;
+    assert!(agent.session_summary(s.id(), &viewer)?.is_none());
     assert!(agent.session_info(s.id())?.unfinished_turn);
     let recovered = agent.open_session(s.id()).await?;
     assert_eq!(recovered.last_turn().await?.unwrap().text, "finished");

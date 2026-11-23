@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -151,14 +152,15 @@ func TestServeACPResumeDoesNotWaitForRecovery(t *testing.T) {
 func TestServeACPComposesProjects(t *testing.T) {
 	t.Setenv("MODULAR_AGENT_PLUGINS", "")
 	first, second := t.TempDir(), t.TempDir()
-	store := MemoryHistory()
+	state := t.TempDir()
+	store := FileHistory(filepath.Join(state, "records"))
 	provider := Provider{ID: "projects", Models: func() []ModelInfo {
 		return []ModelInfo{{ModelRef: ModelRef{Provider: "projects", ID: "offline"}, ContextWindow: 4000, MaxOutput: 2000, Thinking: []string{"off", "low"}}}
 	}, Request: func(_ context.Context, _ ModelRef, _ ModelRequest, _ *ProviderContext) (AssistantMessage, error) {
 		return AssistantMessage{Content: Text("Hello."), Stop: "finished"}, nil
 	}}
 	compose := func(ctx context.Context, project string) (*Agent, error) {
-		return New(ctx, WithProject(project), WithHistory(store), WithPluginHost(true), WithProvider(provider), WithSettings(Settings{"reasoning": "off"}))
+		return New(ctx, WithProject(project), WithHistory(store), WithDataDir(state), WithDurability(Kept), WithPluginHost(true), WithProvider(provider), WithSettings(Settings{"reasoning": "off"}))
 	}
 	a, err := compose(t.Context(), first)
 	if err != nil {

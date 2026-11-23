@@ -221,7 +221,7 @@ fn supplied_acp_kit_with_two_external_plugins_is_mandatory() {
         "{stdout}\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(stdout.contains("132/132 checks passed"), "{stdout}");
+    assert!(stdout.contains("134/134 checks passed"), "{stdout}");
 }
 #[test]
 fn supplied_acp_crash_kit_with_native_runtime() {
@@ -256,9 +256,9 @@ fn acp_crash_kit(part: Option<&str>) {
     // A Runtime served from another process does not run nested calls, so
     // the agent does not declare them and the kit leaves those checks out.
     let expected = if part.is_some() {
-        "111/111 checks passed"
+        "113/113 checks passed"
     } else {
-        "123/123 checks passed"
+        "125/125 checks passed"
     };
     assert!(stdout.contains(expected), "{stdout}");
 }

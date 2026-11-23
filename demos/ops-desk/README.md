@@ -13,7 +13,7 @@ demos/ops-desk/build.sh
 python3 demos/ops-desk/run.py
 ```
 
-The five checks use disposable data directories and loopback ports. Each checks the real AG-UI agents, not a simulated host. Use `--only happy`, `refusal`, `verification`, `restart` or `duplicate` to run one. The verification check adds an upper-bound test to the sample: the first fix fails it, the second passes. The restart check kills `ma` **after** the verifier route is on disk and **before** the hand-off tool returns. It checks recovery in the same thread and exactly one verifier input.
+The six checks use disposable data directories and loopback ports. Each checks the real AG-UI agents, not a simulated host. Use `--only happy`, `refusal`, `verification`, `restart`, `duplicate` or `host-restart` to run one. The verification check adds an upper-bound test to the sample: the first fix fails it, the second passes. The restart check kills `ma` **after** the verifier route is on disk and **before** the hand-off tool returns. It checks recovery in the same thread and exactly one verifier input. The host-restart check kills the HTTP host while an approval is open and deletes the cached inbox and route's thread link. The replacement lists the agents, reads the same approval and answers it before its original deadline.
 
 ## Run one live event
 
@@ -57,7 +57,7 @@ node demos/ops-desk/scripts/send-event.mjs build-17 build-failed
 
 Choose **Allow** on the coder's exact edit. Follow its post and the verifier's verdict. Each post has a snapshot link. To see a refusal, send a new event and let its approval expire. Sending `build-17` again acknowledges it without starting work. Leave off the arguments to send a sample failure with a fresh ID. `issue-opened` is the other event kind.
 
-The default approval deadline is three minutes (`DESK_APPROVAL_MS=180000`). Agents stop after one minute without work (`DESK_IDLE_MS=60000`). A snapshot link can wake a stopped agent. Ctrl-C stops the desk and its children. Starting it again with the same `DESK_DATA` reuses the SQLite store, tokens, sample repository, worktrees and agent histories. The default directory is `demos/ops-desk/.desk/`. Use a different, private directory for a clean start. Do not point the desk at a real project or run two hosts against one store.
+The default approval deadline is three minutes (`DESK_APPROVAL_MS=180000`). Agents stop after one minute without work (`DESK_IDLE_MS=60000`). At start-up the host lists all three agents. A snapshot link can also wake a stopped agent. The local station holds the agent processes and the original presence streams. The scripted launcher restarts a killed HTTP host without replacing the station. Stopping the whole desk detaches those streams; a new stream cannot inherit an approval. Ctrl-C stops the desk and its children. Starting it again with the same `DESK_DATA` reuses the SQLite store, tokens, sample repository, worktrees and agent histories. The default directory is `demos/ops-desk/.desk/`. Use a different, private directory for a clean start. Do not point the desk at a real project or run two hosts against one store.
 
 ### Tailnet
 
@@ -83,6 +83,6 @@ Send an event, then open `http://127.0.0.1:6006`. The desk and all three agents 
 
 ## Where to look
 
-- [Host](host/desk.ts), [SQLite store](host/store.ts), [AG-UI client](host/agui.ts) and [page](host/public/index.html).
+- [Host](host/desk.ts), [SQLite store](host/store.ts), [AG-UI client](host/agui.ts) [agent station](host/station.ts) and [page](host/public/index.html).
 - [Triage](triage/main.py), [coder script](coder/model.json), [live coder instructions](coder/instructions.md), [approval tool](coder/change.py), [verifier](verifier/main.go) and [sample](sample/limits.py).
 - [Design and findings](DESIGN.md).

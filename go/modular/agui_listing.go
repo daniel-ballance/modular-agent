@@ -6,14 +6,23 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"net/url"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
 )
 
+type threadInfo struct {
+	ThreadID  string         `json:"threadId"`
+	UpdatedAt time.Time      `json:"updatedAt"`
+	Waiting   WaitingSummary `json:"waiting"`
+	epoch     int
+}
+
 type agThreadPage struct {
-	Threads []ThreadInfo `json:"threads"`
+	Threads []threadInfo `json:"threads"`
 	Next    string       `json:"next,omitempty"`
 }
 
@@ -80,15 +89,39 @@ func (q *agRequest) listThreads(raw string) error {
 	if err != nil {
 		return err
 	}
-	opt := ListThreadsOptions{Actor: q.Actor, Tenant: q.opt.Tenant, RouteID: q.client, Scope: q.scope,
-		JoinOnOpen: *q.opt.JoinOnOpen, InTurn: q.inTurnOffer, Offset: offset, Limit: limit}
-	threads, more, err := q.a.ListThreads(q.ctx, opt)
-	if err != nil {
-		return err
+	viewer := SessionViewer{Actor: q.Actor, Tenant: q.opt.Tenant, RouteID: q.client, Scope: q.scope,
+		JoinOnOpen: *q.opt.JoinOnOpen, InTurn: q.inTurnOffer}
+	threads := []threadInfo{}
+	if q.a.persistent && slices.Contains(viewer.Actor.Rights, "watch") && q.scope(q.a.project, viewer.Tenant) {
+		rows, err := q.a.a.List(q.a.project)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			summary, err := q.a.summary(q.ctx, row, viewer)
+			if err != nil {
+				return err
+			}
+			if summary != nil {
+				epoch, err := q.host().ErasureEpoch(row.ID)
+				if err != nil {
+					return err
+				}
+				threads = append(threads, threadInfo{row.ID, summary.UpdatedAt, summary.Waiting, epoch})
+			}
+		}
 	}
-	page := agThreadPage{Threads: threads}
-	if more {
-		page.Next = q.nextPage(offset + len(threads))
+	slices.SortFunc(threads, func(a, b threadInfo) int {
+		if c := b.UpdatedAt.Compare(a.UpdatedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ThreadID, b.ThreadID)
+	})
+	start := min(offset, len(threads))
+	end := start + min(limit, len(threads)-start)
+	page := agThreadPage{Threads: threads[start:end]}
+	if end < len(threads) {
+		page.Next = q.nextPage(end)
 	}
 	b, err := q.encode("agui.threads", page)
 	if err != nil {
@@ -107,10 +140,10 @@ func (q *agRequest) listThreads(raw string) error {
 		}
 		for _, info := range page.Threads {
 			row, ok := records[info.ThreadID]
-			if !ok || !q.a.listed(q.ctx, row, opt) {
+			if !ok {
 				return stale
 			}
-			w, err := q.a.threadWaiting(q.ctx, row, opt)
+			current, err := q.a.summary(q.ctx, row, viewer)
 			if err != nil {
 				return err
 			}
@@ -118,7 +151,7 @@ func (q *agRequest) listThreads(raw string) error {
 			if err != nil {
 				return err
 			}
-			if epoch != info.epoch || w.Questions != info.Waiting.Questions || w.ToolCalls != info.Waiting.ToolCalls {
+			if current == nil || epoch != info.epoch || current.Waiting.Questions != info.Waiting.Questions || current.Waiting.ToolCalls != info.Waiting.ToolCalls {
 				return stale
 			}
 		}

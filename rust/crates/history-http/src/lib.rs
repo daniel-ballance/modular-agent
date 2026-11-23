@@ -1130,6 +1130,9 @@ impl HistoryStore for HttpHistory {
         held.insert(session.into(), Arc::downgrade(&state));
         Ok(Box::new(Held(state)))
     }
+    fn inspect(&self, session: &str) -> Result<SessionData> {
+        self.fetch(session).map(|(data, _)| data)
+    }
     fn load(&self, session: &str) -> Result<SessionData> {
         let state = self.lease(session);
         if let Some(state) = &state {

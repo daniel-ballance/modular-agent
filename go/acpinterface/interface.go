@@ -694,29 +694,38 @@ func (s *server) ListSessions(ctx context.Context, p acp.ListSessionsRequest) (a
 	if project != "" && !s.allowsProject(project) {
 		return acp.ListSessionsResponse{}, acpError("forbidden")
 	}
+	out := acp.ListSessionsResponse{Sessions: []acp.SessionInfo{}}
+	if s.declared != nil && s.declared()["portableSessions"] == false {
+		return out, nil
+	}
 	list, err := s.a.List(project)
 	if err != nil {
 		return acp.ListSessionsResponse{}, err
 	}
-	out := acp.ListSessionsResponse{Sessions: []acp.SessionInfo{}}
 	for _, snap := range list {
 		if snap.Parent != "" || !s.discoverable(snap) {
 			continue
 		}
 		host := s.sessionHost(snap.ID)
 		// ACP has no executor route. It never claims a different Interface's calls.
-		waiting, err := s.listingAPI(snap).WaitingForHost(host.acting(ctx, snap.ID, s.actor), snap, s.hostActor(), api.WaitingRoute{})
-		if errors.Is(err, api.ErrAuthority) {
-			continue
-		}
+		viewer := api.SessionViewer{Actor: s.hostActor(), Tenant: snap.Tenant, JoinOnOpen: true,
+			InTurn: func(id, q string) bool {
+				host.mu.Lock()
+				defer host.mu.Unlock()
+				st := host.sessions[id]
+				key := questionRecipient{q, s.actor}
+				return st != nil && (st.polled[key] || st.requests[key] != nil)
+			}}
+		summary, err := s.listingAPI(snap).SessionSummary(host.acting(ctx, snap.ID, s.actor), snap, viewer)
 		if err != nil {
 			return acp.ListSessionsResponse{}, outputReplyError(err)
 		}
-		info := acp.SessionInfo{SessionId: acp.SessionId(snap.ID), Cwd: snap.Project,
-			Meta: map[string]json.RawMessage{Namespace: api.JSON(map[string]any{"waiting": waiting})}}
-		if len(snap.Entries) > 0 {
-			info.UpdatedAt = acp.Ptr(snap.Entries[len(snap.Entries)-1].Time.Format("2006-01-02T15:04:05Z"))
+		if summary == nil {
+			continue
 		}
+		info := acp.SessionInfo{SessionId: acp.SessionId(summary.ID), Cwd: summary.Project,
+			UpdatedAt: acp.Ptr(summary.UpdatedAt.Format("2006-01-02T15:04:05Z")),
+			Meta:      map[string]json.RawMessage{Namespace: api.JSON(map[string]any{"waiting": summary.Waiting})}}
 		out.Sessions = append(out.Sessions, info)
 	}
 	sort.Slice(out.Sessions, func(i, j int) bool { return out.Sessions[i].SessionId < out.Sessions[j].SessionId })

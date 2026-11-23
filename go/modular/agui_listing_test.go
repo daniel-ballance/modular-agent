@@ -125,7 +125,7 @@ func TestAGUIListsEligibleQuestionsAndPagesVisibleThreads(t *testing.T) {
 	bad(url, readerToken, "?after="+first.Next)
 }
 
-func TestPublicThreadListReturnsOnlyWatchableMetadata(t *testing.T) {
+func TestPublicSessionSummaryReturnsOnlyWatchableMetadata(t *testing.T) {
 	project, dir := t.TempDir(), t.TempDir()
 	opts := []modular.Option{modular.WithProject(project), modular.WithDataDir(dir), modular.WithDurability(modular.Durable)}
 	p := modulartest.ScriptedProvider([]modulartest.Reply{{Text: "done"}})
@@ -151,16 +151,23 @@ func TestPublicThreadListReturnsOnlyWatchableMetadata(t *testing.T) {
 	<-started
 	defer close(release)
 	reader := modulartest.Agent(t, append(opts, modulartest.Script(`[]`))...)
-	opt := modular.ListThreadsOptions{Actor: modular.Actor{ID: "user", Kind: "user", Rights: []string{"watch"}}}
-	rows, more, err := reader.ListThreads(t.Context(), opt)
-	if err != nil || more || len(rows) != 1 || rows[0].ThreadID != s.ID() || rows[0].Waiting.Turn != "running" {
-		t.Fatalf("another writer's live turn: %+v, more=%t, err=%v", rows, more, err)
+	viewer := modular.SessionViewer{Actor: modular.Actor{ID: "user", Kind: "user", Rights: []string{"watch"}}}
+	row, err := reader.SessionSummary(t.Context(), s.ID(), viewer)
+	if err != nil || row == nil || row.ID != s.ID() || row.Project != project || row.UpdatedAt.IsZero() || row.Waiting.Turn != "running" {
+		t.Fatalf("another writer's live turn: %+v, err=%v", row, err)
 	}
-	opt.Actor.Rights = []string{"input"}
-	rows, more, err = reader.ListThreads(t.Context(), opt)
-	if err != nil || more || len(rows) != 0 {
-		t.Fatalf("without watch: %+v, more=%t, err=%v", rows, more, err)
+	missing := func(id string) {
+		t.Helper()
+		if row, err := reader.SessionSummary(t.Context(), id, viewer); row != nil || err != nil {
+			t.Fatalf("inaccessible: %+v, err=%v", row, err)
+		}
 	}
+	missing("unknown")
+	viewer.Tenant = "other"
+	missing(s.ID())
+	viewer.Tenant = ""
+	viewer.Actor.Rights = []string{"input"}
+	missing(s.ID())
 }
 
 func TestAGUIListingDoesNotJoinAProspectiveWatcher(t *testing.T) {

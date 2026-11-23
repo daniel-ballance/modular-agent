@@ -2,6 +2,7 @@
 import asyncio
 import os
 import signal
+import sys
 
 from modular_agent import Plugin, create_agent, subscription_logins
 from modular_agent.grok import grok
@@ -64,7 +65,8 @@ async def main():
             "token_file": os.environ["DESK_TOKEN_FILE"], "client_id": "ops-desk",
             "actor": {"id": "desk", "kind": "user", "rights": ["input", "watch", "tools", "approve", "answer"]},
             "projects": [project], "trace_trusted": True,
-        }])
+        }], resume_open={"actor": "desk", "report": lambda sid, status: print(
+            f"resume-open: {status} {sid}", file=sys.stderr)})
         print(server.url, flush=True)
         await stop.wait()
         await server.close()

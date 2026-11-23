@@ -133,17 +133,16 @@ pub trait Factory: Send + Sync {
     fn list_kept(&self, project: Option<&Path>) -> Result<Vec<SessionData>> {
         self.list(project)
     }
-    /// Without an inspector, omit the optional summary rather than guess at
-    /// tenant or parent authority.
-    fn listing_rights(
+    /// SDK factories inspect the committed record. A base build with no
+    /// inspector may omit the optional waiting summary.
+    fn list_row(
         &self,
-        _data: &SessionData,
+        data: &SessionData,
         _principal: &Identity,
-    ) -> Result<Option<Authority>> {
-        Ok(None)
-    }
-    fn observes_writer(&self, _id: &str) -> bool {
-        false
+        _in_turn: &dyn Fn(&str, bool) -> bool,
+        _running: bool,
+    ) -> Result<Option<Value>> {
+        Ok(Some(json!({"sessionId": data.id, "cwd": data.project})))
     }
     fn trust(&self, project: &Path) -> Result<()>;
     fn serves_project(&self, _project: &Path) -> bool {
@@ -565,35 +564,24 @@ impl State {
                     {
                         continue;
                     }
-                    let mut row = json!({"sessionId":data.id,"cwd":data.project});
-                    if let Some(rights) = self.factory.listing_rights(&data, &self.principal)? {
-                        if !rights.has("watch") {
-                            continue;
-                        }
-                        let attached = self.sessions.lock().unwrap().get(&data.id).cloned();
-                        // ACP does not execute Interface tools. An approval needs an
-                        // unchanged view on this connection, not just the actor's grant.
-                        let summary = data.waiting_summary(
-                            &rights,
-                            &self.principal.id,
-                            None,
-                            || {
-                                self.routes.is_running(&data.id)
-                                    || self.factory.observes_writer(&data.id)
-                            },
-                            |q, _| {
-                                q.kind != RequestKind::Approval
-                                    || attached.as_ref().is_some_and(|s| {
-                                        s.approval_views
-                                            .lock()
-                                            .unwrap()
-                                            .contains(&(self.principal.id.clone(), q.id.clone()))
-                                    })
-                            },
-                        )?;
-                        row["_meta"]["modular-agent"]["waiting"] = json!(summary);
+                    let attached = self.sessions.lock().unwrap().get(&data.id).cloned();
+                    let in_turn = |id: &str, approval: bool| {
+                        attached.as_ref().is_some_and(|s| {
+                            !approval
+                                || s.approval_views
+                                    .lock()
+                                    .unwrap()
+                                    .contains(&(self.principal.id.clone(), id.to_owned()))
+                        })
+                    };
+                    if let Some(row) = self.factory.list_row(
+                        &data,
+                        &self.principal,
+                        &in_turn,
+                        self.routes.is_running(&data.id),
+                    )? {
+                        rows.push(row);
                     }
-                    rows.push(row);
                 }
                 Ok(json!({"sessions":rows}))
             }

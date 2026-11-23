@@ -295,6 +295,10 @@ pub trait HistoryStore: Send + Sync {
     }
     fn acquire(&self, session: &str) -> Result<Box<dyn Lease>>;
     fn load(&self, session: &str) -> Result<SessionData>;
+    /// Read a committed snapshot for discovery, without acquiring a writer.
+    fn inspect(&self, session: &str) -> Result<SessionData> {
+        self.load(session)
+    }
     fn save(&self, session: &SessionData) -> Result<()>;
     fn list(&self, project: Option<&Path>) -> Result<Vec<SessionData>>;
     fn erase(&self, entries: Vec<String>, held: &[String]) -> Result<Vec<SessionData>>;

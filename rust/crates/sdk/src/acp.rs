@@ -260,20 +260,16 @@ impl interface_acp::Factory for ProjectFactory {
         history.0.list(project)
     }
 
-    fn listing_rights(
+    fn list_row(
         &self,
         data: &base::SessionData,
         principal: &interface_acp::Identity,
-    ) -> base::Result<Option<base::Authority>> {
+        in_turn: &dyn Fn(&str, bool) -> bool,
+        running: bool,
+    ) -> base::Result<Option<Value>> {
         self.1
-            .acp_listing_rights(&self.0.history()?, data, principal)
+            .acp_list_row(&self.0.history()?, data, principal, in_turn, running)
     }
-    fn observes_writer(&self, id: &str) -> bool {
-        use base::AgentApi;
-        self.1.inner.harness.is_driving_turn(id)
-            || self.0.history().is_ok_and(|h| h.0.confirms_writer(id))
-    }
-
     fn trust(&self, project: &Path) -> base::Result<()> {
         Ok(self.0.trust(project)?)
     }
@@ -386,24 +382,24 @@ impl Agent {
         .await?)
     }
 
-    fn acp_listing_rights(
+    fn acp_list_row(
         &self,
         history: &crate::History,
         data: &base::SessionData,
         principal: &interface_acp::Identity,
-    ) -> base::Result<Option<base::Authority>> {
-        let h = &self.inner.harness;
-        let rights = if history.0.check_erasure(data).is_ok() {
-            h.discovery_rights(
-                data,
-                &principal.id,
-                &principal.rights,
-                principal.join_on_open,
-            )?
-        } else {
-            base::Authority::default()
+        in_turn: &dyn Fn(&str, bool) -> bool,
+        running: bool,
+    ) -> base::Result<Option<Value>> {
+        let viewer = crate::SessionViewer {
+            actor: &principal.id,
+            rights: &principal.rights,
+            scope: &|_, _| principal.may_discover(data),
+            join_on_open: principal.join_on_open,
+            in_turn,
+            route_id: None,
         };
-        Ok(Some(rights))
+        Ok(self.session_summary_from(history, data, &viewer, running)?.map(|row|
+            base::json!({"sessionId":row.id, "cwd":row.project, "_meta":{"modular-agent":{"waiting":row.waiting}}})))
     }
 
     /// Reopen an unfinished turn in this project as the local operator. A race
@@ -568,17 +564,15 @@ impl interface_acp::Factory for Factory {
         }
         self.0.inner.history.0.list(project)
     }
-    fn listing_rights(
+    fn list_row(
         &self,
         data: &base::SessionData,
         principal: &interface_acp::Identity,
-    ) -> base::Result<Option<base::Authority>> {
+        in_turn: &dyn Fn(&str, bool) -> bool,
+        running: bool,
+    ) -> base::Result<Option<Value>> {
         self.0
-            .acp_listing_rights(&self.0.inner.history, data, principal)
-    }
-    fn observes_writer(&self, id: &str) -> bool {
-        use base::AgentApi;
-        self.0.inner.harness.is_driving_turn(id) || self.0.inner.history.0.confirms_writer(id)
+            .acp_list_row(&self.0.inner.history, data, principal, in_turn, running)
     }
     fn trust(&self, _project: &Path) -> base::Result<()> {
         base::bail!("ACP cannot change project trust")

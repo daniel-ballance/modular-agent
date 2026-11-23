@@ -1352,6 +1352,21 @@ if (jobChecks) {
 await attempt(network ? "load on a new connection" : "load in a new process", async () => {
 	if (agent.state.hasApproval) await setOption(agent, sessionId, "approval", "never");
 	await agent.ctx.request(methods.agent.session.close, { sessionId });
+	// The other cases share a long history. Replay and check its original
+	// receipt below, but do not make the saved-policy test run a new tool
+	// turn over every unrelated fixture. Give it its own kept session.
+	let policyId;
+	if (agent.state.hasApproval) {
+		const s = await agent.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] });
+		policyId = s.sessionId;
+		sessionsUsed.push(policyId);
+		await setOption(agent, policyId, "model", "conformance/echo");
+		await setOption(agent, policyId, "approval", "off");
+		await within(15000, prompt(agent, policyId, 'tool:bash {"command":"echo yes > before-never.txt"}'), "seed saved policy");
+		check("load: the saved policy fixture could run bash before restart", existsSync(join(project, "before-never.txt")));
+		await setOption(agent, policyId, "approval", "never");
+		await closeSession(agent, policyId);
+	}
 	await stop(agent);
 	agent = connect(second);
 	const init = await agent.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
@@ -1376,9 +1391,15 @@ await attempt(network ? "load on a new connection" : "load in a new process", as
 	const approval = (loaded.configOptions ?? []).find((o) => o.id === "approval");
 	if (approval) {
 		check("load: the approval setting survives", approval.currentValue === "never");
+		const policy = await within(await reopenWatchdog(), agent.ctx.request(methods.agent.session.load, { sessionId: policyId, cwd: project, mcpServers: [] }), "load saved policy");
+		check("load: the tool fixture reopens under never", policy.configOptions?.find(o => o.id === "approval")?.currentValue === "never");
 		const n = agent.permissions.length;
-		const nv = await within(15000, prompt(agent, sessionId, 'tool:bash {"command":"echo yes > never.txt"}'), "prompt under never");
-		check("load: under never, the call is refused without asking", nv.stopReason === "end_turn" && agent.permissions.length === n && !existsSync(join(project, "never.txt")));
+		const nv = await within(15000, prompt(agent, policyId, 'tool:bash {"command":"echo yes > never.txt"}'), "prompt under never");
+		const turn = (await history(agent, policyId)).entries;
+		const result = turn.findLast(e => e.kind === "toolResult");
+		check("load: under never, the call is refused without asking", nv.stopReason === "end_turn" && result?.data?.status === "refused" &&
+			!turn.some(e => e.kind === "toolStarted" && e.toolCallId === result.toolCallId) && agent.permissions.length === n && !existsSync(join(project, "never.txt")));
+		await closeSession(agent, policyId);
 		await setOption(agent, sessionId, "approval", "off");
 	}
 	if (portableChecks && decl.erasure && extensions.includes("erase")) {

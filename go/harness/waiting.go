@@ -34,28 +34,41 @@ func (c *client) turnState(row api.Session) (string, error) {
 	return "interrupted", nil
 }
 
-func (c *client) WaitingForHost(ctx context.Context, row api.Session, host api.Actor, route api.WaitingRoute) (api.WaitingSummary, error) {
+func (c *client) SessionSummary(ctx context.Context, row api.Session, viewer api.SessionViewer) (*api.SessionSummary, error) {
+	host := viewer.Actor
+	_, recorded := row.Actors[host.ID]
+	if len(row.Entries) == 0 || row.Tenant != viewer.Tenant || viewer.Scope != nil && !viewer.Scope(row.Project, row.Tenant) ||
+		!viewer.JoinOnOpen && !recorded && row.Actor != host.ID {
+		return nil, nil
+	}
 	view := viewForHost(row, host)
 	allowed := func(right string) bool {
 		return slices.Contains(host.Rights, right) && api.ConnectionAllows(ctx, right) && c.authorized(view, host.ID, right)
 	}
 	if !api.SessionScopeAllows(ctx, row.Project, row.Tenant) || !allowed("watch") {
-		return api.WaitingSummary{}, api.ErrAuthority
+		return nil, nil
 	}
 	if _, err := c.ErasureEpoch(row.ID); err != nil {
-		return api.WaitingSummary{}, err
+		return nil, err
 	}
 	turn, err := c.turnState(row)
 	if err != nil {
-		return api.WaitingSummary{}, err
+		return nil, err
 	}
 	w := api.WaitingSummary{Turn: turn}
 	if part, err := c.Get("questions"); err == nil {
+		ended := map[string]bool{}
+		for _, e := range row.Branch() {
+			if e.WasKind("turn.end") {
+				ended[e.Turn] = true
+			}
+		}
 		for _, q := range part.(api.Questions).Recorded(row) {
 			if !q.Answerable || q.Kind == "secret" || len(q.Allowed) != 0 && !slices.Contains(q.Allowed, host.ID) {
 				continue
 			}
-			if route.CanAnswer != nil && !route.CanAnswer(q) {
+			late := q.Defer && q.Kind != "approval" && ended[q.Turn]
+			if !late && (viewer.InTurn == nil || !viewer.InTurn(row.ID, q.ID)) {
 				continue
 			}
 			if q.Kind == "approval" && allowed("approve") || q.Kind != "approval" && allowed("answer") {
@@ -63,16 +76,16 @@ func (c *client) WaitingForHost(ctx context.Context, row api.Session, host api.A
 			}
 		}
 	}
-	if route.Executor != "" && allowed("tools") {
+	if viewer.RouteID != "" && allowed("tools") {
 		for id, cp := range api.InterfaceHandoffs(row) {
 			if interfaceTerminal(row, id).ID != "" {
 				continue
 			}
 			_, saved, ok := c.h.restoreInterface(row, cp)
-			if ok && saved.Actor == host.ID && saved.Route == route.Executor && slices.Contains(saved.Rights, "tools") && slices.Contains(saved.Rights, "watch") && saved.Deadline > worktime.Now().UnixMilli() {
+			if ok && saved.Actor == host.ID && saved.Route == viewer.RouteID && slices.Contains(saved.Rights, "tools") && slices.Contains(saved.Rights, "watch") && saved.Deadline > worktime.Now().UnixMilli() {
 				w.ToolCalls++
 			}
 		}
 	}
-	return w, nil
+	return &api.SessionSummary{ID: row.ID, Project: row.Project, UpdatedAt: row.Entries[len(row.Entries)-1].Time.UTC(), Waiting: w}, nil
 }

@@ -68,6 +68,125 @@ pub struct History(
     pub(crate) Option<Arc<dyn PortableHistoryStore>>,
 );
 
+pub use base::{TurnState, WaitingSummary};
+
+/// The connection ceiling, scope and live offers supplied by a trusted Interface.
+pub struct SessionViewer<'a> {
+    pub actor: &'a str,
+    pub rights: &'a crate::Rights,
+    pub scope: &'a dyn Fn(&Path, Option<&str>) -> bool,
+    pub route_id: Option<&'a str>,
+    pub join_on_open: bool,
+    /// Whether this connection holds the in-turn question ID (and, for approval, its exact view).
+    pub in_turn: &'a dyn Fn(&str, bool) -> bool,
+}
+
+impl<'a> SessionViewer<'a> {
+    /// A recorded actor, no tenant, executor, presence or prospective membership.
+    pub fn new(actor: &'a str, rights: &'a crate::Rights) -> Self {
+        Self {
+            actor,
+            rights,
+            scope: &|_, t| t.is_none(),
+            route_id: None,
+            join_on_open: false,
+            in_turn: &|_, _| false,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SessionSummary {
+    pub id: String,
+    pub project: std::path::PathBuf,
+    /// Unix milliseconds.
+    pub updated_at: u64,
+    pub waiting: WaitingSummary,
+}
+
+impl crate::Agent {
+    /// Read a kept session in this agent's project without joining or starting recovery.
+    pub fn session_summary(
+        &self,
+        id: &str,
+        viewer: &SessionViewer<'_>,
+    ) -> Result<Option<SessionSummary>> {
+        if !self.inner.persistent {
+            return Ok(None);
+        }
+        let history = &self.inner.history;
+        let data = match history.0.inspect(id).map_err(Error::from) {
+            Ok(data) => data,
+            Err(e) if e.code() == Code::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        if data.project != self.inner.project {
+            return Ok(None);
+        }
+        // An SDK session starts with the implicit local "user" grant.
+        // Network bindings instead pass their own prospective admission policy.
+        let viewer = SessionViewer {
+            join_on_open: viewer.actor == "user"
+                || (viewer.join_on_open
+                    && (self.inner.several_actors || viewer.actor == base::ACP_HOST_ACTOR)),
+            ..*viewer
+        };
+        Ok(self.session_summary_from(history, &data, &viewer, false)?)
+    }
+
+    // Bindings can reuse the committed record from a listing. A composed ACP
+    // service may have a common discovery store for several projects.
+    pub(crate) fn session_summary_from(
+        &self,
+        history: &History,
+        data: &base::SessionData,
+        viewer: &SessionViewer<'_>,
+        running: bool,
+    ) -> base::Result<Option<SessionSummary>> {
+        use base::AgentApi;
+        if !history.1
+            || data.entries.is_empty()
+            || !(viewer.scope)(&data.project, data.tenant_id())
+            || history.0.check_erasure(data).is_err()
+        {
+            return Ok(None);
+        }
+        let rights = self.inner.harness.discovery_rights(
+            data,
+            viewer.actor,
+            viewer.rights,
+            viewer.join_on_open,
+        )?;
+        if !rights.has("watch") {
+            return Ok(None);
+        }
+        let waiting = data.waiting_summary(
+            &rights,
+            viewer.actor,
+            viewer.route_id,
+            || {
+                running
+                    || self.inner.harness.is_driving_turn(&data.id)
+                    || history.0.confirms_writer(&data.id)
+            },
+            |q, live| {
+                let approval = q.kind == base::RequestKind::Approval;
+                if live {
+                    (viewer.in_turn)(&q.id, approval)
+                } else {
+                    !approval
+                }
+            },
+        )?;
+        Ok(Some(SessionSummary {
+            id: data.id.clone(),
+            project: data.project.clone(),
+            updated_at: data.entries.last().map_or(0, |e| e.at),
+            waiting,
+        }))
+    }
+}
+
 /// Saved session metadata, available without acquiring its writer lease.
 #[derive(Clone, Debug)]
 pub struct SessionInfo {

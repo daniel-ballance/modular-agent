@@ -148,7 +148,12 @@ async def test_restart_during_tool_call(tmp_path, mode, runtime):
                 (project / "release").touch()
                 with suppress(HTTPError):
                     await active
-        assert (await observer.session_summary(sid))["waiting"]["turn"] == "interrupted"
+        summary = await observer.session_summary(sid)
+        assert summary["waiting"]["turn"] == "interrupted"
+        assert summary["id"] == sid and summary["project"] == str(project) and summary["updatedAt"]
+        assert await observer.session_summary("missing") is None
+        assert await observer.session_summary(sid, rights=["input"]) is None
+        assert await observer.session_summary(sid, scope=lambda _p, _t: False) is None
         if mode == "global":
             (data / "settings.json").write_text('{"resume_open":true}')
             (project / ".modular-agent.json").write_text('{"resume_open":false}')

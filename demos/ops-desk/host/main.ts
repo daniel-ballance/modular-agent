@@ -47,6 +47,7 @@ const changed = () => {
   for (const res of streams) if (!res.write('data: changed\n\n')) res.destroy();
 };
 startTracing();
+process.chdir(root); // connect to the station socket inside the private desk directory
 const desk = new Desk(
   db,
   new Projects(root, resolve(process.env.DESK_SAMPLE ?? join(demo, 'sample'))),

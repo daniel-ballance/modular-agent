@@ -211,11 +211,20 @@ func (s Session) Branch() []Entry {
 	return out
 }
 
-// WaitingRoute names the authenticated executor and any additional answer
-// restrictions of the Interface, such as exact delivery on a presence stream.
-type WaitingRoute struct {
-	Executor  string
-	CanAnswer func(Question) bool
+// SessionViewer describes the caller of a read-only discovery operation.
+type SessionViewer struct {
+	Actor           Actor
+	Tenant, RouteID string
+	Scope           func(project, tenant string) bool
+	JoinOnOpen      bool
+	// InTurn identifies question views still held on this connection.
+	InTurn func(sessionID, questionID string) bool
+}
+
+type SessionSummary struct {
+	ID, Project string
+	UpdatedAt   time.Time
+	Waiting     WaitingSummary
 }
 
 // WaitingSummary contains counts, never question or tool content.
@@ -337,9 +346,8 @@ type API interface {
 	New(context.Context, string) (string, error)
 	Open(context.Context, string) error
 	List(string) ([]Session, error)
-	// WaitingForHost summarizes a listed record without opening it or joining the actor.
-	// An empty executor route cannot receive Interface-run calls.
-	WaitingForHost(context.Context, Session, Actor, WaitingRoute) (WaitingSummary, error)
+	// SessionSummary reads a committed store row without acquiring a writer.
+	SessionSummary(context.Context, Session, SessionViewer) (*SessionSummary, error)
 	Snapshot(string) (Session, error)
 	View(context.Context, string) (Session, error)
 	Record(context.Context, string, Entry) (Entry, error)

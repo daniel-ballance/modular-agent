@@ -133,6 +133,19 @@ func run() error {
 		return err
 	}
 	defer a.Close(ctx)
+	rows, err := a.Sessions(ctx, project)
+	if err != nil {
+		return err
+	}
+	operator := modular.ACPActor{Actor: modular.Actor{ID: "desk", Kind: "user", Rights: []string{"watch"}}, Projects: []string{project}}
+	for _, row := range rows {
+		if !row.UnfinishedTurn {
+			continue
+		}
+		if err := a.ResumeInterrupted(ctx, row.ID, operator); err != nil {
+			log.Printf("resume-open: skipped %s: %v", row.ID, err)
+		}
+	}
 	server, err := a.ServeAGUI(ctx, modular.ServeAGUIOptions{Listen: "127.0.0.1:0", Actors: []modular.ACPActor{{TokenFile: os.Getenv("DESK_TOKEN_FILE"), ClientID: "ops-desk", TrustTrace: true, Projects: []string{project}, Actor: modular.Actor{ID: "desk", Kind: "user", Rights: []string{"watch", "input", "tools", "answer", "approve"}}}}})
 	if err != nil {
 		return err
