@@ -92,7 +92,7 @@ export function fakeFixture(name, fault, script) {
   function startContinuation(s, operationContext) {
     s.nextTurn = turnId();
     s.nextContext = operationContext;
-    record(s, 'turnStart', { continuesTurnId: s.originTurn, startedBy: { kind: 'toolResult', id: s.result.id } }, { turnId: s.nextTurn });
+    record(s, 'turnStart', { startedBy: { kind: 'toolResult', id: s.result.id } }, { turnId: s.nextTurn, continuesTurnId: s.originTurn });
   }
   function completeContinuation(s, push, recovered = false) {
     const ctx = recovered && fault === 'lost-recovery-trace' ? context({}, 'owner') : s.nextContext;
@@ -105,7 +105,7 @@ export function fakeFixture(name, fault, script) {
     const stepName = randomUUID();
     const messageId = `ma:assistant:${stepName}`;
     push('STEP_STARTED', { stepName });
-    record(s, 'response', { text: stored }, { stepId: stepName });
+    record(s, 'response', {}, { stepId: stepName, message: { role: 'assistant', content: [{ type: 'text', text: stored }] } });
     if (reasoning) {
       const id = { messageId: 'ma:reasoning:' + stepName };
       push('REASONING_START', id);
@@ -130,9 +130,9 @@ export function fakeFixture(name, fault, script) {
     record(s, 'inputRequest', { id: s.question.id }, { turnId: s.originTurn });
     return s.question;
   }
-  function closeQuestion(s, { reason, declined, system = false }) {
+  function closeQuestion(s, { reason, declined, value, system = false }) {
     if (!s.question) return;
-    record(s, 'inputAnswer', { requestId: s.question.id, declined, ...(reason ? { reason } : {}) }, { turnId: s.originTurn, ...(system ? {} : { actorId: 'kit-owner' }) });
+    record(s, 'inputAnswer', { requestId: s.question.id, ...(declined ? { declined: true } : { value }), ...(reason ? { reason } : {}), ...(system ? {} : { actorId: 'kit-owner' }) }, { turnId: s.originTurn });
     if (s.question.reason === 'approval' && declined) record(s, 'toolResult', { status: 'refused' }, { toolCallId: s.question.toolCallId, turnId: s.originTurn });
     s.question = undefined;
   }
@@ -150,12 +150,12 @@ export function fakeFixture(name, fault, script) {
       if (!eligible(s, client)) return [409, 'conflict'];
       const decisions = resume.filter(r => r.interruptId === s.question.id);
       if (decisions.length !== 1) return [409, 'conflict'];
-      const [{ status, value }] = decisions;
+      const [{ status, payload: value }] = decisions;
       const approval = s.question.reason === 'approval';
       if (!['resolved', 'cancelled'].includes(status) || (status === 'resolved' && (approval ? typeof value?.allow !== 'boolean' : !['yes', 'no'].includes(value)))) return [400, 'invalid_request'];
       const id = s.question.toolCallId;
       const declined = status === 'cancelled' || (approval && !value.allow);
-      closeQuestion(s, { declined });
+      closeQuestion(s, { declined, value: approval ? 'allow' : value });
       emit();
       if (approval && !declined) stage(s, id, s.stepId);
       if (s.call) {

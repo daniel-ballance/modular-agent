@@ -3,7 +3,7 @@ import { checkTls } from './tls.mjs';
 import { answer, dispatch, draft, first, frontend, handoff, historyError, offer, options, opts, rawReport, reportRefused, second, simple, success, transformed } from './cases.mjs';
 import { at, clean, finalView, input, refused, threadPath, tool, user } from './wire.mjs';
 
-const action = (id, value, status = 'resolved') => ({ interruptId: id, status, ...(value === undefined ? {} : { value }) });
+const action = (id, value, status = 'resolved') => ({ interruptId: id, status, ...(value === undefined ? {} : { payload: value }) });
 const resume = (...answers) => ({ resume: answers });
 const scenario = (model, run, extra = {}) => ({ model, run, control: true, ...extra });
 const prompt = async (api, extra = {}) => {
@@ -66,7 +66,7 @@ function settled(evidence, callId, status, { continuation = true, report = statu
   assert.equal(result.turnId, start.turnId, 'result belongs to origin');
   assert.equal(result.stepId, start.stepId);
   assert.ok(result.sources.includes(start.id) && result.sources.includes(checkpoint.id), 'result preserves handoff erasure lineage');
-  const continuations = entries(evidence, 'turnStart').filter(e => e.data.continuesTurnId === start.turnId);
+  const continuations = entries(evidence, 'turnStart').filter(e => (e.continuesTurnId ?? e.data.continuesTurnId) === start.turnId);
   assert.equal(continuations.length, Number(continuation), 'one continuation iff origin is ready and remains eligible');
   if (!continuation) return;
   const [next] = continuations;
@@ -176,7 +176,8 @@ export const advanced = {
         assert.equal(entries(evidence, 'turnStart').length, 1, 'resumed question uses original turn');
         const answers = entries(evidence, 'inputAnswer');
         assert.equal(answers.length, 1, 'question decision commits once');
-        assert.equal(answers[0].data.declined, status !== 'resolved');
+        if (status === 'resolved') assert.equal(answers[0].data.value, value);
+        else assert.equal(answers[0].data.declined, true);
         if (status === 'expired') assert.equal(answers[0].data.reason, 'timeLimit');
       } finally { await presence.close(); }
     }
@@ -243,7 +244,7 @@ export const advanced = {
         const evidence = await evidenceFor(control, view.threadId);
         if (operation === 'timeout') settled(evidence, id, 'outcomeUnknown');
         else if (operation === 'erase') {
-          assert.equal(entries(evidence, 'turnStart').filter(e => e.data.continuesTurnId).length, 0, 'erased call cannot authorize a continuation');
+          assert.equal(entries(evidence, 'turnStart').filter(e => e.continuesTurnId ?? e.data.continuesTurnId).length, 0, 'erased call cannot authorize a continuation');
           assert.ok(evidence.erasure.outOfReach.length, 'possibly handed-off copy is out of reach');
           clean(current, dispatch.color, rawReport);
         } else assert.equal(entries(evidence, 'toolResult').some(e => e.actorId), false, 'changed tool authority refuses the report');
@@ -278,7 +279,7 @@ export const advanced = {
     const copy = await api.view(view.threadId);
     assert.deepEqual(copy.messages, final.messages, 'gated replay matches live view');
     await refused(await at(origin, tokens.sibling).request(threadPath(view.threadId)), 403, 'output_withheld');
-    assert.ok(entries(await evidenceFor(control, view.threadId), 'response').some(e => e.data.text === hidden), 'redaction does not change the authoritative response');
+    assert.ok(entries(await evidenceFor(control, view.threadId), 'response').some(e => e.message?.content.some(p => p.type === 'text' && p.text === hidden)), 'redaction does not change the authoritative response');
   }),
 
   'output-size': scenario(simple, async ({ api, origin, tokens }) => {
