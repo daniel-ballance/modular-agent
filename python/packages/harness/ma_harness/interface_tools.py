@@ -300,21 +300,97 @@ class InterfaceTools:
                 ot.set_attrs(operation, {"modular_agent.tool.status": "pending"})
                 self.interface_traces[sid, cid] = ot.own_context(operation)
                 try:
-                    cx["deliver"](
-                        {
-                            "call_id": cid,
-                            "session_id": sid,
-                            "name": name,
-                            "input": clone(call["input"]),
-                            "deadline": deadline,
-                        }
-                    )
+                    if cx.get("deferred") is not None:
+                        cx["deferred"][sid, cid] = (
+                            turn,
+                            {
+                                "session_id": sid,
+                                "call_id": cid,
+                                "name": name,
+                                "input": clone(call["input"]),
+                                "deadline": deadline,
+                            },
+                        )
+                    else:
+                        cx["deliver"](
+                            {
+                                "call_id": cid,
+                                "session_id": sid,
+                                "name": name,
+                                "input": clone(call["input"]),
+                                "deadline": deadline,
+                            }
+                        )
                 except Exception:
                     # The receiver may have acted before its callback failed.
                     pass
         for e in (start, checkpoint):
             await self._emit({"kind": "history_entry", "session": sid, "entry": e})
         return {"interface": True, "open": True, "pending": "Waiting for an Interface tool result"}
+
+    async def release_interface(self, sid, token, cid):
+        """A live deferred handle, never a reconstructed dispatch from history."""
+        cx = self.interface_connections.get(token)
+        if not cx or not (staged := (cx.get("deferred") or {}).get((sid, cid))):
+            return False
+        turn = staged[0]
+
+        def current():
+            s = self.sessions.get(sid)
+            if (
+                not s
+                or self.interface_connections.get(token) is not cx
+                or not cx["scope"][-1](s)
+                or any(s.get(k) for k in ("closing", "moving", "suspending", "writer_lost"))
+            ):
+                return None
+            start, cp, result = self.interface_state(sid, cid)
+            if result or not self.restored_interface(start, cp):
+                return None
+            d, call = cp["data"], start["data"]["call"]
+            if (
+                (cx["actor"], cx["route"]) != (d["executorActorId"], d["routeId"])
+                or clock() >= d["deadline"]
+                or not REQUIRED <= self.permissions(s, cx["actor"], d["rights"])
+                or "tools"
+                not in self.interface_work_rights(s, turn, call["actor"], call.get("authority"))
+                or not any(
+                    e["kind"] == "turn_end"
+                    and e.get("turn") == turn
+                    and e["data"]["outcome"] == "completed"
+                    and cid in e["data"].get("open_calls", [])
+                    for e in branch_entries(s)
+                )
+            ):
+                return None
+            return call, d["deadline"]
+
+        async with self.interface_lock(sid):
+            scope = CONNECTION_AUTHORITY.set(cx["scope"])
+            try:
+                if (sid, cid) not in cx["deferred"] or not (pair := current()):
+                    return False
+                event = {"type": "toolCall", "data": {"call": call_out(pair[0])}}
+                if not same_json(await self.output(sid, cx["actor"], [event]), [event]):
+                    return False
+                await self._assert_writable(sid)
+                await self.guard_erasure(sid)
+                if not (pair := current()):
+                    return False
+                call, deadline = pair
+                del cx["deferred"][sid, cid]
+                cx["deliver"](
+                    {
+                        "call_id": cid,
+                        "session_id": sid,
+                        "name": call["name"],
+                        "input": clone(call["input"]),
+                        "deadline": deadline,
+                    }
+                )
+                return True
+            finally:
+                CONNECTION_AUTHORITY.reset(scope)
 
     def interface_work_rights(self, s, turn, actor, ceiling=None):
         rights = self.permissions(s, actor, ceiling)

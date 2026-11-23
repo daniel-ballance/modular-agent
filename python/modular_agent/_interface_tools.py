@@ -50,6 +50,7 @@ class InterfaceToolConnection:
         on_handoff: Callable[[InterfaceToolHandoff], None] | None,
         rights: Sequence[str] | None,
         tenants: Sequence[str | None],
+        defer: bool = False,
     ) -> None:
         self._agent = agent
         self._id = uuid4().hex
@@ -66,6 +67,7 @@ class InterfaceToolConnection:
             ),
             "offers": {},
             "deliver": on_handoff,
+            "deferred": {} if defer else None,
         }
 
     def advertise(self, session_id: str, tools: Sequence[JsonObject]) -> None:
@@ -92,6 +94,16 @@ class InterfaceToolConnection:
                 )
             names.add(name)
         cx["offers"][session_id] = frozenset(names)
+
+    def _staged(self, session_id: str, call_id: str) -> InterfaceToolHandoff | None:
+        # Only the binding preparing its final output gate may inspect this.
+        cx = self._agent._h.interface_connections.get(self._id)
+        staged = (cx.get("deferred") or {}).get((session_id, call_id)) if cx else None
+        return cast(InterfaceToolHandoff, deepcopy(staged[1])) if staged else None
+
+    async def release(self, session_id: str, call_id: str) -> bool:
+        """Release one staged call, once, after a successful originating turn."""
+        return bool(await self._agent._h.release_interface(session_id, self._id, call_id))
 
     async def report_tool_result(
         self, session_id: str, report: InterfaceToolReport
