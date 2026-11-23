@@ -13,7 +13,7 @@ Choose the [approval policy](../../contracts.md#approval-policy) when you build 
 | `all` | Asks even for read-only calls. |
 | `never` | Refuses every call without asking. |
 
-No policy bypasses other [tool gates](../../contracts.md#tool-dispatch). When approval is required, show the exact tool name and input and ask the user to allow or decline that call. A handler makes the embedded actor present to answer. If there is no handler and no other eligible answerer who can see the exact call, the agent refuses it rather than running without consent or waiting for someone who cannot answer. See [The local actor](../concepts.md#the-local-actor) and [Security: Authority](../../security.md#authority).
+No policy bypasses other [tool gates](../../contracts.md#tool-dispatch). When approval is required, show the exact tool name and input and ask the user to allow or decline that call. A handler makes the embedded actor present to answer. Under the default live-only rule, if there is no handler and no other eligible answerer who can see the exact call, the agent refuses it rather than running without consent or waiting for someone who cannot answer. See [The local actor](../concepts.md#the-local-actor) and [Security: Authority](../../security.md#authority).
 
 The test changes the policy and the tool's read-only hint. Its agent-wide handler records the question and returns allow. That automatic answer is only for the test; in an app, return allow only after the user approves the call.
 
@@ -252,7 +252,7 @@ async def test_checks_approval_policy() -> None:
 
 A session handler overrides the agent handler. The examples show how to pass a question to a UI from a handler. The click can supply the handler's return value or call [`session.answer(id, answer)`](../api.md#questions) directly. If the handler only shows the question, keep it pending until the question settles; returning nothing early declines it.
 
-An app can also start the turn without a handler, read open choice and text questions with `session.questions()`, and answer them by id. For approvals, the embedded actor still needs a handler to count as present. Send a tagged decline to refuse a question; the text `declined` is an ordinary answer value.
+An app can also start the turn without a handler, read open choice and text questions with `session.questions()`, and answer them by id. For live approvals, the embedded actor still needs a handler to count as present. Send a tagged decline to refuse a question; the text `declined` is an ordinary answer value.
 
 **Rust**
 
@@ -481,4 +481,4 @@ async def test_answers_a_choice_from_the_ui() -> None:
             waiting.cancel()  # The UI already answered; don't send a second reply.
 ```
 
-Start the prompt without waiting for its result before you show the question. Otherwise the turn waits for the answer while the UI waits for the turn. In an app, clear the control when its question closes or the turn is cancelled; don't treat an old button click as consent for a new call. These examples answer while the turn is still running. Keeping a call open **after** a turn is a separate capability, and an approval can never outlast its turn. See the [question rules](../../contracts.md#questions) and [Questions from a tool](../api.md#tools).
+Start the prompt without waiting for its result before you show the question. Otherwise the turn waits for the answer while the UI waits for the turn. In an app, clear the control when its question closes or the turn is cancelled; don't treat an old button click as consent for a new call. These examples answer while the turn is still running. Keeping a call open **after** a turn is a separate capability. [ADR 0034](../../adr/0034-approvals-that-wait.md) proposes that a pre-dispatch approval can do so only when the session opts in. See the [question rules](../../contracts.md#questions) and [Questions from a tool](../api.md#tools).

@@ -77,6 +77,7 @@ An agent MUST send every non-optional key and use only the values below. The ses
 | `erasure` | boolean | Implies `erase` is offered and the Harness and deployment can enforce [pending erasure](../contracts.md#cross-session-coordination). |
 | `inputKeys` | `true` | Fixed in this edition. |
 | `questionsOutlastTurns` | boolean | An eligible non-approval question can stay open past its turn. Requires `lateAnswersStartTurns: true`. |
+| `approvalsOutlastTurns` (optional, proposed) | boolean | Supports [approvals that wait](../contracts.md#approvals-that-wait); not the session opt-in. Default `false`. |
 | `startsTurnsUnasked` | `never`, `jobReports` | Whether job reports start turns. Late answers are separate. |
 | `queuedInputAfterRestart` | `handedBack`, `run` | Recovery policy for queued input. |
 | `movingWithUnfinishedWork` | `cancels`, `refused` | Behavior when moving away from unfinished work. |
@@ -102,6 +103,7 @@ The table is the ACP projection of the core declaration; binding claims and extr
 |---|---|
 | `waitingThroughRestart` | `continuesAfterRestart` and a durable Runtime |
 | `questionsOutlastTurns` | `lateAnswersStartTurns` |
+| `approvalsOutlastTurns` | `portableSessions`, `questionsOutlastTurns` and `lateAnswersStartTurns` |
 | `portableSessions` | No Provider-run tools or live-session mode for that session |
 | `rewinding`, `forking`, `erasure`, `sessionLimits`, `tenants` | Respectively `move`, `fork`, `erase`, `limit`, `tenant` in `extensions` |
 | `severalActors` | All [several-actors methods](#several-actors) in `extensions` |
@@ -195,6 +197,7 @@ The agent MUST use ACP `select` options with `id`, `currentValue` and `options` 
 | `model` | `provider/model`, with `%` and `/` in each component encoded as `%25` and `%2F` before joining. |
 | `thinking` | Supported levels in order: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`. |
 | `approval` | `off`, `ask`, `all`, `never`. |
+| `approvalWait` (proposed) | `live` (default), `untilDeadline`. Offer only with `approvalsOutlastTurns: true`. Requires `settings` to change. |
 
 An agent MUST omit `thinking` if the model declares no levels. On model switch it MUST apply the [portable reasoning fallback](data.md#context-and-interrupted-work), even for a non-portable session. For an unset reasoning level the agent MUST show `off` as `currentValue` if offered without setting reasoning on the request. The agent MUST omit `thinking` when reasoning is unset and `off` is unavailable, or when no supported level is at or below the prior selection. A recorded model no longer offered MUST stay selected, but not selectable, until changed. Hosts MUST accept `currentValue` absent from `options`, including `options: []`. An implementation decoding the value MUST split on the literal slash and decode only `%25` and `%2F` once. The agent MUST NOT substitute another model. Without any selected or offered model the agent MUST omit `model`. The agent MUST refuse unadvertised option ids or values with `invalid_params`, except that an explicit supported thinking level for the selected model can be set when the selector is omitted because there is no current level.
 
@@ -278,15 +281,17 @@ The agent MUST use exactly the following options in `session/request_permission`
 
 The permission request MUST show the exact current call name as `toolCall.title` and input as `toolCall.rawInput`, bound to its `toolCallId` and question id. Neither a separate call notice nor a previous gate pass supplies that view. The agent MUST obey [core approval view and route rules](../contracts.md#approval-policy). A valid `allow` permits only the displayed call; valid `refuse` or explicit permission cancellation declines. A failed route cannot displace a valid answer, and this method offers no persistent approval.
 
+**Waiting approval (proposed).** In both ACP versions, `session/request_permission` is live-only. For a [waiting approval](../contracts.md#approvals-that-wait) the agent MUST NOT issue or keep this RPC. Return the normal prompt settlement with the call still open. A client can disconnect. Later an eligible actor opens the session on an authenticated connection, polls `_modular-agent/requests`, shows its unchanged approval view and sends `_modular-agent/answer` on that connection with the request ID and `value: "allow"` or a decline. Recheck that actor's current rights and presence at the answer. Acceptance acknowledges the decision, not execution. A disconnect, loss of representation or changed or withheld view invalidates that route's delivery. A new connection must poll afresh. History, a stale RPC response and another actor's poll do not qualify; use the normal negative acknowledgement. Nothing changes for live-only sessions.
+
 ## Questions
 
 An `elicitation/create` request MAY carry the current operation's [trace context](#metadata) where ACP supports `_meta`. It does not change who can answer.
 
-The agent MUST apply the [core question rules](../contracts.md#questions) to eligibility, deadlines and reuse. An approval never outlasts its turn; after a deadline, a later approval check for the exact call uses a fresh request. Presence is not proof of human assent. Standard ACP responses MUST act only as the actor to whom the agent addressed that RPC, on the same authenticated connection. The client MUST NOT override that actor in its reply. The authorization and scope of `actorId` in the extension are in [Several actors](#several-actors).
+The agent MUST apply the [core question rules](../contracts.md#questions) to eligibility, deadlines and reuse. Apart from the declared waiting approval above, an approval never outlasts its turn. An expired approval cannot be reopened. Presence is not proof of human assent. Standard ACP responses MUST act only as the actor to whom the agent addressed that RPC, on the same authenticated connection. The client MUST NOT override that actor in its reply. The authorization and scope of `actorId` in the extension are in [Several actors](#several-actors).
 
 | Kind | Standard ACP route while in the turn | Extension route |
 |---|---|---|
-| `approval` | `session/request_permission` to eligible present actors. | `allow` or `refuse`. Presence still required. |
+| `approval` | `session/request_permission` to eligible present actors for a live approval only. | `allow` or `refuse` on the eligible polling route. Presence still required at answer time. |
 | `text`, `choice` | `elicitation/create` with `mode: "form"` if the client advertised forms. | String or exact choice option. Also used with no forms or when left open past the turn. |
 | `link` | No ACP URL/completion handshake in this profile. | The request supplies the link URI in `details`; the answer is a string acknowledgment, not proof of an external action. |
 | `secret` | None. | Decline only; no secret value crosses ACP. |
@@ -344,7 +349,7 @@ An ACP `Entry` is a recipient projection of a [shared history entry](data.md#his
 | `inputAccepted`, `input`, `inputHandedBack` | `inputIds`, `when`, `content`, `releasedBy`, `reason`, `parked` where present; no input keys |
 | `turnStart`, `modelRequest` | `startedBy`, `model` where present |
 | `toolStarted`, `toolResult` | `call`, `status` where present |
-| `inputRequest`, `inputAnswer` | `request` using [Request](#request) below, or the shared Answer without `stored` |
+| `inputRequest`, `inputAnswer` | `request` using [Request](#request) below, or the shared Answer without `stored` or the private `approvalView` binding |
 | `resultFeedback` | `reason` |
 | `turnEnd` | `outcome`, `result`, `usage` |
 | `actorJoined`, `actorLeft`, `limit`, `tenant`, `erasure` | Standard fields from [Shared data](data.md#standard-kinds), except erased key reservations |
@@ -362,7 +367,7 @@ The agent MUST use shared [Content](data.md#content) for `message.content`, `dat
 
 ### Request
 
-The agent MUST project [InputRequest](data.md#questions) as `{ id, kind, question, answerable, options?, details?, toolCallId?, call? }`. `options` is present only for a choice, and `details` only for a link URI. For approval, `call` MUST be `{ name, input }` with the exact approved values. The agent MUST omit credential names and values. A client MAY poll `requests` even while a permission RPC is open.
+The agent MUST project [InputRequest](data.md#questions) as `{ id, kind, question, answerable, options?, details?, toolCallId?, call?, approvalWait?, deadlineAt? }`. `options` is present only for a choice, and `details` only for a link URI. For approval, `call` MUST be `{ name, input }` with the exact approved values. Only for a marked waiting approval, include `approvalWait: "untilDeadline"` and the absolute `deadlineAt` in milliseconds from the recorded request. The view is not answerable until the origin's completed end commits. The agent MUST omit credential names and values. A client MAY poll `requests` even while a permission RPC is open.
 
 The agent MUST omit `answerable` from each projected request presented to the gate, including nested projections in history. After gating, it MUST set `answerable` per recipient and route from the question's open state, current eligibility and deliverable view. For an approval it MUST set `answerable: false` on a projection that any gate stage changed, comparing without `answerable` by [JSON value](data.md#general-rules). A blocked reply remains withheld.
 
@@ -433,6 +438,8 @@ An agent participating in the shared-erasure check MUST take its authoritative t
 The [conformance kit](../../conformance/acp/README.md) exercises this mode. See [Conformance and versioning](../conformance.md) for what passing the kit establishes.
 
 ## Changes
+
+- **Proposed for 0.2.0 ([ADR 0034](../adr/0034-approvals-that-wait.md)).** Add `approvalsOutlastTurns`, its `approvalWait` session option and expiry in the waiting request projection. Late decisions use `requests` and `answer`, not a permission RPC. No new method in either version.
 
 - **2026-11-23.** Allow an optional waiting summary on each `session/list` entry.
 

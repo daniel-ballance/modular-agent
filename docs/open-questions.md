@@ -24,7 +24,7 @@ See [Terminology](#terminology) under Settled.
 
 ### Waiting for an answer
 
-**Choice: question deadlines.** Use finite deadlines for unattended work. Approvals never outlast their turn; expiration declines the request. The proposed [AG-UI binding](bindings/agui.md#interrupts-and-frontend-tools) can close an exchange and keep the turn waiting on an independently present route. See [Question lifecycle](#question-lifecycle).
+**Choice: question deadlines.** Use finite deadlines for unattended work. Today an approval needs a present answerer and cannot outlast the turn, even if [AG-UI](bindings/agui.md#interrupts-and-frontend-tools) closes the exchange. For 0.2.0, [ADR 0034](adr/0034-approvals-that-wait.md#owner-decisions) proposes an opt-in: leave the unstarted call open until an operator-bounded deadline, then check a late allow in a continuation. Live-only remains the default. See [Question lifecycle](#question-lifecycle).
 
 ### Input during a turn
 
@@ -113,7 +113,7 @@ See [Erasure](#erasure) under Settled.
 - <a id="plugin-registration"></a>**Plugin registration.** Singleton capabilities are selected per session; names do not shadow, and replacement uses the [registration rules](contracts.md#plugins-and-capabilities).
 - <a id="active-plugin-set"></a>**Active plugin set.** An open session cannot add plugins; offering an already registered tool is not loading one. A child inherits the set except host-supplied MCP servers ([Plugins and capabilities](contracts.md#plugins-and-capabilities), [Subagents](contracts.md#subagents), [MCP servers](contracts.md#mcp-servers)).
 - <a id="terminology"></a>**Terminology.** A capability is a role a plugin can provide ([Glossary](../GLOSSARY.md#the-system)).
-- <a id="waiting-for-the-user"></a><a id="question-lifecycle"></a>**Question lifecycle.** The asker sets the deadline and the permitted wait behavior. A late answer to an eligible non-approval question can make a continuation ready; it is not a tool result ([Questions](contracts.md#questions), [ACP questions](bindings/acp.md#questions)).
+- <a id="waiting-for-the-user"></a><a id="question-lifecycle"></a>**Question lifecycle.** The asker sets the deadline and the permitted wait behavior. A late answer to an eligible non-approval question can make a continuation ready; it is not a tool result ([Questions](contracts.md#questions), [ACP questions](bindings/acp.md#questions)). [ADR 0034](adr/0034-approvals-that-wait.md) proposes a separate rule for pre-dispatch approval, not a new use of `leaveOpen`.
 - <a id="steering"></a>**Steering.** Supported steering joins after the current tool round; next-turn input and unsupported steering wait ([Input](contracts.md#input)).
 - <a id="turn-and-job-cancellation"></a>**Turn and job cancellation.** Cancellation hands back untaken input at the cutoff and closes unanswered questions of the cancelled work. Jobs survive turn cancellation unless declared otherwise, and closing cancels and waits for jobs ([Input](contracts.md#input), [Jobs](contracts.md#jobs), [ACP cancelling](bindings/acp.md#cancelling)).
 - <a id="model-changes"></a>**Model changes.** A change applies from the next turn and resets Provider state. Fallback to another model takes a new turn ([Settings](contracts.md#settings), [Provider state](contracts.md#provider-state)).
