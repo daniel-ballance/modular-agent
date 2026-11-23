@@ -912,7 +912,7 @@ class Agent:
         if self._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Agent is closed")
         parts = self._h.declarations(str(self._project))
-        value = _declaration(parts)
+        value = _declaration(parts, interface_tools=self._h.interface_enabled())
         runtime = parts[self._h.capabilities["runtime"][0]]
         environment = parts[self._h.capabilities["environment"][0]]
         store = parts[self._h.capabilities["history"][0]]
@@ -951,8 +951,6 @@ class Agent:
         )
         if queued_jobs != value["queuedInputAfterRestart"]:
             value["queuedJobReportsAfterRestart"] = queued_jobs
-        if self._h.interface_enabled():
-            value["interfaceTools"] = True
         return cast(JsonObject, value)
 
     async def _install_acp_mcp(

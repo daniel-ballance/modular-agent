@@ -8,7 +8,7 @@ from ma_runtime import Runtime
 from ma_runtime.turns import UNKNOWN, checked_tool_result, require_processed_result
 
 from . import hooks
-from ma_core.recovery import STEP_AFTER, step_checkpoint
+from ma_core.recovery import HANDOFF, STEP_AFTER, step_checkpoint
 from ma_core.wire import (
     STATUS_IN,
     call_out,
@@ -77,6 +77,7 @@ class HostedRuntime(Runtime):
             "durable": bool(self.supports.get("continuesAfterRestart")),
             "waiting_through_restart": bool(self.supports.get("waitingThroughRestart")),
             "nested_tools": False,
+            "interface_tools": self.supports.get("interfaceTools") is True,
             "queued_input_after_restart": "run"
             if self.supports.get("continuesAfterRestart")
             else "handedBack",
@@ -97,7 +98,7 @@ class HostedRuntime(Runtime):
             )
         else:
             source = queued["data"].get("source") or {}
-            started_by = (
+            started_by = queued["data"].get("startedBy") or (
                 {"kind": "job", "id": source["job"]}
                 if source.get("job")
                 else {"kind": "answer", "id": source["questions"][0]}
@@ -110,10 +111,13 @@ class HostedRuntime(Runtime):
                 turn,
                 "turn_start",
                 actor=queued["actor"],
-                first_input=self._taken_input(queued),
+                **(
+                    {}
+                    if queued.get("interface_continuation")
+                    else {"first_input": self._taken_input(queued)}
+                ),
                 data={
-                    "input": queued["id"],
-                    "source": source,
+                    **self._start_trigger(queued),
                     "startedBy": started_by,
                     **snapshot,
                     **segment,
@@ -171,13 +175,17 @@ class HostedRuntime(Runtime):
                     ),
                 }
             }
-            resume = queued["data"].get("resume", []) if queued else []
+            resume = (
+                queued["data"].get("resume", [])
+                if queued
+                else start["data"].get("continuationCalls", [])
+            )
             scope.continuing = set(resume)
             if recovering:
                 await scope.recover_model_attempts()
                 params["interrupted"] = await scope.interrupted(resume)
                 method = "resumeTurn"
-            elif resume:
+            elif resume or queued.get("interface_continuation"):
                 params["calls"] = scope.calls(await scope.entries(), resume)
                 method = "continueOpenCalls"
             else:
@@ -356,7 +364,7 @@ class TurnHost:
         pending = {
             e.get("call")
             for e in entries
-            if e.get("turn") == self.turn and e["kind"] in {"tool_deferred", "toolPending"}
+            if e.get("turn") == self.turn and e["kind"] in {"tool_deferred", "toolPending", HANDOFF}
         }
         self.open_recovered = [c["id"] for c in calls if c["id"] in pending]
         eligible = []
@@ -451,16 +459,27 @@ class TurnHost:
             pending = {
                 e["call"]
                 for e in entries
-                if e["kind"] in {"tool_deferred", "toolPending"}
-                and e.get("turn") == self.turn
-                and e["data"].get("requestIds")
+                if e.get("turn") == self.turn
+                and (
+                    e["kind"] == HANDOFF
+                    or e["kind"] in {"tool_deferred", "toolPending"}
+                    and e["data"].get("requestIds")
+                )
             } - settled
+            expired = {
+                e["call"] for e in entries if e["kind"] == HANDOFF and e.get("turn") == self.turn
+            } & settled
             if (
                 not isinstance(reported, list)
                 or not all(isinstance(cid, str) for cid in reported)
                 or len(reported) != len(set(reported))
-                or not set(reported) <= pending
-                or (kind in {"completed", "limit"} and set(reported) != pending)
+                or not set(reported) <= pending | expired
+                or (kind == "completed" and set(reported) - expired != pending)
+                or (
+                    kind == "limit"
+                    and set(reported)
+                    != pending - {e.get("call") for e in entries if e["kind"] == HANDOFF}
+                )
                 or (kind == "cancelled" and reported)
             ):
                 self.outcome_error = (
@@ -546,10 +565,26 @@ class TurnHost:
 
     async def settle(self, answer):
         entries = await self.entries()
+        handoffs = {
+            e["call"] for e in entries if e["kind"] == HANDOFF and e.get("turn") == self.turn
+        }
+        if handoffs:
+            if answer["outcome"] != "completed":
+                await self.api.session(
+                    "interface_settle",
+                    session=self.sid,
+                    turn=self.turn,
+                    reason="Originating turn did not complete",
+                )
+            done = {e.get("call") for e in await self.entries() if recorded_as(e, "tool_result")}
+            answer["open_calls"] = [cid for cid in answer["open_calls"] if cid not in done]
+            answer["shared_result"]["openToolCalls"] = answer["open_calls"]
         calls = {c["id"]: c for c in self.calls(entries)}
         calls.update({c["id"]: c for c in self.calls(entries, self.continuing)})
         for call in calls.values():
             cid = call["id"]
+            if cid in handoffs:
+                continue
             if cid in answer["open_calls"]:
                 if not any(
                     e["kind"] in {"tool_deferred", "toolPending"} and e.get("call") == cid
@@ -631,7 +666,8 @@ class TurnHost:
 
     async def definition(self, name):
         return next(
-            (d for d in await self.runtime._definitions(self.sid) if d["name"] == name), None
+            (d for d in await self.runtime._definitions(self.sid, self.turn) if d["name"] == name),
+            None,
         )
 
     tenant_limited = False
@@ -696,7 +732,7 @@ class TurnHost:
         if self.additions is None:
             self.additions = await self.api.session("prepare", session=self.sid, turn=self.turn)
         model_tools = self.settings.get("modelTools")
-        tools = await self.runtime._definitions(self.sid)
+        tools = await self.runtime._definitions(self.sid, self.turn)
         if model_tools is not None:
             tools = [t for t in tools if t["name"] in model_tools]
         d = {
@@ -878,7 +914,7 @@ class TurnHost:
                         e.get("call") == cid
                         and (
                             recorded_as(e, "tool_result")
-                            or e["kind"] in {"toolPending", "tool_deferred"}
+                            or e["kind"] in {"toolPending", "tool_deferred", HANDOFF}
                             and e.get("turn") == self.turn
                         )
                         for e in entries
@@ -1010,7 +1046,7 @@ class TurnHost:
                     e.get("call")
                     for e in entries
                     if recorded_as(e, "tool_result")
-                    or e["kind"] in {"tool_deferred", "toolPending"}
+                    or e["kind"] in {"tool_deferred", "toolPending", HANDOFF}
                     and e.get("turn") == self.turn
                 }
                 if any(
@@ -1125,6 +1161,29 @@ class TurnHost:
                 cid not in self.repeatable and cid not in self.continuing
             ):
                 raise WireError("Started call cannot safely repeat", "invalid_request")
+            if definition.get("interfaceSource"):
+                result = await self.api.session(
+                    "interface_dispatch",
+                    session=self.sid,
+                    turn=self.turn,
+                    step=step,
+                    call=call,
+                    definition=definition,
+                )
+                if result.get("open"):
+                    return {"callId": cid, "pending": result["pending"]}
+                if result.get("interface"):
+                    committed = next(
+                        e
+                        for e in await self.entries()
+                        if e["kind"] == "tool_result" and e.get("call") == cid
+                    )
+                    wire = result_out(
+                        {**committed["data"], "call": cid, "content": committed["content"]}
+                    )
+                    self.results[cid] = wire
+                    return wire
+                return await self.finish_tool(call, step, result, definition)
             source, offered_definition = self.registration_for(definition)
             started = await self.append(
                 "tool_started",
@@ -1224,6 +1283,7 @@ class TurnHost:
             "resultFeedback",
             "result_feedback",
             STEP_AFTER,
+            HANDOFF,
             ot.TURN_TRACE,
             ot.DISCLOSURE,
         } or kind.startswith(("question_", "job_")):
@@ -1276,7 +1336,7 @@ class TurnHost:
                     (
                         e
                         for e in entries
-                        if e["kind"] == "tool_deferred"
+                        if e["kind"] in {"tool_deferred", HANDOFF}
                         and e.get("call") == cid
                         and e.get("turn") == self.turn
                     ),

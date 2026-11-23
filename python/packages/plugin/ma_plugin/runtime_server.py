@@ -3,7 +3,7 @@
 import asyncio
 
 from ma_core import plain
-from ma_core.recovery import step_checkpoint
+from ma_core.recovery import HANDOFF, step_checkpoint
 
 from .rpc import WireError
 
@@ -20,6 +20,7 @@ class RuntimeServer:
                 "inputDuringTurn": runtime.declarations["steering"],
                 "waitingThroughRestart": durable,
                 "continuesAfterRestart": durable,
+                "interfaceTools": runtime.declarations.get("interface_tools", False),
                 "rewinding": False,
             },
         }
@@ -272,7 +273,7 @@ class PublicTurn:
         self.open.extend(
             e["toolCallId"]
             for e in history
-            if e["kind"] == "toolPending" and e.get("toolCallId") not in settled
+            if e["kind"] in {"toolPending", HANDOFF} and e.get("toolCallId") not in settled
         )
         calls = interrupted["calls"]
         if any(
@@ -418,6 +419,15 @@ class PublicTurn:
         # The host alone settles calls when execution or acknowledgement was interrupted.
         if outcome["kind"] == "cancelled":
             self.open.clear()
+        elif self.open:
+            entries = await self.history()
+            settled = {e.get("toolCallId") for e in entries if e["kind"] == "toolResult"}
+            handoffs = {e.get("toolCallId") for e in entries if e["kind"] == HANDOFF}
+            self.open[:] = [
+                cid
+                for cid in self.open
+                if cid not in settled and (outcome["kind"] == "completed" or cid not in handoffs)
+            ]
         await self.hook("turn.end", outcome=outcome, result=self.result)
         return {
             "outcome": outcome,
