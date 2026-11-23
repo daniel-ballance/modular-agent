@@ -18,7 +18,7 @@ The first invocation of `run.mjs` with a command runs every case, with a fresh f
 
 ## Launching a fixture
 
-The fixture is an SDK app, not a replacement AG-UI adapter. Use the real listener, Harness, Runtime, output gate and history store. There is no SDK implementation to launch yet. See [Serving AG-UI](../../docs/sdk/placement.md#serving-ag-ui) for the proposed setup. `fake-agent.mjs` is only a launch-mode self-test for the basic cases.
+The fixture is an SDK app, not a replacement AG-UI adapter. Use the real listener, Harness, Runtime, output gate and history store. For TypeScript, build the workspace and run `node conformance/agui/run.mjs -- "$(command -v node)" "$PWD/typescript/scripts/agui-ma.mjs"` from the repository root. The launcher uses `ma --agui --acp` for listener, encoding, history and stock conversation. Its SDK fixture supplies the registered frontend tool and the test controls for the other cases. See [Serving AG-UI](../../docs/sdk/placement.md#serving-ag-ui) for the proposed setup. `fake-agent.mjs` is only a launch-mode self-test for the basic cases.
 
 The kit starts the command in a new process group, with a fresh home, working directory and data directory, and without the inherited environment except `PATH`. It sets:
 
