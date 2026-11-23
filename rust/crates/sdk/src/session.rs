@@ -759,6 +759,7 @@ impl Session {
     fn result(&self, id: &str) -> Result<Option<PromptResult>> {
         let data = self.snapshot()?;
         if let Some(turn) = input_turn(&data, id)
+            && !self.inner.harness.is_turn_running(&self.id, &turn)
             && let Some(end) = data
                 .entries
                 .iter()
