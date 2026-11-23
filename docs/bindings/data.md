@@ -91,6 +91,8 @@ For [Interface-run tools](../contracts.md#interface-run-tools), a result report 
 
 The Harness MUST commit `modular-agent.interfaceHandoff` in the batch immediately after the matching `toolStarted`. The start MUST have `safeToRepeat: false` and `openWorld: true`. The checkpoint MUST match its start's turn, step and call and have no second checkpoint for that call. It is private control data: omit its payload from ordinary recipient views and omit the record from model context. Keep the route ID nonsecret. It shows intent to hand off, not receipt. It MUST NOT be used to authorize another handoff.
 
+The checkpoint's `data` is `{ sourceId: Id, actorId: Id, routeId: Id, rights: string[], deadline: Time }`. `sourceId` matches the registered executor source, `rights` is the executor's effective rights ceiling at handoff, and `deadline` is absolute. The checkpoint names the matching start in `sources`. Ordinary recipient views omit `data`.
+
 A terminal `toolResult` MUST keep the originating turn, step and call associations even when appended later, under the current head. On an accepted report it MUST name the reporting actor as top-level `actorId`; system settlements omit it. The writer MUST name the dispatch and checkpoint entry IDs in `sources` to preserve erasure lineage.
 
 The reader MUST fold starts, checkpoints and terminal results in append order. Only intact starts and checkpoints on the current branch can receive a report. A terminal result anywhere still settles the call. Copied checkpoints have no effect. Missing or erased provenance is not proof that nothing ran. If erasure affects a result that would have supplied context, the reader MUST NOT use the erased result or resume work that requires it.
