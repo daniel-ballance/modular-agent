@@ -23,6 +23,7 @@ type policyScope struct {
 
 type aclPolicy struct {
 	TokenFile string `json:"tokenFile"`
+	ClientID  string `json:"clientId,omitempty"`
 	policyScope
 }
 
@@ -164,7 +165,7 @@ func ReadACPPolicy(path string, optional, representation bool) (policy ACPPolicy
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(filepath.Dir(f.Name()), path)
 		}
-		actor.TokenFile = path
+		actor.TokenFile, actor.ClientID = path, row.ClientID
 		policy.Actors = append(policy.Actors, actor)
 	}
 	return policy, ValidateACPActorTokens(policy.Actors)

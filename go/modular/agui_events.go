@@ -27,6 +27,12 @@ func (x *agExchange) project(e api.Event) error {
 		return nil
 	}
 	switch e.Kind {
+	case "turn.start":
+		h, err := x.history(e.Turn)
+		if err != nil {
+			return err
+		}
+		return x.sendSnapshot(h)
 	case "step.start":
 		if x.steps[e.Step] {
 			return nil

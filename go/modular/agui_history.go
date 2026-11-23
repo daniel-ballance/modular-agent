@@ -25,7 +25,7 @@ type agHistory struct {
 	epoch    int
 }
 
-func (q *agRequest) history() (h agHistory, err error) {
+func (q *agRequest) history(beforeStepsOf ...string) (h agHistory, err error) {
 	h.epoch, err = q.epoch()
 	if err != nil {
 		return h, err
@@ -35,6 +35,14 @@ func (q *agRequest) history() (h agHistory, err error) {
 		return h, err
 	}
 	branch := snap.Branch()
+	if len(beforeStepsOf) > 0 {
+		for i, e := range branch {
+			if e.Turn == beforeStepsOf[0] && (e.Kind == "step.start" || e.Kind == "model.request" || e.Kind == "model") {
+				branch = branch[:i]
+				break
+			}
+		}
+	}
 	handoffs := api.InterfaceHandoffs(snap)
 	h.messages = []agObject{}
 	h.starts = map[string]api.Call{}

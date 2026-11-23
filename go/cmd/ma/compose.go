@@ -28,7 +28,7 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 	if o.transient {
 		durability = modular.Kept
 	}
-	opts := []modular.Option{modular.WithAgentName("ma"), modular.WithProject(o.project), modular.WithProviderAliases(providerAliases), modular.WithDataDir(d.state), modular.WithHistory(store), modular.WithDurability(durability), modular.WithPluginHost(o.acp), modular.WithJobReportsStartTurns(true), modular.WithLateAnswersStartTurns(true), modular.WithRefusedSettingsDuringTurn()}
+	opts := []modular.Option{modular.WithAgentName("ma"), modular.WithProject(o.project), modular.WithProviderAliases(providerAliases), modular.WithDataDir(d.state), modular.WithHistory(store), modular.WithDurability(durability), modular.WithPluginHost(o.acp || o.agui), modular.WithJobReportsStartTurns(true), modular.WithLateAnswersStartTurns(true), modular.WithRefusedSettingsDuringTurn()}
 	opts = append(opts, modular.WithCapacityLimits(o.policy.Limits))
 	if len(o.policy.Tenants) != 0 {
 		opts = append(opts, modular.WithTenants(o.policy.Tenants))
@@ -52,7 +52,7 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 		}
 		return modular.New(ctx, append(opts, modular.WithConformanceFixtures(), modular.WithTool(files.FixtureBash()), modular.WithTool(files.Tools("")[0]))...)
 	}
-	if !o.acp {
+	if !o.acp || o.agui {
 		opts = append(opts, mcp.WithServers(d.mcp(o.project, stderr), func(err error) { fmt.Fprintln(stderr, err) }))
 	}
 	opts = append(opts, modular.WithPlugin(files.Plugin(filepath.Join(d.state, "output"))), modular.WithTool(codemode.Tool(codemode.StandardLimits())),
