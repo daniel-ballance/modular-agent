@@ -103,7 +103,7 @@ The SDK adds Ajv 8 (its [2020-12 entry point](https://ajv.js.org/json-schema.htm
 | 17. Pending erasure | `httpHistory(url, tokenFile)` discovers the [pending-erasure registry profile](../../../docs/bindings/history-http.md#pending-erasure-registry-profile-pendingerasure-1). Without version `1` the composition declares `erasure: false`. With it, the agent checks plans before handoff and a later writer completes them under its lease. `Session.erase()` reports confirmed and pending pairs and out-of-reach descriptions. Local history still uses its own SQLite registry. `fileHistory(dir, { pendingErasureDir })` can keep that local registry outside history backups. |
 | 18. ma policy | `ma` reads the default `policy.json` or `--policy FILE` before protected project setup, applies principals and exact scope on both ACP transports, and keeps the one-token shorthand. `ma --declaration` prints operator byte bounds under `limits`. |
 | 19. Telemetry | The Harness declares `telemetry: 1` on the agent and session. It records metadata only through `@opentelemetry/api`. Set `createAgent({ agentName })` to a stable, non-sensitive name. The app registers its tracer and meter providers and an async context manager before composition, and owns export and shutdown. The SDK installs none of them. |
-| 20. Interface-run tools | `createAgent({ interfaceTools })` registers model-only sources for configured actors and routes. An embedded Interface attaches to an open session, advertises exact definitions and receives executable calls only after the Harness commits the start and checkpoint. A valid report settles once through `tool.after` and queues a continuation without a new input. Embedded and served Runtimes opt in. ACP projects `interfaceTools: true` when supported but has no executor or reporting methods. The AG-UI adapter is not part of this change. |
+| 20. Interface-run tools | `createAgent({ interfaceTools })` registers model-only sources for configured actors and routes. An embedded Interface attaches to an open session, advertises exact definitions and receives executable calls only after the Harness commits the start and checkpoint. A valid report settles once through `tool.after` and queues a continuation without a new input. Embedded and served Runtimes opt in. ACP projects `interfaceTools: true` when supported but has no executor or reporting methods. AG-UI uses the deferred connection at run end. |
 
 ### Interface-run tools
 
@@ -113,6 +113,40 @@ Use `agent.connectInterfaceTools(sessionId, { actor, routeId, onHandoff, defer? 
 - `onHandoff({ sessionId, turnId, call, deadline })` is the synchronous delivery boundary, not a queue for later delivery. For a delayed send set `defer: true` and call `connection.release(callId)` when ready; the Harness checks the request again before calling `onHandoff`. Do not execute calls copied from events or history.
 - Call `connection.reportInterfaceToolResult({ callId, status, content, value? })` after the originating turn ends. It returns `{ status: "accepted" }`, `{ status: "alreadySettled" }` or `{ status: "refused", reason?: "notReady" }`. An early report can be sent again after turn end. If result processing fails, the SDK commits a minimal result and raises the processing error. A report does not run a tool or grant authority.
 - Call `connection.disconnect()` when the connection ends. This clears the advertisement without settling the call. A new authenticated connection to the same actor and route may report without advertising, but it cannot receive the executable request again. No reconnect changes the deadline.
+
+### Serving AG-UI
+
+```ts
+const listener = await agent.serveAgui({
+  listen: "127.0.0.1:0",
+  actors: [{ tokenFile, actor, clientId: "editor" }],
+  acp: true, // also accept ACP WebSocket upgrades on /
+});
+console.log(listener.url); // HTTP origin
+await listener.close(); // detach; close the agent separately when finished
+```
+
+Send a bearer token on every [binding route](../../../docs/bindings/agui.md). Set `tls: { certFile, keyFile, clientCaFile? }` for HTTPS; supplying a client CA also requires a client certificate. Creation uses the configured project and optional `tenant`. A token's project and tenant lists and rights ceiling apply on every attachment. Clients of the same actor can have separate IDs. Rotated tokens can share an ID only within the same principal and scope. Browser requests default to same-origin; use `origins` to allow other exact origins.
+
+Use the committed messages from the last snapshot, with or without its `MA-History-Cursor`. Refresh from the thread route after a conflict. An Interface tool's registration uses the client ID as its `routeId`. Advertise only its name, description and parameters. Execute only on a qualifying live terminal event, never on reconnect. Return a tool message on the same route. Open the separate presence stream before asking for an in-turn interrupt; use `resume[].payload` to answer. A secret needs another Interface.
+
+Output hooks receive the actor as recipient. AG-UI reply and interrupt envelopes also identify the authenticated `clientId`. Gate message content at `entry` or `reply` with method `agui.messages`. A withheld result withholds its call group. For state, pass `statePlugin: { name, snapshot(threadId) }`; the callback returns the plugin's current `{ revisionId, snapshot }`. The plugin emits the state events named in the binding. For explicit foreign events, map the plugin name to a source label in `rawSources` and emit `modular-agent.agui.raw` with `{ event }`. Neither option adds a Harness document store.
+
+Set `traceTrusted: true` on a token entry to accept a work POST's trace parent. `traceStateVendors` lists vendor keys accepted into the local operation context. Trace headers on presence and snapshot reads are ignored. No baggage is accepted. `onWarning(field)` receives field names, not payloads.
+
+Run `typescript/scripts/check-agui.sh` after building. It installs the kit in a temporary directory. Four cases launch the standard ma. The other 21 use a disposable SDK application with operator-registered tools and controls. All 25 cases run, including TLS, the stock client, clocks, release races and four process kills.
+
+#### Gaps in the core operations
+
+The [binding](../../../docs/bindings/agui.md#interrupts-and-frontend-tools) says: “If the group becomes unsafe before release, withhold it and use `RUN_ERROR`; the Harness settles the call if it can confirm non-delivery, otherwise it remains open until its deadline.” The adapter withholds the group and sends the error. The Interface tool handle has no operation to confirm non-delivery of a staged group rejected by the adapter's final output gate. The adapter leaves that call with the Harness until settlement; it does not manufacture a failed report from the actor.
+
+The [run rules](../../../docs/bindings/agui.md#runs-and-events) say: “Use SSE comments while waiting; if the origin becomes ineligible, end with `RUN_ERROR`.” The follower detects a branch move, erasure, writer loss, session end and loss of watch. There is no core notification for a ready continuation that fails to reserve a turn and never starts. In that case a waiting exchange can stay open; it cannot claim a turn outcome. The snapshot route remains available.
+
+### Proposed standard configuration text
+
+`docs/reference/standard-configuration.md` does not yet list `--agui`. Proposed text:
+
+> `--agui` serves the AG-UI HTTP and SSE binding on `--listen ADDR`. It requires a listener and never uses stdio. With `--acp`, the same listener accepts ACP WebSocket upgrades at `/`. `ma` prints the HTTP origin when ready. `ma` has no TLS options; bind to loopback. Use `--token-file FILE` for the local user with client ID `ma-local`, or supply policy `actors` with a nonempty `clientId` on every entry. Tokens that share a client ID must bind the same principal and scope. The operator's `--project` selects the AG-UI creation project; the single-user configuration creates sessions without a tenant.
 
 ### Telemetry context
 

@@ -105,7 +105,7 @@ export function fakeFixture(name, fault, script) {
     const stepName = randomUUID();
     const messageId = `ma:assistant:${stepName}`;
     push('STEP_STARTED', { stepName });
-    record(s, 'response', { text: stored }, { stepId: stepName });
+    record(s, 'response', {}, { stepId: stepName, message: { role: 'assistant', content: [{ type: 'text', text: stored }], stop: 'finished' } });
     if (reasoning) {
       const id = { messageId: 'ma:reasoning:' + stepName };
       push('REASONING_START', id);
@@ -150,7 +150,7 @@ export function fakeFixture(name, fault, script) {
       if (!eligible(s, client)) return [409, 'conflict'];
       const decisions = resume.filter(r => r.interruptId === s.question.id);
       if (decisions.length !== 1) return [409, 'conflict'];
-      const [{ status, value }] = decisions;
+      const [{ status, payload: value }] = decisions;
       const approval = s.question.reason === 'approval';
       if (!['resolved', 'cancelled'].includes(status) || (status === 'resolved' && (approval ? typeof value?.allow !== 'boolean' : !['yes', 'no'].includes(value)))) return [400, 'invalid_request'];
       const id = s.question.toolCallId;

@@ -33,6 +33,7 @@ MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test
 node packages/ma/dist/src/main.js              # the standard terminal agent
 node packages/ma/dist/src/main.js --acp        # ACP over stdio
 node packages/ma/dist/src/main.js --acp --listen 127.0.0.1:7401 --token-file /path/to/token
+node packages/ma/dist/src/main.js --agui --acp --listen 127.0.0.1:7401 --token-file /path/to/token
 ```
 
 `npm run agent` still starts the development CLI for the base build.

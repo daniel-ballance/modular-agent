@@ -117,7 +117,7 @@ export interface Transaction {
 	setSetting(key: string, value: unknown, actorId?: string): void;
 	input(options: InputOptions): void;
 }
-export interface FollowOptions { recipient: string; fromEntry?: number; raw?: boolean; onLag?: () => void }
+export interface FollowOptions { recipient: string; fromEntry?: number; raw?: boolean; onLag?: () => void; /** Ignore unneeded events before reserving follower capacity. */ include?(event: AgentEvent): boolean }
 
 /** Everything a plugin can do. A plugin can do nothing else. */
 export interface PluginApi {
@@ -209,7 +209,7 @@ export interface PluginApi {
 	// following along
 	follow(sessionId: string, options: FollowOptions, listener: (event: AgentEvent) => unknown): (() => void) & { idle(): Promise<void> };
 	flushOutput(sessionId: string, recipient: string): Promise<void>;
-	gateOutput<T>(sessionId: string, recipient: string, type: string, data: T): Promise<T | undefined>;
+	gateOutput<T>(sessionId: string, recipient: string, type: string, data: T, ids?: Pick<AgentEvent, "turnId" | "stepId" | "toolCallId">): Promise<T | undefined>;
 	declaration(sessionId?: string): Declaration;
 	modelAccess(sessionId: string): ModelAccess | undefined;
 	// settings
@@ -236,6 +236,7 @@ interface InterfaceConnection extends InterfaceToolConnectionOptions {
 	tools: Map<string, ToolDefinition>;
 }
 interface LiveHandoff {
+	deliver(request: InterfaceToolHandoff): void;
 	connection: InterfaceConnection;
 	released: boolean;
 	check: () => boolean;
@@ -514,13 +515,14 @@ export class Harness {
 				const followers = [...(this.sessions.get(id)?.followers ?? [])].filter((f) => f.recipient === recipient);
 				await Promise.all(followers.map((f) => f.idle()));
 			},
-			gateOutput: async (sessionId, recipient, type, data) => {
+			gateOutput: async (sessionId, recipient, type, data, ids) => {
 				const s = this.sessions.get(sessionId);
 				const freshness = s && await this.admitHistory(s);
 				let out: typeof data | undefined;
 				const follower = new Follower(this.hooks, recipient, false, (e) => { if (e.type === type) out = e.data; }, (e) => this.problem("harness", "output gate", e), undefined, undefined,
 					s && this.httpErasure() ? () => this.admitHistory(s).then(current => { if (current !== freshness) throw failure("unavailable", "Erasure changed the output view"); }) : undefined);
-				follower.push({ type, time: this.now(), sessionId, source: pluginName, data });
+				follower.push({ type, time: this.now(), sessionId, source: pluginName, ...ids, data });
+				if (type === "model.output") follower.push({ type: "model.streamEnd", time: this.now(), sessionId, source: pluginName, ...ids });
 				await follower.idle();
 				if (s && await this.admitHistory(s) !== freshness) throw failure("unavailable", "Erasure changed the output view");
 				return out;
@@ -643,7 +645,7 @@ export class Harness {
 				const key = `output:${this.newId()}`;
 				if (!this.reservations.reserve(s, key, { bufferedBytes: bytes })) return undefined;
 				return () => this.reservations.release(s, key);
-			}, event => this.eventAdmission(event));
+			}, event => this.eventAdmission(event), options.include);
 		// History first, from the requested point, then live events.
 		const from = options.fromEntry ?? s.order.length;
 		for (const id of s.order.slice(from)) {
@@ -1018,6 +1020,11 @@ export class Harness {
 		}
 		this.maybeContinueOpenCalls(s);
 		return id;
+	}
+
+	/** Check the operator's creation ceiling before allocating a provisional session. */
+	tenantAllows(tenant: string | undefined, right: Authority): boolean {
+		return tenant === undefined || this.tenants.get(tenant)?.rights.includes(right) === true;
 	}
 
 	/** Discovery is the open authority check without joining or taking a writer lease. */
@@ -2034,6 +2041,8 @@ export class Harness {
 			throw error;
 		}
 		q.trace ??= currentSpan();
+		const offerScope = this.offerScope.getStore();
+		if (offerScope) this.queuedOffers.set(q, offerScope);
 		const receipt: InputReceipt = { inputId: q.id, taken };
 		if (q.when !== "propose") {
 			if (taken === "now") this.startTurn(s, q);
@@ -2164,7 +2173,7 @@ export class Harness {
 		} : undefined);
 		const settings = this.turnSettings(s, model?.model);
 		const modelTools = s.settings.modelTools;
-		const interfaceOffer = this.interfaceOffer(s);
+		const interfaceOffer = this.interfaceOffer(s, this.queuedOffers.get(queued));
 		const tools = this.toolDefinitions(s).filter((t) => (!t.callers || t.callers.includes("model")) &&
 			(!this.interfaceSources.has(t.name) || interfaceOffer.has(t.name)) &&
 			(modelTools == null || (Array.isArray(modelTools) && modelTools.includes(t.name))));
@@ -2847,6 +2856,12 @@ export class Harness {
 
 	// ---------- Interface tool routes ----------
 
+	// A request-scoped offer follows its admission, not whichever connection happens
+	// to be present when a queued turn starts. Embedded connections remain ambient.
+	private offerScope = new AsyncLocalStorage<symbol>();
+	private queuedOffers = new WeakMap<QueuedInput, symbol>();
+	private connectionOffers = new WeakMap<InterfaceConnection, symbol>();
+	withInterfaceOffer<T>(scope: symbol, work: () => T): T { return this.offerScope.run(scope, work); }
 	private interfaceSources = new Map<string, InterfaceToolSource>();
 	private interfaceConnections = new WeakMap<Session, Set<InterfaceConnection>>();
 	private interfaceWork = new WeakMap<Session, Map<string, LiveHandoff>>();
@@ -2902,6 +2917,8 @@ export class Harness {
 		const connections = this.interfaceConnections.get(s) ?? new Set();
 		this.interfaceConnections.set(s, connections);
 		connections.add(connection);
+		const scope = this.offerScope.getStore();
+		if (scope) this.connectionOffers.set(connection, scope);
 		return {
 			advertise: tools => {
 				if (!this.interfacePresent(s, connection)) throw failure("not_open", "Interface connection ended");
@@ -2929,9 +2946,10 @@ export class Harness {
 		return !s.closed && !s.closing && !s.suspended && this.sessions.get(s.id) === s && !!this.interfaceConnections.get(s)?.has(connection);
 	}
 
-	private interfaceOffer(s: Session): Map<string, InterfaceConnection> {
+	private interfaceOffer(s: Session, scope?: symbol): Map<string, InterfaceConnection> {
 		const offer = new Map<string, InterfaceConnection>();
 		for (const connection of this.interfaceConnections.get(s) ?? []) {
+			if (scope !== this.connectionOffers.get(connection)) continue;
 			const rights = this.executorRights(s, connection);
 			if (!this.interfacePresent(s, connection) || !rights.includes("tools") || !rights.includes("watch")) continue;
 			for (const name of connection.tools.keys()) if (!offer.has(name)) offer.set(name, connection);
@@ -3005,7 +3023,8 @@ export class Harness {
 				(!this.pendingRegistry() || this.checkPending(s) === freshness));
 			if (!committed.length) return refused();
 			const pinned = AsyncLocalStorage.snapshot();
-			const live: LiveHandoff = { connection, released: false, check: () => pinned(() => eligible() && deadline > this.now()) };
+			const live: LiveHandoff = { connection, released: false, check: () => pinned(() => eligible() && deadline > this.now()),
+				deliver: request => pinned(() => this.deliverHandoff(s, live, request)) };
 			const work = this.interfaceWork.get(s) ?? new Map();
 			this.interfaceWork.set(s, work);
 			work.set(call.id, live);
@@ -3055,7 +3074,7 @@ export class Harness {
 			if (await this.admitHistory(s) !== freshness) return false;
 			this.checkWriter(s);
 			if (!live.check()) return false;
-			this.deliverHandoff(s, live, request);
+			live.deliver(request);
 			return true;
 		});
 	}
@@ -3139,7 +3158,7 @@ export class Harness {
 			const span = startOperation("modular_agent.interface.report", { ...conversation(s.id) }, { parent: parent ?? null });
 			return span.observe(async () => {
 				const settled = await this.settleInterfaceCall(s, item, { report, actorId: connection.actor.id, authorized });
-				this.maybeContinueOpenCalls(s);
+				this.maybeContinueOpenCalls(s, currentSpan());
 				if (settled?.error) throw settled.error;
 				return settled ? { status: "accepted" } : refused;
 			});
@@ -3925,9 +3944,12 @@ export class Harness {
 			if (!start || !owners.length && !jobs.length) continue;
 			const startedBy: QueuedInput["startedBy"] = record.kind === "toolResult" ? { kind: "toolResult", id: record.id }
 				: { kind: "answer", id: (record.data as Answer).requestId };
-			s.followUps.push({ id: `continue:${origin}`, content: [], actorId: owners[0] ?? start.actorId ?? "harness",
+			const queued: QueuedInput = { id: `continue:${origin}`, content: [], actorId: owners[0] ?? start.actorId ?? "harness",
 				authorityActors: owners, authorityJobs: jobs, startingRights: this.recordedTurnRights(branch, origin),
-				when: "after", startedBy, kind: "continue", continueTurnId: origin, trace, sources });
+				when: "after", startedBy, kind: "continue", continueTurnId: origin, trace, sources };
+			const scope = this.offerScope.getStore();
+			if (scope) this.queuedOffers.set(queued, scope);
+			s.followUps.push(queued);
 		}
 		this.startQueued(s);
 	}
@@ -4240,6 +4262,7 @@ class Follower {
 		private onLag?: () => void,
 		private reserve?: (bytes: number) => (() => void) | undefined,
 		private admit?: (event: AgentEvent) => Promise<void> | undefined,
+		private include?: (event: AgentEvent) => boolean,
 	) {}
 
 	get closed() { return this.disconnected; }
@@ -4259,7 +4282,7 @@ class Follower {
 	}
 
 	push(event: AgentEvent): void {
-		if (this.disconnected) return;
+		if (this.disconnected || this.include && !this.include(event)) return;
 		const size = resourceBytes(event);
 		const lease = this.reserve?.(size);
 		if (this.pending >= 1024 || this.bytes + size > 64 * 1024 * 1024 || this.reserve && !lease) {

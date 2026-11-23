@@ -22,7 +22,7 @@ import { formerProviderIds, modelRef, providerId } from "./provider-ids.js";
 
 function parse(argv: string[]) {
   const opts: { command?: string; project: string; runtime: "durable" | "transient"; session?: string; prompt?: string;
-    resume?: boolean; verbose?: boolean; json?: boolean; history?: boolean; declaration?: boolean; acp?: boolean;
+    resume?: boolean; verbose?: boolean; json?: boolean; history?: boolean; declaration?: boolean; acp?: boolean; agui?: boolean;
     listen?: string; tokenFile?: string; policy?: string;
     trust?: boolean; all?: boolean; help?: boolean; version?: boolean; settings: Settings } = { project: process.cwd(), runtime: "durable", settings: {} };
   for (let i = 0; i < argv.length; i++) {
@@ -39,6 +39,7 @@ function parse(argv: string[]) {
       case "--declaration": opts.declaration = true; break;
       case "--trust-project": opts.trust = true; break;
       case "--acp": opts.acp = true; break;
+      case "--agui": opts.agui = true; break;
       case "--listen": opts.listen = value(); break;
       case "--token-file": opts.tokenFile = value(); break;
       case "--policy": opts.policy = value(); break;
@@ -145,10 +146,12 @@ async function main(argv: string[]) {
   const opts = parse(argv);
   if (opts.help) { console.log(HELP); return 0; }
   if (opts.version) { console.log("ma 0.1.0 (typescript)"); return 0; }
-  if (opts.listen !== undefined && (!opts.acp || !opts.listen || opts.command || opts.declaration)) throw new Error("--listen requires --acp");
+  const serving = opts.acp || opts.agui;
+  if (opts.agui && !opts.listen) throw new Error("--agui requires --listen");
+  if (opts.listen !== undefined && (!serving || !opts.listen || opts.command || opts.declaration)) throw new Error("--listen requires --acp or --agui");
   if (opts.tokenFile !== undefined && !opts.listen) throw new Error("--token-file requires --listen");
   const policy = await loadPolicy(p.config, opts);
-  if (opts.acp && (opts.prompt !== undefined || opts.session || opts.trust || opts.resume)) throw new Error("with --acp the client creates sessions and grants trust");
+  if (serving && (opts.prompt !== undefined || opts.session || opts.trust || opts.resume)) throw new Error("when serving, the client creates sessions and the operator grants trust");
   let project = await realpath(opts.project);
   if (opts.command === "skills") {
     const { skills, problems } = await skillsFor(p, project);
@@ -210,7 +213,7 @@ async function main(argv: string[]) {
       ? claude({ project: cwd }) : undefined;
     const claudeReady = claudeProvider && await claudeProvider.available();
     if (!model && !inspecting && claudeReady) model = "claude/claude-sonnet-5-5";
-    if (!model && !inspecting && !opts.acp) throw new Error(noModel);
+    if (!model && !inspecting && !serving) throw new Error(noModel);
     if (conformance) settings.modelTools = null;
     delete settings.model;
     const providers = script ? [script] : conformance ? [] : [
@@ -218,17 +221,17 @@ async function main(argv: string[]) {
       grok({ logins: auth, ...identity, modelOverrides: grokOverrides }),
     ];
     const plugins = [standardFileTools({ spill: join(p.state, "output") }), codemode(), standardPrompt(p)];
-    if (!opts.acp) plugins.push(standardMcpTools({ servers: projectMcp }));
+    if (!serving) plugins.push(standardMcpTools({ servers: projectMcp }));
     if (claudeProvider && (model?.startsWith("claude/") || opts.command === "models")) plugins.push(definePlugin({
       name: "provider.claude", setup: r => r.provider(claudeProvider), stop: claudeProvider.close,
     }));
     else claudeProvider?.close();
     return createAgent({ ...base, project: cwd, settings, credentials: auth.credentials(), model: opts.command === "models" ? undefined : model, providers, plugins,
       compaction: !conformance, conformance, questionsOutlastTurns: true, jobReportsStartTurns: true, settingsDuringTurn: "refused",
-      pluginHost: opts.acp, reopenModelAliases: formerProviderIds });
+      pluginHost: serving, reopenModelAliases: formerProviderIds });
   };
   const scoped = opts.listen ? policy.actors?.some(actor => actor.projects !== undefined) : policy.stdio?.projects !== undefined;
-  const agent = await build(project, modelRef(opts.settings.model) ?? savedModel, !opts.acp || !scoped);
+  const agent = await build(project, modelRef(opts.settings.model) ?? savedModel, !serving || !scoped);
   try { return await run(agent); } finally { await agent.close(); }
 
   async function run(agent: Agent) {
@@ -241,7 +244,7 @@ async function main(argv: string[]) {
       console.log(JSON.stringify({ ...agent.declaration(), limits: { session, tenant, agent: overall } }, null, 2));
       return 0;
     }
-    if (opts.acp) {
+    if (serving) {
       const acp = { projectMcp, compose: (cwd: string, saved?: import("@modular-agent/core").SessionInfo) => {
         if (!scoped && cwd === project && (!saved || agent.models().some(m => `${m.provider}/${m.id}` === modelRef(saved.settings.model)))) {
           return Promise.resolve(agent);
@@ -249,8 +252,9 @@ async function main(argv: string[]) {
         return build(cwd, modelRef(saved?.settings.model));
       } };
       if (opts.listen) {
-        const actors = policy.actors ?? [{ tokenFile: opts.tokenFile!, actor: defaultAcpActor() }];
-        const server = await agent.serveAcp({ ...acp, listen: opts.listen, actors });
+        const actors = policy.actors ?? [{ tokenFile: opts.tokenFile!, actor: defaultAcpActor(), clientId: "ma-local" }];
+        const server = opts.agui ? await agent.serveAgui({ ...acp, listen: opts.listen, actors: actors.map(a => ({ ...a, clientId: a.clientId! })), acp: !!opts.acp })
+          : await agent.serveAcp({ ...acp, listen: opts.listen, actors });
         process.stdout.write(server.url + "\n");
         await new Promise<void>((resolve, reject) => {
           const stop = () => {
