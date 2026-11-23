@@ -28,22 +28,33 @@ Decisions that are hard to reverse, surprising without context and the result of
 There is no hosted CI. Run the checks locally before pushing:
 
 ```sh
-scripts/check.sh --quick      # about 10 minutes: builds, lint, SDK tests, shared scenarios, reference checks
-scripts/check.sh              # full run, about 70 minutes: every suite and the binding kits
-scripts/check.sh go python    # only those languages; cross-language steps need all four
+scripts/check.sh --quick      # builds, lint, SDK tests and cross-language checks
+scripts/check.sh              # every suite and the binding kits
+scripts/check.sh go python    # only the Go and Python lanes
+scripts/check.sh --serial     # one step at a time, in the original order
+scripts/stress.sh 3           # three independent full checks at once
 ```
 
-Each step writes its log to a folder the script names at the end. The checks need Linux with unprivileged user, PID and mount namespaces, [mise](https://mise.jdx.dev) (which pins Rust and Go), Node.js 22 or later, and [uv](https://docs.astral.sh/uv/) (which pins Python 3.13). Set `TMPDIR` to a folder on disk if `/tmp` is small; the script defaults to `~/.cache/ma-std-tmp`.
+Each selected language runs in its own lane. A failing step does not stop that lane or the others. The shared scenarios, reference checks, demo, telemetry peer placements and erasure matrix wait for all four lanes. They are skipped if you select fewer than four languages. The erasure pairings also run together unless you pass `--serial`.
+
+The script prints each finished step with its lane and elapsed time. It prints the wall time and log folder in the final summary. On the 32-core reference machine the old serial run took about 79 minutes, the old quick run took 11 minutes, and the old erasure matrix took 17 minutes. During a concurrent stress run, the quick steps took about 15½ minutes and the parallel matrix took about 4½ minutes. Both exposed failures. Cold builds and other work on the machine affect these times.
+
+Use `scripts/stress.sh N [check.sh options]` to reproduce failures under load. It copies the tracked files as they are on disk, including uncommitted changes to tracked files. Each check builds from scratch and writes to its own scratch directory. Allow disk space for all the builds. The final table counts how many runs failed each step and lists their log paths. The script keeps the logs and removes the build trees. A check that fails intermittently is a bug to fix, not to retry until it passes.
+
+The checks need Linux with unprivileged user, PID and mount namespaces, [mise](https://mise.jdx.dev) (which pins Rust and Go), Node.js 22.12 or later, and [uv](https://docs.astral.sh/uv/) (which pins Python 3.13). Set `TMPDIR` to a folder on disk if `/tmp` is small; the script defaults to `~/.cache/ma-std-tmp`.
 
 A coding agent's shell commands may run inside a systemd scope that ends with the agent's process; T3 Code does this. Ending the scope kills everything in it, including a check started with `nohup` or `setsid`. Start a long run as its own user unit instead, so it survives:
 
 ```sh
+mkdir -p "$HOME/.cache/ma-std-tmp"
 systemd-run --user --unit=ma-check --collect --same-dir \
   --setenv=PATH="$PATH" --setenv=TMPDIR="$HOME/.cache/ma-std-tmp" \
-  -p StandardOutput=file:"$HOME/.cache/ma-std-tmp/check.log" -p StandardError=file:"$HOME/.cache/ma-std-tmp/check.log" \
+  -p Delegate=yes -p StandardOutput=file:"$HOME/.cache/ma-std-tmp/check.log" -p StandardError=inherit \
   scripts/check.sh
 systemctl --user is-active ma-check    # active while it runs
 ```
+
+For a stress run, use a different unit name and log file and pass `scripts/stress.sh 3` instead of `scripts/check.sh`.
 
 On an Apple silicon Mac, run `scripts/macos-check.sh` from a fresh clone in a native arm64 shell. It checks for mise, Node.js 22 or later, uv and the Xcode command line tools. It builds all four `ma` programs, including the Go Monty worker, then runs the language suites, reference checks and ACP kits. It needs no sudo. It uses a temporary home, removes it when the run ends and leaves the logs at the paths in its summary table.
 
@@ -60,8 +71,6 @@ What the full run covers:
 | `scripts/check-links.mjs` | Every relative link and anchor in the Markdown resolves |
 
 To run only the ADR 0030 kits for a built language, use `scripts/production-kits.sh rust` (or `typescript`, `go` or `python`). Use the builds from `scripts/check.sh`, including the Rust `history_service` example or Go `modular-service`, and install the kit dependencies with `npm ci --prefix conformance/acp` and `npm ci --prefix conformance/tools`. The runner uses disposable loopback listeners, tokens and stores. It checks ACP on stdio and over direct WebSocket listeners where available; Go's base agent serves ACP on stdio only. The full check runs this step for each selected language; `--quick` skips it.
-
-A check that fails intermittently is a bug to fix, not to retry until it passes.
 
 To look at traces while working on [telemetry](docs/telemetry.md), run `scripts/phoenix.sh start`. It starts [Arize Phoenix](https://arize.com/docs/phoenix) in podman or docker on loopback, with authentication off, from a pinned image. Point an exporter at it with `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:6006` and `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`; its HTTP endpoint does not take JSON. Phoenix shows `invoke_agent`, `chat` and `execute_tool` spans as agent, model and tool steps, and groups them by `gen_ai.conversation.id`. Its span API (`/v1/projects/default/spans`) does not return resource attributes such as `service.name`; check those at an OTLP receiver. It runs as the systemd user unit `ma-phoenix` where one is available, so it outlives the shell that started it. `scripts/phoenix.sh stop` stops it and keeps its traces in the `ma-phoenix-data` volume; `scripts/phoenix.sh reset` also deletes them. To open it from another device on your tailnet without MagicDNS, forward the port with `tailscale serve --bg --tcp=6006 tcp://127.0.0.1:6006` and browse to `http://TAILSCALE-IP:6006`; raw TCP forwarding does not depend on the hostname the browser sends. The checks do not need it.
 
