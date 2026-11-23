@@ -1,3 +1,7 @@
+#[cfg(target_os = "linux")]
+#[path = "resume_open/crash.rs"]
+mod crash;
+
 use serde_json::json;
 use std::process::Command;
 

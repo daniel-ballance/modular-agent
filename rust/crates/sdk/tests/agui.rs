@@ -1,3 +1,6 @@
+#[path = "agui/listing.rs"]
+mod listing;
+
 use modular_agent::{
     AcpActor, Agent, AguiActor, AguiOptions, AguiServer, InterfaceToolSource, Plugin,
     testing::scripted_provider,
@@ -214,15 +217,25 @@ async fn left_open_exchange(
     });
     let agent = Agent::builder()
         .project(dir.path())
+        .data_dir(dir.path().join("data"))
+        .durability(modular_agent::Durability::Kept)
         .tool(ask)
         .provider(scripted_provider(
             json!([{"toolCalls":[{"name":"choose","input":{}}]},{"text":"Finished."}]),
         ))
         .build()
         .await?;
-    let server = serve(&agent, dir.path()).await?;
+    let server = listing::clients(&agent, dir.path()).await?;
     let id = thread(&server).await?;
     let first = exchange(&server, input(&id, "start", json!("Choose"))).await?;
+    for (token, questions) in [(TOKEN, 1), (listing::READER, 0)] {
+        let page = listing::list_ok(&server, token, "").await?;
+        assert_eq!(
+            page["threads"][0]["waiting"],
+            json!({"questions":questions,"toolCalls":0,"turn":"none"})
+        );
+        assert!(!page.to_string().contains("Which?"));
+    }
     let end = &first.last().unwrap()["outcome"];
     assert_eq!(end["type"], "interrupt");
     let interrupt = &end["interrupts"][0];
@@ -242,6 +255,8 @@ async fn left_open_exchange(
     assert_eq!(snapshot["waiting"]["questions"][0], *interrupt);
     let next=exchange(&server,json!({"protocolVersion":"1.0","threadId":id,"runId":"answer","messages":snapshot["messages"],"resume":[{"interruptId":interrupt["id"],"status":"resolved","payload":"second"}]})).await?;
     assert_eq!(next.last().unwrap()["outcome"]["type"], "success");
+    let page = listing::list_ok(&server, TOKEN, "").await?;
+    assert_eq!(page["threads"][0]["waiting"]["questions"], 0);
     assert!(
         next.iter()
             .any(|e| e["type"] == "TEXT_MESSAGE_CONTENT" && e["delta"] == "Finished.")
