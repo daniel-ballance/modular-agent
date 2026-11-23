@@ -1,7 +1,9 @@
 package subagents_test
 
 import (
+	"bufio"
 	"context"
+	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/durable"
 	"github.com/daniel-ballance/modular-agent/go/internal/runtimetest"
@@ -17,9 +19,10 @@ import (
 func TestSubagentSIGKILLRecovery(t *testing.T) {
 	if root := os.Getenv("M3_SUBAGENT_ROOT"); root != "" {
 		release := make(chan struct{})
+		started := make(chan struct{}, 1)
 		p := scripts(func(ctx context.Context, r api.Request, _ func(api.Part)) (api.Response, error) {
 			if first(r) == "child task" {
-				_ = os.WriteFile(filepath.Join(root, "child-started"), []byte("yes"), 0600)
+				started <- struct{}{}
 				select {
 				case <-ctx.Done():
 					return api.Response{}, ctx.Err()
@@ -32,7 +35,7 @@ func TestSubagentSIGKILLRecovery(t *testing.T) {
 			}
 			return text("parent finished"), nil
 		})
-		options := vanilla.Options{History: filepath.Join(root, "history"), Provider: p.Plugin(), Model: "fake"}
+		options := vanilla.Options{History: filepath.Join(root, "history"), Global: filepath.Join(root, "absent"), Provider: p.Plugin(), Model: "fake"}
 		if os.Getenv("M3_RUNTIME") == "durable" {
 			options.Runtime = durable.Plugin()
 		}
@@ -59,33 +62,32 @@ func TestSubagentSIGKILLRecovery(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_ = os.WriteFile(filepath.Join(root, "session"), []byte(id), 0600)
+		ready := func() {
+			if _, err := fmt.Fprintln(os.Stdout, "crash-ready:"+id); err != nil {
+				t.Error(err)
+			}
+		}
 		if os.Getenv("M3_JOB_CUT") == "ended" {
 			h.API().Subscribe(func(e api.Event) {
 				if e.Kind == "history.added" && api.Decode[api.Entry](e.Data).Kind == "job.end" {
-					_ = os.WriteFile(filepath.Join(root, "ready"), []byte("yes"), 0600)
+					ready()
 					for {
 						time.Sleep(time.Hour)
 					}
 				}
 			})
 		}
-		_, _ = h.API().Submit(context.Background(), id, api.Input{Content: api.Text("parent task")})
-		_ = wait(t, h.API(), id)
-		deadline := time.Now().Add(5 * time.Second)
-		for {
-			if _, err = os.Stat(filepath.Join(root, "child-started")); err == nil {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatal("no child request")
-			}
-			time.Sleep(time.Millisecond * 5)
+		if _, err := h.API().Submit(t.Context(), id, api.Input{Content: api.Text("parent task")}); err != nil {
+			t.Fatal(err)
 		}
+		if out, err := h.API().Wait(t.Context(), id); err != nil || out.Status != "completed" {
+			t.Fatal(out, err)
+		}
+		<-started
 		if os.Getenv("M3_JOB_CUT") == "ended" {
 			close(release)
 		} else {
-			_ = os.WriteFile(filepath.Join(root, "ready"), []byte("yes"), 0600)
+			ready()
 		}
 		for {
 			time.Sleep(time.Hour)
@@ -97,8 +99,14 @@ func TestSubagentSIGKILLRecovery(t *testing.T) {
 				for _, cut := range []string{"unfinished", "ended"} {
 					t.Run(cut, func(t *testing.T) {
 						root := t.TempDir()
-						cmd := exec.Command(os.Args[0], "-test.run=^TestSubagentSIGKILLRecovery$")
+						ctx := t.Context()
+						cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSubagentSIGKILLRecovery$")
 						cmd.Env = append(os.Environ(), "M3_SUBAGENT_ROOT="+root, "M3_JOB_CUT="+cut, "M3_RUNTIME="+runtimetest.Plugin(t).Name)
+						stdout, err := cmd.StdoutPipe()
+						if err != nil {
+							t.Fatal(err)
+						}
+						cmd.Stderr = os.Stderr
 						if err := cmd.Start(); err != nil {
 							t.Fatal(err)
 						}
@@ -108,20 +116,15 @@ func TestSubagentSIGKILLRecovery(t *testing.T) {
 								_ = cmd.Wait()
 							}
 						})
-						deadline := time.Now().Add(5 * time.Second)
-						for {
-							if _, err := os.Stat(filepath.Join(root, "ready")); err == nil {
-								break
-							}
-							if time.Now().After(deadline) {
-								t.Fatal("helper did not reach crash boundary")
-							}
-							time.Sleep(time.Millisecond * 5)
+						line, err := bufio.NewReader(stdout).ReadString('\n')
+						id, ok := strings.CutPrefix(strings.TrimSpace(line), "crash-ready:")
+						if err != nil || !ok || id == "" {
+							t.Fatalf("helper did not reach crash boundary: %q, %v", line, err)
 						}
-						_ = cmd.Process.Kill()
+						if err := cmd.Process.Kill(); err != nil {
+							t.Fatal(err)
+						}
 						_ = cmd.Wait()
-						b, _ := os.ReadFile(filepath.Join(root, "session"))
-						id := string(b)
 						p := scripts(func(_ context.Context, r api.Request, _ func(api.Part)) (api.Response, error) {
 							if first(r) == "child task" {
 								return text("actual child result"), nil
@@ -131,7 +134,7 @@ func TestSubagentSIGKILLRecovery(t *testing.T) {
 							}
 							return text("parent saw actual child result"), nil
 						})
-						options := vanilla.Options{History: filepath.Join(root, "history"), Runtime: runtimetest.Plugin(t), Provider: p.Plugin(), Model: "fake", DurableSubagents: kind == "durable-child"}
+						options := vanilla.Options{History: filepath.Join(root, "history"), Global: filepath.Join(root, "absent"), Runtime: runtimetest.Plugin(t), Provider: p.Plugin(), Model: "fake", DurableSubagents: kind == "durable-child"}
 						h, err := vanilla.New(options)
 						if err != nil {
 							t.Fatal(err)
@@ -146,8 +149,14 @@ func TestSubagentSIGKILLRecovery(t *testing.T) {
 						if len(list) != 1 {
 							t.Fatal(list)
 						}
-						done := waitJob(t, jobs, id, list[0].ID)
-						out := wait(t, a, id)
+						done, err := jobs.Wait(ctx, id, list[0].ID)
+						if err != nil {
+							t.Fatal(err)
+						}
+						out, err := a.Wait(ctx, id)
+						if err != nil {
+							t.Fatal(err)
+						}
 						if kind == "transient-child" && cut == "unfinished" {
 							if done.State != "failed" || !strings.Contains(out.Result.Text(), "unknown") {
 								t.Fatal(done, out)
@@ -188,7 +197,9 @@ func TestSubagentSIGKILLRecovery(t *testing.T) {
 						if err = h.API().Open(context.Background(), id); err != nil {
 							t.Fatal(err)
 						}
-						_ = wait(t, h.API(), id)
+						if _, err := h.API().Wait(ctx, id); err != nil {
+							t.Fatal(err)
+						}
 						if len(p.Requests()) != requests {
 							t.Fatal("report was delivered twice")
 						}

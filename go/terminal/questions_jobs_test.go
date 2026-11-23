@@ -104,7 +104,8 @@ func TestPrintWaitsForBackgroundJobAndItsParentTurn(t *testing.T) {
 			scripts = append(scripts, fake.Script{Run: run})
 		}
 		p := fake.New(scripts...)
-		h, err := vanilla.New(vanilla.Options{History: t.TempDir(), Runtime: runtimetest.Plugin(t), Provider: p.Plugin(), Model: "fake"})
+		root := t.TempDir()
+		h, err := vanilla.New(vanilla.Options{History: filepath.Join(root, "history"), Global: filepath.Join(root, "absent"), Runtime: runtimetest.Plugin(t), Provider: p.Plugin(), Model: "fake"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -116,9 +117,9 @@ func TestPrintWaitsForBackgroundJobAndItsParentTurn(t *testing.T) {
 		})
 		v, _ := h.API().Get("interface.terminal")
 		var stdout, stderr bytes.Buffer
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		err = v.(*terminal.Terminal).Run(ctx, terminal.Options{Project: t.TempDir(), Mode: "print", Prompt: "parent-only", WaitJobs: true}, io.NopCloser(strings.NewReader("")), &stdout, &stderr)
+		// The fixture releases the child when the first parent turn ends. Wait
+		// for print mode to return; elapsed time is not part of this contract.
+		err = v.(*terminal.Terminal).Run(t.Context(), terminal.Options{Project: t.TempDir(), Mode: "print", Prompt: "parent-only", WaitJobs: true}, io.NopCloser(strings.NewReader("")), &stdout, &stderr)
 		if err != nil || stdout.String() != "reported child\n" {
 			t.Fatal(stdout.String(), stderr.String(), err)
 		}
