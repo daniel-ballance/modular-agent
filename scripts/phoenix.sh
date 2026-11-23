@@ -18,6 +18,11 @@ engine=$(command -v podman || command -v docker || true)
 
 case ${1:-} in
   start)
+    # Leave a running Phoenix and its traces alone.
+    if [[ $("$engine" inspect -f '{{.State.Running}}' "$name" 2>/dev/null) == true ]]; then
+      echo 'Phoenix is already running: http://127.0.0.1:6006'
+      exit 0
+    fi
     "$engine" rm -f "$name" >/dev/null 2>&1 || true
     "$engine" run -d --name "$name" -e PHOENIX_ENABLE_AUTH=false \
       -p 127.0.0.1:6006:6006 -p 127.0.0.1:4317:4317 "$image" >/dev/null
