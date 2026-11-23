@@ -518,16 +518,20 @@ const CONTROL: Duration = Duration::from_secs(5);
 
 async fn initialize(peer: &Peer, project: &Path, home: &Path, config: Value) -> Reply {
     let config = if config.is_null() { json!({}) } else { config };
-    control(
+    let registration = control(
         peer,
         "plugin/initialize",
         json!({
             "binding":"modular-agent-plugin/1","data":"modular-agent-data/1",
             "host":{"name":"modular-agent-rs","version":env!("CARGO_PKG_VERSION")},
-            "project":project,"home":home,"config":config
+            "project":project,"home":home,"config":config,"traceContext":1
         }),
     )
-    .await
+    .await?;
+    if let Some(name) = registration["name"].as_str() {
+        peer.configure_trace(name, registration["traceContext"] == 1, false);
+    }
+    Ok(registration)
 }
 
 fn validate_binding(registration: &Value) -> Result<()> {
@@ -1167,34 +1171,47 @@ impl ModelAccess for RemoteModel {
             failure: Mutex::default(),
             response: Mutex::default(),
         });
-        let answer = self
-            .peer
-            .call("provider/request", payload, Some(work.clone()), cancel)
-            .await;
+        let result = telemetry::inference(
+            &scope,
+            &self.info,
+            telemetry::SpanKind::Client,
+            true,
+            |error: &anyhow::Error| {
+                (!error.is::<ModelAttemptLimit>()).then_some("provider_request_failed")
+            },
+            async {
+                let answer = self
+                    .peer
+                    .call("provider/request", payload, Some(work.clone()), cancel)
+                    .await;
+                let provider = work.provider.as_ref().unwrap();
+                if let Some(fault) = provider.failure.lock().unwrap().take() {
+                    return Err(fault.into());
+                }
+                let answer = answer?;
+                ensure!(
+                    provider.phase.load(Ordering::Acquire) == 2,
+                    "Provider answered without an authorized request callback"
+                );
+                ensure!(
+                    provider
+                        .response
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|message| same_json(message, &answer)),
+                    "Provider answer differs from its response callback"
+                );
+                wire::parse_response(answer)
+            },
+        )
+        .await;
         let mut end = Event::new(&scope, "model.end", Value::Null);
         end.stream = Some(work.stream.clone());
         end.end = true;
         api.emit(end).await?;
         refresh_changed(&self.shared, &api, &scope, &work).await;
-        let provider = work.provider.as_ref().unwrap();
-        if let Some(fault) = provider.failure.lock().unwrap().take() {
-            return Err(fault.into());
-        }
-        let answer = answer?;
-        ensure!(
-            provider.phase.load(Ordering::Acquire) == 2,
-            "Provider answered without an authorized request callback"
-        );
-        ensure!(
-            provider
-                .response
-                .lock()
-                .unwrap()
-                .as_ref()
-                .is_some_and(|message| same_json(message, &answer)),
-            "Provider answer differs from its response callback"
-        );
-        wire::parse_response(answer)
+        result
     }
     async fn generate(
         &self,
@@ -2132,7 +2149,8 @@ impl Callbacks {
                         let mut page=vec![];
                         let mut size=b"{\"entries\":[]}".len();
                         for (i,e) in entries.iter().enumerate().skip(start).take(limit) {
-                            let v=wire::entry(e,&data)?;
+                            let mut v=wire::entry(e,&data)?;
+                            portable::omit_trace_metadata(&mut v);
                             let n=serde_json::to_vec(&v)?.len();
                             let cursor_size=if i+1<entries.len() {b",\"next\":".len()+serde_json::to_vec(&e.id)?.len()}else{0};
                             let total=size+n+usize::from(!page.is_empty());

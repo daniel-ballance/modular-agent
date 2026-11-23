@@ -1,5 +1,8 @@
 //! Hosts plugins and owns sessions. Inference, turns, I/O and presentation are delegated.
-use agent_api::*;
+use agent_api::{
+    telemetry::{Context, KeyValue, Operation, SpanKind, TraceContextExt},
+    *,
+};
 mod bytes;
 pub use bytes::{ByteCapacity, ByteLimits};
 mod capacity;
@@ -22,6 +25,8 @@ struct OpenSession {
     generation: CancellationToken,
     interruption: CancellationToken,
     queue: VecDeque<Input>,
+    input_contexts: BTreeMap<String, Context>,
+    question_contexts: BTreeMap<String, String>,
     interrupted: Vec<(Arc<dyn Runtime>, Scope)>,
     active: bool,
     rewinding: bool,
@@ -40,6 +45,7 @@ type HeldOutput = BTreeMap<(String, String, String), Vec<(Event, Value, capacity
 
 pub struct Harness {
     me: Weak<Harness>,
+    agent_name: std::sync::OnceLock<String>,
     project: Option<PathBuf>,
     model_provider_aliases: std::sync::OnceLock<&'static [(&'static str, &'static str)]>,
     tenants: RwLock<tenants::Tenants>,
@@ -65,6 +71,7 @@ impl Harness {
         let (registry, points) = Registry::with_harness_hooks();
         Arc::new_cyclic(|me| Self {
             me: me.clone(),
+            agent_name: Default::default(),
             project,
             model_provider_aliases: Default::default(),
             tenants: RwLock::default(),
@@ -80,6 +87,33 @@ impl Harness {
             reservations: RwLock::new(Arc::new(ReservationPool::new(ResourceLimits::default()))),
         })
     }
+    pub fn configure_agent_name(&self, name: String) {
+        if telemetry::name(&name).is_some() {
+            let _ = self.agent_name.set(name);
+        }
+    }
+
+    fn invocation(
+        &self,
+        scope: &Scope,
+        parent: &Context,
+        links: Vec<telemetry::Link>,
+        resumed: bool,
+    ) -> Operation {
+        let mut attrs = vec![KeyValue::new("gen_ai.operation.name", "invoke_agent")];
+        let name = if let Some(agent) = self.agent_name.get() {
+            attrs.push(KeyValue::new("gen_ai.agent.name", agent.clone()));
+            format!("invoke_agent {agent}")
+        } else {
+            "invoke_agent".into()
+        };
+        if resumed {
+            attrs.push(KeyValue::new("modular_agent.turn.resumed", true));
+        }
+        Operation::start(name, SpanKind::Internal, Some(scope), attrs, parent, links)
+            .interrupted("modular_agent.turn.outcome")
+    }
+
     /// Normalize old Provider ids supplied by a reference implementation
     /// before session preparation or recovery, without rewriting history.
     pub fn configure_model_provider_aliases(
@@ -223,111 +257,123 @@ impl Harness {
         tenant: Option<&str>,
         provisional: bool,
     ) -> Result<String> {
-        let parent = settings["_parent"]["session"]
-            .as_str()
-            .map(|session| self.snapshot(session))
-            .transpose()?;
-        let inherited = parent.as_ref().and_then(tenants::name);
-        ensure!(
-            tenant.is_none() || inherited.is_none() || tenant == inherited,
-            "child cannot choose another tenant"
+        let op = Operation::new(
+            "modular_agent.session.open",
+            SpanKind::Internal,
+            None,
+            vec![KeyValue::new("modular_agent.session.operation", "new")],
         );
-        let tenant = tenant.or(inherited);
-        if let Some(name) = tenant {
-            self.check_tenant(name)?;
-        }
-        let project = project.canonicalize()?;
-        ensure!(project.is_dir(), "project must be a directory");
-        let mut defaults = match capability::<dyn Configuration>(self, "configuration") {
-            Ok(c) => c.settings(&project)?,
-            Err(_) => json!({}),
-        };
-        merge(&mut defaults, settings);
-        self.normalize_model(&mut defaults);
-        let id = id();
-        let lease = if provisional {
-            None
-        } else {
-            self.store().map(|s| s.acquire(&id)).transpose()?
-        };
-        let mut data = SessionData {
-            id: id.clone(),
-            project,
-            settings: defaults,
-            plugins: self.registry.read().unwrap().names(),
-            position: None,
-            entries: vec![],
-            origin: None,
-        };
-        if let Some(tenant) = tenant {
-            let entry = make_entry(
-                &data,
+        op.run(async {
+            let parent = settings["_parent"]["session"]
+                .as_str()
+                .map(|session| self.snapshot(session))
+                .transpose()?;
+            let inherited = parent.as_ref().and_then(tenants::name);
+            ensure!(
+                tenant.is_none() || inherited.is_none() || tenant == inherited,
+                "child cannot choose another tenant"
+            );
+            let tenant = tenant.or(inherited);
+            if let Some(name) = tenant {
+                self.check_tenant(name)?;
+            }
+            let project = project.canonicalize()?;
+            ensure!(project.is_dir(), "project must be a directory");
+            let mut defaults = match capability::<dyn Configuration>(self, "configuration") {
+                Ok(c) => c.settings(&project)?,
+                Err(_) => json!({}),
+            };
+            merge(&mut defaults, settings);
+            self.normalize_model(&mut defaults);
+            let id = id();
+            op.attr("gen_ai.conversation.id", id.clone());
+            let lease = if provisional {
+                None
+            } else {
+                self.store().map(|s| s.acquire(&id)).transpose()?
+            };
+            let mut data = SessionData {
+                id: id.clone(),
+                project,
+                settings: defaults,
+                plugins: self.registry.read().unwrap().names(),
+                position: None,
+                entries: vec![],
+                origin: None,
+            };
+            if let Some(tenant) = tenant {
+                let entry = make_entry(
+                    &data,
+                    &Scope::session(&id),
+                    "harness",
+                    Draft::new("tenant", false, json!({"tenant":tenant})),
+                );
+                data.position = Some(entry.id.clone());
+                data.entries.push(entry);
+            }
+            if provisional && !data.settings.as_object().is_none_or(|o| o.is_empty()) {
+                push_setup(&mut data, "settings", |data| data.settings.clone());
+            }
+            {
+                let mut sessions = self.sessions.lock().unwrap();
+                self.check_project_open(&sessions, &data)?;
+                sessions.insert(
+                    id.clone(),
+                    OpenSession {
+                        data,
+                        lease,
+                        provisional,
+                        generation: CancellationToken::new(),
+                        interruption: CancellationToken::new(),
+                        queue: VecDeque::new(),
+                        input_contexts: BTreeMap::new(),
+                        question_contexts: BTreeMap::new(),
+                        interrupted: Vec::new(),
+                        active: false,
+                        rewinding: false,
+                        journal_uncertain: false,
+                        environment_work: 0,
+                        steer_closed: false,
+                        cancel: CancellationToken::new(),
+                    },
+                );
+            }
+            self.watch_writer(&id);
+            if let Err(error) = self.prepare_session(&id).await {
+                let _ = self.close(&id).await;
+                self.sessions.lock().unwrap().remove(&id);
+                return Err(error);
+            }
+            self.append(
                 &Scope::session(&id),
                 "harness",
-                Draft::new("tenant", false, json!({"tenant":tenant})),
-            );
-            data.position = Some(entry.id.clone());
-            data.entries.push(entry);
-        }
-        if provisional && !data.settings.as_object().is_none_or(|o| o.is_empty()) {
-            push_setup(&mut data, "settings", |data| data.settings.clone());
-        }
-        {
-            let mut sessions = self.sessions.lock().unwrap();
-            self.check_project_open(&sessions, &data)?;
-            sessions.insert(
-                id.clone(),
-                OpenSession {
-                    data,
-                    lease,
-                    provisional,
-                    generation: CancellationToken::new(),
-                    interruption: CancellationToken::new(),
-                    queue: VecDeque::new(),
-                    interrupted: Vec::new(),
-                    active: false,
-                    rewinding: false,
-                    journal_uncertain: false,
-                    environment_work: 0,
-                    steer_closed: false,
-                    cancel: CancellationToken::new(),
-                },
-            );
-        }
-        self.watch_writer(&id);
-        if let Err(error) = self.prepare_session(&id).await {
-            let _ = self.close(&id).await;
-            self.sessions.lock().unwrap().remove(&id);
-            return Err(error);
-        }
-        self.append(
-            &Scope::session(&id),
-            "harness",
-            Draft::new(
-                "plugins.changed",
-                false,
-                json!({"active":self.snapshot(&id)?.plugins}),
-            ),
-        )?;
-        if let Err(error) = self
-            .invoke(
-                &self.points["session.start"],
+                Draft::new(
+                    "plugins.changed",
+                    false,
+                    json!({"active":self.snapshot(&id)?.plugins}),
+                ),
+            )?;
+            if let Err(error) = self
+                .invoke(
+                    &self.points["session.start"],
+                    &Scope::session(&id),
+                    json!({"resumed":false}),
+                )
+                .await
+            {
+                let _ = self.close(&id).await;
+                self.sessions.lock().unwrap().remove(&id);
+                return Err(error);
+            }
+            self.emit(Event::new(
                 &Scope::session(&id),
-                json!({"resumed":false}),
-            )
-            .await
-        {
-            let _ = self.close(&id).await;
-            self.sessions.lock().unwrap().remove(&id);
-            return Err(error);
-        }
-        self.emit(Event::new(
-            &Scope::session(&id),
-            "session.start",
-            json!({"reopened":false}),
-        ))
-        .await?;
-        Ok(id)
+                "session.start",
+                json!({"reopened":false}),
+            ))
+            .await?;
+            Ok(id)
+        })
+        .await
     }
     /// Test-only crash seam. The caller has already dropped or stopped every worker.
     /// Release writer leases without orderly shutdown, cancellation or settlement.
@@ -347,6 +393,12 @@ impl Harness {
     }
 
     async fn install_recovery(&self, id: &str) -> Result<Vec<Input>> {
+        let op = Operation::internal("modular_agent.session.open", &Scope::session(id));
+        op.attr("modular_agent.session.operation", "load");
+        op.run(self.install_recovery_inner(id)).await
+    }
+
+    async fn install_recovery_inner(&self, id: &str) -> Result<Vec<Input>> {
         let _erasure = self
             .erasure
             .try_read()
@@ -412,6 +464,8 @@ impl Harness {
                     generation: CancellationToken::new(),
                     interruption: CancellationToken::new(),
                     queue: VecDeque::new(),
+                    input_contexts: BTreeMap::new(),
+                    question_contexts: BTreeMap::new(),
                     interrupted: Vec::new(),
                     active: false,
                     rewinding: recovery,
@@ -546,7 +600,39 @@ impl Harness {
         }
         let result = async {
             for (runtime, scope) in interrupted {
-                runtime.interrupted(self.api(), scope).await?;
+                if runtime.declaration()["continues_after_restart"] == true {
+                    let data = self.snapshot(id)?;
+                    let saved = saved_turn_trace(&data, scope.turn.as_deref());
+                    let links = saved
+                        .as_ref()
+                        .and_then(telemetry::link)
+                        .into_iter()
+                        .collect();
+                    let mut op = self.invocation(&scope, &saved.unwrap_or_default(), links, true);
+                    op.run(async {
+                        if let Some(carrier) = op.own_carrier() {
+                            self.append(
+                                &scope,
+                                "harness",
+                                Draft::new(
+                                    telemetry::TURN_TRACE,
+                                    false,
+                                    json!({"traceContext":carrier}),
+                                ),
+                            )?;
+                        }
+                        runtime.interrupted(self.api(), scope.clone()).await
+                    })
+                    .await?;
+                    if let Some(kind) = recorded_outcome(&self.snapshot(id)?, &scope) {
+                        op.outcome("modular_agent.turn.outcome", kind);
+                        if kind == "failed" {
+                            op.error("turn_failed");
+                        }
+                    }
+                } else {
+                    runtime.interrupted(self.api(), scope).await?;
+                }
             }
             Ok(())
         }
@@ -573,6 +659,12 @@ impl Harness {
     }
 
     pub async fn close(&self, id: &str) -> Result<()> {
+        let op = Operation::internal("modular_agent.session.close", &Scope::session(id));
+        op.attr("modular_agent.session.operation", "close");
+        op.run(self.close_inner(id)).await
+    }
+
+    async fn close_inner(&self, id: &str) -> Result<()> {
         {
             let mut sessions = self.sessions.lock().unwrap();
             if let Some(open) = sessions.get(id)
@@ -809,7 +901,31 @@ impl Harness {
         let pool = self.reservations();
         let mut write_failed = false;
         let committed = pool.commit(&open.data, data, admission, || {
-            self.save(data).inspect_err(|_| write_failed = true)
+            let scope = data
+                .entries
+                .last()
+                .map(|e| e.scope.clone())
+                .unwrap_or_else(|| Scope::session(&data.id));
+            let op = Operation::internal("modular_agent.history.commit", &scope);
+            op.attr(
+                "modular_agent.history.entry.count",
+                data.entries.len().saturating_sub(open.data.entries.len()) as i64,
+            );
+            let _guard = op.enter();
+            let result = self.save(data);
+            write_failed = result.is_err();
+            op.attr(
+                "modular_agent.history.commit.status",
+                if result.is_ok() {
+                    "committed"
+                } else {
+                    "uncertain"
+                },
+            );
+            if write_failed {
+                op.error("write_failed");
+            }
+            result
         });
         if let Err(error) = committed {
             if !write_failed {
@@ -905,6 +1021,27 @@ impl Harness {
         key: Option<String>,
         result_shape: Option<Value>,
     ) -> Result<Receipt> {
+        let span = Operation::internal("modular_agent.input.admit", scope);
+        let receipt = span
+            .run(self.admit_content(scope, sponsor, content, timing, key, result_shape))
+            .await;
+        if let Ok(receipt) = &receipt
+            && !receipt.input.is_empty()
+        {
+            span.attr("modular_agent.input.id", receipt.input.clone());
+        }
+        receipt
+    }
+
+    async fn admit_content(
+        &self,
+        scope: &Scope,
+        sponsor: Option<&str>,
+        content: Value,
+        timing: Timing,
+        key: Option<String>,
+        result_shape: Option<Value>,
+    ) -> Result<Receipt> {
         if let Some(shape) = &result_shape {
             schema::compile(shape)?;
         }
@@ -932,7 +1069,14 @@ impl Harness {
             .entry(session.into())
             .or_default()
             .clone();
-        let _admission = admission.lock().await;
+        let _admission = match admission.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                let wait = Operation::internal("modular_agent.capacity.wait", scope);
+                wait.attr("modular_agent.capacity.scope", "session");
+                wait.run(admission.lock()).await
+            }
+        };
         let _workspace = self.begin_environment_work(session)?;
         let submitter = sponsor.unwrap_or(actor);
         if let Some(ref key) = key {
@@ -993,7 +1137,12 @@ impl Harness {
         let payload = bytes::size(&(&text, &content, &key, &result_shape));
         let reservation = self
             .reservations()
-            .admit(&self.snapshot(session)?, payload)?;
+            .admit(&self.snapshot(session)?, payload)
+            .inspect_err(|e| {
+                if e.is::<OperationError>() {
+                    telemetry::event("modular_agent.capacity.refused", scope, vec![]);
+                }
+            })?;
         // A proposal is data, not a command. Do not run input hooks with
         // broader authority than the connection and actor share.
         let input_payload = json!({"text":text,"content":content,"actor":actor,"timing":timing});
@@ -1097,6 +1246,12 @@ impl Harness {
         next.entries.push(entry.clone());
         self.commit_reserved(open, &next, Some(reservation))?;
         open.data = next;
+        open.input_contexts
+            .retain(|id, _| open.queue.iter().any(|input| &input.id == id));
+        let cx = telemetry::current();
+        if telemetry::traceparent(&cx).is_some() {
+            open.input_contexts.insert(entry.id.clone(), cx);
+        }
         open.queue.push_back(Input {
             id: entry.id.clone(),
             actor: actor.into(),
@@ -1311,7 +1466,7 @@ impl Harness {
                 }
             });
         }
-        let (input, cancel) = {
+        let (input, cancel, parent) = {
             let mut sessions = self.sessions.lock().unwrap();
             let open = sessions
                 .get_mut(session)
@@ -1342,7 +1497,8 @@ impl Harness {
             open.active = true;
             open.steer_closed = false;
             open.cancel = CancellationToken::new();
-            (input, open.cancel.clone())
+            let parent = open.input_contexts.remove(&input.id).unwrap_or_default();
+            (input, open.cancel.clone(), parent)
         };
         let scope = Scope {
             actor: input.actor.clone(),
@@ -1360,9 +1516,12 @@ impl Harness {
             ..Scope::session(session)
         };
         let admitted_input = input.id.clone();
-        let result = self
-            .prepare_and_run(&scope, input, cancel.clone(), resume)
-            .await;
+        let mut invocation = None;
+        let result = telemetry::within(
+            parent,
+            self.prepare_and_run(&scope, input, cancel.clone(), resume, &mut invocation),
+        )
+        .await;
         self.sessions
             .lock()
             .unwrap()
@@ -1390,11 +1549,19 @@ impl Harness {
                 {
                     let mut end = json!(r);
                     end["inputId"] = json!(admitted_input);
+                    let _span = invocation.as_ref().map(Operation::enter);
                     self.append(&scope, "harness", Draft::new("turn.end", false, end))?;
                 }
                 r
             }
         };
+        if let Some(mut op) = invocation {
+            let kind = outcome_name(&result.outcome);
+            op.outcome("modular_agent.turn.outcome", kind);
+            if kind == "failed" {
+                op.error("turn_failed");
+            }
+        }
         let mut event = json!(result);
         event["inputId"] = json!(admitted_input);
         self.emit(Event::new(&scope, "turn.result", event)).await?;
@@ -1422,6 +1589,7 @@ impl Harness {
         input: Input,
         cancel: CancellationToken,
         resume: Vec<ToolCall>,
+        invocation: &mut Option<Operation>,
     ) -> Result<TurnResult> {
         let data = self.snapshot(&scope.session)?;
         let source = data.entries.iter().rev().find(|e| {
@@ -1598,6 +1766,19 @@ impl Harness {
                 );
             }
         }
+        let links = start["continuesTurnId"]
+            .as_str()
+            .and_then(|id| saved_turn_trace(&data, Some(id)))
+            .as_ref()
+            .and_then(telemetry::link)
+            .into_iter()
+            .collect();
+        let op = invocation.insert(self.invocation(scope, &telemetry::current(), links, false));
+        if runtime.declaration()["continues_after_restart"] == true
+            && let Some(context) = op.own_carrier()
+        {
+            start["traceContext"] = context;
+        }
         entries.push(Draft::new("turn.start", false, start).copying(sources));
         let mut taken = json!({"text":input.text,"inputId":input_id,"key":input.key,"authority":cap,"context":context});
         if let Some(value) = source.and_then(|s| s.content.as_ref()) {
@@ -1612,35 +1793,38 @@ impl Harness {
             }
         }
         entries.push(Draft::new("input", true, taken).copying(vec![input.id]));
-        self.publish(scope, "harness", entries, None, None)?;
-        if budget_reached {
-            let result = TurnResult {
-                outcome: Outcome::Limit,
-                limit: Some("tenantTokens".into()),
-                ..Default::default()
-            };
-            self.append(
-                scope,
-                "harness",
-                Draft::new("turn.end", false, json!(result)),
-            )?;
-            return Ok(result);
-        }
-        let model = selected?;
-        runtime
-            .run(
-                self.api(),
-                TurnInput {
-                    resume,
-                    scope: scope.clone(),
-                    model,
-                    system,
-                    tools,
-                    settings,
-                    cancel,
-                },
-            )
-            .await
+        op.run(async {
+            self.publish(scope, "harness", entries, None, None)?;
+            if budget_reached {
+                let result = TurnResult {
+                    outcome: Outcome::Limit,
+                    limit: Some("tenantTokens".into()),
+                    ..Default::default()
+                };
+                self.append(
+                    scope,
+                    "harness",
+                    Draft::new("turn.end", false, json!(result)),
+                )?;
+                return Ok(result);
+            }
+            let model = selected?;
+            runtime
+                .run(
+                    self.api(),
+                    TurnInput {
+                        resume,
+                        scope: scope.clone(),
+                        model,
+                        system,
+                        tools,
+                        settings,
+                        cancel,
+                    },
+                )
+                .await
+        })
+        .await
     }
     pub fn declaration(&self) -> Result<Value> {
         let runtime: Arc<dyn Runtime> = capability(self, "runtime")?;
@@ -1650,6 +1834,7 @@ impl Harness {
             &mut declaration,
             self.registry.read().unwrap().declaration(),
         );
+        declaration["telemetry"] = json!(1);
         declaration["resource_reservations"] = json!(self.reservations().limits());
         Ok(declaration)
     }
@@ -2041,6 +2226,15 @@ impl AgentApi for Harness {
     fn tool_registration(&self, key: &str) -> Value {
         self.registry.read().unwrap().tool_registration(key)
     }
+    fn question_trace(&self, session: &str, question: &str) -> Option<String> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(session)?
+            .question_contexts
+            .get(question)
+            .cloned()
+    }
     fn snapshot(&self, session: &str) -> Result<SessionData> {
         let mut sessions = self.sessions.lock().unwrap();
         let open = sessions
@@ -2219,6 +2413,19 @@ impl AgentApi for Harness {
         self.commit(open, &next)?;
         open.data = next;
         if let Some(input) = queued {
+            let cx = telemetry::current();
+            let job = telemetry::link(&cx).into_iter().collect();
+            let op = Operation::start(
+                "modular_agent.input.admit",
+                SpanKind::Internal,
+                Some(scope),
+                vec![KeyValue::new("modular_agent.input.id", input.id.clone())],
+                &cx,
+                job,
+            );
+            if telemetry::traceparent(&op.context()).is_some() {
+                open.input_contexts.insert(input.id.clone(), op.context());
+            }
             open.queue.push_back(input);
         }
         for entry in &entries {
@@ -2252,6 +2459,24 @@ impl AgentApi for Harness {
         next.entries.push(entry.clone());
         self.commit(open, &next)?;
         open.data = next;
+        if let Some(content) = &entry.content {
+            match entry.kind.as_str() {
+                "request.open" => {
+                    if let Some(id) = content["id"].as_str()
+                        && let Some(parent) = telemetry::traceparent(&telemetry::current())
+                    {
+                        open.question_contexts.insert(id.into(), parent);
+                    }
+                }
+                "request.answer" | "request.closed" => {
+                    if let Some(id) = content["request"].as_str() {
+                        open.question_contexts.remove(id);
+                    }
+                }
+                _ => {}
+            }
+        }
+        observe_question(&open.data, &entry);
         self.pending_events
             .lock()
             .unwrap()
@@ -2511,7 +2736,9 @@ impl AgentApi for Harness {
         let branch = source.branch();
         let branch: Vec<_> = branch
             .iter()
-            .filter(|e| e.writer != "rust.derived" && e.content.is_some())
+            .filter(|e| {
+                e.writer != "rust.derived" && e.content.is_some() && e.kind != telemetry::TURN_TRACE
+            })
             .collect();
         for original in &branch {
             let mut entry = (*original).clone();
@@ -2519,7 +2746,11 @@ impl AgentApi for Harness {
             entry.parent = next.position.clone();
             entry.scope.session = new_id.clone();
             if let Some(v) = entry.content.as_mut() {
-                if entry.kind == "request.open" {
+                if entry.kind == "turn.start" {
+                    if let Some(value) = v.as_object_mut() {
+                        value.remove("traceContext");
+                    }
+                } else if entry.kind == "request.open" {
                     let mut q: Question = serde_json::from_value(v.clone())?;
                     q.scope.session = new_id.clone();
                     for s in &mut q.route {
@@ -2619,6 +2850,8 @@ impl AgentApi for Harness {
                 generation: CancellationToken::new(),
                 interruption: CancellationToken::new(),
                 queue: VecDeque::new(),
+                input_contexts: BTreeMap::new(),
+                question_contexts: BTreeMap::new(),
                 interrupted: Vec::new(),
                 active: false,
                 rewinding: false,
@@ -2914,7 +3147,21 @@ impl AgentApi for Harness {
                 if let Err(error) = self.check_writer(&scope.session) {
                     return ToolResult::new(&call, ToolStatus::NotStarted, error.to_string());
                 }
-                return source.run(self.api(), scope.clone(), call, cancel).await;
+                let mut attrs = telemetry::tool_attributes(&call);
+                if let Some(agent) = self.agent_name.get() {
+                    attrs.push(KeyValue::new("gen_ai.agent.name", agent.clone()));
+                }
+                let name = telemetry::name(&call.name)
+                    .map_or_else(|| "execute_tool".into(), |n| format!("execute_tool {n}"));
+                let op = Operation::new(name, SpanKind::Internal, Some(scope), attrs);
+                let result = op
+                    .run(source.run(self.api(), scope.clone(), call, cancel))
+                    .await;
+                op.attr("modular_agent.tool.status", wire::status(&result.status));
+                if result.status == ToolStatus::Failed {
+                    op.error("tool_failed");
+                }
+                return result;
             }
         }
         ToolResult::new(
@@ -2989,6 +3236,117 @@ impl Harness {
         Ok(inputs)
     }
 }
+fn observe_question(data: &SessionData, entry: &Entry) {
+    let Some(body) = &entry.content else { return };
+    let (q, disposition) = match entry.kind.as_str() {
+        "request.open" => (body, None),
+        "request.answer" | "request.closed" => {
+            let Some(q) = data
+                .entries
+                .iter()
+                .rev()
+                .filter(|e| e.kind == "request.open")
+                .filter_map(|e| e.content.as_ref())
+                .find(|q| q["id"] == body["request"])
+            else {
+                return;
+            };
+            let disposition = if entry.kind == "request.answer" {
+                if body["declined"] == true {
+                    "declined"
+                } else if q["kind"] == "secret" {
+                    "stored"
+                } else {
+                    "answered"
+                }
+            } else {
+                body["reason"]
+                    .as_str()
+                    .filter(|r| {
+                        matches!(
+                            *r,
+                            "timeLimit"
+                                | "noLongerAnswerable"
+                                | "superseded"
+                                | "cancelled"
+                                | "turnEnded"
+                                | "restart"
+                        )
+                    })
+                    .unwrap_or("declined")
+            };
+            (q, Some(disposition))
+        }
+        _ => return,
+    };
+    let (Some(id), Some(kind @ ("approval" | "text" | "choice" | "form" | "secret"))) =
+        (q["id"].as_str(), q["kind"].as_str())
+    else {
+        return;
+    };
+    let mut attrs = vec![
+        KeyValue::new("modular_agent.question.id", id.to_owned()),
+        KeyValue::new("modular_agent.question.kind", kind.to_owned()),
+    ];
+    if let Some(disposition) = disposition {
+        attrs.push(KeyValue::new(
+            "modular_agent.question.disposition",
+            disposition.to_owned(),
+        ));
+        let cx = telemetry::current();
+        let op = (!cx.span().is_recording())
+            .then(|| Operation::internal("modular_agent.question.answer", &entry.scope));
+        let _guard = op.as_ref().map(Operation::enter);
+        telemetry::event("modular_agent.question.close", &entry.scope, attrs);
+    } else {
+        telemetry::event("modular_agent.question.open", &entry.scope, attrs);
+    }
+}
+
+fn saved_turn_trace(data: &SessionData, turn: Option<&str>) -> Option<Context> {
+    let turn = turn?;
+    let copied: std::collections::BTreeSet<_> = if data.origin.is_some() {
+        data.entries
+            .iter()
+            .take_while(|e| !e.copies.is_empty() || e.content.is_none())
+            .map(|e| &e.id)
+            .collect()
+    } else {
+        Default::default()
+    };
+    data.branch()
+        .iter()
+        .rev()
+        .filter(|e| {
+            e.scope.session == data.id
+                && e.scope.turn.as_deref() == Some(turn)
+                && !copied.contains(&e.id)
+                && !e.visible
+                && matches!(e.kind.as_str(), "turn.start" | telemetry::TURN_TRACE)
+        })
+        .filter_map(|e| e.content.as_ref()?.get("traceContext"))
+        .find_map(telemetry::extract)
+}
+
+fn recorded_outcome(data: &SessionData, scope: &Scope) -> Option<&'static str> {
+    let entry = data
+        .branch()
+        .into_iter()
+        .rev()
+        .find(|e| e.kind == "turn.end" && e.scope.turn == scope.turn)?;
+    let outcome = serde_json::from_value::<Outcome>(entry.content?["outcome"].clone()).ok()?;
+    Some(outcome_name(&outcome))
+}
+
+fn outcome_name(outcome: &Outcome) -> &'static str {
+    match outcome {
+        Outcome::Completed => "completed",
+        Outcome::Cancelled => "cancelled",
+        Outcome::Limit => "limit",
+        Outcome::Failed => "failed",
+    }
+}
+
 impl Drop for Harness {
     fn drop(&mut self) {
         for plugin in self.plugins.get_mut().unwrap().iter().rev() {

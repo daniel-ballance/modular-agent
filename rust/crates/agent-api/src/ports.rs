@@ -183,6 +183,9 @@ pub trait AgentApi: Send + Sync {
         json!({"plugin":capability,"toolSource":capability.strip_prefix("tools.").unwrap_or(capability)})
     }
     fn snapshot(&self, session: &str) -> Result<SessionData>;
+    fn question_trace(&self, _session: &str, _question: &str) -> Option<String> {
+        None
+    }
     fn authority(&self, session: &str, actor: &str) -> Result<Authority>;
     fn grant(&self, scope: &Scope, actor: &str, authority: Authority) -> Result<()>;
     /// One history-store commit, optionally admitting input in that same commit.
@@ -361,13 +364,25 @@ pub trait ModelAccess: Send + Sync {
             api.provider_request(&scope, &info, request).await?
         };
         attempt.authorize(api.as_ref(), &scope, &info, &request, &cancel)?;
-        let response = self
-            .generate(api.clone(), scope.clone(), request, cancel)
-            .await?;
+        let response = telemetry::inference(
+            &scope,
+            &info,
+            self.inference_kind(),
+            self.streaming(),
+            telemetry::model_failure,
+            self.generate(api.clone(), scope.clone(), request, cancel),
+        )
+        .await?;
         api.provider_response(&scope, &info, &response).await?;
         Ok(response)
     }
     fn info(&self) -> ModelInfo;
+    fn inference_kind(&self) -> telemetry::SpanKind {
+        telemetry::SpanKind::Internal
+    }
+    fn streaming(&self) -> bool {
+        false
+    }
     async fn generate(
         &self,
         api: Api,

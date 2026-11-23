@@ -100,6 +100,7 @@ impl RemoteJobs {
                     .lock()
                     .unwrap()
                     .insert(job.id.clone());
+                self.peer.observe_job(&job);
                 drop(lock);
                 api.emit(Event::new(&job.scope, "job.started", json!(job)))
                     .await?;
@@ -129,6 +130,7 @@ impl RemoteJobs {
                             .insert(job.id.clone()),
                         "job is already running on this connection"
                     );
+                    self.peer.observe_job(&job);
                     return Ok(json!({}));
                 }
                 ensure!(
@@ -156,7 +158,17 @@ impl RemoteJobs {
                     self.shared.running_jobs.lock().unwrap().contains(&job.id),
                     "job has no active execution on this connection"
                 );
-                self.record_end(&api, &job, p)?;
+                let context = self.peer.job_context(&job.id);
+                {
+                    let _guard = context.map(telemetry::Context::attach);
+                    self.record_end(&api, &job, p)?;
+                }
+                let outcome = match p["outcome"]["kind"].as_str() {
+                    Some("completed") => "completed",
+                    Some("cancelled") => "cancelled",
+                    _ => "failed",
+                };
+                self.peer.finish_job(&job.id, outcome);
                 self.shared.running_jobs.lock().unwrap().remove(&job.id);
                 drop(lock);
                 api.emit(Event::new(&job.scope, "job.ended", json!({"jobId":job.id})))
@@ -240,6 +252,7 @@ impl ExternalJobs for RemoteJobs {
             return Ok(current);
         }
         self.shared.running_jobs.lock().unwrap().remove(&job.id);
+        self.peer.finish_job(&job.id, "interrupted");
         api.append(
             &job.scope,
             &job.owner,

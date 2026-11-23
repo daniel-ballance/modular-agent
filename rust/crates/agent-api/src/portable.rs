@@ -32,7 +32,8 @@ fn kind(native: &str) -> String {
         | "limit"
         | "tenant"
         | "resultFeedback"
-        | crate::recovery::STEP_AFTER => native,
+        | crate::recovery::STEP_AFTER
+        | telemetry::TURN_TRACE => native,
         s => return format!("rust.{s}"),
     }
     .into()
@@ -169,6 +170,7 @@ pub fn input_message(c: &Value) -> Value {
 /// A history entry for an actor rather than a persistent store.
 pub fn public_entry(e: &Entry, session: &SessionData) -> Result<Value> {
     let mut value = entry(e, session)?;
+    omit_trace_metadata(&mut value);
     if let Some(message) = value.get_mut("message")
         && message["role"] == "assistant"
     {
@@ -186,6 +188,18 @@ pub fn public_entry(e: &Entry, session: &SessionData) -> Result<Value> {
         }
     }
     Ok(value)
+}
+
+pub fn omit_trace_metadata(entry: &mut Value) {
+    if entry["kind"] == telemetry::TURN_TRACE {
+        if let Some(object) = entry.as_object_mut() {
+            object.remove("data");
+        }
+    } else if entry["kind"] == "turnStart"
+        && let Some(data) = entry["data"].as_object_mut()
+    {
+        data.remove("traceContext");
+    }
 }
 
 pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
@@ -439,7 +453,7 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
             if let Some(shape) = c["settings"].get("result_shape") {
                 start["resultShape"] = shape.clone();
             }
-            for key in ["point", "context"] {
+            for key in ["point", "context", "traceContext"] {
                 if let Some(value) = c.get(key) {
                     start[key] = value.clone();
                 }
@@ -802,10 +816,11 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                 if let Some(shape) = d.get("resultShape") {
                     settings["result_shape"] = shape.clone();
                 }
-                (
-                    "turn.start",
-                    json!({"startedBy":d["startedBy"],"model":model,"system":d["system"],"tools":tools,"settings":settings,"resume":optional(d, "rust.resume").cloned().unwrap_or(json!([])),"point":d["point"],"context":d["context"]}),
-                )
+                let mut start = json!({"startedBy":d["startedBy"],"model":model,"system":d["system"],"tools":tools,"settings":settings,"resume":optional(d, "rust.resume").cloned().unwrap_or(json!([])),"point":d["point"],"context":d["context"]});
+                if let Some(trace) = d.get("traceContext") {
+                    start["traceContext"] = trace.clone();
+                }
+                ("turn.start", start)
             }
             "response" => {
                 let response = parse_response(v["message"].clone())?;
@@ -939,7 +954,7 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                     reason: d["reason"].as_str().map(str::to_owned)
                 }),
             ),
-            "position" | "erasure" | "tenant" | "limit" => (k, d.clone()),
+            "position" | "erasure" | "tenant" | "limit" | telemetry::TURN_TRACE => (k, d.clone()),
             name if name.starts_with("rust.") => (&name[5..], d.clone()),
             _ => ("runtime.private", v.clone()),
         };

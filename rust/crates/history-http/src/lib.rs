@@ -150,6 +150,9 @@ impl Service {
         let mut request = client
             .request(method.clone(), url)
             .bearer_auth(token.as_ref());
+        if let Some(parent) = agent_api::telemetry::traceparent(&agent_api::telemetry::current()) {
+            request = request.header("traceparent", parent);
+        }
         if let Some(revision) = revision {
             request = request.header("History-Revision", revision);
         }
@@ -261,7 +264,8 @@ impl Service {
         let after = after.map(str::to_owned);
         let revision = revision.map(str::to_owned);
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        io().spawn(async move {
+        let cx = agent_api::telemetry::current();
+        io().spawn(agent_api::telemetry::within(cx, async move {
             let path: Vec<_> = path.iter().map(String::as_str).collect();
             let send = service.send(
                 method,
@@ -280,7 +284,7 @@ impl Service {
                 send.await
             };
             let _ = tx.send(result);
-        });
+        }));
         rx.recv()?
     }
     fn get(&self, path: &[&str], project: Option<&Path>) -> Result<Value> {
@@ -528,10 +532,11 @@ impl State {
                     break;
                 }
                 let path = ["v1", "sessions", &session, "lease", &lease_id, "renew"];
-                let renew = tokio::time::timeout(
+                let span = agent_api::telemetry::Operation::internal("modular_agent.history.lease.renew", &Scope::session(&session));
+                let renew = span.run(tokio::time::timeout(
                     old - sent,
                     service.send(Method::POST, &path, None, None, None, None),
-                );
+                ));
                 let reply = tokio::select! {
                     _ = stop.cancelled() => return,
                     _ = lost.cancelled() => return,
@@ -542,6 +547,7 @@ impl State {
                     }
                 };
                 let Some(ms) = reply.and_then(|v| positive_ms(&v, "ttlMs").ok()) else {
+                    span.error("renewal_failed");
                     break;
                 };
                 ttl = Duration::from_millis(ms);

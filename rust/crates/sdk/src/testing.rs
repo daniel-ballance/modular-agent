@@ -181,6 +181,10 @@ pub struct TestAgentBuilder {
 }
 
 impl TestAgentBuilder {
+    pub fn agent_name(mut self, name: impl Into<String>) -> Self {
+        self.builder = self.builder.agent_name(name);
+        self
+    }
     pub fn model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
         self

@@ -4,8 +4,8 @@ use futures_util::{FutureExt, Sink, SinkExt, Stream, StreamExt, future::BoxFutur
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use tokio::{
@@ -14,7 +14,91 @@ use tokio::{
     task::JoinSet,
 };
 
+#[cfg(test)]
+mod trace_tests;
+
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
+
+fn scope_from_params(params: &Value) -> Option<Scope> {
+    let session = params["sessionId"]
+        .as_str()
+        .or_else(|| params["turn"]["sessionId"].as_str())?;
+    let mut scope = Scope::session(session);
+    scope.turn = params["turnId"]
+        .as_str()
+        .or_else(|| params["turn"]["turnId"].as_str())
+        .map(str::to_owned);
+    scope.step = params["stepId"].as_str().map(str::to_owned);
+    Some(scope)
+}
+
+fn job_callback(method: &str, params: &Value) -> bool {
+    matches!(
+        method,
+        "host/jobs/progress" | "host/jobs/end" | "host/jobs/resume"
+    ) && params["jobId"].is_string()
+}
+
+fn work_method(method: &str) -> Option<&'static str> {
+    // Bound labels to methods defined by the binding, not strings sent by a peer.
+    const WORK: &[&str] = &[
+        "env/checkPoint",
+        "env/exec",
+        "env/exists",
+        "env/list",
+        "env/output",
+        "env/read",
+        "env/restore",
+        "env/save",
+        "env/sessionEnded",
+        "env/write",
+        "hook/handle",
+        "hook/output",
+        "host/ask",
+        "host/emit",
+        "host/env/exec",
+        "host/env/exists",
+        "host/env/list",
+        "host/env/output",
+        "host/env/read",
+        "host/env/write",
+        "host/history",
+        "host/hook",
+        "host/jobs/end",
+        "host/jobs/progress",
+        "host/jobs/resume",
+        "host/jobs/start",
+        "host/jobs/unfinished",
+        "host/runtime/definition",
+        "host/runtime/hasSteering",
+        "host/runtime/hook",
+        "host/runtime/model",
+        "host/runtime/modelEvent",
+        "host/runtime/newId",
+        "host/runtime/prepareStep",
+        "host/runtime/record",
+        "host/runtime/report",
+        "host/runtime/runToolCall",
+        "host/runtime/takeSteering",
+        "host/session",
+        "host/tools/call",
+        "host/tools/list",
+        "jobs/cancel",
+        "provider/available",
+        "provider/discard",
+        "provider/event",
+        "provider/models",
+        "provider/request",
+        "runtime/continueOpenCalls",
+        "runtime/resumeTurn",
+        "runtime/runTurn",
+        "tools/call",
+        "tools/changed",
+        "tools/list",
+        "tools/progress",
+    ];
+    WORK.iter().copied().find(|name| *name == method)
+}
 fn valid_id(id: &Value) -> bool {
     id.is_string()
         || id
@@ -144,6 +228,7 @@ struct Pending {
     reply: oneshot::Sender<(Reply, Option<CancellationToken>)>,
     work: Option<Arc<Work>>,
     method: String,
+    context: telemetry::Context,
     event: Option<OnEvent>,
 }
 // A host callback may be dropped while it is awaiting a nested RPC. Stop that
@@ -164,6 +249,10 @@ impl Drop for Outgoing<'_> {
 }
 pub struct Peer {
     tx: mpsc::UnboundedSender<(Value, bool)>,
+    plugin: OnceLock<String>,
+    trace_agreed: AtomicBool,
+    serves_plugin: AtomicBool,
+    jobs: Mutex<BTreeMap<String, (Scope, telemetry::Operation)>>,
     next: AtomicU64,
     pending: Mutex<BTreeMap<String, Pending>>,
     activity: tokio::sync::Notify,
@@ -226,6 +315,10 @@ impl Peer {
         let (tx, mut rx) = mpsc::unbounded_channel::<(Value, bool)>();
         let peer = Arc::new(Self {
             tx,
+            plugin: OnceLock::new(),
+            trace_agreed: false.into(),
+            serves_plugin: false.into(),
+            jobs: Mutex::default(),
             next: AtomicU64::new(1),
             pending: Mutex::default(),
             activity: tokio::sync::Notify::new(),
@@ -389,8 +482,8 @@ impl Peer {
                             } else if method == "$/ping" {
                                 Ok(json!({}))
                             } else {
-                                std::panic::AssertUnwindSafe(endpoint.request(
-                                    p.clone(),
+                                std::panic::AssertUnwindSafe(p.observe_request(
+                                    endpoint.as_ref(),
                                     id.clone(),
                                     &method,
                                     params,
@@ -407,6 +500,7 @@ impl Peer {
                             p.respond_frame(id, reply, end);
                         });
                     } else {
+                        let context = p.incoming_context(method, &params).0;
                         if let Some(note) = endpoint.clone().admit_notification(&p, method, params)
                         {
                             // Never wait for notification capacity on the reader. In
@@ -423,7 +517,11 @@ impl Peer {
                                 barriers.insert(key, done.clone());
                             }
                             if notify
-                                .try_send((note.run, done.drop_guard(), bytes))
+                                .try_send((
+                                    Box::pin(telemetry::within(context, note.run)),
+                                    done.drop_guard(),
+                                    bytes,
+                                ))
                                 .is_err()
                             {
                                 break;
@@ -507,15 +605,170 @@ impl Peer {
         });
     }
 
+    /// Call after a successful handshake. Agreement is not authority.
+    pub fn configure_trace(&self, name: &str, agreed: bool, serves_plugin: bool) {
+        let _ = self.plugin.set(name.to_owned());
+        self.serves_plugin.store(serves_plugin, Ordering::Release);
+        self.trace_agreed.store(agreed, Ordering::Release);
+    }
+
+    fn span(
+        &self,
+        method: &str,
+        scope: Option<&Scope>,
+        kind: telemetry::SpanKind,
+        cx: &telemetry::Context,
+    ) -> Option<telemetry::Operation> {
+        let method = work_method(method)?;
+        let name = telemetry::name(self.plugin.get()?)?;
+        Some(telemetry::Operation::start(
+            "modular_agent.plugin.request",
+            kind,
+            scope,
+            vec![
+                telemetry::KeyValue::new("modular_agent.plugin.name", name.to_owned()),
+                telemetry::KeyValue::new("modular_agent.plugin.method", method),
+            ],
+            cx,
+            vec![],
+        ))
+    }
+
+    fn inject(&self, method: &str, params: &mut Value, cx: &telemetry::Context) {
+        if let Some(p) = params.as_object_mut() {
+            p.remove("traceContext");
+        }
+        let callback = self.serves_plugin.load(Ordering::Acquire);
+        if self.trace_agreed.load(Ordering::Acquire)
+            && work_method(method).is_some()
+            && (!callback || !params["parentRequestId"].is_null() || job_callback(method, params))
+            && let Some(carrier) = telemetry::carrier(cx)
+            && let Some(p) = params.as_object_mut()
+        {
+            p.insert("traceContext".into(), carrier);
+        }
+    }
+
+    fn incoming_context(
+        &self,
+        method: &str,
+        params: &Value,
+    ) -> (telemetry::Context, Option<Scope>) {
+        if work_method(method).is_none() {
+            return (telemetry::Context::new(), None);
+        }
+        let remote = if self.trace_agreed.load(Ordering::Acquire) {
+            telemetry::extract(&params["traceContext"])
+        } else {
+            None
+        };
+        if self.serves_plugin.load(Ordering::Acquire) {
+            return (remote.unwrap_or_default(), scope_from_params(params));
+        }
+        let pending = self.pending.lock().unwrap();
+        let parent = pending.get(&params["parentRequestId"].to_string());
+        if let Some(parent) = parent
+            && let Some(work) = &parent.work
+            && !work.cancel.is_cancelled()
+            && params["sessionId"]
+                .as_str()
+                .is_none_or(|s| s == work.scope.session)
+        {
+            let cx = telemetry::same_trace_or(remote, &parent.context);
+            return (cx, Some(work.scope.clone()));
+        }
+        drop(pending);
+        if params["parentRequestId"].is_null()
+            && job_callback(method, params)
+            && let Some(job) = params["jobId"].as_str()
+            && let Some((scope, op)) = self.jobs.lock().unwrap().get(job)
+            && params["sessionId"]
+                .as_str()
+                .is_none_or(|id| id == scope.session)
+        {
+            return (
+                telemetry::same_trace_or(remote, &op.context()),
+                Some(scope.clone()),
+            );
+        }
+        (telemetry::Context::new(), None)
+    }
+
+    async fn observe_request(
+        self: &Arc<Self>,
+        endpoint: &dyn Endpoint,
+        id: Value,
+        method: &str,
+        mut params: Value,
+        cancel: CancellationToken,
+    ) -> Reply {
+        let (cx, scope) = self.incoming_context(method, &params);
+        if method != "plugin/initialize"
+            && let Some(p) = params.as_object_mut()
+        {
+            p.remove("traceContext");
+        }
+        let span = if scope.is_some() || self.serves_plugin.load(Ordering::Acquire) {
+            self.span(method, scope.as_ref(), telemetry::SpanKind::Server, &cx)
+        } else {
+            None
+        };
+        let cx = span.as_ref().map_or(cx, telemetry::Operation::context);
+        let result = telemetry::within(
+            cx,
+            endpoint.request(self.clone(), id, method, params, cancel),
+        )
+        .await;
+        if let Some(span) = span
+            && result
+                .as_ref()
+                .is_err_and(|e| !matches!(e.code.as_str(), "busy" | "cancelled" | "refused"))
+        {
+            span.error("plugin_request_failed");
+        }
+        result
+    }
+
+    pub(crate) fn observe_job(&self, job: &Job) {
+        let op = telemetry::Operation::internal("modular_agent.job", &job.scope)
+            .interrupted("modular_agent.job.outcome");
+        op.attr("modular_agent.job.id", job.id.clone());
+        self.jobs
+            .lock()
+            .unwrap()
+            .insert(job.id.clone(), (job.scope.clone(), op));
+    }
+
+    pub(crate) fn job_context(&self, job: &str) -> Option<telemetry::Context> {
+        self.jobs
+            .lock()
+            .unwrap()
+            .get(job)
+            .map(|(_, op)| op.context())
+    }
+
+    pub(crate) fn finish_job(&self, job: &str, outcome: &'static str) {
+        let ended = self.jobs.lock().unwrap().remove(job);
+        if let Some((_, mut op)) = ended {
+            op.outcome("modular_agent.job.outcome", outcome);
+            if outcome == "failed" {
+                op.error("job_failed");
+            }
+        }
+    }
+
     pub fn close(&self) {
         self.closed.cancel();
+        let observations = std::mem::take(&mut *self.jobs.lock().unwrap());
+        drop(observations);
         for (_, pending) in std::mem::take(&mut *self.pending.lock().unwrap()) {
             let _ = pending
                 .reply
                 .send((Err(Fault::new("lost", "plugin connection closed")), None));
         }
     }
-    pub fn notify(&self, method: &str, params: Value) {
+    pub fn notify(&self, method: &str, mut params: Value) {
+        self.inject(method, &mut params, &telemetry::current());
         let _ = self.tx.send((
             json!({"jsonrpc":"2.0","method":method,"params":params}),
             false,
@@ -584,6 +837,46 @@ impl Peer {
         cancel: CancellationToken,
         event: Option<OnEvent>,
     ) -> Reply {
+        let scope = work
+            .as_ref()
+            .map(|w| w.scope.clone())
+            .or_else(|| scope_from_params(&params));
+        let span = self.span(
+            method,
+            scope.as_ref(),
+            telemetry::SpanKind::Client,
+            &telemetry::current(),
+        );
+        let context = span
+            .as_ref()
+            .map_or_else(telemetry::current, telemetry::Operation::context);
+        let mut params = params;
+        if method != "plugin/initialize" {
+            self.inject(method, &mut params, &context);
+        }
+        let reply = self
+            .send_call(method, params, work, cancel, event, context)
+            .await;
+        if let Some(span) = span
+            && reply
+                .as_ref()
+                .is_err_and(|e| !matches!(e.code.as_str(), "busy" | "cancelled" | "refused"))
+        {
+            span.error("plugin_request_failed");
+        }
+        reply
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_call(
+        &self,
+        method: &str,
+        params: Value,
+        work: Option<Arc<Work>>,
+        cancel: CancellationToken,
+        event: Option<OnEvent>,
+        context: telemetry::Context,
+    ) -> Reply {
         let id = format!("r{}", self.next.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = oneshot::channel();
         let key = json!(id).to_string();
@@ -598,6 +891,7 @@ impl Peer {
                     reply: tx,
                     work,
                     method: method.to_owned(),
+                    context,
                     event,
                 },
             );

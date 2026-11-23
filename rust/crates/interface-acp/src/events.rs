@@ -166,7 +166,7 @@ async fn question(
         let cancel = session.api.cancellation(&q.scope.session)?;
         let response = async {
             if q.kind == RequestKind::Approval {
-                let params = json!({"sessionId":session.id,
+                let mut params = json!({"sessionId":session.id,
                     "toolCall":{"toolCallId":q.scope.call.clone().unwrap_or_else(||q.id.clone()),
                         "title":q.extra["approvalCall"]["name"],"rawInput":q.extra["approvalCall"]["input"],"status":"pending"},
                     "options":[{"optionId":"allow","name":"Allow","kind":"allow_once"},{"optionId":"refuse","name":"Refuse","kind":"reject_once"}],
@@ -194,6 +194,7 @@ async fn question(
                 if !binding::answerable(&session, service.as_ref(), &q) {
                     return std::future::pending().await;
                 }
+                add_question_trace(&session, &q, &mut params);
                 let request: RequestPermissionRequest = serde_json::from_value(params)?;
                 session.approval_views.lock().unwrap().insert((connection_actor().as_str().into(), q.id.clone()));
                 let response = serde_json::to_value(cx.send_request(request).block_task().await?)?;
@@ -205,7 +206,9 @@ async fn question(
             } else if q.kind != RequestKind::Secret && capabilities["elicitation"]["form"].is_object() {
                 let mut field = json!({"type":"string"});
                 if q.kind == RequestKind::Choice { field["enum"] = json!(q.options); }
-                let request:CreateElicitationRequest = serde_json::from_value(json!({"sessionId":session.id,"mode":"form","message":q.text,"requestedSchema":{"type":"object","properties":{"answer":field},"required":["answer"]},"_meta":{"modular-agent":{"requestId":q.id,"answerable":q.answerable}}}))?;
+                let mut params = json!({"sessionId":session.id,"mode":"form","message":q.text,"requestedSchema":{"type":"object","properties":{"answer":field},"required":["answer"]},"_meta":{"modular-agent":{"requestId":q.id,"answerable":q.answerable}}});
+                add_question_trace(&session, &q, &mut params);
+                let request:CreateElicitationRequest = serde_json::from_value(params)?;
                 let response = serde_json::to_value(cx.send_request(request).block_task().await?)?;
                 Ok((response["content"]["answer"].clone(),response["action"] != "accept"))
             } else {
@@ -231,6 +234,14 @@ async fn question(
             .await;
     }
 }
+fn add_question_trace(session: &Session, q: &Question, params: &mut Value) {
+    if !PRINCIPAL.with(|p| p.network)
+        && let Some(parent) = session.api.question_trace(&q.scope.session, &q.id)
+    {
+        params["_meta"]["traceparent"] = json!(parent);
+    }
+}
+
 fn reasoning(response: &ModelResponse) -> String {
     response
         .parts

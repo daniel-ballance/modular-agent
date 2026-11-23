@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+opentelemetry.workspace = true
 anyhow.workspace = true
 libc.workspace = true
 reqwest.workspace = true

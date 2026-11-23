@@ -1,5 +1,6 @@
 //! The transport and tool catalog shared by the Rust MCP adapters.
 use anyhow::{Result, ensure};
+use opentelemetry::{Context, trace::TraceContextExt};
 use rmcp::model::CallToolRequestParams;
 pub use rmcp::model::{CallToolResult, Tool};
 use rmcp::{
@@ -170,13 +171,9 @@ impl Connection {
         name: String,
         arguments: Map<String, Value>,
     ) -> Result<Option<CallToolResult>> {
-        match tokio::time::timeout(
-            Duration::from_secs(60),
-            self.service
-                .call_tool(CallToolRequestParams::new(name).with_arguments(arguments)),
-        )
-        .await
-        {
+        let mut request = CallToolRequestParams::new(name).with_arguments(arguments);
+        request.meta = trace_metadata();
+        match tokio::time::timeout(Duration::from_secs(60), self.service.call_tool(request)).await {
             Ok(result) => Ok(Some(result?)),
             Err(_) => Ok(None),
         }
@@ -185,6 +182,24 @@ impl Connection {
     pub async fn close(self) {
         let _ = self.service.cancel().await;
     }
+}
+
+fn trace_metadata() -> Option<rmcp::model::RequestMetaObject> {
+    let cx = Context::current();
+    let span = cx.span();
+    let sc = span.span_context();
+    sc.is_valid().then(|| {
+        let parent = format!(
+            "00-{}-{}-{:02x}",
+            sc.trace_id(),
+            sc.span_id(),
+            sc.trace_flags().to_u8()
+        );
+        rmcp::model::RequestMetaObject::from(Map::from_iter([(
+            "traceparent".into(),
+            Value::String(parent),
+        )]))
+    })
 }
 
 fn validate(server: &str, tools: &[Tool]) -> Result<()> {

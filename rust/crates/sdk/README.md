@@ -56,6 +56,8 @@ Claude credentials, pass them to the program, or sign in.
 
 ## What is checked
 
+The telemetry tests use the OpenTelemetry in-memory exporter, a failing exporter and a scripted Provider. They check admission, turn, step and call parentage, the absence of fixture payloads, the no-SDK path, private recovery checkpoints and fork exclusion. A plugin carrier test checks both directions with and without agreement and ignores unscoped callback context. This run passed 434 workspace tests, formatting and Clippy. The separate `ma` and base builds and the locked history demo build passed. The WebSocket kit passed 153/153 for the plugin, 14/14 for listener isolation and 193/193 for ACP. The telemetry recovery test uses the SDK's interruption seam; it does not kill and restart an exporter process.
+
 From `rust/`:
 
 ```sh
@@ -112,6 +114,8 @@ rm -rf "$scratch"
 
 ## Built so far
 
+The Harness declares `telemetry: 1`, whether export is installed or not. Set `Agent::builder().agent_name("my-agent")` to supply a stable, non-sensitive GenAI agent name. Register the application's tracer and meter providers with `opentelemetry::global` before building the agent. The SDK uses the OpenTelemetry API only; the application owns sampling, export and shutdown. Durable turns save their span context and use it as the parent and a link when they resume. Forks and public history do not carry that context. The SDK sends no baggage or vendor state. It trusts stdio ACP launchers for trace context; it treats network ACP principals as outside that scope. Configured plugin peers negotiate trace context separately on every connection.
+
 | Milestone | State |
 |---|---|
 | 1. Compose an agent | Project, data directory and disposable scratch, durability, built-in parts and explicit plugins, ordered process and service plugins, models, settings, approval, credentials and question handlers. `Registrar::runtime` accepts a `RuntimePart` with scoped, binding-shaped callbacks in process or served. `Registrar::history_store` accepts `History::from_portable` for metadata creation, lease-fenced opaque appends and paged reads and listings, or a native snapshot store. The Registrar also accepts custom environments, credentials, configuration and Interfaces. An explicit persistent store, including one installed by a plugin, requires `kept` or `durable`. |
@@ -131,6 +135,9 @@ rm -rf "$scratch"
 | ADR 0030. Pending erasure | Native file history puts the registry beside its snapshots. The snapshot-backed HTTP service declares [`pendingErasure: 1`](../../../docs/bindings/history-http.md#pending-erasure-registry-profile-pendingerasure-1). It stores the plans in the durable control record and orders publication, completion and guarded appends under the same lock. The old Rust routes and declaration are removed. On upgrade the service migrates existing private marks, keeping their bookkeeping IDs and completion flags. The client requires the profile to declare erasure, checks the registry before handoff and completes pending copies under the destination lease. Raw readers still bypass the Harness. Back up the registry and records together and verify restore freshness independently. |
 
 ## Findings for the SDK specification
+
+- **[Standard configuration, telemetry export check](../../../docs/reference/standard-configuration.md#what-is-checked):** Replace “With a loopback endpoint and always-on sampler, check the invocation and inference spans, `gen_ai.agent.name=ma`, configured `service.name` and no content.” with “With a loopback endpoint and an always-on sampler, check the invocation and inference spans, `gen_ai.agent.name=ma` and no content. Check `service.name` on the OTLP resource at the receiver. A collector's span query can omit the resource attributes; Phoenix's `/v1/projects/default/spans` response does.”
+- **[ACP, metadata](../../../docs/bindings/acp.md#metadata):** After the first paragraph add “The operator's trace trust scope is separate from authentication and work rights. A receiver may trust an operator-launched stdio peer by default. An authenticated network peer is not trusted for trace context unless the operator includes it in that scope.”
 
 - **[Placement, plugin environment scope](../../../docs/sdk/placement.md):** Add “In Rust a WebSocket plugin listener serves one operator-assigned host trust scope. Use `serve_websocket_factory` for a working environment and set `ServeOptions.projects` to its exact canonical roots. Use independent factories, retained state, credentials and confinement for isolated hosts. A callback invoked by two connections may share captured state only if the operator intentionally provided shared trusted code.” The base conformance plugin also accepts `--serve-plugin --listen ADDR --host-policy FILE`. Give it a JSON list of `{ "tokenFile": "…", "project": "…", "state": "…" }` entries with distinct credentials and nonoverlapping existing project and state directories. Relative paths resolve beside the policy. The host's `home` does not choose retained state.
 
