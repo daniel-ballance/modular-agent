@@ -313,7 +313,7 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 			if err != nil {
 				return err
 			}
-			if d != InterfaceToolAccepted {
+			if d.Status != InterfaceToolAccepted {
 				return stale
 			}
 		}

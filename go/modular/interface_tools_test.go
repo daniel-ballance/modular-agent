@@ -78,7 +78,7 @@ func checkInterfaceResultFromNewConnection(t *testing.T, opts []modular.Option) 
 	first.Close()
 	second := interfaceConnect(t, a, s)
 	status, err := second.ReportToolResult(ctx, modular.InterfaceToolReport{CallID: call.ID, Status: modular.Completed, Content: modular.Text("amber")})
-	if err != nil || status != modular.InterfaceToolAccepted {
+	if err != nil || status.Status != modular.InterfaceToolAccepted {
 		t.Fatalf("report: %v, %v", status, err)
 	}
 	if err := s.WaitIdle(ctx); err != nil {
@@ -183,7 +183,7 @@ func TestInterfaceTwoReportsRace(t *testing.T) {
 	if err := errors.Join(errs...); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 || statuses[0] == statuses[1] || statuses[0] == modular.InterfaceToolRefused || statuses[1] == modular.InterfaceToolRefused {
+	if calls != 1 || statuses[0] == statuses[1] || statuses[0].Status == modular.InterfaceToolRefused || statuses[1].Status == modular.InterfaceToolRefused {
 		t.Fatalf("reports: %v, tool.after ran %d times", statuses, calls)
 	}
 	if err := s.WaitIdle(ctx); err != nil {
@@ -199,7 +199,7 @@ func TestInterfaceTwoReportsRace(t *testing.T) {
 			n++
 			raw, _ := json.Marshal(row["message"])
 			want := "checked red"
-			if statuses[1] == modular.InterfaceToolAccepted {
+			if statuses[1].Status == modular.InterfaceToolAccepted {
 				want = "checked gold"
 			}
 			if !strings.Contains(string(raw), want) {
@@ -329,7 +329,7 @@ func TestInterfaceCheckpointSurvivesSIGKILL(t *testing.T) {
 			}
 			c := interfaceConnect(t, a, s)
 			status, err := c.ReportToolResult(ctx, modular.InterfaceToolReport{CallID: call, Status: modular.Completed, Content: modular.Text("amber")})
-			if err != nil || status != modular.InterfaceToolAccepted {
+			if err != nil || status.Status != modular.InterfaceToolAccepted {
 				t.Fatalf("report after SIGKILL: %s %v", status, err)
 			}
 			if err := s.WaitIdle(ctx); err != nil {

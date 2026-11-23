@@ -46,6 +46,7 @@ const (
 	InterfaceAccepted       = "accepted"
 	InterfaceAlreadySettled = "alreadySettled"
 	InterfaceRefused        = "refused"
+	InterfaceNotReady       = "notReady"
 )
 
 func (i *InterfaceConnection) ReportToolResult(ctx context.Context, report api.InterfaceReport) (string, error) {
@@ -164,15 +165,18 @@ func (i *InterfaceConnection) checkReportLocked(ctx context.Context, id string) 
 		i.c.h.startInterfaceContinuationsLocked(s)
 		return refuse()
 	}
-	if s.interfaceUnreleased[id] {
-		return refuse()
-	}
 	for _, e := range s.data.Branch() {
-		if e.Kind == "turn.end" && e.Turn == cp.Turn && api.Decode[api.Outcome](e.Data).Status == "completed" && slices.ContainsFunc(api.Decode[api.Outcome](e.Data).Open, func(c api.Call) bool { return c.ID == id }) {
+		if e.Turn != cp.Turn || !e.WasKind("turn.end") {
+			continue
+		}
+		out := api.Decode[api.Outcome](e.Data)
+		if !e.IsErased() && !s.interfaceUnreleased[id] && out.Status == "completed" &&
+			slices.ContainsFunc(out.Open, func(c api.Call) bool { return c.ID == id }) {
 			return cp, call, "", nil
 		}
+		return refuse()
 	}
-	return refuse()
+	return cp, call, InterfaceNotReady, nil
 }
 
 // Interface and question completions use the same session run queue. Derive
