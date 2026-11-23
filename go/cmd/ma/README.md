@@ -23,6 +23,7 @@ ma --project ./my-project
 ma --project ./my-project -p 'Explain the tests.'
 ma --project ./my-project -c
 ma --project ./my-project --acp
+ma --project ./my-project --acp --resume-open
 ma --agui --listen 127.0.0.1:7400 --token-file /path/to/private.token
 ```
 
@@ -34,9 +35,17 @@ ChatGPT, Grok and Claude come from the SDK. The former ids `openai-codex` and `x
 
 ## AG-UI listener
 
-`--agui` serves HTTP and SSE in the operator's project. Add `--acp` for ACP WebSocket upgrades on the same port. Use `HOST:0` to choose a free loopback port; the first line on stdout is the HTTP origin. Every request needs the bearer token. `ma` has no TLS options. A policy can supply `actors` instead of `--token-file`; give each client a stable `clientId`. The single-token shorthand uses client `local`. No browser tool is registered by default.
+`--agui` serves HTTP and SSE in the operator's project. Add `--acp` for ACP WebSocket upgrades on the same port. Use `HOST:0` to choose a free loopback port; the first line on stdout is the HTTP origin. Every request needs the bearer token. `ma` has no TLS options. A policy can supply `actors` instead of `--token-file`; give each client a stable `clientId`. The single-token shorthand uses client `ma-local`. No browser tool is registered by default.
 
-Run `go/scripts/check-agui.sh` from the repository root for the managed kit. It runs listener, encoding, history and stock conversation against `ma`. The other cases need the SDK app's registered tool, scripted hooks, clock, store or test controls. Those controls are not in `ma`.
+Run `go/scripts/check-agui.sh` from the repository root for the managed kit. It runs listener, thread listing, encoding, history and stock conversation against `ma`. The other cases need the SDK app's registered tool, scripted hooks, clock, store or test controls. Those controls are not in `ma`.
+
+Use `GET /agui/v1/threads` to find this client's kept threads without opening them. Each row reports counts of eligible questions and Interface calls, and whether its turn is running, interrupted or absent. Use the thread snapshot to read content.
+
+## Resuming at startup
+
+Recovery normally waits for a client to open the session. Pass `--resume-open` with `--acp` or `--agui` to start it before accepting clients. To make that the default, put `{"resume_open": true}` in the global `settings.json`. A project setting cannot enable or disable it. The option does not change interactive or print mode.
+
+`ma` checks the operator's project for interrupted turns. It uses the local operator's watch authority, not the rights of a future client. A durable turn continues under its recorded authority and repeat-safety rules. With `--runtime transient`, it ends as failed. A held writer is skipped. The service reports `resumed ID` or `skipped ID` on stderr, without prompts or tool details. It does not open an idle session just because that session has a question or an Interface call outstanding.
 
 ## Client identity
 
@@ -63,7 +72,7 @@ From the repository root:
 ```sh
 export TMPDIR="$HOME/.cache/ma-std-tmp"
 mkdir -p "$TMPDIR"
-(cd conformance/acp && npm ci && cd ../tools && npm ci)
+(cd conformance/acp && npm ci && cd ../tools && npm ci && cd ../telemetry && npm ci)
 (cd go && ./scripts/build-monty.sh && mise exec -- go build -o .bin/ma ./cmd/ma && mise exec -- go build -o .bin/modular ./cmd/modular && mise exec -- go build -o .bin/modular-agent-fixtures ./modular/cmd/fixtures)
 node conformance/reference/run.mjs --agent go
 MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- "$PWD/go/.bin/ma" --acp
@@ -74,8 +83,8 @@ scripts/websocket-kits.sh go
 ```
 
 - **Telemetry:** a loopback OTLP receiver checks binary protobuf and `service.name`. No export provider is installed without an endpoint or when `OTEL_SDK_DISABLED=true`. Phoenix received `invoke_agent ma`, `chat script` and `execute_tool codemode` from an offline scripted prompt run with `OTEL_SERVICE_NAME=ma-go`.
-- **Reference checks:** 25/25 against Go `ma`, including `telemetry-export`, including client identity validation, tool function values, denied ambient access, codemode results and memory failure followed by recovery.
-- **ACP with `--crash-checks --probe-checks --job-checks`:** 188/188 on stdio against Go `ma` with the SDK's Grok Provider. Earlier WebSocket runs passed 193/193 for ACP and 153/153 for plugins.
+- **Reference checks:** 26/26 against Go `ma`, including `resume-open`, telemetry export, client identity validation, tool function values, denied ambient access, codemode results and memory failure followed by recovery.
+- **ACP with `--crash-checks --probe-checks --job-checks`:** 188/188 on stdio against Go `ma` with the SDK's Grok Provider. The WebSocket run passed 193/193 for ACP, 153/153 for plugins and 14/14 for separate listeners. The AG-UI kit passed 26/26.
 - **Sandbox regressions:** the Go tests cover imports and function values, schema-order arguments, JSON and repr, terminal memory and time limits, which suspensions reset the active clock, a tool wait longer than the compute budget, 500 nested calls, recursion at 200 and 201, a UTF-8 print cut, worker death and cancellation, malformed messages, denied OS operations and seeded random.
 - **Go checks:** build, vet and formatting passed. The full Go suite passed 38 tested packages. The race run for `modular/...` and `cmd/ma/...` passed seven tested packages. `cmd/modular` takes several minutes; use the default package timeout.
 - **No network:** the Go `codemode-tools-values` and `sandbox-memory` reference checks both passed in a separate Linux network namespace.
