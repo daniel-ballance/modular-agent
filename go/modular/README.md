@@ -128,3 +128,5 @@ A repeated publication returns the original intent ID and destinations in publis
 
 ### Specification findings
 
+None open.
+
