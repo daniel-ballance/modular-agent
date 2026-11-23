@@ -30,6 +30,30 @@ func (c *client) CheckSessionWriter(id string) error {
 	return s.checkWriterLocked()
 }
 
+// JobTrace returns the live observation context, not authority to act as a job.
+func (c *client) JobTrace(sessionID, jobID string) context.Context {
+	s, err := c.find(sessionID)
+	if err != nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.jobSpans[jobID]
+}
+
+// ObserveJob starts a separate observation for a job restored from history.
+func (c *client) ObserveJob(job api.Job) {
+	s, err := c.find(job.Session)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.jobSpans[job.ID] == nil {
+		s.startJobSpan(telemetry.Scope(context.Background(), job.Session, job.Turn, "", c.h.agentName), job.ID)
+	}
+}
+
 func (c *client) finishJobLocked(s *session, end api.Entry, contexts ...context.Context) (api.Entry, api.Entry, error) {
 	job := api.Decode[api.Job](end.Data)
 	next := clone(s.data)
@@ -47,8 +71,8 @@ func (c *client) finishJobLocked(s *session, end api.Entry, contexts ...context.
 	end = appendEntry(&next, end, c.owner, true)
 	if job.Report {
 		in, admission = appendJobReport(&next, end, job, api.ID(), job.Outcome.Result, c.h.parkJobReports)
-		if span := s.jobSpans[end.Job]; span != nil {
-			ctx, admit := telemetry.Start(telemetry.Session(firstContext(contexts), s.id), "modular_agent.input.admit", trace.WithLinks(trace.Link{SpanContext: span.SpanContext()}), trace.WithAttributes(telemetry.String("modular_agent.input.id", in.ID)))
+		if jobCtx := s.jobSpans[end.Job]; jobCtx != nil {
+			ctx, admit := telemetry.Start(telemetry.Session(firstContext(contexts), s.id), "modular_agent.input.admit", trace.WithLinks(trace.Link{SpanContext: trace.SpanContextFromContext(jobCtx)}), trace.WithAttributes(telemetry.String("modular_agent.input.id", in.ID)))
 			in.TraceContext = telemetry.Inject(ctx)
 			defer admit.End()
 			contexts = []context.Context{ctx}

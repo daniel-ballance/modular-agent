@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
 	"slices"
 	"strings"
 	"sync"
@@ -255,6 +256,9 @@ func (m *Manager) launch(j api.Job, run func(context.Context) api.Outcome) {
 		return
 	}
 	ctx, cancel := context.WithCancelCause(context.Background())
+	if scope := m.jobTrace(j); scope != nil {
+		ctx = telemetry.InTrace(ctx, scope)
+	}
 	w.cancel = cancel
 	go func() {
 		defer cancel(nil)
@@ -277,9 +281,9 @@ func (m *Manager) launch(j api.Job, run func(context.Context) api.Outcome) {
 			if j.Report && out.Result == nil {
 				out.Result = api.Content{} // an explicit empty result for native jobs
 			}
-			j, err = m.endLocked(j, out, j.Report)
+			j, err = m.endLocked(ctx, j, out, j.Report)
 			if errors.Is(err, api.ErrJobReportRefused) {
-				j, err = m.endLocked(j, out, false)
+				j, err = m.endLocked(ctx, j, out, false)
 			}
 			m.mu.Unlock()
 			if err == nil {
@@ -314,7 +318,7 @@ func boundJobOutcome(out api.Outcome, report bool) (api.Outcome, bool) {
 	return bounded, true
 }
 
-func (m *Manager) endLocked(j api.Job, out api.Outcome, report bool) (api.Job, error) {
+func (m *Manager) endLocked(ctx context.Context, j api.Job, out api.Outcome, report bool) (api.Job, error) {
 	out, _ = boundJobOutcome(out, report)
 	switch out.Status {
 	case "completed", "failed", "cancelled", "outcomeUnknown":
@@ -323,7 +327,11 @@ func (m *Manager) endLocked(j api.Job, out api.Outcome, report bool) (api.Job, e
 	}
 	j.Outcome, j.State, j.Report, j.ResultPresent = out, out.Status, report, out.Result != nil
 	j.CleanupUnconfirmed = false
-	_, err := m.a.Record(context.Background(), j.Session, api.Entry{ID: "job-end-" + j.ID, Kind: "job.end", Turn: j.Turn, Job: j.ID, Actor: j.Actor, Writer: j.Owner, Copies: append([]string{j.StartEntry}, out.Copies...), Data: api.JSON(j)})
+	ctx = context.WithoutCancel(ctx)
+	if scope := m.jobTrace(j); scope != nil {
+		ctx = telemetry.InTrace(ctx, scope)
+	}
+	_, err := m.a.Record(ctx, j.Session, api.Entry{ID: "job-end-" + j.ID, Kind: "job.end", Turn: j.Turn, Job: j.ID, Actor: j.Actor, Writer: j.Owner, Copies: append([]string{j.StartEntry}, out.Copies...), Data: api.JSON(j)})
 	return j, err
 }
 func (m *Manager) emit(ctx context.Context, kind string, j api.Job, data []byte) {
@@ -387,7 +395,7 @@ func (m *Manager) cancelJob(ctx context.Context, id, job string, explicit bool) 
 		return api.ErrJobCleanupLost
 	}
 	if cancel == nil && explicit && m.ownerGone(j.Owner) {
-		j, err = m.endLocked(j, api.Outcome{Status: "cancelled"}, false)
+		j, err = m.endLocked(ctx, j, api.Outcome{Status: "cancelled"}, false)
 		if err == nil {
 			m.release(key)
 		}

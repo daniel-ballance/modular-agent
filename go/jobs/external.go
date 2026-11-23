@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 )
 
@@ -50,6 +51,26 @@ func (m *Manager) findExternalLocked(owner, id string) (api.Job, error) {
 	return api.Job{}, errors.New("job of this plugin not found")
 }
 
+// ExternalTrace resolves the live observation only for this job owner.
+func (m *Manager) ExternalTrace(owner, id string) context.Context {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j, err := m.findExternalLocked(owner, id)
+	if err != nil || j.State != "running" {
+		return nil
+	}
+	return m.jobTrace(j)
+}
+
+func (m *Manager) jobTrace(j api.Job) context.Context {
+	if h, ok := m.a.(interface {
+		JobTrace(string, string) context.Context
+	}); ok {
+		return h.JobTrace(j.Session, j.ID)
+	}
+	return nil
+}
+
 func (m *Manager) ResumeExternal(owner, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -61,6 +82,9 @@ func (m *Manager) ResumeExternal(owner, id string) error {
 	if m.open[j.Session] || j.State != "running" || j.CleanupUnconfirmed || m.remoteRuns[key] || m.cancelling[key] != nil || !m.a.Authorize(j.Session, api.JobActor(j.ID), "jobs") {
 		return errors.New("job cannot be resumed")
 	}
+	if h, ok := m.a.(interface{ ObserveJob(api.Job) }); ok {
+		h.ObserveJob(j)
+	}
 	m.launch(j, nil)
 	return nil
 }
@@ -69,6 +93,11 @@ func (m *Manager) ProgressExternal(ctx context.Context, owner, id string, conten
 	m.mu.Lock()
 	j, err := m.findExternalLocked(owner, id)
 	active := j.State == "running" && !j.CleanupUnconfirmed && m.workers[ref{j.Session, id}] != nil
+	if active {
+		if scope := m.jobTrace(j); scope != nil {
+			ctx = telemetry.InTrace(ctx, scope)
+		}
+	}
 	m.mu.Unlock()
 	if err != nil {
 		return err
@@ -106,7 +135,7 @@ func (m *Manager) EndExternal(ctx context.Context, owner, id string, outcome api
 		return errors.New("job end refused")
 	}
 	key := ref{j.Session, id}
-	j, err = m.endLocked(j, outcome, report)
+	j, err = m.endLocked(ctx, j, outcome, report)
 	if err == nil {
 		m.release(key)
 	}

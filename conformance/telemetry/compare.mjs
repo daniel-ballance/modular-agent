@@ -236,12 +236,18 @@ export function compareTrace({ testCase, report, received, connections = [], sen
     const attempts = inference.filter(s => matches(s, scoped));
     const stepMatches = stepSpans.filter(s => matches(s, scoped));
     if (observed.beforeCrash) {
-      assert(attempts.length <= 1 && stepMatches.length <= 1, "Duplicate pre-crash work");
       const saved = parseContext(report.crash.turnStart.data.traceContext);
-      if (stepMatches[0]) parent(stepMatches[0], saved);
+      const oldSteps = stepMatches.filter(s => s.traceId === saved.traceId && s.parentSpanId === saved.spanId);
+      const restored = stepMatches.filter(s => !oldSteps.includes(s));
+      assert(attempts.length <= 1 && oldSteps.length <= 1, "Duplicate pre-crash work");
+      assert(restored.length <= 1, "Duplicate restored step");
+      // Recovery can finish work on the recorded step without making another
+      // model attempt. That work belongs to the resumed segment.
+      if (restored[0]) parent(restored[0], invocation);
       if (attempts[0]) {
         assert.equal(attempts[0].traceId, saved.traceId, "Pre-crash inference trace ID");
-        if (stepMatches[0]) parent(attempts[0], stepMatches[0]);
+        if (oldSteps[0]) parent(attempts[0], oldSteps[0]);
+        if (restored[0]) assert.notEqual(attempts[0].parentSpanId, restored[0].spanId, "Pre-crash inference under restored step");
       }
     }
     const attempt = observed.beforeCrash ? attempts[0] : one(attempts, "Inference attempt for step ID");

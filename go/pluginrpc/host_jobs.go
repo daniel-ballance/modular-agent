@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
+	"go.opentelemetry.io/otel/trace"
 	"time"
 )
 
@@ -34,7 +36,7 @@ func (h *host) jobCanceller(name string) api.JobCanceller {
 	}
 }
 
-func (r *remote) jobCallback(ctx context.Context, method string, v object, notification bool) (any, error) {
+func (r *remote) jobCallback(ctx context.Context, method string, v object, notification bool) (_ any, errOut error) {
 	if r.host.jobOwner(r.reg.Name) != r {
 		return nil, fault("invalid_request", "plugin has no unique job owner name")
 	}
@@ -118,6 +120,21 @@ func (r *remote) jobCallback(ctx context.Context, method string, v object, notif
 	case "host/jobs/resume", "host/jobs/end", "host/jobs/progress":
 		if id == "" || has(v, "sessionId") || has(v, "parentRequestId") {
 			return nil, fault("invalid_request", "request must name a job of this plugin")
+		}
+		if j, ok := jobs.(interface {
+			ExternalTrace(string, string) context.Context
+		}); ok {
+			if scope := j.ExternalTrace(owner, id); scope != nil {
+				if r.peer.traceAgreed.Load() {
+					ctx = telemetry.Extract(ctx, readTrace(mustJSON(v)))
+				}
+				ctx = telemetry.InTrace(ctx, scope)
+				if !notification {
+					var span trace.Span
+					ctx, span = tracePlugin(ctx, owner, method, trace.SpanKindServer)
+					defer func() { telemetry.Finish(span, errOut) }()
+				}
+			}
 		}
 		switch method {
 		case "host/jobs/resume":

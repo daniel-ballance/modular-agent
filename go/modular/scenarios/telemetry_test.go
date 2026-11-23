@@ -208,9 +208,11 @@ func firstTurnCommit(batch []api.Entry) (commitEvidence, error) {
 			continue // initial records staged before the first input
 		case "input.accepted":
 			writer.Name = "modular_agent.input.admit"
-		case "turn.start", "input", "step.start", "turn.end", "step.end":
+		case "turn.start", "input", "step.start", "turn.end":
 			writer = writerEvidence{Name: "invoke_agent", TurnID: e.Turn}
-		case "model.request", "model", portable.StepAfterKind:
+		case "model.request":
+			writer = writerEvidence{Name: "chat", TurnID: e.Turn, StepID: e.Step}
+		case "model", "step.end", portable.StepAfterKind:
 			writer = writerEvidence{Name: "modular_agent.step", TurnID: e.Turn, StepID: e.Step}
 		default:
 			return c, fmt.Errorf("unexpected first-turn commit kind %q", e.Kind)
@@ -219,8 +221,8 @@ func firstTurnCommit(batch []api.Entry) (commitEvidence, error) {
 			return c, fmt.Errorf("first-turn batch has multiple writers: %v and %v", c.Parent, writer)
 		}
 		c.Parent = writer
+		c.TurnID, c.StepID = e.Turn, e.Step
 	}
-	c.TurnID, c.StepID = c.Parent.TurnID, c.Parent.StepID
 	return c, nil
 }
 

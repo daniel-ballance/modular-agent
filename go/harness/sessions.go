@@ -20,7 +20,7 @@ import (
 )
 
 type session struct {
-	jobSpans          map[string]trace.Span
+	jobSpans          map[string]context.Context
 	id                string // immutable, safe for event routing while snapshots change
 	project           string // immutable canonical workspace for rewind exclusion
 	tenant            string // immutable capacity scope for output
@@ -573,9 +573,13 @@ func (s *session) publishReservedInitialLocked(next api.Session, ctx context.Con
 func (s *session) commitSnapshotLocked(next api.Session, contexts ...context.Context) error {
 	return s.withErasureCheck(next, func() error {
 		return s.commitCapacity(next, func() error {
-			return s.traceCommit(next, s.pendingStore == nil, contexts, func(ctx context.Context) error { return s.commitReservedSnapshotLocked(next, ctx) })
+			return s.traceCommit(next, s.savesSnapshot(next), contexts, func(ctx context.Context) error { return s.commitReservedSnapshotLocked(next, ctx) })
 		})
 	})
+}
+
+func (s *session) savesSnapshot(next api.Session) bool {
+	return s.pendingStore == nil && s.lease != nil && (s.h.deferHistory || next.ForkedFrom != "" || slices.ContainsFunc(next.Entries, startsLegacyHistory))
 }
 
 func (s *session) commitReservedSnapshotLocked(next api.Session, contexts ...context.Context) error {
@@ -592,7 +596,7 @@ func (s *session) commitReservedSnapshotLocked(next api.Session, contexts ...con
 	}
 	// Outside the public persistent lifecycle, keep the original lazy
 	// save rule. An attached public persistent lease saves all changes.
-	if s.lease != nil && (s.h.deferHistory || next.ForkedFrom != "" || slices.ContainsFunc(next.Entries, startsLegacyHistory)) {
+	if s.savesSnapshot(next) {
 		if err := saveHistory(ctx, s.lease, next); err != nil {
 			if s.rewindBlocked && !errors.Is(err, api.ErrWriterLost) && s.reconcileRewindCommit(next) {
 				return nil
@@ -653,10 +657,7 @@ func (c *client) Record(ctx context.Context, id string, e api.Entry) (api.Entry,
 	} else {
 		e, err = s.recordLocked(e, c.owner, true, telemetry.Step(telemetry.Session(ctx, id), e.Step))
 		if err == nil && e.Kind == "job.start" {
-			if s.jobSpans == nil {
-				s.jobSpans = make(map[string]trace.Span)
-			}
-			_, s.jobSpans[e.Job] = telemetry.Start(telemetry.Session(ctx, id), "modular_agent.job", trace.WithAttributes(telemetry.String("modular_agent.job.id", e.Job)))
+			s.startJobSpan(telemetry.Session(ctx, id), e.Job)
 		}
 	}
 	s.mu.Unlock()

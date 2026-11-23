@@ -122,6 +122,22 @@ func Parse(w *Wire) trace.SpanContext {
 	return trace.SpanContextFromContext(propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{"traceparent": w.Parent}))
 }
 
+// InTrace keeps a supplied operation only in the tracked work's trace.
+// Retain the caller's cancellation, but restore the tracked work's IDs.
+func InTrace(ctx, tracked context.Context) context.Context {
+	if tracked == nil {
+		return ctx
+	}
+	parent := trace.SpanFromContext(tracked)
+	if candidate := trace.SpanFromContext(ctx); candidate.SpanContext().IsValid() && candidate.SpanContext().TraceID() == parent.SpanContext().TraceID() {
+		parent = candidate
+	}
+	if scope, ok := tracked.Value(scopeKey{}).(work); ok {
+		ctx = context.WithValue(ctx, scopeKey{}, scope)
+	}
+	return trace.ContextWithSpan(ctx, parent)
+}
+
 func Extract(ctx context.Context, w *Wire) context.Context {
 	if sc := Parse(w); sc.IsValid() {
 		return trace.ContextWithRemoteSpanContext(ctx, sc)

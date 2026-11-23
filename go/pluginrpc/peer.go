@@ -308,7 +308,12 @@ func (p *Peer) call(ctx context.Context, method string, params any, out any, acc
 		}
 		p.mu.Unlock()
 	}()
-	if err := p.send(envelope{ID: id, Method: method, Params: traceParams(mustJSON(params), ctx, p.traceAgreed.Load() && traceWork(method))}); err != nil {
+	raw := mustJSON(params)
+	// The initialize member is a capability version, not a W3C carrier.
+	if method != "plugin/initialize" {
+		raw = traceParams(raw, ctx, p.traceAgreed.Load() && traceWork(method))
+	}
+	if err := p.send(envelope{ID: id, Method: method, Params: raw}); err != nil {
 		if Code(err) != "" {
 			return err
 		}
