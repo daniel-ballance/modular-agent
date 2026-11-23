@@ -143,16 +143,40 @@ async fn tenant_without_input_never_starts_a_provisional_session() -> anyhow::Re
 
 #[tokio::test]
 async fn a_left_open_question_can_be_answered_without_presence() -> anyhow::Result<()> {
+    left_open_exchange(
+        modular_agent::Ask::choice("Which?", &["first", "second"]),
+        None,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn link_interrupt_contains_its_gated_uri() -> anyhow::Result<()> {
+    let uri = "https://example.test/authorize";
+    left_open_exchange(
+        modular_agent::Ask::link("Visit the account page", uri),
+        Some(uri),
+    )
+    .await
+}
+
+async fn left_open_exchange(
+    question: modular_agent::Ask,
+    link: Option<&str>,
+) -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
-    let ask = modular_agent::Tool::new("choose", "Choose a label").run(|_: Value, cx| async move {
-        cx.ask_with(
-            modular_agent::Ask::choice("Which?", &["first", "second"]),
-            modular_agent::AskWait {
-                wait: std::time::Duration::ZERO,
-            },
-        )
-        .await?;
-        Ok("Answered.".to_owned())
+    let ask = modular_agent::Tool::new("choose", "Choose a label").run(move |_: Value, cx| {
+        let question = question.clone();
+        async move {
+            cx.ask_with(
+                question,
+                modular_agent::AskWait {
+                    wait: std::time::Duration::ZERO,
+                },
+            )
+            .await?;
+            Ok("Answered.".to_owned())
+        }
     });
     let agent = Agent::builder()
         .project(dir.path())
@@ -169,6 +193,10 @@ async fn a_left_open_question_can_be_answered_without_presence() -> anyhow::Resu
     assert_eq!(end["type"], "interrupt");
     let interrupt = &end["interrupts"][0];
     assert!(interrupt.get("expiresAt").is_none());
+    if let Some(uri) = link {
+        assert_eq!(interrupt["metadata"]["modular-agent.link"], uri);
+        assert_eq!(interrupt["message"], "Visit the account page");
+    }
     let snapshot: Value = reqwest::Client::new()
         .get(url(&server, &format!("/threads/{id}")))
         .bearer_auth(TOKEN)
