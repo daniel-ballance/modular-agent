@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { context, isSpanContextValid, metrics, ROOT_CONTEXT, SpanKind, SpanStatusCode, trace,
+import { context, createTraceState, isSpanContextValid, metrics, ROOT_CONTEXT, SpanKind, SpanStatusCode, trace,
 	type Attributes, type Context, type Span, type SpanContext } from "@opentelemetry/api";
 import type { AssistantMessage, HistoryEntry, ToolCall } from "./types.js";
 import { INTERFACE_HANDOFF } from "./interface-tools.js";
@@ -11,14 +11,23 @@ export const conversation = (id: string): Attributes => ({ "gen_ai.conversation.
 const scopeKeys = ["gen_ai.conversation.id", "modular_agent.turn.id", "modular_agent.step.id"] as const;
 const scope = new AsyncLocalStorage<{ context: Context; attributes: Attributes; operation: Operation }>();
 
-// Only IDs and flags are carried. There is no configured allowlist for vendor state.
-export function readTrace(value: unknown): SpanContext | undefined {
+// Vendor state stays local to work entered through an explicit trust policy. Other
+// transports and persisted carriers continue to carry only IDs and sampling flags.
+const admittedState = new WeakSet<object>();
+export function readTrace(value: unknown, vendors?: readonly string[]): SpanContext | undefined {
 	const header = (value as { traceparent?: unknown } | null)?.traceparent;
 	if (typeof header !== "string" || header.length > 512) return;
 	const parts = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})(.*)$/.exec(header);
 	if (!parts || parts[0] !== header || parts[1] === "ff" || (parts[5] && (parts[1] === "00" || !parts[5].startsWith("-")))) return;
 	const candidate = { traceId: parts[2], spanId: parts[3], traceFlags: Number.parseInt(parts[4], 16), isRemote: true };
-	if (isSpanContextValid(candidate)) return candidate;
+	if (!isSpanContextValid(candidate)) return;
+	const state = (value as { tracestate?: unknown }).tracestate;
+	if (vendors?.length && typeof state === "string" && state.length <= 512) {
+		const allowed = state.split(",").map(s => s.trim()).filter(s => vendors.includes(s.slice(0, s.indexOf("="))));
+		const traceState = createTraceState(allowed.join(","));
+		if (traceState.serialize()) { admittedState.add(traceState); return { ...candidate, traceState }; }
+	}
+	return candidate;
 }
 
 export function carrier(parent: SpanContext | undefined): TraceContext | undefined {
@@ -48,7 +57,7 @@ export function startOperation(name: string, attributes: Attributes = {}, option
 } = {}) {
 	const active = scope.getStore();
 	const candidate = options.parent === undefined ? currentSpan() : options.parent;
-	const parent = candidate && isSpanContextValid(candidate) ? withoutState(candidate) : undefined;
+	const parent = candidate && isSpanContextValid(candidate) ? candidate.traceState && admittedState.has(candidate.traceState) ? candidate : withoutState(candidate) : undefined;
 	const parentContext = parent ? trace.setSpanContext(ROOT_CONTEXT, parent) : ROOT_CONTEXT;
 	const inherited = active && (options.parent === undefined || (parent && trace.getSpanContext(active.context)?.traceId === parent.traceId)) ? active.attributes : {};
 	const all = { ...inherited, ...attributes };

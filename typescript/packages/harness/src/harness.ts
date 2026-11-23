@@ -209,7 +209,7 @@ export interface PluginApi {
 	// following along
 	follow(sessionId: string, options: FollowOptions, listener: (event: AgentEvent) => unknown): (() => void) & { idle(): Promise<void> };
 	flushOutput(sessionId: string, recipient: string): Promise<void>;
-	gateOutput<T>(sessionId: string, recipient: string, type: string, data: T): Promise<T | undefined>;
+	gateOutput<T>(sessionId: string, recipient: string, type: string, data: T, ids?: Pick<AgentEvent, "turnId" | "stepId" | "toolCallId">): Promise<T | undefined>;
 	declaration(sessionId?: string): Declaration;
 	modelAccess(sessionId: string): ModelAccess | undefined;
 	// settings
@@ -515,14 +515,14 @@ export class Harness {
 				const followers = [...(this.sessions.get(id)?.followers ?? [])].filter((f) => f.recipient === recipient);
 				await Promise.all(followers.map((f) => f.idle()));
 			},
-			gateOutput: async (sessionId, recipient, type, data) => {
+			gateOutput: async (sessionId, recipient, type, data, ids) => {
 				const s = this.sessions.get(sessionId);
 				const freshness = s && await this.admitHistory(s);
 				let out: typeof data | undefined;
 				const follower = new Follower(this.hooks, recipient, false, (e) => { if (e.type === type) out = e.data; }, (e) => this.problem("harness", "output gate", e), undefined, undefined,
 					s && this.httpErasure() ? () => this.admitHistory(s).then(current => { if (current !== freshness) throw failure("unavailable", "Erasure changed the output view"); }) : undefined);
-				follower.push({ type, time: this.now(), sessionId, source: pluginName, data });
-				if (type === "model.output") follower.push({ type: "model.streamEnd", time: this.now(), sessionId, source: pluginName });
+				follower.push({ type, time: this.now(), sessionId, source: pluginName, ...ids, data });
+				if (type === "model.output") follower.push({ type: "model.streamEnd", time: this.now(), sessionId, source: pluginName, ...ids });
 				await follower.idle();
 				if (s && await this.admitHistory(s) !== freshness) throw failure("unavailable", "Erasure changed the output view");
 				return out;

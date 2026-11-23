@@ -74,6 +74,13 @@ export function runInput(raw: Record<string, any>, warn: (field: string) => void
   if (version && Number(version[1]) !== 1) fail("not_supported");
   if (raw.protocolVersion !== "1.0") warn("protocolVersion");
   if (raw.forwardedProps === null) delete raw.forwardedProps;
+  // New media variants are not operations. Do not try to resolve their source.
+  if (Array.isArray(raw.messages)) for (const m of raw.messages) {
+    if ((m?.role === "user" || m?.role === "tool") && Array.isArray(m.content)) m.content = m.content.filter((p: unknown) => {
+      if (!object(p) || typeof p.type !== "string" || ["text","image","audio","video","document"].includes(p.type)) return true;
+      warn("messages.content"); return false;
+    });
+  }
   const parsed = RunAgentInputSchema.safeParse(raw);
   if (!parsed.success || !parsed.data.threadId || !parsed.data.runId) fail("invalid_request");
   const data = parsed.data as RunAgentInput;

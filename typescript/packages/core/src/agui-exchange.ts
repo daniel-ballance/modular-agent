@@ -2,7 +2,7 @@ import type { ServerResponse } from "node:http";
 import { inputIdOf, isText, textOf, type AgentEvent, type HistoryEntry, type InputRequest, type InterfaceToolConnection, type ToolCall } from "@modular-agent/harness";
 import type { Interrupt } from "@ag-ui/core";
 import type { Route } from "./agui.js";
-import { assistantId, content, toolId } from "./agui-view.js";
+import { assistantId, content, displayEntry, toolId } from "./agui-view.js";
 import { MAX, errorCode, fail, frame, object, same, sse, type WireEvent } from "./agui-wire.js";
 
 export const callFrames = (call: ToolCall, parentMessageId?: string): WireEvent[] => [
@@ -24,6 +24,8 @@ export class Exchange {
   private pieces = new Map<string, number>(); private received = new Map<string, number>();
   private starts = new Map<string, ToolCall>(); private stateRevision?: string; private originals = new Map<string, unknown>();
   private firstEntry?: string;
+  private initialState?: {revisionId: string; snapshot: unknown};
+  private stateSerial = 0; private lastStateSerial = 0;
   inputId?: string; turn?: string; origin?: string; handled?: boolean;
   constructor(readonly r: Route, readonly res: ServerResponse, readonly runId: string, readonly connection: InterfaceToolConnection | undefined,
     readonly setDeliver: (fn: (call: ToolCall) => void) => void) {}
@@ -31,10 +33,12 @@ export class Exchange {
   eligible(q: InputRequest) { return this.turn !== undefined && q.turnId === this.turn; }
   private include = (e: AgentEvent) => {
     if (e.type === "model.output" && e.data?.type === "text" && e.stepId) this.pieces.set(e.stepId, 1 + (this.pieces.get(e.stepId) ?? 0));
-    if (e.type.startsWith(statePrefix) && e.source === this.r.binding.host.statePlugin?.name && e.data?.revisionId) this.originals.set(e.data.revisionId, e.data);
+    if (e.type.startsWith(statePrefix) && e.source === this.r.binding.host.statePlugin?.name && e.data?.revisionId) this.originals.set(e.data.revisionId, { data: e.data, serial: ++this.stateSerial });
     if (e.type === "entry.added") {
       this.firstEntry ??= e.data.id;
-      return ["response", "input", "toolStarted", "toolResult", "turnStart"].includes(e.data.kind) || this.extensionEntry(e.data);
+      if (e.data.kind === "input" && e.data.data?.key === "agui:" + JSON.stringify([this.r.p.clientId, this.runId]) && e.actorId === this.r.p.actor.id) this.turn = e.turnId;
+      if (this.origin && e.data.kind === "turnStart" && e.data.continuesTurnId === this.origin) this.turn = e.turnId;
+      return ["response", "input", "inputHandedBack", "toolStarted", "toolResult", "turnStart"].includes(e.data.kind) || this.extensionEntry(e.data);
     }
     // Optional plugin output that cannot fit on the wire must not disconnect a healthy follower.
     if (e.source !== "runtime" && e.source !== "harness" && Buffer.byteLength(JSON.stringify(e.data ?? null)) > MAX) return false;
@@ -72,19 +76,16 @@ export class Exchange {
       this.turn = entries.find(e => this.inputId ? e.kind === "input" && inputIdOf(e) === this.inputId : this.origin && e.kind === "turnStart" && e.continuesTurnId === this.origin)?.turnId;
     }
   }
+  async readState() { this.initialState = await this.r.binding.host.statePlugin?.snapshot(this.r.id); }
   async start() {
     const { r, res } = this;
     const start = await r.events([{ type: "RUN_STARTED", ...this.boundary, protocolVersion: "1.0" }]);
     if (res.destroyed) fail("unavailable"); sse(res); this.write(start);
     const snap = await r.snapshot(false, this.firstEntry);
     this.write(await r.events(snapshotFrames(snap.view))); r.remember(snap);
-    const plugin = r.binding.host.statePlugin;
-    if (plugin) {
-      const document = await plugin.snapshot(r.id);
-      if (document) {
-        const view = await r.api.gateOutput(r.id, r.recipient, statePrefix + "stateSnapshot", document);
-        if (view) await this.state("stateSnapshot", view, document);
-      }
+    if (this.initialState) {
+      const view = await r.api.gateOutput(r.id, r.recipient, statePrefix + "stateSnapshot", this.initialState);
+      if (view) await this.state("stateSnapshot", view, this.initialState);
     }
     await this.select(); this.opened.resolve();
     this.beat = setInterval(() => { void this.r.current().then(() => this.write(": waiting\n\n"), e => this.error(e)).catch(e => this.error(e)); }, 15_000).unref();
@@ -127,7 +128,10 @@ export class Exchange {
         const sources = r.binding.host.rawSources;
         if (sources && Object.hasOwn(sources, e.source) && object(d) && Object.hasOwn(d, "event")) await this.send([{ type: "RAW", source: sources[e.source], event: d.event }], false);
       } else if (e.source === r.binding.host.statePlugin?.name) {
-        await this.state(e.type.slice(statePrefix.length), d, this.originals.get(d?.revisionId)); this.originals.delete(d?.revisionId);
+        const received = this.originals.get(d?.revisionId);
+        if (!object(received) || received.serial !== this.lastStateSerial + 1) this.stateRevision = undefined;
+        this.lastStateSerial = object(received) ? received.serial : 0;
+        await this.state(e.type.slice(statePrefix.length), d, object(received) ? received.data : undefined); this.originals.delete(d?.revisionId);
       }
       return;
     }
@@ -142,8 +146,11 @@ export class Exchange {
       return;
     }
     if (e.type === "entry.added") {
-      const entry = d as HistoryEntry, { message } = entry;
-      if (entry.erased) return;
+      const raw = (await r.records()).find(record => record.id === d.id);
+      if (!raw || raw.erased || d.erased) return;
+      const entry = await displayEntry(r.api, r.p, raw, d as HistoryEntry);
+      if (!entry) return;
+      const {message} = entry;
       if (entry.kind === "input" && inputIdOf(entry) === this.inputId) {
         const snap = await r.snapshot(false, undefined, undefined, entry.id);
         await this.send(snapshotFrames(snap.view)); r.remember(snap);
@@ -203,17 +210,20 @@ export class Exchange {
     const outcome = questions.length ? { type: "interrupt", interrupts: questions } : kind === "completed" ? { type: "success", ...(calls.length ? { pendingToolCallIds: calls.map(c => c.toolCallId) } : {}) } : { type: "cancelled" };
     const snap = await r.snapshot(false);
     const terminal = [...snapshotFrames(snap.view), { type: "RUN_FINISHED", ...this.boundary, outcome }];
-    const tail = await r.events(terminal);
-    const frames = await Promise.all(calls.map(c => r.events(callFrames(c.call))));
+    const groups = calls.map(c => callFrames(c.call, c.call.stepId && snap.view.messages.some(m => m.id === assistantId(c.call.stepId!)) ? assistantId(c.call.stepId) : undefined));
+    await r.events([...groups.flat(), ...terminal]); // Do not authorize a terminal or a subset in isolation.
+    if (await r.branchGeneration() !== snap.cursor.branch) fail("conflict");
+    const tail = terminal.map(frame).join("");
+    const frames = groups.map(group => group.map(frame).join(""));
     const end = () => {
       this.write(tail); this.res.end(); r.remember(snap); r.c.delivered = new Set(questions.map(q => q.id)); this.stop();
     };
-    if (kind === "interrupt" && connection && this.turn && !owned) r.c.held = { connection, turnId: this.turn, setDeliver: this.setDeliver, deliver: () => {} };
-    if (!calls.length) { end(); return; }
+    if (kind === "interrupt" && connection && this.turn && !owned) r.c.held = { connection, turnId: this.turn, setDeliver: this.setDeliver };
+    if (!calls.length) { if (owned && kind !== "interrupt") { owned.connection.disconnect(); r.c.held = undefined; } end(); return; }
     if (!connection) fail("conflict");
     let next = 0;
     (owned?.setDeliver ?? this.setDeliver)(call => {
-      if (!same(call, calls[next]?.call) || !r.rights().includes("watch")) fail("refused");
+      if (!same(call, calls[next]?.call) || !r.rights().includes("watch") || calls.some(c => Date.parse(c.expiresAt) <= Date.now())) fail("refused");
       this.write(frames[next++]); if (next === calls.length) end();
     });
     try {

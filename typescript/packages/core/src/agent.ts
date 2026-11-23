@@ -190,6 +190,7 @@ export class Agent {
   #hostEnabled = false;
   #defaults: Settings;
   #acp = false;
+  #agui = false;
   #stopAcp?: () => Promise<void>;
   #project: string;
   #conformance = false;
@@ -419,7 +420,7 @@ export class Agent {
     return { name: "sdk.local", setup: api => {
       const capability: InterfaceCapability = {
         id: "sdk.local", actorId: local.id,
-        present: id => !this.#acp && !!(this.#handlers.get(id) ?? this.#defaultHandler),
+        present: id => (!this.#acp || this.#agui) && !!(this.#handlers.get(id) ?? this.#defaultHandler),
         onInputRequest: request => {
           const handler = this.#handlers.get(request.sessionId) ?? this.#defaultHandler;
           if (!handler) return;
@@ -581,6 +582,7 @@ export class Agent {
     this.#check();
     if (this.#acp || this.#open.size || this.#opening.size) throw new AgentError("busy", "ACP must start before opening sessions");
     this.#acp = true;
+    this.#agui = !!agui;
     const agents = new Map<string, Promise<Agent>>();
     const sessions = new Map<string, Agent>();
     const attachments = new Map<PluginApi, ReturnType<typeof standardMcpTools>>();
@@ -753,16 +755,16 @@ export class Agent {
         http = new AguiBinding({ ...agui, root: target(this), project: this.#project, principalScope: (actor, fn) => this.#h.withConnectionActor(actor, fn),
           associate: (id, agent) => sessions.set(id, agent),
           locate: async (p, id) => {
-            if (!p.allowProject(this.#project)) fail("not_found");
+            if (!id && !p.allowProject(this.#project)) fail("not_found");
             const owner = id && sessions.get(id) || this;
             const live = id ? owner.#h.liveSessionInfo(id) : undefined;
             const saved = id && !live ? await owner.sessionInfo(id).catch(e => {
               if (e.code === "not_found" || e.cause?.code === "ENOENT") fail("not_found"); throw e;
             }) : undefined;
             const info = live ?? saved;
-            if (info && (info.project !== this.#project || !p.allowTenant(info.tenant ?? null))) fail("not_found");
+            if (info && (!p.allowProject(info.project) || !p.allowTenant(info.tenant ?? null))) fail("not_found");
             if (id && !await owner.#h.canDiscoverSession(id, p.actor, owner.#authority.severalActors)) fail("not_found");
-            const agent = await selectProject(this.#project, id, saved);
+            const agent = await selectProject(info?.project ?? this.#project, id, saved);
             if (id) sessions.set(id, agent);
             return target(agent);
           } });

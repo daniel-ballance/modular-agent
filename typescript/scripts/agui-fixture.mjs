@@ -114,7 +114,7 @@ if (tls) {
   tlsOptions = {certFile,keyFile,clientCaFile};
 }
 const listener = await agent.serveAgui({ listen: env.MA_AGUI_LISTEN, actors, tenant: 'kit', acp: true, tls:tlsOptions,
-  statePlugin: state ? {name:'kit',snapshot} : undefined, rawSources: {kit:'kit'}, onWarning: field => warnings.push(field) });
+  statePlugin: state ? {name:'kit',snapshot} : undefined, rawSources: {kit:'kit'}, traceStateVendors:['kit'], onWarning: field => warnings.push(field) });
 const auth = createHash('sha256').update('Bearer '+(await readFile(controlTokenFile,'utf8')).trim()).digest();
 async function control({operation,threadId:id,name:at,milliseconds}) {
   if (operation === 'tls') return tls.client;

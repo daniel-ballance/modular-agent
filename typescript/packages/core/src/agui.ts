@@ -6,13 +6,15 @@ import type { Actor, Declaration, Harness, HistoryEntry, InputRequest, Interface
 import type { Agent } from "./agent.js";
 import { PATH, body, encode, errorCode, fail, frame, hash, httpError, json, object, parts, runInput, same, sse, type Code, type WireEvent } from "./agui-wire.js";
 import { current, interrupt, messages, pending, reply, rights, watch, type InterruptView, type Principal } from "./agui-view.js";
-import { Exchange, callFrames } from "./agui-exchange.js";
+import { Exchange } from "./agui-exchange.js";
 
 export interface AguiProjectionOptions {
   /** Read the current document from its owner. The binding keeps no document store. */
   statePlugin?: { name: string; snapshot(threadId: string): { revisionId: string; snapshot: unknown } | undefined | Promise<{ revisionId: string; snapshot: unknown } | undefined> };
   /** Plugin name to source label for explicit modular-agent.agui.raw events. */
   rawSources?: Readonly<Record<string, string>>;
+  /** Vendor keys to retain locally, only for traceTrusted principals. */
+  traceStateVendors?: readonly string[];
   onWarning?(field: string): void;
 }
 export interface Target { h: Harness; api: PluginApi; agent: Agent; sources: readonly InterfaceToolSource[] }
@@ -24,8 +26,8 @@ interface Host extends AguiProjectionOptions {
 export interface Presence { response: ServerResponse; questions: Set<string>; rejected: Set<string> }
 export interface Client {
   cursor?: { id: string; digest: string; branch: string; http: boolean }; active?: Exchange; busy?: boolean; presence?: Presence;
-  held?: { connection: InterfaceToolConnection; turnId: string; deliver(call: ToolCall): void; setDeliver(fn: (call: ToolCall) => void): void };
-  delivered: Set<string>; runs: Set<string>; hidden: Set<string>;
+  held?: { connection: InterfaceToolConnection; turnId: string; setDeliver(fn: (call: ToolCall) => void): void };
+  needsSnapshot?: boolean; delivered: Set<string>; runs: Set<string>; hidden: Set<string>;
 }
 export class AguiBinding {
   clients = new Map<string, Client>();
@@ -39,6 +41,10 @@ export class AguiBinding {
   request = (req: IncomingMessage, res: ServerResponse, p?: Principal) => {
     res.on("error", () => res.destroy());
     const work = async () => {
+      if (req.method === "OPTIONS" && req.headers.origin && this.allowOrigin(req) && /^\/agui\/v1(?:\/|$)/.test(req.url ?? "")) {
+        res.writeHead(204, { "cache-control": "no-store", vary: "Origin", "access-control-allow-origin": req.headers.origin,
+          "access-control-allow-methods": "GET, POST", "access-control-allow-headers": "Authorization, Content-Type, MA-History-Cursor, traceparent, tracestate" }).end(); return;
+      }
       if (!p) fail("unauthenticated");
       if (!this.allowOrigin(req)) fail("refused");
       if (req.headers.origin) { res.setHeader("access-control-allow-origin", req.headers.origin); res.setHeader("vary", "Origin"); }
@@ -79,8 +85,10 @@ export class AguiBinding {
       const route = new Route(this, t, id, p, client);
       if (input) return route.run(res, input, req);
       if (match && match[2]) return route.presence(res);
-      const snap = await route.snapshot(true);
-      json(res, 200, snap.view); route.remember(snap);
+      try {
+        const snap = await route.snapshot(true);
+        json(res, 200, snap.view); route.remember(snap);
+      } catch (e) { client.cursor = undefined; client.needsSnapshot = true; throw e; }
     };
     void withTrace(undefined, () => p ? this.host.principalScope(p.actor, work) : work()).catch(async e => {
       let code = errorCode(e);
@@ -119,8 +127,8 @@ export class Route {
     return result.filter(q => this.api.openRequests(this.id).some(r => r.id === q.wire.id));
   }
   async snapshot(http: boolean, through?: string, cursor = randomUUID() as string, inclusive?: string) {
+    const branch = await this.branchGeneration();
     const records = await this.records();
-    const branch = hash(records.filter(e => e.kind === "position" || e.erased).map(e => e.id));
     const copy = await messages(this.api, this.id, this.p, inclusive ? records.slice(0, records.findIndex(e => e.id === inclusive) + 1) : records, this.c.hidden, through);
     const view = { threadId: this.id, declaration: this.t.agent.declaration(), messages: copy, cursor, lastMessageId: copy.at(-1)?.id ?? null,
       waiting: { questions: (await this.questions(records)).map(q => q.wire), toolCalls: this.pending(records).filter(c => c.ended).map(({toolCallId, expiresAt}) => ({ toolCallId, expiresAt })) } };
@@ -128,10 +136,15 @@ export class Route {
     encode(gated);
     // Message redaction takes place at entry and agui.messages. A wrapper cannot change identities or grant an interrupt.
     if (!same(view, gated)) fail("output_withheld");
+    if (await this.branchGeneration() !== branch) fail("conflict");
     await this.current();
     return { view: gated, cursor: { id: cursor, digest: hash(copy), branch, http } };
   }
-  remember(snap: Awaited<ReturnType<Route["snapshot"]>>) { this.c.cursor = snap.cursor; }
+  async branchGeneration() {
+    const all = await this.scoped(() => this.api.readHistory(this.id, { all: true }));
+    return hash(all.filter(e => e.kind === "position" || e.erased).map(e => e.id));
+  }
+  remember(snap: Awaited<ReturnType<Route["snapshot"]>>) { this.c.cursor = snap.cursor; this.c.needsSnapshot = false; }
   presence(res: ServerResponse) {
     const { c, id, api, p } = this;
     if (c.presence) fail("conflict");
@@ -161,6 +174,7 @@ export class Route {
     let conn: InterfaceToolConnection | undefined, exchange: Exchange | undefined;
     const scope = Symbol("AG-UI offer");
     try { await this.t.h.withInterfaceOffer(scope, async () => {
+      if (c.needsSnapshot) fail("cursor_expired");
       const seen = c.cursor;
       const echoed = req.headers["ma-history-cursor"];
       if (echoed !== undefined && echoed !== seen?.id) fail("cursor_expired");
@@ -184,7 +198,10 @@ export class Route {
       });
       const answers = (input.resume ?? []).flatMap(a => {
         const q = questions.find(q => q.wire.id === a.interruptId && (c.delivered.has(a.interruptId) || !q.inTurn));
-        if (!q) { this.binding.warn("resume.interruptId"); return []; }
+        if (!q) {
+          if (records.some(e => e.kind === "inputRequest" && e.requestId === a.interruptId)) fail("conflict");
+          this.binding.warn("resume.interruptId"); return [];
+        }
         const v = a.payload, r = q.request; let declined = a.status === "cancelled", value: string | undefined;
         if (!declined) {
           if (r.kind === "approval") { if (!object(v) || Object.keys(v).length !== 1 || typeof v.allow !== "boolean") fail("invalid_request"); declined = !v.allow; value = declined ? undefined : "allow"; }
@@ -195,7 +212,7 @@ export class Route {
       if (new Set(answers.map(a => a.q.wire.id)).size !== answers.length || new Set(reports.map(r => r.report.callId)).size !== reports.length) fail("invalid_request");
       if (questions.some(q => c.delivered.has(q.wire.id) && !answers.some(a => a.q.wire.id === q.wire.id)) || !user && !answers.length && !reports.length) fail("conflict");
       const origins = new Set([...answers.map(a => a.q.request.turnId), ...reports.map(r => r.call.turnId)]);
-      if (origins.size > 1 || user && calls.some(c => c.ended)) fail("conflict");
+      if (origins.size > 1 || calls.some(c => c.ended && (user || origins.has(c.turnId) && !reports.some(r => r.report.callId === c.toolCallId)))) fail("conflict");
       const content = user && parts(user, this.binding.warn);
       if (content && !this.rights().includes("input")) fail("refused");
       const sources = this.t.sources.filter(s => s.actorId === p.actor.id && s.routeId === p.clientId);
@@ -204,15 +221,15 @@ export class Route {
         if (!def) fail("refused"); return def;
       });
       if (new Set(offers.map(t => t.name)).size !== offers.length || offers.length && !this.rights().includes("tools")) fail("refused");
-      if (seen !== c.cursor || res.destroyed) fail("conflict");
+      if (seen !== c.cursor || res.destroyed || await this.branchGeneration() !== snap.cursor.branch) fail("conflict");
       let deliver: (call: ToolCall) => void = () => fail("conflict");
       if (sources.length) {
         conn = this.t.agent.connectInterfaceTools(id, { actor: { id: p.actor.id, kind: p.actor.kind as "user", rights: p.actor.authority }, routeId: p.clientId, defer: true, onHandoff: request => deliver(request.call) });
         conn.advertise(offers);
       }
       const x = exchange = new Exchange(this, res, input.runId, conn, fn => { deliver = fn; });
-      c.active = x; this.binding.track(res); x.follow();
-      const parent = p.traceTrusted ? readTrace(req.headers) : undefined;
+      c.active = x; this.binding.track(res); x.follow(); await x.readState();
+      const parent = p.traceTrusted ? readTrace(req.headers, this.binding.host.traceStateVendors) : undefined;
       await withTrace(parent, async () => {
         if (content) {
           // The binding has no command or administration route, even for a direct operator.

@@ -54,13 +54,44 @@ export async function interrupt(api: PluginApi, id: string, p: Principal, r: Inp
   if (!gated || !same(gated.interrupt, wire)) return;
   return { wire, request: r, inTurn };
 }
+// A reply and a live stream can be subject to different gates. A more restrictive
+// view wins; if two redactions disagree there is no safe common copy to project.
+function common<T>(original: T, a: T, b: T) {
+  if (same(a,b) || same(a,original)) return b;
+  if (same(b,original)) return a;
+}
+export async function displayEntry(api: PluginApi, p: Principal, raw: HistoryEntry, entry: HistoryEntry) {
+  const { sessionId: id, stepId, turnId, toolCallId } = entry, ids = { stepId, turnId, toolCallId };
+  const {message} = entry;
+  if (entry.kind === "response" && message?.role === "assistant" && raw.message?.role === "assistant") {
+    const original = textOf(raw.message.content);
+    const rendered = original && await api.gateOutput(id, p.actor.id, "model.output", {type:"text", delta:original}, ids);
+    const text = rendered ? common(original, textOf(message.content), rendered.delta) ?? "" : "";
+    return { ...entry, message: { ...message, content: [...message.content.filter(p=>p.type!=="text"), {type:"text",text}] } };
+  }
+  if (entry.kind === "toolStarted" && object(entry.data) && object(raw.data) && entry.data.source?.plugin !== "sdk.interface-tools") {
+    const data = await api.gateOutput(id, p.actor.id, "tool.started", {call:raw.data.call}, ids);
+    const call = data && common(raw.data.call,entry.data.call,data.call);
+    return call ? {...entry,data:{...entry.data,call}} : undefined;
+  }
+  if (entry.kind === "toolResult" && message?.role === "toolResult" && raw.message?.role === "toolResult" && object(raw.data)) {
+    const data = await api.gateOutput(id, p.actor.id, "tool.result.delivered", {status:raw.data.status, content:raw.message.content,
+      ...(raw.data.value === undefined ? {} : {value:raw.data.value})}, ids);
+    const content = data && common(raw.message.content, message.content, data.content);
+    return content ? {...entry, message:{...message,content}} : undefined;
+  }
+  return entry;
+}
 export async function messages(api: PluginApi, id: string, p: Principal, entries: HistoryEntry[], hidden: ReadonlySet<string>, through?: string): Promise<Message[]> {
   const visible: HistoryEntry[] = [];
   for (const entry of entries) {
     if (through === entry.id) break;
     if (entry.erased || !["input", "response", "toolStarted", "toolResult"].includes(entry.kind)) continue;
     const out = await api.gateOutput(id, p.actor.id, "entry", entry);
-    if (out?.id === entry.id && out.kind === entry.kind && !out.erased) visible.push(out);
+    if (out?.id === entry.id && out.kind === entry.kind && !out.erased) {
+      const projected = await displayEntry(api, p, entry, out);
+      if (projected) visible.push(projected);
+    }
   }
   const starts = new Map(visible.filter(e => e.kind === "toolStarted").map(e => [e.toolCallId, e]));
   const results = new Set(visible.filter(e => e.kind === "toolResult" && e.message?.role === "toolResult").map(e => e.toolCallId));
