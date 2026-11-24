@@ -260,10 +260,8 @@ func recordedOutcomeFor(a api.API, id, input, who string) api.Outcome {
 			active = ""
 		}
 		if out.Status == "cancelled" && e.Kind == "input.returned" {
-			for _, id := range e.HandedBackIDs() {
-				if in, ok := accepted[id]; ok {
-					out.Returned = append(out.Returned, in)
-				}
+			if in, ok := accepted[e.InputRef]; ok {
+				out.Returned = append(out.Returned, in)
 			}
 		}
 	}

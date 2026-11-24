@@ -361,7 +361,7 @@ func resultFor(s api.Session, input string) *PromptResult {
 		if turn != "" && e.Kind == "turn.end" && e.Turn == turn {
 			return buildResult(s, e, input)
 		}
-		if turn == "" && (e.Kind == "input.returned" || e.Kind == "input.withdrawn") && slices.Contains(e.HandedBackIDs(), input) {
+		if turn == "" && e.WasKind("input.returned") && e.InputRef == input {
 			return &PromptResult{InputID: input, Disposition: HandedBack}
 		}
 	}

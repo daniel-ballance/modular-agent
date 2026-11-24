@@ -310,6 +310,10 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor, interrupt
 		_ = lease.Close()
 		return api.ErrAuthority
 	}
+	if err := validateIntake(snap); err != nil {
+		_ = lease.Close()
+		return err
+	}
 	if interruptedOnly {
 		// Startup is not a new membership grant. Apply the recorded local
 		// actor's watch right, including the session and tenant ceilings.
@@ -395,7 +399,12 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor, interrupt
 			return true
 		})
 		if len(ids) > 0 {
-			if _, err = s.recordLocked(api.Entry{Kind: "input.returned", Data: api.JSON(ids)}, "harness", true); err != nil {
+			next := s.data
+			next.Entries = slices.Clip(next.Entries)
+			for _, id := range ids {
+				appendEntry(&next, api.Entry{Kind: "input.returned", InputRef: id, Data: api.JSON("restart")}, "harness", true)
+			}
+			if err = s.commitLocked(next); err != nil {
 				s.mu.Unlock()
 				_ = c.StopSession(id)
 				return err
@@ -1076,8 +1085,8 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (receipt a
 				next := s.data
 				next.Entries = slices.Clip(next.Entries)
 				in.Taken = "now"
-				appendEntry(&next, api.Entry{ID: entry, Kind: "input.accepted", Actor: in.Actor, Data: api.JSON(in), Content: in.Content}, "harness", true)
-				appendEntry(&next, api.Entry{Kind: "input.returned", Actor: in.Actor, InputRef: in.ID, Copies: []string{entry}, Wire: api.JSON(map[string]any{"data": map[string]string{"reason": "handled"}})}, "harness", true)
+				appendEntry(&next, api.Entry{ID: entry, Kind: "input.accepted", InputRef: in.ID, Actor: in.Actor, Data: api.JSON(in), Content: in.Content}, "harness", true)
+				appendEntry(&next, api.Entry{Kind: "input.returned", Actor: in.Actor, InputRef: in.ID, Copies: []string{entry}, Data: api.JSON("handled")}, "harness", true)
 				if err := s.publishInitialLocked(next, ctx); err != nil {
 					return api.Receipt{}, err
 				}
@@ -1159,7 +1168,7 @@ func (s *session) takeLocked(in api.Input, turn string) (api.Entry, error) {
 	var source string
 	actor := in.Actor
 	for _, e := range s.data.Entries {
-		if e.Kind == "input" && api.Decode[string](e.Data) == in.ID {
+		if e.Kind == "input" && e.InputRef == in.ID {
 			return e, nil
 		}
 		if e.Kind == "input.accepted" && api.Decode[api.Input](e.Data).ID == in.ID {
@@ -1175,7 +1184,7 @@ func (s *session) takeLocked(in api.Input, turn string) (api.Entry, error) {
 	if source != "" {
 		sources = append(sources, source)
 	}
-	return s.recordLocked(api.Entry{Kind: "input", Turn: turn, Visible: true, Content: in.Content, Actor: actor, Job: in.Job, Copies: sources, InputKey: in.Key, Data: api.JSON(in.ID)}, "harness", true)
+	return s.recordLocked(api.Entry{Kind: "input", Turn: turn, Visible: true, Content: in.Content, Actor: actor, Job: in.Job, Copies: sources, InputKey: in.Key, InputRef: in.ID}, "harness", true)
 }
 func (h *Harness) run(ctx context.Context, s *session, in api.Input) {
 	for {
@@ -1196,7 +1205,7 @@ func (h *Harness) run(ctx context.Context, s *session, in api.Input) {
 				next.Entries = slices.Clip(next.Entries)
 				for _, queued := range outcome.Returned {
 					appendEntry(&next, api.Entry{Kind: "input.returned", Actor: queued.Actor, InputRef: queued.ID,
-						Data: api.JSON(map[string]string{"reason": "cancelled"})}, "harness", true)
+						Data: api.JSON("cancelled")}, "harness", true)
 				}
 				if err := s.commitLocked(next); err != nil {
 					outcome.Error = err.Error()
@@ -1305,7 +1314,7 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 	if err != nil {
 		if ctx.Err() != nil && !errors.Is(context.Cause(ctx), api.ErrProcessStopped) {
 			if in.ID != "" && resume == nil {
-				_, recordErr := h.API().Record(context.Background(), s.id, api.Entry{Kind: "input.returned", Data: api.JSON(in.ID)})
+				_, recordErr := h.API().Record(context.Background(), s.id, api.Entry{Kind: "input.returned", InputRef: in.ID, Data: api.JSON("cancelled")})
 				if recordErr != nil {
 					return api.Outcome{Status: "cancelled", Error: recordErr.Error()}
 				}
@@ -1423,7 +1432,7 @@ func (c *client) Withdraw(ctx context.Context, id, input string) (api.Input, err
 			if api.Acting(ctx) != in.Actor && !c.authorized(s.data, api.Acting(ctx), "input") {
 				return api.Input{}, errors.New("withdraw refused")
 			}
-			if _, err = s.recordLocked(api.Entry{Kind: "input.returned", Data: api.JSON([]string{input})}, "harness", true); err != nil {
+			if _, err = s.recordLocked(api.Entry{Kind: "input.returned", InputRef: input, Data: api.JSON("withdrawn")}, "harness", true); err != nil {
 				return api.Input{}, err
 			}
 			s.queue = append(s.queue[:i], s.queue[i+1:]...)
@@ -1917,10 +1926,10 @@ func (p *turnPorts) Record(ctx context.Context, e api.Entry) (api.Entry, error) 
 		}
 		if e.Kind == "input" {
 			if e.InputID() == "" {
-				e.Data = api.JSON(api.ID())
+				e.InputRef = api.ID()
 			}
-			in := api.Input{ID: e.InputID(), Key: e.InputKey, Actor: e.Actor, When: "steer", Content: e.Content, Copies: e.Copies}
-			accepted, err := p.c.Record(ctx, p.s.id, api.Entry{Kind: "input.accepted", Turn: p.id, Actor: e.Actor, Content: in.Content, Copies: in.Copies, Data: api.JSON(in)})
+			in := api.Input{ID: e.InputID(), Key: e.InputKey, Actor: e.Actor, When: "steer", Taken: "inTurn", ConnectionRights: p.input.ConnectionRights, Content: e.Content, Copies: e.Copies}
+			accepted, err := p.c.Record(ctx, p.s.id, api.Entry{Kind: "input.accepted", InputRef: in.ID, Turn: p.id, Actor: e.Actor, Content: in.Content, Copies: in.Copies, Data: api.JSON(in)})
 			if err != nil {
 				return api.Entry{}, err
 			}

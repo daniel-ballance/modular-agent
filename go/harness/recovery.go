@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"slices"
 )
@@ -8,45 +9,25 @@ import (
 // Replay uses the branch only to select interrupted turns. Intake and terminal
 // facts belong to the whole session, including records written after a move.
 func recovery(s api.Session) (*api.Entry, []api.Input) {
-	interrupted := s.UnfinishedTurn()
-	var orphan *api.Input
-	initial := map[string]api.Input{}
-	for _, e := range s.LiveEntries() {
-		if e.Kind == "input.accepted" {
-			in := api.Decode[api.Input](e.Data)
-			initial[in.ID] = in
-		}
-	}
-	// A fork's display prefix is context, not an interrupted turn to resume.
-	live := s
-	live.Entries = s.LiveEntries()
-	for _, e := range live.Branch() {
-		switch {
-		case e.WasKind("turn.end") || e.Kind == "turn.start":
-			orphan = nil
-		case e.Kind == "input" && e.Turn == "" && interrupted == nil:
-			// Old Go records could take input before writing the turn start.
-			if in, ok := initial[e.InputID()]; ok {
-				orphan = &in
-			}
-		}
-	}
 	var queue []api.Input
-	if orphan != nil {
-		for _, e := range s.LiveEntries() {
-			if slices.Contains(e.HandedBackIDs(), orphan.ID) {
-				orphan = nil
-				break
-			}
-		}
-		if orphan != nil {
-			queue = append(queue, *orphan)
-		}
-	}
 	for _, e := range pendingAdmissions(s) {
 		queue = append(queue, api.Decode[api.Input](e.Data))
 	}
-	return interrupted, queue
+	return s.UnfinishedTurn(), queue
+}
+
+// Check intake order before running any reopen hook or starting a worker.
+func validateIntake(s api.Session) error {
+	started := map[string]bool{}
+	for _, e := range s.LiveEntries() {
+		if e.WasKind("turn.start") && e.Turn != "" {
+			started[e.Turn] = true
+		}
+		if e.Kind == "input" && !started[e.Turn] {
+			return fmt.Errorf("taken input %s has no preceding turn start", e.ID)
+		}
+	}
+	return nil
 }
 
 func pendingAdmissions(s api.Session) []api.Entry {
@@ -67,10 +48,8 @@ func pendingAdmissions(s api.Session) []api.Entry {
 				}
 			}
 			settled[id] = true
-		default:
-			for _, id := range e.HandedBackIDs() {
-				settled[id] = true
-			}
+		case e.WasKind("input.returned"):
+			settled[e.InputRef] = true
 		}
 	}
 	slices.Reverse(pending)

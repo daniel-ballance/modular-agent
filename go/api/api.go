@@ -98,7 +98,8 @@ type Entry struct {
 	Wire               json.RawMessage `json:"wire,omitempty"`
 	InputKey           string          `json:"input_key,omitempty"`
 	InputRef           string          `json:"input_ref,omitempty"`
-	InputRefs          []string        `json:"input_refs,omitempty"`
+	RequestRef         string          `json:"request_ref,omitempty"`
+	ContinuesTurn      string          `json:"continues_turn,omitempty"`
 	JobKey             string          `json:"job_key,omitempty"`
 	TracksStepAfter    bool            `json:"tracks_step_after,omitempty"`
 	SafeToRepeat       *bool           `json:"safe_to_repeat,omitempty"`
@@ -173,13 +174,8 @@ func (s Session) UnfinishedTurn() *Entry {
 	return start
 }
 
-// InputID reads the taken admission in both old and current in-process records.
-func (e Entry) InputID() string {
-	if e.InputRef != "" {
-		return e.InputRef
-	}
-	return Decode[string](e.Data)
-}
+// InputID identifies the admission that this record takes or settles.
+func (e Entry) InputID() string { return e.InputRef }
 
 // LiveEntries excludes a portable fork's display-only prefix.
 func (s Session) LiveEntries() []Entry {

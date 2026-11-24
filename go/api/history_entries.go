@@ -1,25 +1,5 @@
 package api
 
-// HandedBackIDs reads a batch of returned input, or the old single-id record.
-func (e Entry) HandedBackIDs() []string {
-	if !e.WasKind("input.returned") && !e.WasKind("input.withdrawn") {
-		return nil
-	}
-	if e.InputRef != "" {
-		return []string{e.InputRef}
-	}
-	if e.InputRefs != nil {
-		return e.InputRefs
-	}
-	if ids := Decode[[]string](e.Data); ids != nil {
-		return ids
-	}
-	if id := Decode[string](e.Data); id != "" {
-		return []string{id}
-	}
-	return []string{}
-}
-
 func (e Entry) AuthorityRecord() bool {
 	switch e.Kind {
 	case "tenant", "limit", "actor.set", "actor.left", "job.cleanup":
@@ -42,7 +22,7 @@ func (e Entry) Redacted() Entry {
 	if e.IsErased() {
 		kind = e.OriginalKind
 	}
-	redacted := Entry{ID: e.ID, Parent: e.Parent, Kind: "erasure", OriginalKind: kind, Turn: e.Turn, Step: e.Step, Call: e.Call, Job: e.Job, Copies: e.Copies, InputRef: e.InputRef, InputRefs: e.InputRefs}
+	redacted := Entry{ID: e.ID, Parent: e.Parent, Kind: "erasure", OriginalKind: kind, Turn: e.Turn, Step: e.Step, Call: e.Call, Job: e.Job, Copies: e.Copies, InputRef: e.InputRef, RequestRef: e.RequestRef, ContinuesTurn: e.ContinuesTurn}
 	switch kind {
 	case "job.start":
 		redacted.JobKey = e.JobKey
@@ -52,15 +32,21 @@ func (e Entry) Redacted() Entry {
 		if redacted.JobKey != "" {
 			redacted.Writer = e.Writer
 		}
-	case "input":
-		redacted.InputRef = e.InputID()
-	case "input.accepted":
-		if redacted.InputRef == "" {
-			redacted.InputRef = Decode[Input](e.Data).ID
+	case "question.open":
+		if !e.IsErased() {
+			redacted.RequestRef = Decode[struct{ Question Question }](e.Data).Question.ID
 		}
-	case "input.returned", "input.withdrawn":
-		if redacted.InputRef == "" {
-			redacted.InputRefs = e.HandedBackIDs()
+	case "question.answer":
+		if !e.IsErased() {
+			redacted.RequestRef = Decode[Answer](e.Data).Request
+		}
+	case "question.secret":
+		if !e.IsErased() {
+			redacted.RequestRef = Decode[string](e.Data)
+		}
+	case "turn.start":
+		if !e.IsErased() {
+			redacted.ContinuesTurn = Decode[TurnStart](e.Data).ContinuesTurn
 		}
 	}
 	return redacted

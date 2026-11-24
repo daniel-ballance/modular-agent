@@ -134,12 +134,12 @@ func (q *agRequest) receiptView(s api.Session, key, run string, m runreceipt.Mar
 			if api.Decode[api.TurnStart](e.Data).ContinuesTurn != api.Decode[api.TurnStart](raw.Data).ContinuesTurn {
 				return r, missing
 			}
-		case "input.returned", "input.withdrawn":
+		case "input.returned":
 			r.Work = "handedBack"
 			handled := func(v api.Entry) bool {
-				return agString(agMap(api.Decode[agObject](v.Wire)["data"]), "reason") == "handled"
+				return api.Decode[string](v.Data) == "handled"
 			}
-			if !slices.Equal(e.HandedBackIDs(), raw.HandedBackIDs()) || handled(e) != handled(raw) {
+			if e.InputRef != raw.InputRef || handled(e) != handled(raw) {
 				return r, missing
 			}
 			if handled(e) {

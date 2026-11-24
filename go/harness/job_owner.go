@@ -98,7 +98,7 @@ func appendJobReport(next *api.Session, end api.Entry, j api.Job, id string, con
 		taken = "proposed"
 	}
 	in := api.Input{ID: id, Key: who, Actor: who, When: "after", Taken: taken, Parked: &parked, Job: end.Job, JobRights: rights, Content: content, Copies: []string{end.ID}}
-	entry := appendEntry(next, api.Entry{Kind: "input.accepted", Job: end.Job, Actor: j.Actor, Data: api.JSON(in), Copies: in.Copies, Content: content}, "harness", true)
+	entry := appendEntry(next, api.Entry{Kind: "input.accepted", InputRef: in.ID, Job: end.Job, Actor: j.Actor, Data: api.JSON(in), Copies: in.Copies, Content: content}, "harness", true)
 	return in, entry
 }
 

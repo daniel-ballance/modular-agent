@@ -114,7 +114,7 @@ func TestClientAgainstBindingPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap := api.Session{ID: "test", Project: "/p", Version: 1, Entries: []api.Entry{{
-		ID: "entry", Kind: "input", Turn: "turn", Time: time.UnixMilli(123), Content: api.Text("kept"), Data: api.JSON("input-id"),
+		ID: "entry", Kind: "input", Turn: "turn", Time: time.UnixMilli(123), Content: api.Text("kept"), InputRef: "input-id",
 	}}}
 	if err = l.Save(snap); err != nil {
 		t.Fatal(err)

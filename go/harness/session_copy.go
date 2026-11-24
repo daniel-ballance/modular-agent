@@ -25,7 +25,6 @@ func copySession(s api.Session) api.Session {
 		e.Wire = slices.Clone(e.Wire)
 		e.Data = slices.Clone(e.Data)
 		e.Copies = slices.Clone(e.Copies)
-		e.InputRefs = slices.Clone(e.InputRefs)
 		if e.OfferedTools != nil {
 			e.OfferedTools = new(slices.Clone(*e.OfferedTools))
 		}

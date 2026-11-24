@@ -150,7 +150,7 @@ func Fold(entries []api.Entry, key string, m Marker) (w Work) {
 				w.Turn = e.Turn
 				w.Sources = append(w.Sources, e)
 			}
-			if slices.Contains(e.HandedBackIDs(), input) {
+			if e.WasKind("input.returned") && e.InputRef == input {
 				w.Returned = e
 				w.Sources = append(w.Sources, e)
 			}

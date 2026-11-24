@@ -87,7 +87,7 @@ func (c *client) admitLocked(s *session, in api.Input, contexts ...context.Conte
 	if err != nil {
 		return api.Receipt{}, err
 	}
-	appendEntry(&next, api.Entry{ID: id, Kind: "input.accepted", Job: in.Job, Data: api.JSON(in), Content: in.Content, Actor: attribution, Copies: in.Copies}, "harness", true)
+	appendEntry(&next, api.Entry{ID: id, Kind: "input.accepted", InputRef: in.ID, Job: in.Job, Data: api.JSON(in), Content: in.Content, Actor: attribution, Copies: in.Copies}, "harness", true)
 	if err := s.publishInitialLocked(next, contexts...); err != nil {
 		return api.Receipt{}, err
 	}
@@ -119,7 +119,7 @@ func (c *client) ReleaseInput(ctx context.Context, id, input, when string, decli
 			continue
 		}
 		if declined {
-			_, err := s.recordLocked(api.Entry{Kind: "input.returned", Actor: by, InputRef: input}, "harness", true)
+			_, err := s.recordLocked(api.Entry{Kind: "input.returned", Actor: by, InputRef: input, Data: api.JSON("declined")}, "harness", true)
 			return api.Receipt{ID: input, When: "handedBack"}, err
 		}
 		if !c.canAdmit(s.data, in) {
@@ -181,7 +181,7 @@ func (c *client) WithdrawProposal(ctx context.Context, id, input, who string) er
 		if !can("input") && !(who == in.Actor && can("propose")) {
 			return errors.New("withdraw refused")
 		}
-		_, err := s.recordLocked(api.Entry{Kind: "input.returned", Actor: who, Data: api.JSON([]string{input})}, c.owner, true)
+		_, err := s.recordLocked(api.Entry{Kind: "input.returned", Actor: who, InputRef: input, Data: api.JSON("withdrawn")}, c.owner, true)
 		return err
 	}
 	return errors.New("no pending proposal with that input id")

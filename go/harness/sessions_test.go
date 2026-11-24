@@ -26,11 +26,11 @@ func TestHistoryBranchesMoveForkAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := a.Record(ctx, id, api.Entry{Kind: "input", Visible: true, Content: api.Text("first")})
+	first, err := a.Record(ctx, id, api.Entry{Kind: "test.note", Visible: true, Content: api.Text("first")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := a.Record(ctx, id, api.Entry{Kind: "input", Visible: true, Content: api.Text("second")})
+	second, err := a.Record(ctx, id, api.Entry{Kind: "test.note", Visible: true, Content: api.Text("second")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestHistoryBranchesMoveForkAndRestart(t *testing.T) {
 	if len(branch.Entries) < 3 || branch.Entries[1].Copies[0] != first.ID || branch.Entries[len(branch.Entries)-1].Kind != "plugins.set" {
 		t.Fatal(branch)
 	}
-	third, _ := a.Record(ctx, id, api.Entry{Kind: "input", Visible: true, Content: api.Text("third")})
+	third, _ := a.Record(ctx, id, api.Entry{Kind: "test.note", Visible: true, Content: api.Text("third")})
 	if third.Parent != first.ID || third.Parent == second.ID {
 		t.Fatal(third)
 	}

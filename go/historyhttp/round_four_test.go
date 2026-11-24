@@ -120,7 +120,7 @@ func TestReadAndAppendSessionWithNoCheckpoint(t *testing.T) {
 	if err := json.Unmarshal([]byte(`[
 		{"id":"m","parentId":null,"sessionId":"portable","kind":"setting","time":1000,"writer":"peer","modelVisible":false,"data":{"key":"model","value":{"provider":"conformance","id":"echo"}}},
 		{"id":"a","parentId":"m","sessionId":"portable","kind":"actorJoined","time":1001,"writer":"peer","modelVisible":false,"data":{"actor":{"id":"alice","kind":"user","rights":["input"]}}},
-		{"id":"i","parentId":"a","sessionId":"portable","kind":"input","time":1002,"writer":"peer","modelVisible":true,"actorId":"alice","turnId":"turn","message":{"role":"user","content":[{"type":"text","text":"kept"}]},"data":{"inputId":"admission","key":"only-once"}},
+		{"id":"i","parentId":"a","sessionId":"portable","kind":"input","time":1002,"writer":"peer","modelVisible":true,"actorId":"alice","turnId":"turn","message":{"role":"user","content":[{"type":"text","text":"kept"}]},"inputId":"admission","data":{"key":"only-once"}},
 		{"id":"cache","parentId":"i","sessionId":"portable","kind":"peer.cache","time":1003,"writer":"peer","modelVisible":false,"peerField":9007199254740993},
 		{"id":"p","parentId":"cache","sessionId":"portable","kind":"position","time":1004,"writer":"peer","modelVisible":false,"data":{"to":"i"}}
 	]`), &original); err != nil {
