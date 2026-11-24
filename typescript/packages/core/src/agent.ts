@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { ALL_AUTHORITY, Harness, parseModel, type CredentialStore, type Runtime, type ListingViewer, type SessionSummary, type InterfaceToolSource, type InterfaceToolConnection, type InterfaceToolConnectionOptions as HarnessToolConnection, type PluginApi, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider, type ReservationOptions, type ReservationLimits } from "@modular-agent/harness";
@@ -51,6 +52,7 @@ export interface AgentOptions {
   /** Enable the official context compaction plugin and /compact command. */
   compaction?: boolean;
   questionsOutlastTurns?: boolean;
+  maxApprovalWaitMs?: number;
   jobReportsStartTurns?: boolean;
   settingsDuringTurn?: "nextTurn" | "refused";
   /** Former Provider ids to resolve when reopening saved model settings and attempts. */
@@ -334,6 +336,12 @@ export class Agent {
         await effectiveStore?.list();
         agent.#portable = effectiveStore?.supports.portableSessions === true;
       }
+      if (options.maxApprovalWaitMs !== undefined) {
+        if (!agent.#approval || !agent.declaration().portableSessions || durability === "ephemeral" || !options.questionsOutlastTurns) {
+          throw new AgentError("invalid_composition", "Waiting approvals need approval, portable kept history and late-answer continuations");
+        }
+        h.enableWaitingApprovals(options.maxApprovalWaitMs);
+      }
       await h.rebuildReservations();
       const env = h.use<WorkingEnvironment>("working-environment");
       if (!options.dataDir && (env?.requiresDataDir || effectiveRuntime?.supports.requiresDataDir === true ||
@@ -422,12 +430,20 @@ export class Agent {
   }
   #localInterface(): BasePlugin {
     return { name: "sdk.local", setup: api => {
+      api.registerApprovalRoute({ id: "sdk.local", ceiling: (_id, actor, principal) =>
+        principal === local.id && (actor === local.id || this.#authority.severalActors) ? ALL_AUTHORITY : [],
+        unchanged: async (entry, actor) => {
+          const request = (entry.data as { request: import("@modular-agent/harness").InputRequest }).request;
+          const q = await questionOf(api, { ...request, answerers: request.answerers ?? [] });
+          const view = await api.gateOutput(entry.sessionId, actor, "input.request.opened", structuredClone(q));
+          return isDeepStrictEqual(view, q);
+        } });
       const capability: InterfaceCapability = {
         id: "sdk.local", actorId: local.id,
         present: id => (!this.#acp || this.#agui) && !!(this.#handlers.get(id) ?? this.#defaultHandler),
         onInputRequest: request => {
           const handler = this.#handlers.get(request.sessionId) ?? this.#defaultHandler;
-          if (!handler) return;
+          if (!handler || this.#questions.has(request.id)) return;
           const { id, sessionId } = request;
           if (!api.session(sessionId).actors.find(a => a.id === local.id)?.authority.includes(request.kind === "approval" ? "approve" : "answer") ||
               request.answerers.length && !request.answerers.includes(local.id)) return;
@@ -435,12 +451,14 @@ export class Agent {
           this.#questions.set(request.id, controller);
           void questionOf(api, request).then(async q => {
             await api.checkPending(sessionId);
+            if (request.approvalWait && !await api.presentApproval(sessionId, id, { routeId: "sdk.local", handle: controller,
+              actorId: local.id, submittedBy: local.id, present: () => !controller.signal.aborted && (this.#handlers.get(sessionId) ?? this.#defaultHandler) === handler })) return;
             if (!controller.signal.aborted) return handler(q, { sessionId, actorId: local.id, cancelled: controller.signal });
           })
             .catch(() => undefined).then(async answer => {
-              if (!controller.signal.aborted) await submitAnswer(api, request, local.id, answer ?? "decline");
+              if (!controller.signal.aborted) await submitAnswer(api, request, local.id, answer ?? "decline", undefined, controller);
             }).catch(async () => {
-              if (!controller.signal.aborted) await submitAnswer(api, request, local.id, "decline").catch(() => {});
+              if (!controller.signal.aborted) await submitAnswer(api, request, local.id, "decline", undefined, controller).catch(() => {});
             }).finally(() => { this.#questions.delete(id); });
         },
         onInputRequestClosed: id => this.#questions.get(id)?.abort(),
@@ -455,7 +473,7 @@ export class Agent {
     const s = makeSession(id, this.#api, {
       interruption: this.#interruption.signal,
       enabled: this.#authority,
-      isOpen: () => this.#open.has(id),
+      isOpen: () => this.#open.get(id) === s,
       fork: async entry => {
         this.#check();
         const at = entry ?? this.#api.session(id).position;
@@ -472,6 +490,7 @@ export class Agent {
         if (handler) this.#handlers.set(id, handler);
         else this.#handlers.delete(id);
         this.#api.presenceChanged(id);
+        if (handler) for (const r of this.#api.openRequests(id)) if (r.approvalWait) this.#h.useAll<InterfaceCapability>("interface").find(i => i.id === "sdk.local")?.onInputRequest?.(r);
       },
     });
     this.#open.set(id, s);

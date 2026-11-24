@@ -136,11 +136,12 @@ export async function questionOf(api: PluginApi, request: InputRequest): Promise
   const { id, kind, sessionId, question, details, options, timeLimitMs, answerers, credential } = request;
   const entry = (await api.readHistory(sessionId, { all: true })).findLast(e => e.kind === "inputRequest" && e.requestId === id);
   return structuredClone({ id, kind, sessionId, question, details, options, answerers, credential,
+    ...(request.approvalWait ? { approvalWait: request.approvalWait } : {}),
     call: (entry?.data as { call?: ToolCall } | undefined)?.call,
     deadline: timeLimitMs === undefined || !entry ? undefined : entry.time + timeLimitMs });
 }
 
-export async function submitAnswer(api: PluginApi, request: InputRequest, actorId: string, answer: Answer, delegatedBy?: string): Promise<void> {
+export async function submitAnswer(api: PluginApi, request: InputRequest, actorId: string, answer: Answer, delegatedBy?: string, handle?: object): Promise<void> {
   const { sessionId, id, kind } = request;
   const decline = answer === "decline" || (answer && typeof answer === "object" && "declined" in answer && answer.declined === true);
   const value = answer === "allow" ? "allow" : answer && typeof answer === "object" && "value" in answer ? answer.value : undefined;
@@ -150,7 +151,7 @@ export async function submitAnswer(api: PluginApi, request: InputRequest, actorI
     throw new AgentError("invalid_params", "Answer does not match the question");
   }
   const reply = { requestId: id, actorId, delegatedBy, ...(decline ? { declined: true, reason } : { value }) };
-  const result = await api.submitAnswer(sessionId, reply);
+  const result = await api.submitAnswer(sessionId, reply, handle);
   if (!result.accepted) throw new AgentError("conflict", result.reason ?? "Question is already closed");
 }
 export let makeSession: (id: string, api: PluginApi, owner: Owner) => Session;
@@ -462,10 +463,18 @@ export class Session {
     if (!view) throw new AgentError("withheld", "Tool result was withheld");
     return structuredCloneResult(view, name);
   }
-  async questions(): Promise<Question[]> {
+  async questions(options: { present?: boolean } = {}): Promise<Question[]> {
     this.#require("watch");
-    const visible = await Promise.all(this.#api.openRequests(this.id).map(async request =>
-      this.#api.gateOutput(this.id, this.actor, "input.request.opened", await questionOf(this.#api, request))));
+    if (options.present && !this.#api.declaration(this.id).approvalsOutlastTurns) throw new AgentError("not_supported", "Polling as present requires waiting approvals");
+    await this.#api.refreshApprovals(this.id);
+    const visible = await Promise.all(this.#api.openRequests(this.id).map(async request => {
+      const question = await questionOf(this.#api, request);
+      if (options.present && request.approvalWait) {
+        return await this.#api.presentApproval(this.id, request.id, { routeId: "sdk.local", handle: this, actorId: this.actor,
+          submittedBy: local, present: () => this.#owner.isOpen() }) ? question : undefined;
+      }
+      return this.#api.gateOutput(this.id, this.actor, "input.request.opened", question);
+    }));
     const open = new Set(this.#api.openRequests(this.id).map(request => request.id));
     return visible.flatMap(q => q && open.has(q.id) ? [structuredClone(q)] : []);
   }
@@ -475,7 +484,7 @@ export class Session {
     if (!request) throw new AgentError("not_found", "No such open question");
     this.#require(request.kind === "approval" ? "approve" : "answer");
     if (request.answerers.length && !request.answerers.includes(this.actor)) throw new AgentError("forbidden", "Actor is not an eligible answerer");
-    await checked(() => submitAnswer(this.#api, request, this.actor, answer, this.actor === local ? undefined : local));
+    await checked(() => submitAnswer(this.#api, request, this.actor, answer, this.actor === local ? undefined : local, this));
   }
   onQuestion(handler?: QuestionHandler): void {
     this.#check();

@@ -134,6 +134,7 @@ export interface QuestionDraft {
   timeLimitMs?: number;
 }
 export interface Question extends QuestionDraft {
+  approvalWait?: "untilDeadline";
   id: string;
   sessionId: string;
   call?: ToolCall;

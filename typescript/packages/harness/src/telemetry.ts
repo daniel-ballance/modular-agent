@@ -118,6 +118,10 @@ export function toolAttributes(call: Pick<ToolCall, "id" | "name" | "startedBy" 
 
 export function historyForPeer(entry: HistoryEntry): HistoryEntry {
 	if (entry.kind === TURN_TRACE || entry.kind === INTERFACE_HANDOFF) { const { data: _data, ...envelope } = entry; return envelope; }
+	if (entry.kind === "inputAnswer" && entry.data && typeof entry.data === "object" && "approvalView" in entry.data) {
+		const { approvalView: _proof, ...data } = entry.data;
+		return { ...entry, data };
+	}
 	if (entry.kind !== "turnStart" || !entry.data || typeof entry.data !== "object") return entry;
 	const { traceContext: _traceContext, ...data } = entry.data as Record<string, unknown>;
 	return { ...entry, data };
