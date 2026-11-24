@@ -311,7 +311,8 @@ async def run_scenario(
     )
     with scratch as temp:
         directory = Path(temp)
-        if path.parent.name == "waiting-approval":
+        # The telemetry kit copies the fixture to its own scenario.json.
+        if scenario["scenario"].startswith("waiting-approval"):
             kit = Path(__file__).resolve().parents[2] / "conformance/sdk/waiting.mjs"
             proc = await asyncio.create_subprocess_exec(
                 "node",
