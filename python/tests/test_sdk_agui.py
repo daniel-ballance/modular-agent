@@ -28,8 +28,15 @@ def principal(folder, client="editor", actor="alice", rights=("input", "watch", 
 
 
 @asynccontextmanager
-async def service(tmp_path, *, script=({"text": "Hello."},), server=None, **options):
-    a, token = principal(tmp_path)
+async def service(
+    tmp_path,
+    *,
+    script=({"text": "Hello."},),
+    server=None,
+    rights=("input", "watch", "tools"),
+    **options,
+):
+    a, token = principal(tmp_path, rights=rights)
     async with create_agent(
         project=tmp_path, providers=[scripted_provider(script)], **options
     ) as agent:
@@ -142,6 +149,91 @@ async def test_approval_setting_requires_current_session_and_connection_rights(t
             [result] = [m for m in messages if m["role"] == "tool"]
             assert result["error"] and "ran the effect" not in result["content"]
         await listener.close()
+
+
+def code_approvals(tmp_path, hooks, **options):
+    @tool
+    async def codemode(code: str) -> str:
+        """Return the code as text without executing it."""
+        return code
+
+    return service(
+        tmp_path,
+        rights=("input", "watch", "tools", "approve"),
+        script=[{"toolCalls": [{"name": "codemode", "input": {"code": "model_draft()"}}]}],
+        tools=[codemode],
+        approval="all",
+        plugins=[Plugin("gate", hooks=hooks)],
+        **options,
+    )
+
+
+@pytest.mark.parametrize("covers", [False, True], ids=["live", "covered"])
+async def test_approval_interrupt_shows_the_call_after_tool_before(tmp_path, covers):
+    code = 'count = 2\nprint("checked", count)'
+
+    async def revise(payload):
+        return {"change": {"input": {"code": code}}}
+
+    async with code_approvals(tmp_path, {"tool.before": revise}, approval_covers_nested=covers) as (
+        _,
+        client,
+    ):
+        sid = await new(client)
+        path = f"threads/{sid}"
+        async with client.stream("GET", path + "/presence") as presence:
+            assert presence.status_code == 200
+            terminal = events(await client.post("run", json=prompt(sid)))[-1]
+            assert terminal["type"] == "RUN_FINISHED" and terminal["outcome"]["type"] == "interrupt"
+            [q] = terminal["outcome"]["interrupts"]
+            assert q["reason"] == "approval" and "checked" in q["message"]
+            assert "model_draft" not in q["message"]
+            assert q["metadata"]["modular-agent.approvalCall"] == {
+                "name": "codemode",
+                "input": {"code": code},
+            }
+            assert q["metadata"].get("modular-agent.coversNested", False) is covers
+            assert (await client.get(path)).json()["waiting"]["questions"] == [q]
+
+
+@pytest.mark.parametrize("mode", ["redact", "block"])
+async def test_changed_or_blocked_approval_call_is_not_offered(tmp_path, mode):
+    async def gate(payload):
+        for event in payload["events"]:
+            d = event["data"]
+            if d.get("method") == "agui.interrupt" and mode != "allow":
+                call = d["result"].get("metadata", {}).get("modular-agent.approvalCall")
+                if call:
+                    if mode == "block":
+                        return {"block": True}
+                    call["input"]["code"] = "redacted"
+                    return {"redact": payload["events"]}
+
+    async with code_approvals(
+        tmp_path,
+        {"output": gate},
+        data_dir=tmp_path / "store",
+        durability="kept",
+        late_answers_start_turns=True,
+        max_approval_wait=60.0,
+        settings={"approvalWait": "untilDeadline"},
+    ) as (_, client):
+        sid = await new(client)
+        path = f"threads/{sid}"
+        async with client.stream("GET", path + "/presence") as presence:
+            assert presence.status_code == 200
+            run = events(await client.post("run", json=prompt(sid)))
+            assert run[-1]["outcome"] == {"type": "success"}
+            snapshot = (await client.get(path)).json()
+            assert snapshot["waiting"] == {"questions": [], "toolCalls": []}
+            assert "model_draft" not in str((run, snapshot))
+
+            mode = "allow"
+            [q] = (await client.get(path)).json()["waiting"]["questions"]
+            assert q["metadata"]["modular-agent.approvalCall"] == {
+                "name": "codemode",
+                "input": {"code": "model_draft()"},
+            }
 
 
 async def test_waiting_approval_on_returning_presence(tmp_path):
