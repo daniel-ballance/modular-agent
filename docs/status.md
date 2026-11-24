@@ -12,6 +12,25 @@
 
 **What the checks do not establish.** Byte limits are counted logically: they do not reserve physical disk, and the operator provides the extra space an atomic replacement needs. Scope is rechecked when a queued reply leaves its queue, but not every transport proves it at the last socket handoff. A deletion is not held until every external effect already in flight has finished, and restoring a backup still needs separate proof that it is current. Each SDK's README lists its own remaining items. Full production readiness is not claimed.
 
+## 0.2.0
+
+Recorded on 2026-11-23 for the commit tagged `v0.2.0`, from `scripts/check.sh` on Linux (Fedora, x86-64; 53 steps, all passed) and `scripts/macos-check.sh` on macOS (Apple silicon; 20 steps, all passed).
+
+| Check | Rust | TypeScript | Go | Python |
+|---|---|---|---|---|
+| Shared SDK scenarios, every placement | 153/153 | 153/153 | 153/153 | 153/153 |
+| Reference checks against `ma` | 27/27 | 27/27 | 27/27 | 27/27 |
+| ACP kit against `ma`, crash, probe and job checks | 190/190 | 190/190 | 190/190 | 190/190 |
+| Over WebSocket: plugin kit, listener isolation, ACP kit | 153, 14, 195 | 153, 14, 195 | 153, 14, 195 | 153, 14, 195 |
+| [AG-UI kit](../conformance/agui/README.md) against `ma` and an SDK fixture | 26/26 | 26/26 | 26/26 | 26/26 |
+| [Telemetry check](../conformance/telemetry/README.md), as host: in process and with each other language's plugins | 8, 18 | 8, 18 | 8, 18 | 8, 18 |
+| [ADR 0030](adr/0030-production-gaps.md) kits | pass | pass | pass | pass |
+| Own suites | 467 tests | 492 in each of two layouts | 38 packages; race on 7 | 726 in each of four configurations |
+
+Each language's agents passed the erasure checks on every other language's history service: 12 of 12 pairings. The [project notes demo](../demos/project-notes/README.md) passed with its crash run, and the [ops desk](../demos/ops-desk/README.md) passed its six scripted checks. Every result above used scripted models. With real models, the ops desk ran three times on the owner's subscriptions (Grok triage, Claude coder, ChatGPT verifier), and each run fixed its bug on the first try.
+
+[ADR 0034](adr/0034-approvals-that-wait.md) is accepted but not implemented; no result above covers it.
+
 ## 0.1.0
 
 Recorded on 2026-11-22 for the commit tagged `v0.1.0`, from `scripts/check.sh` on Linux (Fedora, x86-64) and `scripts/macos-check.sh` on macOS (Apple silicon). [ADR 0027](adr/0027-sdk-0-1-and-edition-4.md) explains what these results establish.
