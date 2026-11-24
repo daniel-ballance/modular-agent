@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -62,9 +61,6 @@ func (r run) checkWaiting(t *testing.T, path string, sc scenario) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s: %v\n%s", sc.Name, err, out)
-	}
-	if strings.HasPrefix(string(out), "SKIP ") {
-		t.Skip(string(out))
 	}
 }
 
@@ -253,23 +249,15 @@ func (w *waitWorker) command(p waitCommand) (any, error) {
 			return nil, fmt.Errorf("receiver checkpoint HTTP %d", res.StatusCode)
 		}
 		return active, nil
-	case "probe", "open":
+	case "open":
 		w.clock = modulartest.UseClock(w.t, time.UnixMilli(p.Now))
 		sc := w.sc
-		if p.Op == "probe" {
-			sc.Agent.Durability = modular.Kept
-			sc.Agent.Approval = modular.All
-			sc.Agent.MaxApprovalWaitMs = new(int64(100))
-		}
 		sc.Agent.Settings = nil // Record the real settings at session creation, not composition.
 		a, err := w.run.agent(w.ctx, sc, nil)
 		if err != nil {
 			return nil, err
 		}
 		w.agent = a
-		if p.Op == "probe" {
-			return w.run.sessionDeclaration(w.ctx, a, "")
-		}
 		if p.ID == "" {
 			w.session, err = a.Session(w.ctx, modular.SessionOptions{Actors: sc.Agent.Actors, Settings: w.sc.Agent.Settings})
 		} else {

@@ -186,7 +186,7 @@ func TestGeneralServerPreservesUnknownSharedData(t *testing.T) {
 	peerDone := make(chan struct{})
 	go func() { _ = peer.Run(); close(peerDone) }()
 	defer func() { peer.Close(); <-peerDone; <-done }()
-	err := peer.Call(context.Background(), "plugin/initialize", map[string]any{"binding": pluginrpc.Binding, "data": pluginrpc.DataBinding, "project": t.TempDir(), "home": t.TempDir()}, nil)
+	err := peer.Call(context.Background(), "plugin/initialize", map[string]any{"binding": pluginrpc.Binding, "project": t.TempDir(), "home": t.TempDir()}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -78,7 +78,7 @@ func TestServedRefusalAndFlag(t *testing.T) {
 			t.Cleanup(func() { client.Close(); _ = clientOut.Close(); <-finished })
 			home := t.TempDir()
 			var reg pluginrpc.Registration
-			err := client.Call(ctx, "plugin/initialize", map[string]any{"binding": pluginrpc.Binding, "data": pluginrpc.DataBinding, "project": home, "home": home, "config": map[string]any{}}, &reg)
+			err := client.Call(ctx, "plugin/initialize", map[string]any{"binding": pluginrpc.Binding, "project": home, "home": home, "config": map[string]any{}}, &reg)
 			if only {
 				if pluginrpc.Code(err) != "not_supported" {
 					t.Fatalf("want not_supported, got %v", err)

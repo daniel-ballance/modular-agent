@@ -18,6 +18,7 @@ func StartModelProcess(ctx context.Context, spec Spec, project, state, id string
 	if err := r.startProcess(spec, project); err != nil {
 		return nil, err
 	}
+	r.peer.traceHost = true
 	r.peer.Handle = r.modelCallback
 	r.peer.notify = r.notification
 	r.peer.admitNotification = func(ctx context.Context, m envelope) (string, bool) {
@@ -34,7 +35,7 @@ func StartModelProcess(ctx context.Context, spec Spec, project, state, id string
 		_ = r.cmd.Process.Kill()
 		_ = r.cmd.Wait()
 	}()
-	init := object{"binding": Binding, "data": DataBinding, "host": object{"name": "modular-agent-go", "version": api.ImplementationVersion}, "project": project, "home": state, "config": object{}}
+	init := object{"binding": Binding, "host": object{"name": "modular-agent-go", "version": api.ImplementationVersion}, "project": project, "home": state, "config": object{}}
 	err := r.peer.Call(ctx, "plugin/initialize", init, &r.reg)
 	if err == nil {
 		err = r.validate()

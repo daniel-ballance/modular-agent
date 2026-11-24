@@ -26,12 +26,10 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/modular"
 	"github.com/daniel-ballance/modular-agent/go/modular/internal/fixtures"
 	"github.com/daniel-ballance/modular-agent/go/modular/modulartest"
-	"github.com/daniel-ballance/modular-agent/go/pluginrpc"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 )
 
 type scenario struct {
-	Requires          map[string]bool
 	ExpectDeclaration map[string]bool
 	Fixture           struct{ RequestedApprovalMs int64 }
 	Name              string `json:"scenario"`
@@ -137,9 +135,6 @@ func (r run) agent(ctx context.Context, s scenario, checkAnswers func(*modularte
 			return nil, err
 		}
 		opts = append(opts, more...)
-		if r.telemetry.Handshake == "no-offer" {
-			ctx = pluginrpc.WithoutTraceHandshake(ctx)
-		}
 	}
 	switch s.Agent.History {
 	case "":
@@ -345,13 +340,23 @@ func TestShared(t *testing.T) {
 			t.Errorf("required SDK %q has no fixture registry", name)
 		}
 	}
-	waitDir := os.Getenv("MODULAR_AGENT_GO_WAITING_FIXTURES")
-	if waitDir == "" {
-		waitDir = filepath.Join(root, "conformance/sdk/fixtures/waiting-approval")
+	waitDir := filepath.Join(root, "conformance/sdk/fixtures/waiting-approval")
+	names, err := load[[]string](filepath.Join(root, "conformance/sdk/waiting-scenarios.json"))
+	if err != nil || len(names) == 0 {
+		t.Fatalf("waiting manifest: %v", err)
 	}
 	extra, err := filepath.Glob(filepath.Join(waitDir, "*.json"))
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || len(names) != len(extra) {
+		t.Fatal("waiting fixture set differs from manifest", err)
+	}
+	for i := range names {
+		names[i] += ".json"
+	}
+	slices.Sort(names)
+	for i, name := range names {
+		if filepath.Base(extra[i]) != name {
+			t.Fatalf("waiting fixture %s missing from manifest", extra[i])
+		}
 	}
 	for _, path := range append(files, extra...) {
 		s, err := load[scenario](path)
@@ -362,7 +367,7 @@ func TestShared(t *testing.T) {
 			if p.applies(s) {
 				t.Run(s.Name+"/"+p.name(), func(t *testing.T) {
 					r := run{dir: t.TempDir(), placement: p}
-					if s.Requires["approvalsOutlastTurns"] {
+					if filepath.Dir(path) == waitDir {
 						r.checkWaiting(t, path, s)
 					} else {
 						r.check(t, path, s)

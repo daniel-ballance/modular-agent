@@ -352,7 +352,7 @@ func TestPluginEOFStopsAnActiveEscapedCommand(t *testing.T) {
 		<-done
 	})
 	project := t.TempDir()
-	if err = peer.Call(context.Background(), "plugin/initialize", map[string]any{"binding": pluginrpc.Binding, "data": pluginrpc.DataBinding, "project": project, "home": t.TempDir()}, nil); err != nil {
+	if err = peer.Call(context.Background(), "plugin/initialize", map[string]any{"binding": pluginrpc.Binding, "project": project, "home": t.TempDir()}, nil); err != nil {
 		t.Fatal(err)
 	}
 	go func() {

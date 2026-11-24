@@ -13,7 +13,7 @@ const {Path:path,Dir:dir}=JSON.parse(await readFile(config));
 const sc=JSON.parse(await readFile(path));
 const telemetry=process.env.MODULAR_AGENT_TELEMETRY_RUN && JSON.parse(await readFile(process.env.MODULAR_AGENT_TELEMETRY_RUN));
 const rules=telemetry?resolve(process.cwd(),'conformance/sdk/waiting.mjs'):resolve(dirname(path),'../../waiting.mjs');
-const {waitingStep,waitingRecords,skipReason}=await import(pathToFileURL(rules));
+const {waitingStep,waitingRecords,checkWaitingDeclaration}=await import(pathToFileURL(rules));
 let child,exit,lines,id,now=1740000000000;
 const start=()=>{
  child=spawn(exe,['-test.run=^TestWaitingScenarioProcess$'],{env:{...process.env,MA_GO_WAIT_WORKER:config},detached:true,stdio:['pipe','pipe','inherit']});
@@ -38,11 +38,9 @@ async function records(){try{return (await readFile(join(dir,'commits'),'utf8'))
 async function count(){try{return Number(await readFile(join(dir,'count'),'utf8'))}catch(e){if(e.code==='ENOENT')return 0;throw e}}
 
 async function run(){
- start();const compatible=await rpc('probe',{now});await stop('close');
- const reason=skipReason(sc,compatible);if(reason){console.log('SKIP '+reason);return;}
  start();if(sc.expectCreateError){await assert.rejects(()=>rpc('open',{now}),e=>e.code===sc.expectCreateError.code);return;}
  const opened=await rpc('open',{now});id=opened.id;
- for(const [k,v] of Object.entries(sc.expectDeclaration??{}))assert.equal(opened.declaration[k]??false,v);
+ checkWaitingDeclaration(sc,opened.declaration);
  let parked,last;
  for(const step of sc.steps){
   const w=step.expect??{};let result;
