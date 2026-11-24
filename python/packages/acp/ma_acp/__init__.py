@@ -950,7 +950,12 @@ class ACP(Plugin):
                 "list",
                 {"session": sid, **attribution, "recipientView": True, "openOnly": True},
             )
-            if any(item["id"] == q["id"] and item["answerable"] for item in questions):
+            if any(
+                item["id"] == q["id"]
+                and item["answerable"]
+                and (not item.get("coversNested") or binding.question(item) == binding.question(q))
+                for item in questions
+            ):
                 return attribution
         return None
 
@@ -978,6 +983,7 @@ class ACP(Plugin):
                     title=exact.get("name") or q["question"],
                     raw_input=exact.get("input"),
                     status="pending",
+                    content=tool_content(content(q["question"])) if q.get("coversNested") else None,
                 )
                 options = [
                     s.PermissionOption(option_id="allow", name="Allow", kind="allow_once"),
@@ -989,7 +995,13 @@ class ACP(Plugin):
                     "options": [
                         o.model_dump(mode="json", by_alias=True, exclude_none=True) for o in options
                     ],
-                    "_meta": {NAMESPACE: {"requestId": q["id"], "actorId": attribution["actor"]}},
+                    "_meta": {
+                        NAMESPACE: {
+                            "requestId": q["id"],
+                            "actorId": attribution["actor"],
+                            **({"coversNested": True} if q.get("coversNested") is True else {}),
+                        }
+                    },
                 }
                 view = await self.view(
                     {"method": "session/request_permission", "params": params},

@@ -150,6 +150,7 @@ def _question(sid: str, q: dict[str, Any]) -> Question:
         q.get("answerable", True),
         q.get("approvalWait"),
         q.get("call"),
+        q.get("coversNested") is True,
     )
 
 

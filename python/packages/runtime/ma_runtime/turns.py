@@ -1038,7 +1038,7 @@ class Turns:
             },
         )
 
-    async def _tool(self, sid, turn, step, call, definition, *, replay=False):
+    async def _tool(self, sid, turn, step, call, definition, *, replay=False, covered_by=None):
         ran_again = False
         unknown = {"status": "outcome_unknown", "content": content(UNKNOWN)}
         answer = {"call": call["id"], "status": "failed", "content": []}
@@ -1058,6 +1058,7 @@ class Turns:
                     "step": step,
                     "call": call,
                     "definition": definition,
+                    **({"covered_by": covered_by} if covered_by else {}),
                 },
             )
             if terminal := gate.get("wait_terminal"):
@@ -1134,6 +1135,7 @@ class Turns:
                         "definition": definition,
                         "openWorld": definition.get("hints", {}).get("external", True),
                         "safeToRepeat": await self._safe_to_repeat(sid, definition),
+                        **({"approvalCoveredBy": covered_by} if covered_by else {}),
                         **(await self._save_point(sid) if turn is None else {}),
                     },
                     copies=[
@@ -1158,6 +1160,9 @@ class Turns:
                         **({"content": piece["content"]} if "content" in piece else {}),
                     )
 
+                covering = covered_by
+                if request := gate.get("covering_request"):
+                    covering = {"toolCallId": call["id"], "requestId": request}
                 ran_again = True
                 answer = await self.api.call(
                     "tools",
@@ -1168,6 +1173,7 @@ class Turns:
                         "step": step,
                         "call": changed,
                         "definition": definition,
+                        **({"covering_approval": covering} if covering else {}),
                     },
                     progress,
                 )

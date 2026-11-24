@@ -492,7 +492,12 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
         ):
             raise AgentError("Actor lacks authority: tools", "forbidden")
         token = identity()
-        scope = {"data": data, "children": set(), "closing": False}
+        scope = {
+            "data": data,
+            "children": set(),
+            "closing": False,
+            "covering_approval": data.pop("covering_approval", None),
+        }
         self.tool_dispatches[token] = scope
         attributes = ot.tool_attrs(
             sid, data.get("turn"), data.get("step"), call, data["definition"]["name"]
@@ -626,6 +631,7 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
                             "step": step,
                             "call": call,
                             "definition": definition,
+                            "covered_by": scope["covering_approval"],
                         },
                     )
                     if answer.get("open"):
@@ -1686,7 +1692,7 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
         if op == "branch":
             return select_entries(branch_entries(s), d)
         if op == "waiting_gate":
-            return await self.waiting_gate(d["gate"], d["ask"])
+            return await self.waiting_gate(d["gate"], d["ask"], d["question"], d["covers_nested"])
         if op == "interface_dispatch":
             return await self.interface_dispatch(d)
         if op == "interface_settle":

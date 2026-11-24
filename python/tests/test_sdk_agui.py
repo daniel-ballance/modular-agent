@@ -123,6 +123,7 @@ async def test_waiting_approval_on_returning_presence(tmp_path):
         ],
         tools=[bump],
         approval="all",
+        approval_covers_nested=True,
         late_answers_start_turns=True,
         max_approval_wait_ms=60_000,
         settings={"approvalWait": "untilDeadline"},
@@ -146,6 +147,9 @@ async def test_waiting_approval_on_returning_presence(tmp_path):
                 snapshot = (await client.get(path)).json()
                 [q] = snapshot["waiting"]["questions"]
                 assert q["reason"] == "approval" and q["toolCallId"] and q["expiresAt"]
+                assert snapshot["declaration"]["approvalCoversNested"] is True
+                assert q["metadata"]["modular-agent.coversNested"] is True
+                assert "covers the nested calls" in q["message"]
                 assert "bump" in q["message"] and "amount" in q["message"]
                 assert not effects
                 reply = await client.post(

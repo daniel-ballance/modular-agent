@@ -257,6 +257,7 @@ class Agent:
         self._test_project: TemporaryDirectory[str] | None = None
         self._sessions: dict[str, Session] = {}
         self._resumed: dict[str, Agent] = {}
+        self._live_views: dict[str, set[tuple[str, str | None]]] = {}
         self._question_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
@@ -307,14 +308,18 @@ class Agent:
     async def _present(self, d: dict[str, Any]) -> None:
         sid = d["session"]
         if self._handlers.get(sid, self._handler) is not None:
-            await self._call("questions", "connect", session=sid, actor="user")
+            await self._call("questions", "connect", session=sid, actor="user", route="sdk-handler")
 
     async def _set_handler(self, sid: str, handler: QuestionHandler | None) -> None:
         self._handlers[sid] = handler
         if session := self._sessions.get(sid):
             self._h.forget_waits(sid, token=session._delivery_token)
         await self._call(
-            "questions", "connect" if handler else "disconnect", session=sid, actor="user"
+            "questions",
+            "connect" if handler else "disconnect",
+            session=sid,
+            actor="user",
+            route="sdk-handler",
         )
         await self._offer_waits(sid)
 
@@ -387,6 +392,7 @@ class Agent:
             value=value,
             declined=answer.kind == "decline",
             delivery_token=delivery_token,
+            exact_cover_view=(actor, delivery_token) in self._live_views.get(question_id, ()),
             **acting,
             reason=answer.reason,
         )
@@ -397,6 +403,26 @@ class Agent:
             session._changed.set()
             for stream in session._prompt_streams:
                 stream.push(AgentError(ErrorCode.LOST, "Session interrupted", {"reason": reason}))
+
+    async def _delivered(self, original: dict[str, Any], view: dict[str, Any] | None) -> None:
+        kind = original["kind"]
+        if (
+            kind == "input_request_opened"
+            and (q := original["request"]).get("coversNested")
+            and not q.get("approvalWait")
+        ):
+            exact = json_equal(original, view)
+            if exact and self._handlers.get(original["session"], self._handler) is not None:
+                self._live_views.setdefault(q["id"], set()).add(("user", None))
+            if not exact:
+                self._live_views.pop(q["id"], None)
+                return  # A changed or withheld request cannot be answered on this route.
+        elif kind == "input_request_answered":
+            self._live_views.pop(original["answer"]["request"], None)
+        elif kind == "input_request_unanswerable":
+            self._live_views.pop(original["request"], None)
+        if view is not None:
+            await self._event(view)
 
     async def _event(self, d: dict[str, Any]) -> None:
         sid = d.get("session")
@@ -676,6 +702,8 @@ class Agent:
         environment = parts[self._h.capabilities["environment"][0]]
         store = parts[self._h.capabilities["history"][0]]
         value.pop("plugins", None)
+        if parts.get("approval", {}).get("covers_nested"):
+            value["approvalCoversNested"] = True
         if self._h.max_approval_wait_ms:
             value["approvalsOutlastTurns"] = True
         value.update(
@@ -1075,6 +1103,7 @@ def create_agent(
     model_aliases: Mapping[str, str] | None = None,
     settings: JsonObject | None = None,
     approval: Approval | None = None,
+    approval_covers_nested: bool = False,
     on_question: QuestionHandler | None = None,
     local_process_groups: bool = False,
     commands: bool = False,
@@ -1092,6 +1121,8 @@ def create_agent(
         return await build_with_store()
 
     async def build_with_store(memory_store: _MemoryHistory | None = None) -> Agent:
+        if not isinstance(approval_covers_nested, bool):
+            raise AgentError(ErrorCode.INVALID_PARAMS, "approval_covers_nested must be a boolean")
         if durability not in {"ephemeral", "kept", "durable"} or approval not in {
             None,
             "off",
@@ -1236,7 +1267,14 @@ def create_agent(
                 h.on("embedding", "session.prepare", migrate_model, "first")
             h.on("embedding", "session.start", agent._present, "first")
             h.on("embedding", "session.suspend", agent._interrupted, "first")
-            h.follow("embedding", "user", agent._event)
+            if approval_covers_nested:
+                questions.route_eligibility["sdk-handler"] = lambda q: (
+                    not q.get("coversNested")
+                    or ("user", None) in agent._live_views.get(q["id"], ())
+                )
+                h.observe_delivery("embedding", "user", lambda _: True, agent._delivered)
+            else:
+                h.follow("embedding", "user", agent._event)
             for provider in providers:
                 await h.load(_ProviderAdapter(provider, agent._credentials))
             selection = Selection(
@@ -1257,7 +1295,7 @@ def create_agent(
             elif conformance:
                 await h.load(MCP(standard_names=True))
             if approval is not None or conformance:
-                await h.load(_Approval())
+                await h.load(_Approval(covers_nested=approval_covers_nested))
             registered_tools: dict[str, _LocalPlugin] = {}
             interfaces: list[tuple[str, Interface]] = []
             credential_registered = credentials is not None

@@ -1041,7 +1041,7 @@ class TurnHost:
                 )
             self.gating.discard(cid)
             if not a.get("open") and definition:
-                self.gates[call["id"]] = (call, definition, d["step"])
+                self.gates[call["id"]] = (call, definition, d["step"], a.get("covering_request"))
         elif name == "turn.result":
             value["result"] = {**a.get("shared_result", p["result"]), "text": plain(a["result"])}
             if a.get("refused"):
@@ -1139,7 +1139,7 @@ class TurnHost:
         allowed = self.gates.pop(cid, None)
         if not allowed or cid in self.attempted:
             raise WireError("Tool call needs its own before gate", "invalid_request")
-        call, definition, step = allowed
+        call, definition, step, covering_request = allowed
         if self.unrepeated(cid):
             old = next(
                 e
@@ -1254,7 +1254,17 @@ class TurnHost:
             result = await self.api.call(
                 "tools",
                 "run",
-                {**self.scope, "step": step, "call": call, "definition": definition},
+                {
+                    **self.scope,
+                    "step": step,
+                    "call": call,
+                    "definition": definition,
+                    **(
+                        {"covering_approval": {"toolCallId": cid, "requestId": covering_request}}
+                        if covering_request
+                        else {}
+                    ),
+                },
                 progress,
             )
             if result.get("open"):

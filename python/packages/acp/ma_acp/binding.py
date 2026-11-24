@@ -60,6 +60,7 @@ def question(q):
             else {}
         ),
         **({"call": q["approval_call"]} if q.get("approval_call") else {}),
+        **({"coversNested": True} if q.get("coversNested") is True else {}),
         **({"options": q["options"]} if q["kind"] == "choice" else {}),
         **({"details": q["details"]} if isinstance(q.get("details"), str) else {}),
     }

@@ -169,6 +169,7 @@ class ToolCallEvent(_Event[Literal["toolCall"], ToolCallEventFields]):
 class ToolStartedEventFields(TypedDict):
     call: JsonObject
     definition: NotRequired[JsonObject]
+    approvalCoveredBy: NotRequired[JsonObject]
 
 
 class ToolStartedEvent(_Event[Literal["toolStarted"], ToolStartedEventFields]):

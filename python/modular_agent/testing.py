@@ -144,6 +144,7 @@ class _Options(TypedDict, total=False):
     resource_reservations: dict[str, dict[str, int]] | None
     settings: JsonObject
     approval: Approval | None
+    approval_covers_nested: bool
     late_answers_start_turns: bool
     max_approval_wait_ms: int | None
     on_question: QuestionHandler | None

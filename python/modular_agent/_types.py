@@ -157,6 +157,7 @@ class Question:
     answerable: bool = True
     approval_wait: str | None = None
     tool_call_id: str | None = None
+    covers_nested: bool = False
 
 
 @dataclass(frozen=True)

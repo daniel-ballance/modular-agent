@@ -2,7 +2,6 @@
 
 import asyncio
 import contextvars
-import json
 import time
 from datetime import UTC, datetime
 
@@ -155,10 +154,10 @@ class WaitingApprovals:
             return "noLongerAnswerable", "refused"
         return None
 
-    async def waiting_gate(self, d, ask):
+    async def waiting_gate(self, d, ask, question, covers_nested):
         sid, turn, step, call = (d[k] for k in ("session", "turn", "step", "call"))
         s = self.sessions[sid]
-        if self.waiting_request(s, call["id"]):
+        if request := self.waiting_request(s, call["id"]):
             # Verify at the gate that asked, and independently after all gates.
             status, _ = await self.check_wait_dispatch(sid, turn, step, call, d.get("definition"))
             if status:
@@ -168,6 +167,8 @@ class WaitingApprovals:
                     "wait_status": status,
                     "reason": "The recorded approval no longer applies",
                 }
+            if covers_nested and request["data"].get("coversNested") is True:
+                return {**d, "covering_request": request["data"]["id"]}
             return d
         definition = d.get("definition")
         if not (
@@ -213,7 +214,6 @@ class WaitingApprovals:
             qid = identity()
             source, offered = self.registration(sid, definition)
             binding = call_view(call)
-            question = "Allow tool call: " + json.dumps(binding, sort_keys=True)
             q = {
                 "id": qid,
                 "key": "approval:" + call["id"],
@@ -239,6 +239,7 @@ class WaitingApprovals:
                     "definition": offered,
                 },
                 "approvalWait": UNTIL,
+                **({"coversNested": True} if covers_nested else {}),
                 "answerable": False,
                 "timeout": limit / 1000,
                 "timeLimitMs": limit,
