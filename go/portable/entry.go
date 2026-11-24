@@ -441,7 +441,6 @@ func Entry(e api.Entry) map[string]any {
 			d["to"] = *p.To
 		}
 		set(d, "restore", p.Restore, p.Restore != nil)
-		set(d, "failed", p.Failed, p.Failed)
 	case "resultFeedback":
 		d["reason"] = api.Decode[string](e.Data)
 	case "erasure":
@@ -673,7 +672,7 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 	case "actor.left":
 		e.Data = api.JSON(str(d, "actorId"))
 	case "job.start", "job.end":
-		e.Data = api.JSON(jobIn(e, d, str(v, "kind")))
+		e.Data = api.JSON(jobIn(e, d))
 	case "position":
 		e.Data = api.JSON(v["data"])
 		if _, err := api.ReadPosition(e.Data); err != nil {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
+	"github.com/daniel-ballance/modular-agent/go/portable"
 	"go.opentelemetry.io/otel/trace"
 	"slices"
 	"strings"
@@ -89,9 +90,6 @@ func (c *client) finishJobLocked(s *session, end api.Entry, contexts ...context.
 
 func appendJobReport(next *api.Session, end api.Entry, j api.Job, id string, content api.Content, parked bool) (api.Input, api.Entry) {
 	rights := j.Rights
-	if rights == nil {
-		rights = []string{"watch"}
-	}
 	who := api.JobActor(end.Job)
 	taken := "after"
 	if parked {
@@ -102,51 +100,34 @@ func appendJobReport(next *api.Session, end api.Entry, j api.Job, id string, con
 	return in, entry
 }
 
-// Older writers could commit the end and crash before admitting its report.
-// Never reschedule an already admitted or taken report while repairing it.
-func (c *client) repairJobReportsLocked(s *session) error {
-	next := clone(s.data)
-	for _, end := range s.data.LiveEntries() {
+// A reported end and its initial admission are one commit. An erased
+// admission still occupies its place, but supplies no runnable content.
+func validateJobReports(s api.Session) error {
+	entries := s.LiveEntries()
+	for i, end := range entries {
 		if end.Kind != "job.end" {
 			continue
 		}
-		report := api.Decode[api.Job](end.Data)
-		if !report.Report || (!report.ResultPresent && report.Outcome.Result == nil) {
+		j := api.Decode[api.Job](end.Data)
+		if !j.Report {
 			continue
 		}
-		key := api.JobActor(end.Job)
-		var taken *api.Entry
-		matched := false
-		for _, e := range next.LiveEntries() {
-			if e.WasKind("input.accepted") && (e.Job == end.Job || (!e.IsErased() && api.Decode[api.Input](e.Data).Key == key)) {
-				matched = true
-				break
-			}
-			if e.WasKind("input") && (e.Job == end.Job || e.InputKey == key) {
-				copy := e
-				taken = &copy
-			}
+		if !j.ResultPresent || i+1 >= len(entries) {
+			return fmt.Errorf("job %s lacks its report admission", end.Job)
 		}
-		if matched || (taken != nil && (taken.IsErased() || taken.InputID() == "")) {
+		a := entries[i+1]
+		if !a.WasKind("input.accepted") || a.Job != end.Job || a.Parent != end.ID || a.InputRef == "" {
+			return fmt.Errorf("unmatched job report %s", end.Job)
+		}
+		if a.IsErased() {
 			continue
 		}
-		for _, start := range next.LiveEntries() {
-			if start.Kind != "job.start" || start.Job != end.Job {
-				continue
-			}
-			j := api.Decode[api.Job](start.Data)
-			if taken != nil {
-				appendJobReport(&next, end, j, taken.InputID(), taken.Content, false)
-			} else {
-				appendJobReport(&next, end, j, api.ID(), report.Outcome.Result, true)
-			}
-			break
+		in := api.Decode[api.Input](a.Data)
+		if in.Key != api.JobActor(end.Job) || in.When != "after" || in.Parked == nil || !portable.EqualJSON(api.JSON(portable.Content(in.Content)), api.JSON(portable.Content(j.Outcome.Result))) {
+			return fmt.Errorf("inconsistent job report %s", end.Job)
 		}
 	}
-	if len(next.Entries) == len(s.data.Entries) {
-		return nil
-	}
-	return s.commitLocked(next)
+	return nil
 }
 
 // A job actor is never an Interface actor. Its execution rights are derived
@@ -174,9 +155,6 @@ func jobAncestors(s api.Session, who, right string) []string {
 		delete(pending, derived)
 		job := api.Decode[api.Job](e.Data)
 		rights := job.Rights
-		if rights == nil {
-			rights = []string{"watch"}
-		}
 		if !slices.Contains(rights, right) {
 			return nil
 		}

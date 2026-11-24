@@ -764,6 +764,9 @@ func (m *Manager) resume(id string) {
 			has, answered := false, true
 			for _, st := range sts {
 				if st.q.Question.Call == c.ID && !st.closed {
+					if !api.HasQuestionCheckpoint(s, st.q.Question) {
+						all = false
+					}
 					has = true
 					if st.answer == nil {
 						answered = false

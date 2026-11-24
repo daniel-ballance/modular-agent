@@ -224,8 +224,8 @@ func (h *Harness) queueInterfaceContinuationsLocked(s *session) {
 	results := map[string]api.Entry{}
 	positions := map[string]int{}
 	type question struct {
-		call, entry string
-		closed      api.Entry
+		q      api.Question
+		closed api.Entry
 	}
 	questions := map[string]question{}
 	for idx, e := range branch {
@@ -238,7 +238,7 @@ func (h *Harness) queueInterfaceContinuationsLocked(s *session) {
 		case "question.open":
 			q := api.Decode[struct{ Question api.Question }](e.Data).Question
 			if q.ID != "" && (q.Defer && q.Kind != "approval" || q.ApprovalWait == api.UntilDeadline) {
-				questions[q.ID] = question{call: q.Call, entry: e.ID}
+				questions[q.ID] = question{q: q}
 			}
 		case "question.answer":
 			id := api.Decode[api.Answer](e.Data).Request
@@ -298,11 +298,11 @@ func (h *Harness) queueInterfaceContinuationsLocked(s *session) {
 			}
 			hasQuestion := false
 			for requestID, q := range questions {
-				if q.call != c.ID {
+				if q.q.Call != c.ID {
 					continue
 				}
 				hasQuestion = true
-				if q.closed.ID == "" {
+				if q.closed.ID == "" || !api.HasQuestionCheckpoint(s.data, q.q) {
 					eligible = false
 					break
 				}

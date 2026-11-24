@@ -30,7 +30,7 @@ func validateIntake(s api.Session) error {
 			return fmt.Errorf("taken input %s has no preceding turn start", e.ID)
 		}
 	}
-	return nil
+	return validateJobReports(s)
 }
 
 func pendingAdmissions(s api.Session) []api.Entry {

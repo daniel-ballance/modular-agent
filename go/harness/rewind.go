@@ -344,9 +344,6 @@ func pendingRewind(entries []api.Entry) (api.PositionChange, string, bool, error
 		if err != nil {
 			return pending, previous, undo, err
 		}
-		if p.Failed {
-			return pending, previous, undo, errors.New("legacy failed position does not establish the state of project files")
-		}
 		if pending.Restore == nil {
 			if p.Restore != nil {
 				// The initial intent must move from the current head to

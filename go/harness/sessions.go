@@ -369,14 +369,6 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor, interrupt
 		_ = c.StopSession(id)
 		return err
 	}
-	s.mu.Lock()
-	err = c.repairJobReportsLocked(s)
-	snap = clone(s.data)
-	s.mu.Unlock()
-	if err != nil {
-		_ = c.StopSession(id)
-		return err
-	}
 	_, err = s.invokeWithErasureView(api.WithReopenedSession(ctx), "session.start", snap, clone(snap))
 	if err != nil {
 		_ = c.CloseSession(id)
