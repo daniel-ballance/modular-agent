@@ -1,16 +1,16 @@
 # Open questions
 
-**What this edition leaves open.** A limit is behavior this edition does not standardize. A choice is policy a deployment can set within the rules. The defaults below are production advice, not extra conformance requirements. [Settled](#settled) links to the current rules. Older heading links still work.
+**What this edition leaves open.** A limit is behavior this edition does not standardize. A choice is policy a deployment can set within the rules. The defaults below are production advice, not extra conformance requirements. [Settled](#settled) links to the current rules.
 
 ## The Harness and plugins
 
 ### How many of each capability
 
-See [Plugin registration](#plugin-registration) under Settled.
+See [Plugin registration](contracts.md#plugins-and-capabilities) under Settled.
 
 ### Plugin scope
 
-See [Active plugin set](#active-plugin-set) under Settled.
+See [Active plugin set](contracts.md#plugins-and-capabilities) under Settled.
 
 ### Plugin lifecycle
 
@@ -18,33 +18,33 @@ See [Active plugin set](#active-plugin-set) under Settled.
 
 ### Naming "capability"
 
-See [Terminology](#terminology) under Settled.
+See [Terminology](../GLOSSARY.md#the-system) under Settled.
 
 ## Turns
 
 ### Waiting for an answer
 
-**Choice: question deadlines.** Use finite deadlines for unattended work. Today an approval needs a present answerer and cannot outlast the turn, even if [AG-UI](bindings/agui.md#interrupts-and-frontend-tools) closes the exchange. For 0.2.0, [ADR 0034](adr/0034-approvals-that-wait.md#owner-decisions) proposes an opt-in: leave the unstarted call open until an operator-bounded deadline, then check a late allow in a continuation. Live-only remains the default. See [Question lifecycle](#question-lifecycle).
+**Choice: question deadlines.** Use finite deadlines for unattended work. Today an approval needs a present answerer and cannot outlast the turn, even if [AG-UI](bindings/agui.md#interrupts-and-frontend-tools) closes the exchange. For 0.2.0, [ADR 0034](adr/0034-approvals-that-wait.md#owner-decisions) proposes an opt-in: leave the unstarted call open until an operator-bounded deadline, then check a late allow in a continuation. Live-only remains the default. See [Question lifecycle](contracts.md#questions).
 
 ### Input during a turn
 
-See [Steering](#steering) under Settled.
+See [Steering](contracts.md#input) under Settled.
 
 ### Cancellation
 
-**Limit: own-work cancellation.** There is no separate right to cancel only work a particular actor started. Default: give `cancel` only to actors trusted to cancel session work, and do not disclose handed-back inputs to a canceller merely because they cancelled. See [Turn and job cancellation](#turn-and-job-cancellation).
+**Limit: own-work cancellation.** There is no separate right to cancel only work a particular actor started. Default: give `cancel` only to actors trusted to cancel session work, and do not disclose handed-back inputs to a canceller merely because they cancelled. See [Turn and job cancellation](contracts.md#input).
 
 ### Turn limits
 
-**Choice: deployment ceilings.** The edition does not prescribe step or wall-clock ceilings or their precedence in combination with deployment-specific limits. Default: have the operator set finite ceilings for unattended work and bound concurrent sessions and jobs. Do not let a session setting relax an operator ceiling. Comply with the binding's cancellation deadline. A tenant budget is [soft](#tenant-budgets), not a substitute for a hard cap. If admission or accounting is uncertain, decline work whose policy cannot be enforced.
+**Choice: deployment ceilings.** The edition does not prescribe step or wall-clock ceilings or their precedence in combination with deployment-specific limits. Default: have the operator set finite ceilings for unattended work and bound concurrent sessions and jobs. Do not let a session setting relax an operator ceiling. Comply with the binding's cancellation deadline. A tenant budget is [soft](contracts.md#limits-and-tenants), not a substitute for a hard cap. If admission or accounting is uncertain, decline work whose policy cannot be enforced.
 
 ### Changing the model mid-turn
 
-See [Model changes](#model-changes) under Settled.
+See [Model changes](contracts.md#settings) under Settled.
 
 ### Work outside a turn
 
-**Limit: detached work.** There is no portable ownership or recovery model for a job that continues outside its session. Default: keep managed work in session jobs, and do not detach it on close. See [Turn and job cancellation](#turn-and-job-cancellation).
+**Limit: detached work.** There is no portable ownership or recovery model for a job that continues outside its session. Default: keep managed work in session jobs, and do not detach it on close. See [Turn and job cancellation](contracts.md#input).
 
 ### Live sessions
 
@@ -58,7 +58,7 @@ See [Model changes](#model-changes) under Settled.
 
 ### Several actors
 
-**Choice: local grant policy.** The operator chooses which principals and tenants each connection can use and who is trusted with `grant`. Default: grant neither delegation nor cross-tenant access unless needed, and disable joining on open for shared deployments unless explicitly intended. If matching principal ids or authorized history provenance cannot be established across builds, refuse the transfer. See [Actor grants and reopening](#actor-grants-and-reopening).
+**Choice: local grant policy.** The operator chooses which principals and tenants each connection can use and who is trusted with `grant`. Default: grant neither delegation nor cross-tenant access unless needed, and disable joining on open for shared deployments unless explicitly intended. If matching principal ids or authorized history provenance cannot be established across builds, refuse the transfer. See [Actor grants and reopening](contracts.md#authority).
 
 ## Tools
 
@@ -68,15 +68,15 @@ See the proposed [Interface-run tool rules](contracts.md#interface-run-tools) an
 
 ### Tool calls outside a turn
 
-**Limit: injecting direct results.** The default portable context excludes out-of-turn tool calls. There is no common operation for inserting their results into model context. Use an authorized input or a deployment's context handler, not direct access to the tool source. A late [Interface tool result](bindings/data.md#interface-handoff-records) is not a new out-of-turn call: it settles a recorded call from a turn. See [Tool dispatch](#tool-dispatch).
+**Limit: injecting direct results.** The default portable context excludes out-of-turn tool calls. There is no common operation for inserting their results into model context. Use an authorized input or a deployment's context handler, not direct access to the tool source. A late [Interface tool result](bindings/data.md#interface-handoff-records) is not a new out-of-turn call: it settles a recorded call from a turn. See [Tool dispatch](contracts.md#tool-dispatch).
 
 ### Parallel tool calls
 
-See [Parallel calls](#parallel-calls) under Settled.
+See [Parallel calls](contracts.md#tool-dispatch) under Settled.
 
 ### Direct tool access
 
-See [Tool dispatch](#tool-dispatch) under Settled.
+See [Tool dispatch](contracts.md#tool-dispatch) under Settled.
 
 ## History and durability
 
@@ -86,11 +86,11 @@ See [Tool dispatch](#tool-dispatch) under Settled.
 
 ### Transient and durable Runtimes
 
-See [Recovery](#recovery) under Settled.
+See [Recovery](contracts.md#recovery-and-repeating-work) under Settled.
 
 ### Erasure scope
 
-See [Erasure](#erasure) under Settled.
+See [Erasure](contracts.md#erasure) under Settled.
 
 ## Beyond one agent
 
@@ -112,20 +112,18 @@ The [ops desk](../demos/ops-desk/DESIGN.md#findings) drove three agents from one
 
 ### Agents working together
 
-**Limit: peer protocol.** Subagent work and requests through a parent are [settled](#child-work); a peer-to-peer wire is not. Default: do not allow a peer channel to deliver authority. Treat peer messages as data under the receiving deployment's policy.
+**Limit: peer protocol.** Subagent work and requests through a parent are [settled](contracts.md#subagents); a peer-to-peer wire is not. Default: do not allow a peer channel to deliver authority. Treat peer messages as data under the receiving deployment's policy.
 
 ### Content model
 
 **Limit: other media profiles.** [Shared data](bindings/data.md#content) and [ACP](bindings/acp.md#entry) specify their content and projections. Unknown fields are inert, not new behavior. There is no interoperable live voice or remote media handling contract. Default: use the types both peers support; do not dereference a file or network reference merely because it arrived as content.
-
-<a id="settled"></a>
 
 ## Settled
 
 - <a id="plugin-registration"></a>**Plugin registration.** Singleton capabilities are selected per session; names do not shadow, and replacement uses the [registration rules](contracts.md#plugins-and-capabilities).
 - <a id="active-plugin-set"></a>**Active plugin set.** An open session cannot add plugins; offering an already registered tool is not loading one. A child inherits the set except host-supplied MCP servers ([Plugins and capabilities](contracts.md#plugins-and-capabilities), [Subagents](contracts.md#subagents), [MCP servers](contracts.md#mcp-servers)).
 - <a id="terminology"></a>**Terminology.** A capability is a role a plugin can provide ([Glossary](../GLOSSARY.md#the-system)).
-- <a id="waiting-for-the-user"></a><a id="question-lifecycle"></a>**Question lifecycle.** The asker sets the deadline and the permitted wait behavior. A late answer to an eligible non-approval question can make a continuation ready; it is not a tool result ([Questions](contracts.md#questions), [ACP questions](bindings/acp.md#questions)). [ADR 0034](adr/0034-approvals-that-wait.md) proposes a separate rule for pre-dispatch approval, not a new use of `leaveOpen`.
+- <a id="question-lifecycle"></a>**Question lifecycle.** The asker sets the deadline and the permitted wait behavior. A late answer to an eligible non-approval question can make a continuation ready; it is not a tool result ([Questions](contracts.md#questions), [ACP questions](bindings/acp.md#questions)). [ADR 0034](adr/0034-approvals-that-wait.md) proposes a separate rule for pre-dispatch approval, not a new use of `leaveOpen`.
 - <a id="steering"></a>**Steering.** Supported steering joins after the current tool round; next-turn input and unsupported steering wait ([Input](contracts.md#input)).
 - <a id="turn-and-job-cancellation"></a>**Turn and job cancellation.** Cancellation hands back untaken input at the cutoff and closes unanswered questions of the cancelled work. Jobs survive turn cancellation unless declared otherwise, and closing cancels and waits for jobs ([Input](contracts.md#input), [Jobs](contracts.md#jobs), [ACP cancelling](bindings/acp.md#cancelling)).
 - <a id="model-changes"></a>**Model changes.** A change applies from the next turn and resets Provider state. Fallback to another model takes a new turn ([Settings](contracts.md#settings), [Provider state](contracts.md#provider-state)).
@@ -143,14 +141,11 @@ The [ops desk](../demos/ops-desk/DESIGN.md#findings) drove three agents from one
 - **History and position.** Normal use appends entries; moving records a new position without deleting the rest. Retention and erasure are separate ([History entries](bindings/data.md#history-entries), [Rewinding](bindings/data.md#rewinding)).
 - **Exchanges.** History represents turns by what started them, not by a separate exchange unit ([History entries](bindings/data.md#history-entries)).
 - **Holding streamed output.** A gate can hold output within the declared stream boundary; the agent declares this behavior ([The output gate](contracts.md#the-output-gate)).
-- <a id="what-the-harness-keeps"></a><a id="configuration"></a>**Harness and configuration.** The Harness owns sessions and the plugin API; configuration is a plugin capability ([Plugins and capabilities](contracts.md#plugins-and-capabilities), [Configuration and trust](contracts.md#configuration-and-trust)).
+- <a id="configuration"></a>**Harness and configuration.** The Harness owns sessions and the plugin API; configuration is a plugin capability ([Plugins and capabilities](contracts.md#plugins-and-capabilities), [Configuration and trust](contracts.md#configuration-and-trust)).
 - <a id="how-handlers-combine"></a>**Handler order.** Hook owners fix the combining rule and handlers run in the specified order ([Hook execution](contracts.md#hook-execution)).
 - **Plugin trust.** The operator chooses which code to run; project plugins need project trust. The API is not an isolation boundary ([Configuration and trust](contracts.md#configuration-and-trust), [Security](security.md)).
 - **Input keys and reconnect.** Input keys stay reserved for the session's life, even when their content is erased. The [input](contracts.md#input) and [following](contracts.md#following-a-session) rules define replay and retry behavior.
 - **Versions.** The claimed binding sets its own handshake, error rules and versions; the core picks no transport ([Bindings](bindings/README.md), [Versioning](conformance.md#versioning)).
-
-<a id="parked-how"></a>
-<a id="parked-wiring"></a>
 
 ## Parked: how
 

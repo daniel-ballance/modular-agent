@@ -43,7 +43,7 @@ Pi builds in read, bash, edit, write and others, and extensions add more with `r
 - **run a call** with its arguments and a cancellation signal, **report progress** while it runs, and **return a result**
 - **ask the person** something during a call (Pi's `question` tool)
 - **run other tools** through the Harness, so hook points still apply (Pi's `ctx.executeTool`, used by codemode)
-- **reach the environment:** the working directory, files and processes. Pi's tools use the operating system directly. DeepSeek Harness puts files and processes behind swappable capabilities, so one switch moves every tool into a remote sandbox (see the open question [Working environment](../open-questions.md#working-environment)).
+- **reach the environment:** the working directory, files and processes. Pi's tools use the operating system directly. DeepSeek Harness puts files and processes behind swappable capabilities, so one switch moves every tool into a remote sandbox (see the open question [Working environment](../contracts.md#harness-and-working-environment)).
 
 ### MCP client support
 
@@ -63,7 +63,7 @@ Pi builds it in, following the [Agent Skills specification](https://agentskills.
 - **load a skill's full instructions on demand,** either when the model reads them with a tool or when a person runs `/skill:name`, which expands into input
 - skills that bundle scripts need tools from other plugins to run them
 
-Other plugins adding skill directories is a case of plugins building on each other (open question [Plugins building on plugins](../open-questions.md#plugins-building-on-plugins)).
+Other plugins adding skill directories is a case of plugins building on each other (open question [Plugins building on plugins](../contracts.md#plugins-and-capabilities)).
 
 ### Commands
 
@@ -85,7 +85,7 @@ Pi builds in JSONL session files. A storage plugin needs to:
 - **provide the storage capability:** save each new record, load a session's history, list sessions, and confirm when records are safely stored
 - **refuse a second writer** for a session that is already open elsewhere (DeepSeek Harness takes write ownership when it opens a session)
 
-In this draft the base Harness keeps the record itself and the storage plugin decides where it lives (open question [What the Harness keeps](../open-questions.md#what-the-harness-keeps)).
+In this draft the base Harness keeps the record itself and the storage plugin decides where it lives (open question [What the Harness keeps](../contracts.md#plugins-and-capabilities)).
 
 ### Context management and compaction
 
@@ -125,8 +125,8 @@ Pi builds in stored API keys and OAuth sign-in (`/login`, `/logout`). The plugin
 
 Pi has nothing built in. Extensions add them with `tool_call` and `ctx.ui`. The plugin needs to:
 - **handle the before-tool hook point** to allow, deny or ask
-- **ask the person, and wait,** or turn the wait into a pending result (open question [Waiting for the user](../open-questions.md#waiting-for-the-user))
-- **define its own hook point,** "approval requested", that Interface plugins answer, and handle the case where no Interface can answer (open question [Plugins building on plugins](../open-questions.md#plugins-building-on-plugins))
+- **ask the person, and wait,** or turn the wait into a pending result (open question [Waiting for the user](../contracts.md#questions))
+- **define its own hook point,** "approval requested", that Interface plugins answer, and handle the case where no Interface can answer (open question [Plugins building on plugins](../contracts.md#plugins-and-capabilities))
 - **record each request and decision** in history without the model seeing them
 - **keep a per-session setting,** such as "never ask"
 
@@ -140,6 +140,6 @@ These are worth checking against the same list:
 ## What the walkthrough shows
 
 - **The plugin API is more than hook points.** Commands and Interfaces need operations: start, fork and close sessions, submit input, cancel, compact, change the model. Pi offers these as `ctx` methods next to its events.
-- **History is the meeting point.** Model selection, compaction, approval, the system prompt and plugin state all write to it. That supports keeping the record in the base Harness (open question [What the Harness keeps](../open-questions.md#what-the-harness-keeps)).
-- **Plugins building on each other is common, not an edge case.** Skill and template directories come from other plugins, MCP servers come from Interfaces, and approval needs answerers. That pushes open question [Plugins building on plugins](../open-questions.md#plugins-building-on-plugins) toward "yes".
+- **History is the meeting point.** Model selection, compaction, approval, the system prompt and plugin state all write to it. That supports keeping the record in the base Harness (open question [What the Harness keeps](../contracts.md#plugins-and-capabilities)).
+- **Plugins building on each other is common, not an edge case.** Skill and template directories come from other plugins, MCP servers come from Interfaces, and approval needs answerers. That pushes open question [Plugins building on plugins](../contracts.md#plugins-and-capabilities) toward "yes".
 - **"The person" is a shared service.** Approval, tools, MCP sign-in and credentials all ask the person something, and only Interfaces can answer. That is one exchange, defined once.
