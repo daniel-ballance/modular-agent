@@ -19,7 +19,7 @@ pub mod terminal;
 
 use anyhow::{Result, anyhow};
 use modular_agent::{
-    Agent, AgentBuilder, ChatGptOptions, ClaudeOptions, ClientIdentity, Durability,
+    Agent, AgentBuilder, Approval, ChatGptOptions, ClaudeOptions, ClientIdentity, Durability,
     FilesConfiguration, GrokOptions, History, Plugin, chatgpt, claude, grok,
     responses::ResponsesModel,
 };
@@ -47,6 +47,8 @@ pub fn canonical_model(model: &str) -> String {
 
 #[derive(Clone)]
 pub struct Standard {
+    pub approval: Option<Approval>,
+    pub approval_wait_max_ms: Option<u64>,
     pub limits: modular_agent::ResourceLimits,
     pub byte_limits: modular_agent::ByteLimits,
     pub tenant_scopes: bool,
@@ -87,6 +89,8 @@ impl Standard {
             ),
         };
         Ok(Self {
+            approval: None,
+            approval_wait_max_ms: None,
             config,
             state,
             limits: policy::Bounds::default().counts(),
@@ -191,6 +195,16 @@ pub fn defaults() -> Value {
     })
 }
 
+pub fn approval_policy(value: &str) -> Result<Approval> {
+    match value {
+        "off" => Ok(Approval::Off),
+        "ask" => Ok(Approval::Ask),
+        "all" => Ok(Approval::All),
+        "never" => Ok(Approval::Never),
+        _ => Err(anyhow!("approval must be off, ask, all or never")),
+    }
+}
+
 /// One SDK composition serves one project, with that project's trust.
 pub fn builder(
     standard: &Standard,
@@ -212,6 +226,7 @@ pub fn builder(
         eprintln!("MCP: {problem}");
     }
     let skills = standard.skills();
+    let mut settings = configuration.settings(&project)?;
     let mut b = Agent::builder()
         .agent_name("ma")
         .project(&project)
@@ -222,7 +237,6 @@ pub fn builder(
         } else {
             Durability::Kept
         })
-        .configuration(configuration)
         .resource_limits(standard.limits.clone())
         .byte_limits(standard.byte_limits)
         .credentials(standard.auth())
@@ -240,6 +254,14 @@ pub fn builder(
             }
             .plugin(skills),
         );
+    // Only the operator may load approval or choose its defaults. Do not pass a
+    // second, unfiltered file configuration to the SDK after making this choice.
+    for key in ["approval", "approval_wait", "approvalWait"] {
+        settings.as_object_mut().unwrap().remove(key);
+    }
+    for (key, value) in settings.as_object().unwrap() {
+        b = b.setting(key, value.clone());
+    }
     if standard.tenant_scopes
         && let Some(tenants) = std::env::var_os("MODULAR_AGENT_TENANTS")
     {
@@ -275,6 +297,33 @@ pub fn builder(
             );
         if standard.claude {
             b = b.claude_provider(claude(ClaudeOptions::default())?);
+        }
+    }
+    let global = configuration.global_settings()?;
+    let approval = match standard.approval {
+        Some(policy) => Some(policy),
+        None => global
+            .get("approval")
+            .map(|v| approval_policy(v.as_str().unwrap_or("")))
+            .transpose()
+            .map_err(|e| anyhow!("{}: {e}", standard.settings_file().display()))?,
+    };
+    let wait = match global.get("approval_wait") {
+        None => "live",
+        Some(v) if matches!(v.as_str(), Some("live" | "untilDeadline")) => v.as_str().unwrap(),
+        _ => {
+            return Err(anyhow!(
+                "{}: approval_wait must be live or untilDeadline",
+                standard.settings_file().display()
+            ));
+        }
+    };
+    if let Some(policy) = approval {
+        b = b.approval(policy).approval_covers_nested(true);
+        if let Some(max) = standard.approval_wait_max_ms {
+            b = b
+                .max_approval_wait_ms(max)
+                .setting("approvalWait", json!(wait));
         }
     }
     for plugin in extra {

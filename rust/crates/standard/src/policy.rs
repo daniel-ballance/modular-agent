@@ -9,6 +9,12 @@ pub struct Policy {
     stdio: Option<Principal>,
     actors: Option<Vec<NetworkPrincipal>>,
     limits: Option<LimitOverrides>,
+    #[serde(
+        default,
+        rename = "approvalWaitMaxMs",
+        deserialize_with = "approval_max"
+    )]
+    pub approval_wait_max_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -51,6 +57,18 @@ struct PolicyActor {
 
 fn trace_trust<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     bool::deserialize(d).map_err(|_| serde::de::Error::custom("traceTrusted must be a boolean"))
+}
+
+fn approval_max<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    u64::deserialize(d)
+        .ok()
+        .filter(|ms| (1..=9_007_199_254_740_991).contains(ms))
+        .map(Some)
+        .ok_or_else(|| {
+            serde::de::Error::custom(
+                "approvalWaitMaxMs must be a positive safe integer in milliseconds",
+            )
+        })
 }
 
 fn trusted_stdio() -> bool {

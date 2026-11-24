@@ -494,10 +494,13 @@ pub(crate) fn config(api: &dyn AgentApi, id: &str) -> Result<Value> {
         wire::lower_reasoning(settings["thinking"].as_str().unwrap_or("low"), &thinking);
     let mut options = json!([
         {"id":"model","name":"Model","category":"model","type":"select","currentValue":current_model,"options":models},
-        {"id":"thinking","name":"Thinking","category":"thought_level","type":"select","currentValue":effective_thinking,"options":thinking.into_iter().map(|v|json!({"value":v,"name":v})).collect::<Vec<_>>()},
-        {"id":"approval","name":"Approval","type":"select","currentValue":match settings["approval"].as_str().unwrap_or("off") {"ask_always"=>"all","ask_unless_read_only"=>"ask","never_ask"=>"never",_=>"off"},"options":[{"value":"off","name":"Off"},{"value":"ask","name":"Ask unless read-only"},{"value":"all","name":"Ask always"},{"value":"never","name":"Refuse without asking"}]}
+        {"id":"thinking","name":"Thinking","category":"thought_level","type":"select","currentValue":effective_thinking,"options":thinking.into_iter().map(|v|json!({"value":v,"name":v})).collect::<Vec<_>>()}
     ]);
-    if api.declaration()?["approvals_outlast_turns"] == true {
+    let declaration = api.declaration()?;
+    if declaration["approval_policies"].is_array() {
+        options.as_array_mut().unwrap().push(json!({"id":"approval","name":"Approval","type":"select","currentValue":match settings["approval"].as_str() {Some("ask_always")=>"all",Some("ask_unless_read_only")=>"ask",Some("never_ask")=>"never",_=>"off"},"options":[{"value":"off","name":"Off"},{"value":"ask","name":"Ask unless read-only"},{"value":"all","name":"Ask always"},{"value":"never","name":"Refuse without asking"}]}));
+    }
+    if declaration["approvals_outlast_turns"] == true {
         options.as_array_mut().unwrap().push(json!({"id":"approvalWait","name":"Approval wait","type":"select","currentValue":settings["approvalWait"].as_str().unwrap_or("live"),"options":[{"value":"live","name":"Live only"},{"value":"untilDeadline","name":"Until deadline"}]}));
     }
     Ok(options)

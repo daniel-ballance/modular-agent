@@ -41,6 +41,7 @@ Options:
   --declaration         print what this agent declares it supports
   --acp                 serve the Agent Client Protocol on stdio, for an editor or host
   --agui                serve AG-UI over HTTP and SSE; requires --listen
+  --approval POLICY     load approval: off, ask, all or never
   --resume-open         reopen interrupted turns before serving --acp or --agui
   --listen ADDR         loopback listener for --agui, --acp, or both
   --token-file FILE     configure a single local token for --listen
@@ -297,6 +298,7 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
                         | "--model"
                         | "--thinking"
                         | "--runtime"
+                        | "--approval"
                         | "--session"
                         | "--listen"
                         | "--token-file"
@@ -313,6 +315,7 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
     let bounds = policy.bounds()?;
     standard.limits = bounds.counts();
     standard.byte_limits = bounds.bytes();
+    standard.approval_wait_max_ms = policy.approval_wait_max_ms;
     standard.tenant_scopes = policy.named_tenants();
     let mut args = remaining.into_iter().peekable();
     let mut project = std::env::current_dir()?;
@@ -437,6 +440,9 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
                     "durable" => true,
                     _ => bail!("runtime must be transient or durable"),
                 }
+            }
+            "--approval" => {
+                standard.approval = Some(standard::approval_policy(&take(&mut args, &arg)?)?)
             }
             "--project" => project = take(&mut args, &arg)?.into(),
             "--session" => terminal.session = Some(take(&mut args, &arg)?),

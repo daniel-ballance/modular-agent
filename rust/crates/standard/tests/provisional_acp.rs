@@ -40,7 +40,7 @@ async fn ma_acp_new_and_settings_leave_no_history_until_prompt() {
     std::fs::create_dir(&project).unwrap();
     std::fs::write(&script, r#"[{"text":"done"}]"#).unwrap();
     let mut ma = Command::new(env!("CARGO_BIN_EXE_ma"))
-        .arg("--acp")
+        .args(["--acp", "--approval", "off"])
         .arg("--project")
         .arg(&project)
         .env("MODULAR_AGENT_DATA_DIR", &data)

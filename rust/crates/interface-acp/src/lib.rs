@@ -697,6 +697,10 @@ impl State {
                         session.wake.notify_one();
                     }
                     "approval" => {
+                        ensure!(
+                            session.api.declaration()?["approval_policies"].is_array(),
+                            request_error("not_supported", "approval is disabled")
+                        );
                         let policy = match value {
                             "off" => "off",
                             "ask" => "ask_unless_read_only",
