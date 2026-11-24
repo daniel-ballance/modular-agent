@@ -16,6 +16,7 @@ import { historyService } from "./history.mjs";
 import { portableProblems } from "./portable.mjs";
 import { manageServices } from "./service.mjs";
 import { capacity, erasure, isolation } from "./production.mjs";
+import { coveredApproval } from "./covered.mjs";
 import { waitingChecks } from "./waiting.mjs";
 import { ACP_PROTOCOL, checkUpgrades, CONTROL_MS, readToken, socketPeer, websocketOptions } from "../tools/websocket.mjs";
 
@@ -462,6 +463,15 @@ if (agent.state.hasApproval) await attempt("approval", async () => {
 	const calls = agent.updates.filter((u) => u.sessionId === sessionId && u.update.sessionUpdate === "tool_call");
 	check("updates: tool_call with title bash", calls.some((u) => u.update.title === "bash"), calls.map((u) => u.update.title).join(","));
 	await setOption(agent, sessionId, "approval", "off");
+});
+
+await attempt("covered approval", async () => {
+	const skipped = await coveredApproval(decl, { sessionId,
+		rpc: (method, params) => within(15000, agent.ctx.request(method, params), method),
+		duringPermission: handler => { agent.state.permissionHandler = handler; return () => { delete agent.state.permissionHandler; }; },
+	});
+	if (skipped) console.log("SKIP  covered approval (" + skipped + ")");
+	else check("covered approval: one permission, exact poll and bound child start", true);
 });
 
 // Edition 4 draft. Contracts: Nested calls. ACP: Updates and Conformance mode. Runs only for an agent that declares it.

@@ -269,7 +269,7 @@ interface ApprovalPass {
 	callId: string; attempt: string; inherited?: CoveringAllow; allow?: CoveringAllow;
 }
 interface DispatchAllowance { call: ToolCall; binding: ApprovalBinding; policy: unknown; cover?: CoveringAllow }
-interface NestedDispatch { depth: number; registration: NonNullable<ReturnType<Harness["findTool"]>>; approval: unknown; inherited?: CoveringAllow; coveredBy?: CoveringAllow }
+interface NestedDispatch { depth: number; registration: NonNullable<ReturnType<Harness["findTool"]>>; approval: unknown; inherited?: CoveringAllow }
 interface TurnState extends TurnSnapshot { interfaceOffer?: Map<string, InterfaceConnection>; interfaceAllowances?: Map<string, { call: ToolCall; approval: unknown } | null>; dispatched: Set<string>; steps: Map<string, Operation>; startingRights?: Authority[]; connectionRights?: ConnectionRights; endedHook?: boolean; sources: Map<string, string[]>; actors: Set<string>; jobs: Set<string>; tenantLimit?: boolean; capacityLimit?: boolean; stepAfterRunning?: boolean; toolResultError?: string }
 
 /**
@@ -3477,7 +3477,7 @@ export class Harness {
 		const [start] = await this.commit(s, [{ kind: "toolStarted", writer: "harness", modelVisible: false, turnId, actorId: call.actorId ?? owners[0] ?? this.actorForJob(s, state?.jobs), toolCallId: call.id, stepId: call.stepId,
 			sources: wait ? [wait.entry.id, wait.decision!.id] : nested ? s.branch().filter(e => e.kind === "modular-agent.nestedCall" && e.toolCallId === call.id).map(e => e.id) : undefined,
 			data: { call: { ...call, actorId: call.actorId ?? owners[0] ?? this.actorForJob(s, state?.jobs) }, source: { plugin: found.plugin, toolSource: found.source.id }, definition: found.definition, safeToRepeat, point, openWorld: found.definition.hints?.openWorld ?? true,
-				...(nested?.coveredBy ? { approvalCoveredBy: { toolCallId: nested.coveredBy.toolCallId, requestId: nested.coveredBy.requestId } } : {}),
+				...(nested?.inherited ? { approvalCoveredBy: { toolCallId: nested.inherited.toolCallId, requestId: nested.inherited.requestId } } : {}),
 				authorizers: owners.map((actorId) => ({ sessionId: s.id, actorId })), rights: this.workRights(s, owners, state?.jobs) } }], false, wait ? () => consent() : undefined);
 		if (wait && (!start || !consent(start))) return denied();
 		const current = this.findTool(s, call.name);
@@ -3624,7 +3624,7 @@ export class Harness {
 					}
 					if (gate.refused !== undefined) { result = stop("refused", gate.refused); break; }
 					executed = gate.value.call;
-					const ran = await this.executeTool(s, executed, signal, turnId, state, { depth, registration, approval, inherited, coveredBy: coverage?.allow });
+					const ran = await this.executeTool(s, executed, signal, turnId, state, { depth, registration, approval, inherited });
 					result = isPending(ran) ? stop("refused", "A nested call cannot be left open") : ran;
 					break;
 				}
@@ -3723,7 +3723,9 @@ export class Harness {
 			!branch.some(e => e.kind === "toolStarted" && e.toolCallId === call.id);
 		if (!wait && !parkable && !this.coversNested()) return this.toolGate(payload, signal);
 		const actorId = state.actors.values().next().value ?? this.actorForJob(s, state.jobs);
-		const origin = wait?.entry.turnId ?? turnId;
+		// A continuation can also repeat a tool that left a non-approval question open.
+		const currentStep = branch.some(e => e.kind === "response" && e.turnId === turnId && e.stepId === call.stepId);
+		const origin = wait?.entry.turnId ?? (!currentStep && branch.find(e => e.kind === "turnStart" && e.turnId === turnId)?.continuesTurnId || turnId);
 		const response = branch.find(e => e.kind === "response" && !e.erased && !s.copied.has(e.id) && e.turnId === origin && e.stepId === call.stepId &&
 			e.message?.role === "assistant" && e.message.content.some(p => isToolCall(p) && p.id === call.id && p.name === call.name && sameJson(p.arguments, call.input)));
 		const offered = branch.some(e => e.kind === "modelRequest" && !e.erased && e.turnId === origin && e.stepId === call.stepId && (e.data as { tools?: string[] })?.tools?.includes(call.name));
@@ -4255,8 +4257,7 @@ export class Harness {
 		const call = this.toolWork.getStore();
 		if (pass && askedBy === "approval" && draft.kind === "approval" && call && call.id === draft.toolCallId && call.id === pass.callId) {
 			if (call.parentCallId && pass.inherited) {
-				pass.allow = pass.inherited;
-				return { requestId: pass.allow.requestId, actorId: pass.allow.actorId, value: "allow" };
+				return { requestId: pass.inherited.requestId, actorId: pass.inherited.actorId, value: "allow" };
 			}
 			if (!call.parentCallId) {
 				// A repeated dispatch gets a fresh key. Only exact inputs within this gate pass can reuse the answer.

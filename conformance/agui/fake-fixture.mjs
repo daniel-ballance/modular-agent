@@ -8,7 +8,7 @@ export const makeSession = () => ({
   barriers: new Map(), waiters: new Map(), releases: new Map(),
 });
 
-export function fakeFixture(name, fault, script) {
+export function fakeFixture(name, fault, script, covers) {
   const record = (s, kind, data = {}, identifiers = {}) => {
     const e = { kind, id: randomUUID(), data, ...identifiers };
     s.batches.push([e]);
@@ -126,8 +126,9 @@ export function fakeFixture(name, fault, script) {
   function question(s, reason, toolCallId) {
     s.question = { id: randomUUID(), reason, message: reason === 'approval' ? `Allow ${offer.name} with ${JSON.stringify(dispatch)}?` : 'Choose yes or no.',
       expiresAt: new Date(s.now + 5000).toISOString(), ...(toolCallId ? { toolCallId } : {}),
+      ...(covers && reason === 'approval' && fault !== 'missing-live-coverage' && { metadata: { 'modular-agent.coversNested': true } }),
       responseSchema: reason === 'approval' ? { type: 'object', properties: { allow: { type: 'boolean' } }, required: ['allow'] } : { type: 'string', enum: ['yes', 'no'] } };
-    record(s, 'inputRequest', { id: s.question.id }, { turnId: s.originTurn });
+    record(s, 'inputRequest', { request: { id: s.question.id, ...(covers && reason === 'approval' && { coversNested: true }) } }, { requestId: s.question.id, turnId: s.originTurn });
     return s.question;
   }
   function closeQuestion(s, { reason, declined, value, system = false }) {
