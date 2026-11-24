@@ -102,7 +102,7 @@ func (d *display) event(e modular.Event) error {
 func slashCommand(line string) bool {
 	return strings.HasPrefix(line, "/") && !strings.HasPrefix(line, "/skill:")
 }
-func printTurn(ctx context.Context, s *modular.Session, o options, out, stderr io.Writer, interrupts <-chan os.Signal) error {
+func printTurn(ctx context.Context, s *modular.Session, o options, out, stderr io.Writer, interrupts <-chan os.Signal) (errOut error) {
 	if line := strings.TrimSpace(*o.prompt); slashCommand(line) {
 		v, err := s.RunCommand(ctx, line)
 		if err != nil {
@@ -112,6 +112,34 @@ func printTurn(ctx context.Context, s *modular.Session, o options, out, stderr i
 			fmt.Fprintln(out, v)
 		}
 		return nil
+	}
+	if o.approval != "" && o.policy.ApprovalWaitMaxMs > 0 && o.session != "" {
+		settings, err := s.Settings(ctx)
+		if err != nil {
+			return err
+		}
+		if settings["approvalWait"] == "untilDeadline" {
+			// Do not switch an earlier parked call to live: that would refuse it.
+			qs, err := s.Questions(ctx)
+			if err != nil {
+				return err
+			}
+			for _, q := range qs {
+				if q.ApprovalWait == "untilDeadline" {
+					return errors.New("this session has a waiting approval; answer it before using print mode")
+				}
+			}
+			if err := s.SetSetting(ctx, "approvalWait", "live"); err != nil {
+				return err
+			}
+			defer func() {
+				if err := s.WaitIdle(ctx); err != nil {
+					errOut = errors.Join(errOut, err)
+					return
+				}
+				errOut = errors.Join(errOut, s.SetSetting(ctx, "approvalWait", "untilDeadline"))
+			}()
+		}
 	}
 	work, done := context.WithCancel(ctx)
 	defer done()
@@ -245,7 +273,9 @@ func lineMode(ctx context.Context, s *modular.Session, o options, in io.Reader, 
 			question = &q
 			questionDone = q.done
 			fmt.Fprintln(stderr, q.q.Question)
-			if len(q.q.Options) > 0 {
+			if q.q.Kind == "approval" {
+				fmt.Fprintln(stderr, "Allow? (y/n)")
+			} else if len(q.q.Options) > 0 {
 				fmt.Fprintln(stderr, strings.Join(q.q.Options, " / "))
 			}
 		case <-interrupts:
@@ -299,7 +329,17 @@ func lineMode(ctx context.Context, s *modular.Session, o options, in io.Reader, 
 			}
 			if question != nil {
 				answer := modular.Answer{Value: text}
-				if text == "/decline" {
+				if question.q.Kind == "approval" {
+					switch text {
+					case "y":
+						answer = modular.Allow()
+					case "n":
+						answer = modular.Decline("declined")
+					default:
+						fmt.Fprintln(stderr, "Answer y or n.")
+						continue
+					}
+				} else if text == "/decline" {
 					answer = modular.Decline("declined")
 				}
 				question.reply <- answer

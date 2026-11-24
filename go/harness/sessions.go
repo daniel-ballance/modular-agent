@@ -1609,6 +1609,11 @@ func (p *turnPorts) Hook(ctx context.Context, name string, v any) (any, error) {
 	ctx = api.WithExecution(api.AsActor(ctx, p.actor), api.Execution{Session: p.s.id, Turn: p.id})
 	if name == "runtime.tool.before" {
 		check := v.(api.ToolCheck)
+		if p.c.h.approvalCoversNested && check.Call.ParentCall == "" {
+			// Both gate passes belong to one attempt; a repeat enters Hook anew.
+			check.ApprovalAttempt = api.ID()
+			v = check
+		}
 		if !p.canRunTools(check.Call.Actor) {
 			return nil, errors.New("tool authority refused")
 		}
@@ -1618,8 +1623,8 @@ func (p *turnPorts) Hook(ctx context.Context, name string, v any) (any, error) {
 			return nil, err
 		}
 		check = changed.(api.ToolCheck)
-		if (check.Call.ParentCall != "" || p.c.h.interfaceTools[check.Call.Name] != nil) && check.InputChanged && !check.Open && check.Refused == "" {
-			check.InputChanged, check.Validate = false, nil
+		if (p.c.h.approvalCoversNested || check.Call.ParentCall != "" || p.c.h.interfaceTools[check.Call.Name] != nil) && check.InputChanged && !check.Open && check.Refused == "" {
+			check.InputChanged, check.Validate, check.LiveApproval = false, nil, nil
 			ctx = api.WithExecution(ctx, api.Execution{Session: p.s.id, Turn: p.id, Call: check.Call, ToolSource: p.toolRegistration(check.Call.Name)})
 			changed, err = p.c.Invoke(ctx, name, check)
 			if err != nil {
@@ -1997,12 +2002,23 @@ func (p *turnPorts) RunTool(ctx context.Context, call api.Call) (result api.Tool
 		return api.ToolResult{Call: call.ID, Status: "not_started", NotDispatched: true}
 	}
 	binding := api.ToolRegistration{Plugin: plugin, ToolSource: id}
+	q := api.Executing(ctx).LiveApproval
 	if p.c.h.SupportsWaitingApprovals() {
-		if _, err := p.waitingProof(ctx, snap, call, &binding, &def, true); err != nil {
+		if sources, err := p.waitingProof(ctx, snap, call, &binding, &def, true); err != nil {
 			return api.ToolResult{Call: call.ID, Status: api.GateFailureStatus(err), NotDispatched: true}
+		} else if len(sources) != 0 {
+			// Use the immutable request that was answered, not today's composition default.
+			q = &api.WaitingApprovals(snap)[call.ID].Question
 		}
 	}
-	result, err := p.executeTool(ctx, source, snap, call, binding, 0)
+	var cover *approvalCover
+	if p.c.h.approvalCoversNested && q != nil && q.CoversNested {
+		if q.ID == "" || !sameApprovalCall(*q, call, &binding, &def) {
+			return api.ToolResult{Call: call.ID, Status: "refused", NotDispatched: true}
+		}
+		cover = &approvalCover{ToolCallID: call.ID, RequestID: q.ID}
+	}
+	result, err := p.executeTool(ctx, source, snap, call, binding, 0, cover)
 	result.Returns = def.Output
 	if err != nil {
 		result.ProcessingError = err

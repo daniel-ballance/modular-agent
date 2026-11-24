@@ -89,7 +89,10 @@ func (s *server) event(e api.Event) {
 	var u *acp.SessionUpdate
 	switch e.Kind {
 	case "question.open":
-		s.ask(st, api.Decode[api.Question](e.Data))
+		q := api.Decode[api.Question](e.Data)
+		if q.Kind != "approval" || !e.OutputChanged {
+			s.ask(st, q)
+		}
 	case "question.closed":
 		s.cancelQuestion(st, api.Decode[struct{ QuestionID string }](e.Data).QuestionID)
 	case "question.answered":
@@ -383,10 +386,16 @@ func (s *server) askActor(st *attachment, q api.Question, who string) bool {
 			ToolCall:  acp.ToolCallUpdate{ToolCallId: acp.ToolCallId(call.ID), Name: acp.Ptr(call.Name), RawInput: call.Input, Title: acp.Ptr(q.Prompt)},
 			Options:   []acp.PermissionOption{{OptionId: "allow", Name: "Allow", Kind: acp.PermissionOptionKindAllowOnce}, {OptionId: "refuse", Name: "Refuse", Kind: acp.PermissionOptionKindRejectOnce}},
 		}
+		if q.CoversNested {
+			view["requestId"], view["actorId"] = q.ID, who
+			permission.ToolCall.Title = acp.Ptr(call.Name)
+			permission.ToolCall.Content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(q.Prompt))}
+			permission.Meta[Namespace] = api.JSON(view)
+		}
 		original := api.JSON(permission)
 		if gate, ok := s.a.(outputGate); ok {
 			event, err := gate.OutputValue(api.AsActor(st.ctx, who), api.Event{Kind: "interface.request", Session: q.Session, Method: "session/request_permission", Data: original})
-			if err != nil || !portable.EqualJSON(original, event.Data) {
+			if err != nil || event.OutputChanged || !portable.EqualJSON(original, event.Data) {
 				polled, _ := s.projectRequests(st.ctx, st, q.Session, who, false)
 				for _, item := range api.Decode[struct{ Requests []map[string]any }](api.JSON(polled)).Requests {
 					if item["id"] == q.ID && item["answerable"] == true {

@@ -84,6 +84,41 @@ func (d layout) settings(project string) (modular.Settings, error) {
 	}
 	return settings, nil
 }
+func approvalPolicy(value any, source string) (modular.Approval, error) {
+	if s, ok := value.(string); ok {
+		switch p := modular.Approval(s); p {
+		case modular.Off, modular.Ask, modular.All, modular.Never:
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("%s: approval must be off, ask, all or never", source)
+}
+
+// These defaults belong to the operator, not the project selected by a client.
+func (d layout) approvalDefaults(o *options) error {
+	path := filepath.Join(d.config, "settings.json")
+	var global map[string]any
+	if err := readJSON(path, &global); err != nil {
+		return err
+	}
+	if v, ok := global["approval"]; ok && o.approval == "" {
+		policy, err := approvalPolicy(v, path)
+		if err != nil {
+			return err
+		}
+		o.approval = policy
+	}
+	o.approvalWait = "live"
+	if v, ok := global["approval_wait"]; ok {
+		wait, ok := v.(string)
+		if !ok || (wait != "live" && wait != "untilDeadline") {
+			return fmt.Errorf("%s: approval_wait must be live or untilDeadline", path)
+		}
+		o.approvalWait = wait
+	}
+	return nil
+}
+
 func (d layout) trustLedger() string { return filepath.Join(d.config, "trusted-projects.json") }
 func (d layout) trust(project string) error {
 	ledger := map[string]bool{}

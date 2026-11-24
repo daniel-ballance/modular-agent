@@ -69,6 +69,7 @@ type ServicePlugin struct {
 }
 
 type options struct {
+	approvalCoversNested                    bool
 	approvalRequestTimeout                  time.Duration
 	maxApprovalWaitMs                       int64
 	agentName                               string
@@ -181,6 +182,12 @@ func WithApproval(a Approval) Option {
 		o.approval = a
 		return nil
 	}
+}
+
+// WithApprovalCoversNested lets a top-level approval cover nested calls in that dispatch.
+// It has no effect without the approval plugin.
+func WithApprovalCoversNested(enabled bool) Option {
+	return func(o *options) error { o.approvalCoversNested = enabled; return nil }
 }
 
 // WithApprovalRequestTimeout requests a shorter deadline from the approval
@@ -442,6 +449,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 			})
 		}}}
 	if o.approval != "" || o.conformance {
+		h.ConfigureCoveredApprovals(o.approvalCoversNested)
 		core = append(core, approval.Plugin(o.approvalRequestTimeout))
 	}
 	if o.conformance {

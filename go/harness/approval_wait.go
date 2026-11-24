@@ -153,8 +153,12 @@ func (c *client) ParkApproval(ctx context.Context, q api.Question) (bool, error)
 }
 
 func sameWaitingCall(q api.Question, c api.Call, source *api.ToolRegistration, def *api.Tool) bool {
+	return c.Origin == "model" && q.Step == c.Step && sameApprovalCall(q, c, source, def)
+}
+
+func sameApprovalCall(q api.Question, c api.Call, source *api.ToolRegistration, def *api.Tool) bool {
 	a := q.ApprovalCall
-	return a != nil && a.ID == c.ID && a.Actor == c.Actor && q.Actor == c.Actor && a.Name == c.Name && c.ParentCall == "" && c.Origin == "model" && q.Step == c.Step && portable.EqualJSON(a.Input, c.Input) && q.Source != nil && source != nil && *q.Source == *source && q.Definition != nil && def != nil && portable.EqualJSON(definitionJSON(*q.Definition), definitionJSON(*def))
+	return a != nil && a.ID == c.ID && a.Actor == c.Actor && q.Actor == c.Actor && a.Name == c.Name && a.Origin == c.Origin && c.ParentCall == "" && portable.EqualJSON(a.Input, c.Input) && q.Source != nil && source != nil && *q.Source == *source && q.Definition != nil && def != nil && portable.EqualJSON(definitionJSON(*q.Definition), definitionJSON(*def))
 }
 func definitionJSON(t api.Tool) []byte {
 	if len(t.Wire) > 0 {

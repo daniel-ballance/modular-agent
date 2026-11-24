@@ -90,6 +90,7 @@ type ToolRegistration struct {
 }
 
 type Question struct {
+	CoversNested                                                        bool              `json:",omitempty"`
 	ApprovalIntervalMs                                                  int64             `json:",omitempty"`
 	ApprovalWait                                                        string            `json:",omitempty"`
 	ApprovalCall                                                        *Call             `json:",omitempty"`
@@ -221,6 +222,8 @@ type Execution struct {
 	Session, Turn, Step string
 	Call                Call
 	ToolSource          *ToolRegistration
+	// LiveApproval is passed only from the host gate to this handoff, never over RPC.
+	LiveApproval *Question `json:"-"`
 }
 
 func WithExecution(ctx context.Context, e Execution) context.Context {

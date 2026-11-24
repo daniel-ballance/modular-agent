@@ -47,6 +47,7 @@ Options:
   --declaration         print what this agent declares it supports
   --acp                 serve the Agent Client Protocol for an editor or host
   --agui                serve AG-UI using HTTP and SSE (requires --listen)
+  --approval POLICY     set the default approval policy: off, ask, all or never
   --resume-open         reopen interrupted turns in this project before serving ACP or AG-UI
   --listen ADDR [--token-file FILE]
   --policy FILE        read operator policy from FILE
@@ -62,6 +63,8 @@ Files: settings.json, mcp.json, models.json, AGENTS.md and skills/ in
 ~/.config/modular-agent. Sessions are kept in ~/.local/state/modular-agent/go.`
 
 type options struct {
+	approval                                                                              modular.Approval
+	approvalWait                                                                          string
 	command, provider, project, session, model, thinking                                  string
 	listen, tokenFile, policyPath                                                         string
 	policy                                                                                operatorPolicy
@@ -110,6 +113,11 @@ func parse(args []string) (o options, err error) {
 		case "--model":
 			o.model, err = take()
 			o.model = currentModel(o.model)
+		case "--approval":
+			var v string
+			if v, err = take(); err == nil {
+				o.approval, err = approvalPolicy(v, "--approval")
+			}
 		case "--thinking":
 			o.thinking, err = take()
 			if err == nil && !slices.Contains([]string{"off", "minimal", "low", "medium", "high", "xhigh"}, o.thinking) {
@@ -345,6 +353,9 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 			}
 		}
 		return nil
+	}
+	if err := d.approvalDefaults(&o); err != nil {
+		return err
 	}
 	candidates, err := d.resumeCandidates(ctx, o, store)
 	if err != nil {

@@ -29,10 +29,11 @@ type aclPolicy struct {
 }
 
 type ACPPolicy struct {
-	Stdio   *ACPActor
-	Actors  []ACPActor
-	Tenants map[string]Tenant
-	Limits  CapacityLimits
+	ApprovalWaitMaxMs int64 // Zero means the operator did not configure waiting approvals.
+	Stdio             *ACPActor
+	Actors            []ACPActor
+	Tenants           map[string]Tenant
+	Limits            CapacityLimits
 }
 
 func defaultPolicyLimits() CapacityLimits {
@@ -68,9 +69,10 @@ func ReadACPPolicy(path string, optional, representation bool) (policy ACPPolicy
 		return policy, errors.New("file must be UTF-8 JSON of at most 1 MiB")
 	}
 	var parsed struct {
-		Stdio  *policyScope   `json:"stdio"`
-		Actors []aclPolicy    `json:"actors"`
-		Limits CapacityLimits `json:"limits"`
+		ApprovalWaitMaxMs json.RawMessage `json:"approvalWaitMaxMs"`
+		Stdio             *policyScope    `json:"stdio"`
+		Actors            []aclPolicy     `json:"actors"`
+		Limits            CapacityLimits  `json:"limits"`
 	}
 	parsed.Limits = policy.Limits
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -92,6 +94,11 @@ func ReadACPPolicy(path string, optional, representation bool) (policy ACPPolicy
 		}
 		if b.ControlBytes > b.StorageBytes {
 			return policy, errors.New("controlBytes exceeds storageBytes")
+		}
+	}
+	if raw := parsed.ApprovalWaitMaxMs; raw != nil {
+		if err := json.Unmarshal(raw, &policy.ApprovalWaitMaxMs); err != nil || policy.ApprovalWaitMaxMs <= 0 || policy.ApprovalWaitMaxMs > 9007199254740991 {
+			return policy, errors.New("approvalWaitMaxMs must be a positive safe integer in milliseconds")
 		}
 	}
 	policy.Limits = parsed.Limits

@@ -72,6 +72,9 @@ func Declaration(a api.API, project, id string) map[string]any {
 	if store, ok := a.(interface{ SupportsErasure() bool }); ok {
 		d["erasure"] = store.SupportsErasure()
 	}
+	if h, ok := a.(interface{ SupportsCoveredApprovals() bool }); ok && h.SupportsCoveredApprovals() {
+		d["approvalCoversNested"] = true
+	}
 	if h, ok := a.(interface{ SupportsWaitingApprovals() bool }); ok && h.SupportsWaitingApprovals() {
 		d["approvalsOutlastTurns"] = true
 	}
@@ -184,6 +187,14 @@ func contentBlocks(content api.Content) []any {
 	return out
 }
 func entryValue(e api.Entry) map[string]any {
+	if e.Kind == "question.open" {
+		q := api.Decode[struct{ Question api.Question }](e.Data).Question
+		if q.CoversNested && q.ApprovalCall != nil {
+			v := portable.EntryWithoutTrace(e)
+			v["data"] = map[string]any{"request": requestValue(q)}
+			return v
+		}
+	}
 	if e.Kind == "modular-agent.turnTrace" || (e.Kind == "erasure" && len(e.Data) == 0) || e.Kind == "turn.start" || e.Kind == "tool.started" || e.Kind == "model" {
 		return portable.EntryWithoutTrace(e)
 	}
@@ -253,6 +264,12 @@ func entryValue(e api.Entry) map[string]any {
 }
 func requestValue(q api.Question) map[string]any {
 	out := map[string]any{"id": q.ID, "kind": q.Kind, "question": q.Prompt}
+	if q.CoversNested {
+		out["coversNested"] = true
+		if c := q.ApprovalCall; c != nil {
+			out["call"] = map[string]any{"name": c.Name, "input": c.Input}
+		}
+	}
 	if q.ApprovalWait == api.UntilDeadline && q.Deadline != nil {
 		out["approvalWait"] = q.ApprovalWait
 		out["deadlineAt"] = q.Deadline.UnixMilli()

@@ -326,6 +326,7 @@ func Entry(e api.Entry) map[string]any {
 		for k, x := range map[string]string{"toolCallId": q.Call, "key": q.Key, "credential": q.Credential, "go.actor": q.Actor, "go.forwardSession": stored.ForwardSession, "go.forwardRequest": stored.ForwardRequest} {
 			set(r, k, x, x != "")
 		}
+		set(r, "coversNested", true, q.CoversNested)
 		if q.ApprovalWait != "" {
 			r["approvalWait"], r["whenTimeLimit"] = q.ApprovalWait, "decline"
 			if q.Allowed != nil {
@@ -622,6 +623,7 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 		}
 		q.Options = api.Decode[[]string](api.JSON(r["options"]))
 		q.Allowed = api.Decode[[]string](api.JSON(r["go.allowed"]))
+		q.CoversNested = boolean(r, "coversNested")
 		q.ApprovalWait = str(r, "approvalWait")
 		if q.ApprovalWait != "" {
 			q.Wait = 0

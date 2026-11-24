@@ -59,6 +59,10 @@ func Plugin(requested ...time.Duration) api.Plugin {
 			default:
 				return api.Decision{}, errors.New("unknown approval policy")
 			}
+			if check.ApprovalCovered && check.Call.ParentCall != "" {
+				// The parent answered only this gate. In particular never still refuses.
+				return api.Decision{}, nil
+			}
 			q, err := a.Get("questions")
 			if err != nil {
 				return api.Decision{}, err
@@ -66,6 +70,12 @@ func Plugin(requested ...time.Duration) api.Plugin {
 			// Include the transformed arguments: an allow for old arguments cannot authorize new ones.
 			key := fmt.Sprintf("approval:%s:%x", check.Call.ID, sha256.Sum256(check.Call.Input))
 			draft := api.Question{Session: s.ID, Turn: check.Turn, Call: check.Call.ID, Actor: check.Call.Actor, Key: key, Kind: "approval", Prompt: "Allow " + check.Call.Name + " " + string(check.Call.Input) + "?", Wait: time.Minute, ApprovalCall: &check.Call, Definition: &check.Definition, Source: api.Executing(ctx).ToolSource}
+			if check.ApprovalAttempt != "" && check.Call.ParentCall == "" {
+				draft.CoversNested = true
+				draft.Prompt += " An allow covers the nested calls this call makes."
+				// A repeated live dispatch must get a new allow, not a replay by call ID.
+				draft.Key = fmt.Sprintf("%s:%s:%x", key, check.ApprovalAttempt, sha256.Sum256(api.JSON([]any{draft.Source, draft.Definition})))
+			}
 			// Live approvals retain the existing one-minute wait. A parked
 			// gate without an explicit shorter request uses the operator maximum.
 			parked := draft
@@ -87,6 +97,10 @@ func Plugin(requested ...time.Duration) api.Plugin {
 			if answer.Declined || answer.Value != "allow" {
 				check.Refused = "Approval refused"
 			} else {
+				if draft.CoversNested {
+					draft.ID = answer.Request
+					check.LiveApproval = &draft
+				}
 				input := string(check.Call.Input)
 				check.Validate = func(call api.Call) error {
 					if string(call.Input) != input || !a.Authorize(s.ID, answer.Actor, "approve") {

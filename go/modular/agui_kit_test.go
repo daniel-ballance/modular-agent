@@ -563,12 +563,21 @@ func TestAGUIKitProgram(t *testing.T) {
 		if strings.HasPrefix(f.Name, "waiting-mixed-") {
 			policy = modular.Ask
 		}
-		opts = append(opts, modular.WithMaxApprovalWaitMs(5000), modular.WithLateAnswersStartTurns(true), modular.WithApproval(policy), modular.WithSettings(modular.Settings{"approvalWait": v}), modular.WithTool(modular.NewTool("bump", "Increment the counter.", func(context.Context, struct {
+		opts = append(opts, modular.WithMaxApprovalWaitMs(5000), modular.WithLateAnswersStartTurns(true), modular.WithApproval(policy), modular.WithApprovalCoversNested(true), modular.WithSettings(modular.Settings{"approvalWait": v}), modular.WithTool(modular.NewTool("bump", "Increment the counter.", func(ctx context.Context, _ struct {
 			Hold bool   `json:"hold"`
 			Note string `json:"note"`
-		}, *modular.ToolContext) (string, error) {
+		}, tc *modular.ToolContext) (string, error) {
+			if f.Name == "waiting-restart" {
+				r, err := tc.Tools.Call(ctx, "increment", struct{}{})
+				return r.Text(), err
+			}
 			return "counted", f.log("counter", 1)
 		})))
+		if f.Name == "waiting-restart" {
+			opts = append(opts, modular.WithTool(modular.NewTool("increment", "Increment the counter.", func(context.Context, struct{}, *modular.ToolContext) (string, error) {
+				return "counted", f.log("counter", 1)
+			}, modular.Callers("plugin"))))
+		}
 	}
 	a, err := modular.New(t.Context(), opts...)
 	must(err)

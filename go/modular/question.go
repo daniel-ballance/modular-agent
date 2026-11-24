@@ -13,6 +13,7 @@ import (
 )
 
 type Question struct {
+	CoversNested bool            `json:"coversNested,omitempty"`
 	ApprovalWait string          `json:"approvalWait,omitempty"`
 	ID           string          `json:"id,omitempty"`
 	SessionID    string          `json:"sessionId,omitempty"`
@@ -117,7 +118,7 @@ func (q *questionRouter) attach(id string, h QuestionHandler) {
 	ctx, cancel := context.WithCancel(context.Background())
 	next := &questionSession{ctx: ctx, cancel: cancel, handler: h, responding: map[string]bool{}}
 	if h != nil {
-		next.disconnect = q.manager().Connect(id, localActor)
+		next.disconnect = q.manager().ConnectClient(id, localActor, "sdk")
 	}
 	q.sessions[id] = next
 	if h != nil {
@@ -145,7 +146,7 @@ func answerQuestion(ctx context.Context, handler QuestionHandler, q Question) (a
 }
 
 func sdkQuestion(raw api.Question) Question {
-	q := Question{ApprovalWait: raw.ApprovalWait, ID: raw.ID, SessionID: raw.Session, Kind: raw.Kind, Question: raw.Prompt, Details: raw.Details, Options: raw.Options, Credential: raw.Credential, Deadline: raw.Deadline}
+	q := Question{CoversNested: raw.CoversNested, ApprovalWait: raw.ApprovalWait, ID: raw.ID, SessionID: raw.Session, Kind: raw.Kind, Question: raw.Prompt, Details: raw.Details, Options: raw.Options, Credential: raw.Credential, Deadline: raw.Deadline}
 	if raw.ApprovalCall != nil {
 		var c ToolCall
 		_ = decodeInto(portable.Call(*raw.ApprovalCall), &c)
@@ -191,7 +192,7 @@ func (q *questionRouter) event(e api.Event) {
 		return
 	}
 	raw := api.Decode[api.Question](e.Data)
-	if raw.ApprovalWait != "" {
+	if raw.ApprovalWait != "" || raw.Kind == "approval" && e.OutputChanged {
 		return
 	}
 	q.handle(raw)
@@ -203,10 +204,19 @@ func (q *questionRouter) handle(raw api.Question) {
 		q.mu.Unlock()
 		return
 	}
+	// Presence alone does not make a live approval deliverable. Offer this
+	// unchanged question before returning to the gate that checks presence.
+	var release func()
+	if raw.Kind == "approval" && raw.ApprovalWait == "" {
+		release = q.manager().OfferApproval(raw.Session, localActor, "sdk", raw.ID)
+	}
 	s.responding[raw.ID] = true
 	q.mu.Unlock()
 	go func() {
 		defer func() { q.mu.Lock(); delete(s.responding, raw.ID); q.mu.Unlock() }()
+		if release != nil {
+			defer release()
+		}
 		ctx := api.AsActor(s.ctx, localActor)
 		instance := api.ID()
 		host := q.a.(api.WaitingApprovalHost)
@@ -235,6 +245,12 @@ func (q *questionRouter) handle(raw api.Question) {
 		answer := api.Answer{Request: raw.ID, Value: ans.Value, Declined: ans.Declined, Reason: ans.Reason}
 		if raw.ApprovalWait != "" {
 			_ = host.AnswerWaiting(ctx, raw.Session, instance, answer)
+			return
+		}
+		if release != nil {
+			if m.AnswerOnClient(ctx, raw.Session, "sdk", answer) == api.ErrInvalidAnswer {
+				_ = m.AnswerOnClient(ctx, raw.Session, "sdk", api.Answer{Request: raw.ID, Declined: true, Reason: "invalid answer"})
+			}
 			return
 		}
 		if m.Answer(ctx, raw.Session, answer) == api.ErrInvalidAnswer {

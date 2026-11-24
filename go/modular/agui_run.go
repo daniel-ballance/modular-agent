@@ -463,7 +463,7 @@ func (x *agExchange) follow() (func(), <-chan api.BufferedEvent, <-chan struct{}
 }
 func (x *agExchange) offerQuestion(e api.Event) {
 	candidate := api.Decode[api.Question](e.Data)
-	if candidate.Kind == "secret" || !x.eligible(candidate) {
+	if candidate.Kind == "secret" || candidate.Kind == "approval" && e.OutputChanged || !x.eligible(candidate) {
 		return
 	}
 	snap, err := x.a.a.Snapshot(x.id)
