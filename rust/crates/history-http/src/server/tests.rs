@@ -41,6 +41,19 @@ impl HistoryStore for Snapshots {
 }
 
 #[test]
+fn tombstones_preserve_envelope_ids_only() {
+    let entry =
+        json!({"id":"e","parentId":null,"kind":"inputRequest","data":{"request":{"id":"nested"}}});
+    let mut current = entry.clone();
+    current["requestId"] = json!("canonical");
+    assert_eq!(tombstone(&current)["requestId"], "canonical");
+    assert!(tombstone(&entry).get("requestId").is_none());
+    let hand_back =
+        json!({"id":"h","parentId":"e","kind":"inputHandedBack","data":{"inputIds":["one","two"]}});
+    assert!(tombstone(&hand_back).get("inputIds").is_none());
+}
+
+#[test]
 fn unverifiable_control_is_fenced_without_writing_it() -> agent_api::Result<()> {
     for settings in [
         json!({"historyTtlBound":1}),

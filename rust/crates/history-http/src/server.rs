@@ -1042,30 +1042,6 @@ fn tombstone(entry: &Value) -> Value {
         }
     }
     let data = &entry["data"];
-    let fallback: Option<(&str, &[&Value])> = match kind {
-        Some("inputAccepted" | "input" | "inputHandedBack") => {
-            Some(("inputId", &[&data["inputId"]]))
-        }
-        Some("inputRequest") => Some(("requestId", &[&data["requestId"], &data["request"]["id"]])),
-        Some("inputAnswer") => Some(("requestId", &[&data["requestId"]])),
-        Some("turnStart") => Some(("continuesTurnId", &[&data["continuesTurnId"]])),
-        _ => None,
-    };
-    if let Some((key, choices)) = fallback
-        && entry.get(key).is_none()
-        && let Some(value) = choices.iter().find(|v| valid_id(v))
-    {
-        out[key] = (*value).clone();
-    }
-    if kind == Some("inputHandedBack")
-        && entry.get("inputId").is_none()
-        && data.get("inputId").is_none()
-        && data["inputIds"]
-            .as_array()
-            .is_some_and(|a| !a.is_empty() && a.iter().all(valid_id))
-    {
-        out["inputIds"] = data["inputIds"].clone();
-    }
     if entry["sources"]
         .as_array()
         .is_some_and(|a| a.iter().all(valid_id))
