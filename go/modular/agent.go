@@ -69,6 +69,7 @@ type ServicePlugin struct {
 }
 
 type options struct {
+	approvalRequestTimeout                  time.Duration
 	maxApprovalWaitMs                       int64
 	agentName                               string
 	project, dataDir, model                 string
@@ -178,6 +179,18 @@ func WithApproval(a Approval) Option {
 			return &Error{Code: InvalidParams, Message: "invalid approval policy"}
 		}
 		o.approval = a
+		return nil
+	}
+}
+
+// WithApprovalRequestTimeout requests a shorter deadline from the approval
+// gate. It cannot enable a wait or raise the operator maximum.
+func WithApprovalRequestTimeout(d time.Duration) Option {
+	return func(o *options) error {
+		if d < time.Millisecond || d%time.Millisecond != 0 {
+			return &Error{Code: InvalidComposition, Message: "approval timeout must be positive whole milliseconds"}
+		}
+		o.approvalRequestTimeout = d
 		return nil
 	}
 }
@@ -429,7 +442,7 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 			})
 		}}}
 	if o.approval != "" || o.conformance {
-		core = append(core, approval.Plugin())
+		core = append(core, approval.Plugin(o.approvalRequestTimeout))
 	}
 	if o.conformance {
 		core = append(core, conformancemodel.Plugin(), pluginrpc.NestFixture())

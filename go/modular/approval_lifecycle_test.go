@@ -42,7 +42,7 @@ func bumpOptions(t *testing.T, dir string, mode modular.Durability, served bool,
 		}
 		return "bumped", err
 	})
-	opts := []modular.Option{modular.WithProject(dir), modular.WithDataDir(filepath.Join(dir, "store")), modular.WithEnvironment(modulartest.MemoryEnvironment()), modular.WithDurability(mode), modular.WithLateAnswersStartTurns(true), modular.WithMaxApprovalWaitMs(120000), modular.WithApproval(modular.All), modular.WithSeveralActors(true), modulartest.Script(bumpScript), modular.WithPlugin(modular.Plugin{Name: source, Setup: func(r *modular.Registrar) error { return r.Tool(tool) }})}
+	opts := []modular.Option{modular.WithProject(dir), modular.WithDataDir(filepath.Join(dir, "store")), modular.WithEnvironment(modulartest.MemoryEnvironment()), modular.WithDurability(mode), modular.WithLateAnswersStartTurns(true), modular.WithMaxApprovalWaitMs(120000), modular.WithApprovalRequestTimeout(time.Minute), modular.WithApproval(modular.All), modular.WithSeveralActors(true), modulartest.Script(bumpScript), modular.WithPlugin(modular.Plugin{Name: source, Setup: func(r *modular.Registrar) error { return r.Tool(tool) }})}
 	if served {
 		opts = append(opts, interfaceServedRuntime(t, mode == modular.Durable))
 	}

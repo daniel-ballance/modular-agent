@@ -1510,7 +1510,11 @@ func (c *client) stopSessionAs(ctx context.Context, id string, closing bool, who
 	s.mu.Unlock()
 	if closing && !interrupted {
 		snap, _ := c.Snapshot(id)
+		waits := api.WaitingApprovals(snap)
 		for _, call := range api.OpenCalls(snap) {
+			if w := waits[call.ID]; w != nil && w.Listed && w.Start.ID == "" {
+				continue
+			}
 			result := api.ToolResult{Call: call.ID, Reference: call.Reference, Status: "cancelled", Content: api.Text("Session closed before the call finished.")}
 			if _, e := c.Record(context.Background(), id, api.Entry{Kind: "tool.result", Call: call.ID, Actor: call.Actor, Visible: true, Content: result.Content, Data: api.JSON(result)}); e != nil {
 				return e

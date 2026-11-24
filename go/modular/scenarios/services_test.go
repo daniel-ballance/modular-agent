@@ -64,7 +64,11 @@ func (g *fixtureGroups) start(ctx context.Context, r run, sc scenario) ([]modula
 		if err != nil || u.Scheme != "ws" || u.Host == "" {
 			return nil, fmt.Errorf("%s fixture %s supplied no WebSocket URL: %q", r.placement.name(), name, address)
 		}
-		config = append(config, modular.ServicePlugin{URL: address, TokenFile: file, Config: map[string]any{"path": r.countPath()}})
+		settings := map[string]any{"path": r.countPath()}
+		if sc.Requires["approvalsOutlastTurns"] {
+			settings["waitingCounter"] = true
+		}
+		config = append(config, modular.ServicePlugin{URL: address, TokenFile: file, Config: settings})
 	}
 	return config, nil
 }
