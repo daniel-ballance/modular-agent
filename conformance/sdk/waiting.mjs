@@ -8,15 +8,19 @@ import { parked, rows, settled } from '../waiting/records.mjs';
 
 const directory = new URL('fixtures/waiting-approval/', import.meta.url);
 export async function waitingFixtures() {
-  return Promise.all((await readdir(directory)).filter(n => n.endsWith('.json')).sort().map(async n => {
+  const names = JSON.parse(await readFile(new URL('waiting-scenarios.json', import.meta.url), 'utf8'));
+  assert.ok(names.length > 0, 'waiting fixture manifest is empty');
+  const files = (await readdir(directory)).filter(n => n.endsWith('.json')).sort();
+  assert.deepEqual(files, names.map(n => n + '.json').sort(), 'waiting fixture set differs from manifest');
+  return Promise.all(files.map(async n => {
     const fixture = JSON.parse(await readFile(new URL(n, directory), 'utf8'));
-    assert.equal(n, fixture.scenario + '.json'); assert.equal(fixture.requires.approvalsOutlastTurns, true);
+    assert.equal(n, fixture.scenario + '.json');
     return fixture;
   }));
 }
-export function skipReason(fixture, declaration) {
-  const missing = Object.keys(fixture.requires).filter(k => declaration[k] !== true);
-  return missing.length ? `placement does not declare ${missing.join(', ')}` : undefined;
+export function checkWaitingDeclaration(fixture, declaration) {
+  const expected = { approvalsOutlastTurns: true, ...(fixture.agent.severalActors && { severalActors: true }), ...fixture.expectDeclaration };
+  for (const [key, value] of Object.entries(expected)) assert.equal(declaration[key] ?? false, value, key);
 }
 export const waitingKinds = ['poll', 'decide', 'barrier', 'clock', 'change', 'stop'];
 

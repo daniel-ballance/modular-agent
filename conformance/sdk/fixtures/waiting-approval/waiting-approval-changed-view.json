@@ -2,7 +2,6 @@
   "scenario": "waiting-approval-changed-view",
   "about": "Changing view after an allow refuses the original call without a substitute request.",
   "rules": ["contracts.md#approvals-that-wait","bindings/data.md#waiting-approval-records","sdk/api.md#questions"],
-  "requires": {"approvalsOutlastTurns":true,"severalActors":true},
   "agent": {"durability":"kept","plugins":["counter"],"approval":"all","maxApprovalWaitMs":100,"settings":{"approvalWait":"untilDeadline"},"actors":[{"id":"worker","kind":"user","rights":["watch","input","tools"]},{"id":"reviewer","kind":"user","rights":["watch","approve"]}],"severalActors":true},
   "model": [
     {"toolCalls":[{"name":"bump","input":{"hold":false,"note":"kit-counter"}}]},
