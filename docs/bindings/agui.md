@@ -133,7 +133,7 @@ A client can save the cursor after applying each item. Disconnect a slow reader 
 
 ## Run receipts
 
-[ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md) proposes a separate optional read. A thread snapshot with `runReceipts: 1` offers `GET /agui/v1/threads/{threadId}/run-receipt?runId={runId}`. Encode the run ID as one query value. Offer the read only for sessions configured to keep history. With the field absent, reconnect by snapshot as today. The GET requires the original authenticated principal and client ID, current membership, `watch` and the thread's project and tenant scope. It does not open a writer, start recovery, mark presence or attach to a run.
+[ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md), accepted and not yet implemented, adds a separate optional read. A thread snapshot with `runReceipts: 1` offers `GET /agui/v1/threads/{threadId}/run-receipt?runId={runId}`. Encode the run ID as one query value. Offer the read only for sessions configured to keep history. With the field absent, reconnect by snapshot as today. The GET requires the original authenticated principal and client ID, current membership, `watch` and the thread's project and tenant scope. It does not open a writer, start recovery, mark presence or attach to a run.
 
 Return HTTP 200 with `{ terminal, work }` at one committed watermark. These strings answer different questions:
 
