@@ -3,12 +3,11 @@ package contextview
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
-	"github.com/daniel-ballance/modular-agent/go/portable"
 	"github.com/daniel-ballance/modular-agent/go/turnrun"
+	"slices"
 	"strings"
 )
 
@@ -66,7 +65,7 @@ func PluginWithCompaction(compact bool) api.Plugin {
 			if err != nil {
 				return api.Decision{}, err
 			}
-			sc.Request.Messages, sc.Sources = forProvider(snap.Branch(), sc.Turn.Access.Model().Provider)
+			sc.Request.Messages, sc.Sources = forProvider(snap, sc.Turn.Access.Model().Provider)
 			if len(sc.Turn.Context) > 0 {
 				sc.Request.Messages = append(sc.Request.Messages, api.Message{Role: "user", Content: sc.Turn.Context})
 			}
@@ -90,7 +89,7 @@ func PluginWithCompaction(compact bool) api.Plugin {
 				if err != nil {
 					return api.Decision{}, err
 				}
-				sc.Request.Messages, sc.Sources = forProvider(snap.Branch(), sc.Turn.Access.Model().Provider)
+				sc.Request.Messages, sc.Sources = forProvider(snap, sc.Turn.Access.Model().Provider)
 				if len(sc.Turn.Context) > 0 {
 					sc.Request.Messages = append(sc.Request.Messages, api.Message{Role: "user", Content: sc.Turn.Context})
 				}
@@ -151,84 +150,6 @@ func effective(entries []api.Entry) []api.Entry {
 	}
 	return out
 }
-func Messages(entries []api.Entry) ([]api.Message, []string) { return forProvider(entries, "") }
-
-func forProvider(branch []api.Entry, provider string) ([]api.Message, []string) {
-	return messages(effective(branch), branch, provider)
-}
-
-func messages(entries, branch []api.Entry, provider string) ([]api.Message, []string) {
-	var out []api.Message
-	var sources []string
-	entries = orderInterfaceResults(entries, branch)
-	// A late exchange cannot be sent as an unpaired vendor tool call. Render
-	// waiting calls and their later results as text in the model view only.
-	late := map[string]bool{}
-	owners := map[[2]string]string{}
-	for _, e := range branch {
-		if e.Kind == "model.request" {
-			owners[[2]string{e.Turn, e.Step}] = api.Decode[api.Model](e.Data).Provider
-		}
-	}
-	for i, e := range entries {
-		if e.Kind != "model" {
-			continue
-		}
-		for _, p := range e.Content {
-			if p.Call != nil {
-				paired := false
-				for _, next := range entries[i+1:] {
-					if next.Kind == "model" || next.Kind == "input" || next.Kind == "summary" {
-						break
-					}
-					if next.Kind == "tool.result" && api.Decode[api.ToolResult](next.Data).Call == p.Call.ID {
-						paired = true
-					}
-				}
-				if !paired {
-					late[p.Call.ID] = true
-				}
-			}
-		}
-	}
-	for _, e := range entries {
-		if !e.Visible {
-			continue
-		}
-		var m api.Message
-		switch e.Kind {
-		case "input", "summary":
-			m = api.Message{Role: "user", Content: e.Content}
-		case "model":
-			stop := api.Decode[struct{ Stop string }](e.Data).Stop
-			if len(e.Content) == 0 && (stop == "failed" || stop == "aborted") {
-				continue
-			}
-			content := append(api.Content(nil), e.Content...)
-			for i, p := range content {
-				if p.Call != nil && late[p.Call.ID] {
-					content[i] = api.Part{Type: "text", Text: fmt.Sprintf("Tool call %s (%s) is waiting for its late result. Input: %s", p.Call.Name, p.Call.ID, p.Call.Input)}
-				}
-			}
-			m = api.Message{Role: "assistant", Content: content, Wire: api.Decode[struct{ Wire json.RawMessage }](e.Data).Wire}
-			if provider == "" || owners[[2]string{e.Turn, e.Step}] != provider {
-				m = portable.PublicMessage(m)
-			}
-		case "tool.result":
-			r := api.Decode[api.ToolResult](e.Data)
-			if late[r.Call] {
-				m = api.Message{Role: "user", Content: api.Text("Late tool result: " + string(api.JSON(r)))}
-			} else {
-				m = api.Message{Role: "tool", Result: &r}
-			}
-		default:
-			continue
-		}
-		out = append(out, m)
-		sources = append(sources, e.ID)
-	}
-	return out, sources
-}
 func (m *manager) compact(ctx context.Context, id string) error {
 	return m.compactWith(ctx, id, nil)
 }
@@ -242,13 +163,18 @@ func (m *manager) compactWith(ctx context.Context, id string, step *api.StepCont
 	if err != nil {
 		return err
 	}
-	entries := effective(snap.Branch())
+	view := newView(snap.Branch(), snap.Entries)
+	entries := view.entries
 	cut := -1
 	for i, e := range entries {
 		// A long turn can outgrow context on its own. Keep the newest input
 		// or complete model/tool batch, not the whole user exchange.
 		if e.Kind == "input" || e.Kind == "model" {
 			cut = i
+		}
+		// Keep this response: a later result still needs its call part.
+		if e.Kind == "model" && slices.ContainsFunc(e.Content, view.waitingForResult) {
+			break
 		}
 	}
 	if cut <= 0 {
@@ -273,7 +199,7 @@ func (m *manager) compactWith(ctx context.Context, id string, step *api.StepCont
 			return err
 		}
 	}
-	messages, sources := messages(prefix, snap.Branch(), access.Model().Provider)
+	messages, sources := view.messages(prefix, access.Model().Provider)
 	request := api.Request{System: "Summarize this older session history faithfully. Preserve facts, decisions, file paths and unresolved work. Return only a short summary; do not use tools.", Messages: messages, Thinking: "off", MaxOutput: min(maxOutput, 512)}
 	var auxiliary api.Entry
 	if step != nil {

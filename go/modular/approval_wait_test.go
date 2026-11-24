@@ -9,6 +9,44 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/modular/modulartest"
 )
 
+func TestLateApprovalResultPrecedesNewerInputInModelRequest(t *testing.T) {
+	ctx := t.Context()
+	var last atomic.Pointer[modular.ModelRequest]
+	observe := modular.Plugin{Name: "observe-request", Setup: func(r *modular.Registrar) error {
+		return r.OnProviderRequest(func(_ context.Context, p modular.ProviderRequest) (*modular.ModelRequest, error) {
+			last.Store(&p.Request)
+			return nil, nil
+		})
+	}}
+	limits := modular.DefaultCapacityLimits()
+	limits.Session.Calls = 1
+	opts := bumpOptions(t, t.TempDir(), modular.Kept, false, "counter", "Bump.", nil)
+	a := approvalAgent(t, append(opts, modular.WithCapacityLimits(limits), modular.WithPlugin(observe)))
+	s, call := parkBump(t, a)
+	probe, err := s.Prompt(ctx, "Newer input")
+	if err != nil || probe.Outcome == nil || probe.Outcome.Limit != "capacity" {
+		t.Fatalf("probe: %+v, %v", probe, err)
+	}
+	last.Store(nil)
+	if err := s.Answer(ctx, pollOne(t, s).ID, modular.Decline("no")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WaitIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	req := last.Load()
+	if req == nil {
+		t.Fatal("no continuation request")
+	}
+	m := req.Messages
+	if len(m) != 4 || m[0].Content.Text() != "Bump." || m[1].Role != "assistant" ||
+		len(m[1].Content) != 1 || m[1].Content[0].Type != "toolCall" ||
+		m[2].Role != "toolResult" || m[2].ToolCallID != call || !m[2].IsError ||
+		m[3].Role != "user" || m[3].Content.Text() != "Newer input" {
+		t.Fatalf("want original input, call, refused result, newer input; got %+v", m)
+	}
+}
+
 func TestWaitingApprovalRequiresDeliveryOnTheAnsweringHandle(t *testing.T) {
 	ctx := t.Context()
 	var count atomic.Int32

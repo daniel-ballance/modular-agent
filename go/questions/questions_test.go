@@ -278,7 +278,7 @@ func TestAskUserWaitsInTurnAndSecretDoesNotReachEventsOrModel(t *testing.T) {
 }
 func TestLateQuestionsEndWithoutResultsThenResumeTogether(t *testing.T) {
 	runtimetest.Each(t, func(t *testing.T) {
-		a, q, id, p, _ := setup(t, response(api.Call{ID: "first", Name: "ask_user", Input: api.JSON(map[string]any{"question": "First?", "wait_ms": 1})}, api.Call{ID: "second", Name: "ask_user", Input: api.JSON(map[string]any{"question": "Second?", "wait_ms": 1})}), fake.Script{Require: "waiting for its late result", Response: api.Response{Content: api.Text("ordinary input while waiting"), Stop: "finished"}}, fake.Script{Require: "Late tool result", Response: api.Response{Content: api.Text("resumed"), Stop: "finished"}})
+		a, q, id, p, _ := setup(t, response(api.Call{ID: "first", Name: "ask_user", Input: api.JSON(map[string]any{"question": "First?", "wait_ms": 1})}, api.Call{ID: "second", Name: "ask_user", Input: api.JSON(map[string]any{"question": "Second?", "wait_ms": 1})}), fake.Script{Require: "This call is waiting for an answer. It has no result yet.", Response: api.Response{Content: api.Text("ordinary input while waiting"), Stop: "finished"}}, fake.Script{Require: "second answer", Response: api.Response{Content: api.Text("resumed"), Stop: "finished"}})
 		ctx := context.Background()
 		_, _ = a.Submit(ctx, id, api.Input{Content: api.Text("go")})
 		out := wait(t, a, id)

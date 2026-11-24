@@ -535,7 +535,8 @@ Round four settles the shared persisted state with standard entries. Go no longe
 
 - Where: `docs/architecture.md`, Waiting for an answer and History; `docs/contracts.md`, Tool result.
 - Missing: how to present a still-open exchange to a vendor that requires adjacent tool results, and what moving or forking does to live jobs and questions.
-- Choice: the raw record never gets a waiting stand-in result. In the model view only, a call that lacked a result before the next exchange is described as waiting text, with its real late result later described as user-role result text. Normal adjacent tool exchanges remain standard tool messages. Moves, forks and erasure are refused while calls or jobs are unfinished, and navigation into unfinished boundaries is refused. Finished job/question records copied into forks are provenance, not live work. Forks retain actor ceilings rather than regaining root authority.
+- Current rule: [Context and interrupted work](../../../docs/bindings/data.md#context-and-interrupted-work) specifies the model view. Tool results follow their assistant message in call-part order. For a call left open past its turn, the view uses a waiting tool result until the call settles. The raw record never gets that stand-in.
+- Navigation choice: Moves, forks and erasure are refused while calls or jobs are unfinished, and navigation into unfinished boundaries is refused. Finished job/question records copied into forks are provenance, not live work. Forks retain actor ceilings rather than regaining root authority.
 - Swap test: yes. Model-context shape and navigation limitations affect plugins and hosts. This conservative limitation avoids resuming abandoned outside work.
 
 ## G27: Stopping, closing and erasure of job results
