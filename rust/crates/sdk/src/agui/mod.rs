@@ -496,6 +496,33 @@ impl Service {
                 }
                 result
             }
+            (&Method::POST, Some(p)) if p.starts_with("/threads/") && p.ends_with("/settings") => {
+                if self.h().declaration()?["approval_covers_nested"] != true {
+                    return Err(Fail::Missing);
+                }
+                let id = p
+                    .trim_start_matches("/threads/")
+                    .strip_suffix("/settings")
+                    .ok_or(Fail::Invalid)?;
+                self.attach(&a, id).await?;
+                if !self.right(&a, id, "settings")? {
+                    return Err(Fail::Refused);
+                }
+                let change = body(req).await?;
+                if change.as_object().is_none_or(|o| o.len() != 1)
+                    || !matches!(
+                        change["approval"].as_str(),
+                        Some("off" | "ask" | "all" | "never")
+                    )
+                {
+                    return Err(Fail::Invalid);
+                }
+                self.h().settings(
+                    &scope(id, a.id()),
+                    base::portable::settings_from_wire(&change),
+                )?;
+                self.json(&a, id, 200, change).await
+            }
             (&Method::GET, Some(p)) if p.starts_with("/threads/") => {
                 let rest = &p[9..];
                 let id = rest.strip_suffix("/presence").unwrap_or(rest);

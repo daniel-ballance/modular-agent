@@ -74,6 +74,9 @@ pub fn declaration(api: &dyn AgentApi, session: Option<&str>) -> Result<Value> {
         "confinesFiles":d["environment"]["confines_files"] == true,
         "commandContainment":if d["environment"]["stops_commands_after_sigkill"] == true {"strong"} else if d["environment"]["containment"] == "processGroup" {"processGroup"} else {"none"}
     });
+    if d["approval_covers_nested"] == true {
+        declaration["approvalCoversNested"] = json!(true);
+    }
     if d["approvals_outlast_turns"] == true {
         declaration["approvalsOutlastTurns"] = json!(true);
     }
@@ -354,6 +357,9 @@ pub fn shared_question(q: Question) -> Value {
         return q.approval_projection();
     }
     let mut value = json!({"id":q.id,"kind":q.kind,"question":q.text});
+    if q.covers_nested() {
+        value["coversNested"] = json!(true);
+    }
     if let Some(call_id) = q.scope.call {
         value["toolCallId"] = json!(call_id);
     }

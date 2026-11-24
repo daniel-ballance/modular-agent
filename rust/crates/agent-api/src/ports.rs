@@ -186,10 +186,11 @@ pub trait AgentApi: Send + Sync {
     fn park_approval(&self, _question: &Question) -> Result<Option<bool>> {
         Ok(None)
     }
-    async fn waiting_dispatch(
+    async fn approval_dispatch(
         &self,
         _scope: &Scope,
         _call: &ToolCall,
+        _cover: Option<&ApprovalCover>,
         _after_start: bool,
     ) -> Result<Option<ToolStatus>> {
         Ok(None)
@@ -283,11 +284,15 @@ pub trait AgentApi: Send + Sync {
     fn finish_interface_calls(&self, _scope: &Scope, _result: &mut TurnResult) -> Result<()> {
         Ok(())
     }
+    fn covering_approval(&self, _scope: &Scope, _call: &ToolCall) -> Option<ApprovalCover> {
+        None
+    }
     async fn dispatch_tool(
         &self,
         scope: &Scope,
         call: ToolCall,
         cancel: CancellationToken,
+        cover: Option<ApprovalCover>,
     ) -> ToolResult;
 }
 #[derive(Debug)]

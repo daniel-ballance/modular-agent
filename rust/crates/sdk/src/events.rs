@@ -273,6 +273,8 @@ pub struct Question {
     pub deadline: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_wait: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub covers_nested: bool,
     pub credential: Option<String>,
     /// For an approval: the exact call, as shared data's ToolCall.
     pub call: Option<Value>,
@@ -296,6 +298,7 @@ impl Question {
             deadline: q.extra["deadlineAt"]
                 .as_u64()
                 .or_else(|| q.extra["deadline"].as_u64()),
+            covers_nested: q.covers_nested(),
             approval_wait: q.extra["approvalWait"].as_str().map(str::to_string),
             credential: q.credential.clone(),
             call: q.extra.get("approvalCall").cloned(),

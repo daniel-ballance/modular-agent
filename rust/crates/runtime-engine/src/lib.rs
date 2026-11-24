@@ -577,6 +577,11 @@ impl Engine {
                 let (source, definition) = registration.as_ref().unwrap();
                 let mut start = json!({"call":changed,"safeToRepeat":repeat,"openWorld":definition.open_world(),
                     "source":source,"definition":wire::registered_definition(definition)});
+                if let Some(cover) = &reply.approval_cover
+                    && cover.tool_call_id != call.id
+                {
+                    start["approvalCoveredBy"] = json!(cover);
+                }
                 if scope.turn.is_none()
                     && environment.keeps_points(&api.snapshot(&scope.session)?.project)
                 {
@@ -603,8 +608,11 @@ impl Engine {
                 };
                 if input.cancel.is_cancelled() {
                     ToolResult::new(call, ToolStatus::Cancelled, "turn cancelled")
-                } else if let Some(status) = api.waiting_dispatch(scope, &changed, false).await? {
-                    ToolResult::new(call, status, "waiting approval no longer permits dispatch")
+                } else if let Some(status) = api
+                    .approval_dispatch(scope, &changed, reply.approval_cover.as_ref(), false)
+                    .await?
+                {
+                    ToolResult::new(call, status, "approval no longer permits dispatch")
                 } else if !current()? {
                     ToolResult::new(
                         call,
@@ -648,7 +656,12 @@ impl Engine {
                     } else {
                         dispatched = true;
                         let result = api
-                            .dispatch_tool(scope, changed, input.cancel.child_token())
+                            .dispatch_tool(
+                                scope,
+                                changed,
+                                input.cancel.child_token(),
+                                reply.approval_cover,
+                            )
                             .await;
                         if result.status == ToolStatus::Waiting {
                             let data = api.snapshot(&scope.session)?;

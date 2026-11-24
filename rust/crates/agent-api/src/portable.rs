@@ -412,7 +412,14 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
             if let Some(point) = c.get("point") {
                 start["point"] = point.clone();
             }
-            for field in ["source", "definition", "openWorld", "authorizers", "rights"] {
+            for field in [
+                "source",
+                "definition",
+                "openWorld",
+                "authorizers",
+                "rights",
+                "approvalCoveredBy",
+            ] {
                 if let Some(value) = optional(c, field) {
                     start[field] = value.clone();
                 }
@@ -509,6 +516,9 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
         "request.open" => {
             let q: Question = serde_json::from_value(c.clone())?;
             let mut request = json!({"id":q.id,"sessionId":q.scope.session,"kind":q.extra["kind"].as_str().map(|s|json!(s)).unwrap_or_else(||json!(q.kind)),"question":q.text,"answerable":q.answerable,"options":q.options});
+            if q.covers_nested() {
+                request["coversNested"] = json!(true);
+            }
             if q.waits_for_approval() {
                 request["askedBy"] = json!(q.scope.actor);
             }
@@ -871,7 +881,7 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                 let call = parse_call(&d["call"])?;
                 (
                     "tool.started",
-                    json!({"call":call,"safeToRepeat":d["safeToRepeat"]==true,"point":d["point"],"openWorld":d.get("openWorld").unwrap_or(&d["rust.openWorld"]),"source":d["source"],"definition":d["definition"],"authorizers":d["authorizers"],"rights":d["rights"]}),
+                    json!({"call":call,"safeToRepeat":d["safeToRepeat"]==true,"approvalCoveredBy":d["approvalCoveredBy"],"point":d["point"],"openWorld":d.get("openWorld").unwrap_or(&d["rust.openWorld"]),"source":d["source"],"definition":d["definition"],"authorizers":d["authorizers"],"rights":d["rights"]}),
                 )
             }
             "toolResult" => {
@@ -962,6 +972,13 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                     }
                     extra
                 });
+                // Only the shared request field describes the view that was offered.
+                if let Some(extra) = q.extra.as_object_mut() {
+                    extra.remove("coversNested");
+                }
+                if q.kind == RequestKind::Approval && r["coversNested"] == true {
+                    q.extra["coversNested"] = json!(true);
+                }
                 if r["approvalWait"] == "untilDeadline" {
                     for k in ["approvalWait", "deadlineAt", "whenTimeLimit", "answerers"] {
                         if let Some(v) = r.get(k) {

@@ -145,12 +145,14 @@ impl Sink {
                     eprintln!("{error}");
                 }
             }
-            "questionOpened" => eprintln!(
-                "Question {}: {} {}\nUse /answer REQUEST_ID VALUE",
-                content["id"].as_str().unwrap_or(""),
-                content["question"].as_str().unwrap_or(""),
-                content["options"]
-            ),
+            "questionOpened" if content["kind"] != "approval" || !content["call"].is_object() => {
+                eprintln!(
+                    "Question {}: {} {}\nUse /answer REQUEST_ID VALUE",
+                    content["id"].as_str().unwrap_or(""),
+                    content["question"].as_str().unwrap_or(""),
+                    content["options"]
+                )
+            }
             "command.result" => match content {
                 Value::String(text) => println!("{text}"),
                 other => println!(

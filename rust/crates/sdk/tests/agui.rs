@@ -179,6 +179,67 @@ async fn tenant_without_input_never_starts_a_provisional_session() -> anyhow::Re
 }
 
 #[tokio::test]
+async fn only_a_client_with_settings_can_change_one_threads_approval() -> anyhow::Result<()> {
+    use modular_agent::{Approval, Rights};
+    let dir = tempfile::tempdir()?;
+    let agent = Agent::builder()
+        .project(dir.path())
+        .approval(Approval::Ask)
+        .approval_covers_nested(true)
+        .provider(scripted_provider(json!([{"text":"done"}])))
+        .build()
+        .await?;
+    let mut observer = actor(dir.path(), "observer", "observer-test-token")?;
+    observer.principal.actor.rights = Rights::only(&["watch"]);
+    let server = agent
+        .serve_agui(AguiOptions {
+            listen: "127.0.0.1:0".into(),
+            actors: vec![actor(dir.path(), "writer", TOKEN)?, observer],
+            ..Default::default()
+        })
+        .await?;
+    let one = thread(&server).await?;
+    let two = thread(&server).await?;
+    let set = |payload: Value, token| {
+        reqwest::Client::new()
+            .post(url(&server, &format!("/threads/{one}/settings")))
+            .bearer_auth(token)
+            .json(&payload)
+            .send()
+    };
+    assert_eq!(
+        set(json!({"approval":"off"}), "observer-test-token")
+            .await?
+            .status(),
+        403
+    );
+    assert_eq!(
+        set(
+            json!({"approval":"off","approvalWait":"untilDeadline"}),
+            TOKEN
+        )
+        .await?
+        .status(),
+        400
+    );
+    assert_eq!(
+        set(json!({"approval":"never"}), TOKEN)
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?,
+        json!({"approval":"never"})
+    );
+    for (id, policy) in [(&one, "never"), (&two, "ask")] {
+        exchange(&server, input(id, "prompt", json!("Check"))).await?;
+        assert_eq!(agent.session_info(id)?.settings["approval"], policy);
+    }
+    server.close().await;
+    agent.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn presence_first_opened_on_return_can_resume_a_parked_approval() -> anyhow::Result<()> {
     use modular_agent::{Approval, Durability, Tool};
     let dir = tempfile::tempdir()?;
@@ -187,6 +248,7 @@ async fn presence_first_opened_on_return_can_resume_a_parked_approval() -> anyho
         .data_dir(dir.path().join("data"))
         .durability(Durability::Kept)
         .approval(Approval::All)
+        .approval_covers_nested(true)
         .max_approval_wait_ms(60_000)
         .setting("approvalWait", json!("untilDeadline"))
         .tool(Tool::new("bump", "Increment").run(|_: Value, _| async { Ok("Bumped") }))
@@ -218,6 +280,8 @@ async fn presence_first_opened_on_return_can_resume_a_parked_approval() -> anyho
     let q = &snapshot["waiting"]["questions"][0];
     assert!(q["expiresAt"].is_string());
     assert!(q["message"].as_str().unwrap().contains("bump"));
+    assert_eq!(q["metadata"]["modular-agent.coversNested"], true);
+    assert_eq!(snapshot["declaration"]["approvalCoversNested"], true);
     let end=exchange(&server,json!({"protocolVersion":"1.0","threadId":id,"runId":"answer","messages":snapshot["messages"],"resume":[{"interruptId":q["id"],"status":"resolved","payload":{"allow":true}}]})).await?;
     assert_eq!(end.last().unwrap()["outcome"]["type"], "success");
     assert!(end.iter().any(|f| f["type"] == "TOOL_CALL_RESULT"));

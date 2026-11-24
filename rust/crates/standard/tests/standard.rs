@@ -73,6 +73,8 @@ impl Rig {
             worker
         });
         let standard = Standard {
+            approval: None,
+            approval_wait_max_ms: None,
             limits: standard::policy::Bounds::default().counts(),
             byte_limits: standard::policy::Bounds::default().bytes(),
             tenant_scopes: false,

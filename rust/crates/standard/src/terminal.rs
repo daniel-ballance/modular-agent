@@ -17,26 +17,79 @@ pub enum Mode {
     Json,
 }
 
-type PendingAnswers =
-    std::collections::BTreeMap<String, (modular_agent::QuestionKind, oneshot::Sender<Answer>)>;
+struct Pending {
+    id: String,
+    kind: modular_agent::QuestionKind,
+    prompt: Option<String>,
+    sender: oneshot::Sender<Answer>,
+}
+#[derive(Default)]
+struct PendingAnswers {
+    items: Vec<Pending>,
+    closed: bool,
+}
+impl PendingAnswers {
+    fn approval(&self) -> Option<&Pending> {
+        self.items.iter().find(|p| p.prompt.is_some())
+    }
+    fn remove(&mut self, id: &str) -> Option<Pending> {
+        let front = self.approval().is_some_and(|p| p.id == id);
+        let item = self
+            .items
+            .remove(self.items.iter().position(|p| p.id == id)?);
+        if front && let Some(prompt) = self.approval().and_then(|p| p.prompt.as_ref()) {
+            eprintln!("{prompt}");
+        }
+        Some(item)
+    }
+}
+/// Remove a terminal prompt even if the SDK drops the handler on cancellation.
+struct Showing(Questions, String);
+impl Drop for Showing {
+    fn drop(&mut self) {
+        self.0.0.lock().unwrap().remove(&self.1);
+    }
+}
 #[derive(Clone, Default)]
 pub struct Questions(Arc<Mutex<PendingAnswers>>);
 impl Questions {
     pub fn install(&self, b: AgentBuilder) -> AgentBuilder {
         let this = self.clone();
         b.on_question(move |q| {
-            let (tx, rx) = oneshot::channel();
-            this.0.lock().unwrap().insert(q.id, (q.kind, tx));
+            let this = this.clone();
             async move {
-                rx.await.unwrap_or(Answer::Declined {
+                let declined = || Answer::Declined {
                     reason: Some("terminal closed".into()),
-                })
+                };
+                let (sender, rx) = oneshot::channel();
+                let _showing = {
+                    let mut pending = this.0.lock().unwrap();
+                    if pending.closed {
+                        return declined();
+                    }
+                    let prompt = (q.kind == modular_agent::QuestionKind::Approval
+                        && q.call.is_some())
+                    .then(|| format!("{}\nAllow? (y/n)", q.question));
+                    if pending.approval().is_none()
+                        && let Some(prompt) = &prompt
+                    {
+                        eprintln!("{prompt}");
+                    }
+                    pending.items.push(Pending {
+                        id: q.id.clone(),
+                        kind: q.kind,
+                        prompt,
+                        sender,
+                    });
+                    Showing(this.clone(), q.id)
+                };
+                rx.await.unwrap_or_else(|_| declined())
             }
         })
     }
 
     fn answer(&self, id: &str, value: &str) -> Result<()> {
-        let (kind, sender) = self
+        let Pending { kind, sender, .. } = self
             .0
             .lock()
             .unwrap()
@@ -56,7 +109,7 @@ impl Questions {
     }
 
     fn decline_all(&self) {
-        self.0.lock().unwrap().clear();
+        self.0.lock().unwrap().items.clear();
     }
 }
 
@@ -122,7 +175,28 @@ pub async fn run(agent: &Agent, options: TerminalOptions, questions: Questions) 
                 serde_json::to_string_pretty(&session.history().await?)?
             );
         } else if let Some(text) = prompt {
-            let result = session.prompt(text).await?;
+            // A batch invocation has no approver. Do not park new calls, and
+            // do not close someone else's wait by changing its session mode.
+            let waiting = session.settings()?["approvalWait"] == "untilDeadline"
+                && agent.declaration()?["approvalsOutlastTurns"] == true;
+            if waiting {
+                if session
+                    .questions()?
+                    .iter()
+                    .any(|q| q.approval_wait.is_some())
+                {
+                    bail!(
+                        "This session has a waiting approval. Answer it before using print mode."
+                    );
+                }
+                session.set_setting("approvalWait", serde_json::json!("live"))?;
+            }
+            let result = session.prompt(text).await;
+            if waiting {
+                session.wait_idle().await?;
+                session.set_setting("approvalWait", serde_json::json!("untilDeadline"))?;
+            }
+            let result = result?;
             if mode != Mode::Json {
                 println!("{}", result.text);
             }
@@ -169,15 +243,8 @@ async fn interactive(session: &Session, questions: Questions, mode: Mode) -> Res
                 let Some(line) = line.transpose()? else {
                     // A closed pipe cannot answer questions. Decline both those
                     // already shown and any opened while the last input drains.
-                    let idle = session.wait_idle();
-                    tokio::pin!(idle);
-                    loop {
-                        questions.decline_all();
-                        tokio::select! {
-                            result = &mut idle => { result?; break; }
-                            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => (),
-                        }
-                    }
+                    { let mut pending = questions.0.lock().unwrap(); pending.closed = true; pending.items.clear(); }
+                    session.wait_idle().await?;
                     break;
                 };
                 let line = line.trim();
@@ -207,6 +274,16 @@ async fn input(session: &Session, questions: &Questions, mode: Mode, line: &str)
     if line == "/cancel" {
         questions.decline_all();
         session.cancel().await?;
+    } else if let Some(id) = {
+        let pending = questions.0.lock().unwrap();
+        pending.approval().map(|p| p.id.clone())
+    } {
+        let value = match line.to_ascii_lowercase().as_str() {
+            "y" => "allow",
+            "n" => "decline",
+            _ => bail!("Answer y or n."),
+        };
+        questions.answer(&id, value)?;
     } else if let Some(args) = line.strip_prefix("/answer ") {
         let (id, value) = args
             .split_once(' ')
@@ -214,7 +291,14 @@ async fn input(session: &Session, questions: &Questions, mode: Mode, line: &str)
         questions.answer(id, value)?;
     } else if line == "/questions" {
         display(&serde_json::to_string(
-            &questions.0.lock().unwrap().keys().collect::<Vec<_>>(),
+            &questions
+                .0
+                .lock()
+                .unwrap()
+                .items
+                .iter()
+                .map(|p| &p.id)
+                .collect::<Vec<_>>(),
         )?);
     } else if let Some(args) = line.strip_prefix("/tool ") {
         let v: Value = serde_json::from_str(args)?;
