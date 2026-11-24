@@ -92,7 +92,9 @@ async def test_cancel_turn_joins_bash_two_processes_away(tmp_path, runtime_type)
         await until(lambda: pid_ready(tmp_path / "escaped.pid"))
         shell, escaped = [int((tmp_path / p).read_text()) for p in ("shell.pid", "escaped.pid")]
         await until(
-            lambda: any(e["kind"] == "tool_progress" and e.get("text") == "live" for e in events)
+            lambda: any(
+                e["kind"] == "tool_progress" and plain(e["content"]) == "live" for e in events
+            )
         )
         await a.call("runtime", "cancel", {"session": sid})
         assert dead(shell) and dead(escaped)
@@ -154,7 +156,7 @@ async def test_plugin_death_fails_all_waiters_turn_continues_harness_reports(
         await a.call("runtime", "submit", {"session": sid, "content": content("go")})
         await until(
             lambda: any(
-                e["kind"] == "tool_progress" and e.get("text", "").startswith("started:")
+                e["kind"] == "tool_progress" and plain(e["content"]).startswith("started:")
                 for e in events
             )
         )

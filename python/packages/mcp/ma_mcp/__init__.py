@@ -155,10 +155,6 @@ class Connection:
 class MCP(Plugin):
     name = "mcp"
     role = "tool_source"
-    # A private process placement can restore an older serialized instance.
-    standard_names = False
-    project_servers = None
-    prepare_hook = "session.start"
     declarations = {
         "transports": ["stdio", "http"],
         "session_tools": True,

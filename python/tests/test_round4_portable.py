@@ -111,7 +111,9 @@ async def test_acp_joins_foreign_session_before_replay(tmp_path, monkeypatch):
             )
             joins = [e["data"]["actor"] for e in records if e["kind"] == "actorJoined"]
             assert joins == [foreign, {**actor, "rights": sorted(h.admin & h.tenant)}]
-            history = await interface.bound_extension("history", {"sessionId": sid, "all": True})
+            history = await interface.ext_method(
+                "modular-agent/history", {"sessionId": sid, "all": True}
+            )
             assert [
                 (e["id"], e["data"]["actor"])
                 for e in history["entries"]
@@ -182,7 +184,7 @@ async def test_recover_foreign_standard_record(tmp_path, monkeypatch):
     }
     intent = entry(
         "modelRequest",
-        {"model": model, "safeToRepeat": False, "tools": ["bash"], "tracksStepAfter": True},
+        {"model": model, "safeToRepeat": False, "tools": ["bash"]},
         turnId=turn,
         stepId=step,
     )

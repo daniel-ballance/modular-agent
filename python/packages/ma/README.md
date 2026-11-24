@@ -21,7 +21,7 @@ The configuration folder is shared across languages; sessions live under `$XDG_S
 
 Use `ma login chatgpt` to sign in with a browser or add `--device` for a code. Use `ma login grok` for Grok. `ma login claude` runs Anthropic's own `claude auth login`. Python uses the Claude Agent SDK directly; it does not need a Node sidecar. A metered Claude Code account is not a subscription login.
 
-The Provider ids are `chatgpt`, `grok` and `claude`. `ma` still accepts `openai-codex` and `xai` in `--model`, `login`, `logout`, `settings.json`, `models.json` and saved sessions. On the next write of `auth.json`, it moves logins to their new ids. If both entries exist, it keeps the login under the new id.
+The subscription Provider ids are `chatgpt`, `grok` and `claude`.
 
 ## Approval
 
@@ -79,7 +79,7 @@ By default `ma` sends no telemetry. Set `OTEL_EXPORTER_OTLP_ENDPOINT` or a per-s
 - **ACP:** 190/190 with no approval configuration. With `--approval off`, 193/193 with the crash, probe, job and waiting-declaration checks. With an operator maximum, 118/118 public, crash and job checks. The covered continuation uses an actual ACP poll and answer; the probe Runtimes do not support waiting approvals. The standard composition does not declare several actors, tenants or session limits.
 - **WebSocket kits:** 153/153 for the plugin binding, 14/14 for separate-listener isolation, 29/29 for named callers and 195/195 for ACP.
 - **Python suites:** 823 passed and five live checks skipped in each Runtime and binding combination (transient/local, transient/process, durable/local and durable/process). The sandbox tests cover memory and active time, waiting on the host, worker death, cancellation, the recursion and nested-call limits, ambient access, UTF-8 output and result rendering.
-- **Subscriptions:** offline SDK checks cover ChatGPT and Grok sign-in, model requests, refresh and reasoning replay, and Claude tool dispatch. Product checks cover client identity and former Provider ids in sign-in, settings, catalog overrides and saved sessions.
+- **Subscriptions:** offline SDK checks cover ChatGPT and Grok sign-in, model requests, refresh and reasoning replay, and Claude tool dispatch. Product checks cover client identity and catalog overrides.
 - **Python static checks:** Ruff lint and format checks passed; strict mypy passed.
 
 ```sh

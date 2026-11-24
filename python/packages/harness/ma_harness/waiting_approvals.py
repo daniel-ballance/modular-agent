@@ -221,7 +221,7 @@ class WaitingApprovals:
                 "key": "approval:" + call["id"],
                 "kind": "approval",
                 "question": question,
-                "options": ["allow", "refuse"],
+                "options": [],
                 "asker": "approval",
                 "actor": call["actor"],
                 "authority": sorted(rights),
@@ -348,11 +348,7 @@ class WaitingApprovals:
                 raise AgentError("This route has not delivered the unchanged approval", "forbidden")
             else:
                 allow = d.get("value") == "allow" and not d.get("declined")
-                if (
-                    not allow
-                    and not d.get("declined")
-                    and d.get("value") not in (None, "declined", "refuse")
-                ):
+                if not allow and not d.get("declined"):
                     raise AgentError("Expected allow or decline", "invalid_request")
                 decision = {
                     "request": q["id"],

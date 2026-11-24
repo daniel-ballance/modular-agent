@@ -13,11 +13,6 @@ class Registry:
     def __init__(self, db, *, initialized):
         self.db = db
         if not initialized:
-            # A private registry has no stable bookkeeping IDs. Do not discard
-            # its marks or invent new evidence for them.
-            legacy = db.execute("SELECT 1 FROM sqlite_master WHERE name='erase_intents'").fetchone()
-            if legacy and db.execute("SELECT 1 FROM erase_intents LIMIT 1").fetchone():
-                raise Unavailable
             db.execute(
                 "CREATE TABLE registry_revision (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"
             )

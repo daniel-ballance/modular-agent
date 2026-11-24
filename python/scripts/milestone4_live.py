@@ -189,10 +189,10 @@ async def demonstrate(output, offline=False, runtime="durable"):
                     **{"modular-agent": {"key": "milestone4-proof"}},
                 )
                 save(output, "response.json", response.model_dump(mode="json", by_alias=True))
-                followed = await conn.ext_method("modular-agent/follow", {"session": sid})
-                save(output, "follow.json", followed["value"])
+                history = await conn.ext_method("modular-agent/history", {"sessionId": sid})
+                save(output, "history.json", history)
                 save(output, "permissions.json", client.permissions)
-                results = [e for e in followed["value"]["entries"] if e["kind"] == "tool_result"]
+                results = [e for e in history["entries"] if e["kind"] == "toolResult"]
                 server_pid = results[0]["data"]["value"]["pid"]
                 await conn.close_session(session_id=sid)
                 try:
@@ -250,25 +250,27 @@ def validate(output):
     init, session = read("initialize.json"), read("session.json")
     assert init["protocolVersion"] == 1 and init["agentCapabilities"]["loadSession"]
     assert "request_audit" in session["_meta"]["modular-agent"]["plugins"]
-    es = read("follow.json")["entries"]
+    es = read("history.json")["entries"]
     responses = [e for e in es if e["kind"] == "response"]
-    calls = [e for e in es if e["kind"] == "tool_call"]
-    results = [e for e in es if e["kind"] == "tool_result"]
+    calls = [e for e in es if e["kind"] == "toolStarted"]
+    results = [e for e in es if e["kind"] == "toolResult"]
     assert len(calls) == len(results) == 1
     call, result = calls[0], results[0]
-    assert call["data"]["name"] == tool_name("proof", "read_proof")
+    assert call["data"]["call"]["name"] == tool_name("proof", "read_proof")
     assert call["data"]["definition"]["mcp"]["server"] == "proof"
-    assert call["data"]["definition"]["schema"]["properties"] == {}
-    assert result["call"] == call["call"] and result["data"]["status"] == "completed"
+    request = next(e["data"]["request"] for e in es if e["kind"] == "modelRequest")
+    offered = next(t for t in request["tools"] if t["name"] == call["data"]["call"]["name"])
+    assert offered["parameters"]["properties"] == {}
+    assert result["toolCallId"] == call["toolCallId"] and result["data"]["status"] == "completed"
     assert result["data"]["value"]["marker"] == MARKER
-    ends = [e for e in es if e["kind"] == "turn_end"]
-    assert len(ends) == 1 and ends[0]["data"]["outcome"] == "completed"
+    ends = [e for e in es if e["kind"] == "turnEnd"]
+    assert len(ends) == 1 and ends[0]["data"]["outcome"]["kind"] == "completed"
     answer = plain(ends[0]["data"]["content"])
     assert MARKER in answer and "mcp" in answer.lower()
     assert MARKER not in read("input.json")["text"]
     permissions = read("permissions.json")
-    assert len(permissions) == 1 and permissions[0]["call"] == call["call"]
-    assert any(e["kind"] == "question_answer" and e["data"]["value"] == "allow" for e in es)
+    assert len(permissions) == 1 and permissions[0]["call"] == call["toolCallId"]
+    assert any(e["kind"] == "inputAnswer" and e["data"]["value"] == "allow" for e in es)
     requests = [json.loads(line) for line in (output / "requests.jsonl").read_text().splitlines()]
     assert len(requests) == len(responses) == 2
     assert {r["model"] for r in requests} == {run["model"]}

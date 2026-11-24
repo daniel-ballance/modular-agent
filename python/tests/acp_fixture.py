@@ -102,7 +102,7 @@ async def running(tmp_path, script, runtime_kind, client=None, forms=True, bindi
 
 
 async def extension(conn, operation, sid, **data):
-    return (await conn.ext_method("modular-agent/" + operation, {"session": sid, **data}))["value"]
+    return await conn.ext_method("modular-agent/" + operation, {"sessionId": sid, **data})
 
 
 async def prompt(conn, sid, text="hello", **meta):

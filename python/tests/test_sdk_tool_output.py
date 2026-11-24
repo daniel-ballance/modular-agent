@@ -61,8 +61,8 @@ async def test_tool_output_keeps_image_content(served, hosted_runtime):
                     break
             call_id = turn.tool_results()[0].call_id
             assert outputs == [
-                {"toolCallId": call_id, "chunk": "preview", "content": progress},
-                {"toolCallId": call_id, "chunk": "", "content": [image]},
+                {"toolCallId": call_id, "content": progress},
+                {"toolCallId": call_id, "content": [image]},
             ]
             if served:
                 assert all(event in seen for event in outputs)

@@ -37,7 +37,7 @@ async def test_acp_gates_streams_replay_and_extension_returns(tmp_path, runtime_
         assert "split-secret-732" not in json.dumps(
             [u.model_dump(mode="json") for _, u in client.updates]
         )
-        assert "split-secret-732" not in json.dumps(await extension(conn, "follow", sid))
+        assert "split-secret-732" not in json.dumps(await extension(conn, "history", sid))
         await conn.close_session(session_id=sid)
         client.updates.clear()
         await conn.load_session(cwd=str(tmp_path), session_id=sid, mcp_servers=[])
@@ -50,22 +50,25 @@ async def test_acp_fork_move_erasure_are_host_operations(tmp_path, runtime_kind)
     async with running(tmp_path, [reply("derived private text")], runtime_kind) as (conn, _, _):
         sid = (await conn.new_session(cwd=str(tmp_path), mcp_servers=[])).session_id
         await prompt(conn, sid, "private input")
-        entries = (await extension(conn, "follow", sid))["entries"]
+        entries = (await extension(conn, "history", sid))["entries"]
         original = next(e["id"] for e in entries if e["kind"] == "input")
-        fork = await extension(conn, "fork", sid)
-        assert fork["id"] != sid
+        fork = await extension(conn, "fork", sid, entryId=entries[-1]["id"])
+        assert fork["sessionId"] != sid
+        await conn.load_session(cwd=str(tmp_path), session_id=fork["sessionId"], mcp_servers=[])
         assert any(
-            e["kind"] == "input" for e in (await extension(conn, "follow", fork["id"]))["entries"]
+            e["kind"] == "input"
+            for e in (await extension(conn, "history", fork["sessionId"]))["entries"]
         )
-        await extension(conn, "erase", sid, entries=[original])
-        for session in (sid, fork["id"]):
-            state = await extension(conn, "follow", session)
+        await extension(conn, "erase", sid, entryIds=[original])
+        for session in (sid, fork["sessionId"]):
+            state = await extension(conn, "history", session)
             assert "private input" not in json.dumps(state)
             assert "derived private text" not in json.dumps(state)
-        before = (await extension(conn, "follow", sid))["entries"]
-        await extension(conn, "move", sid, point=None)
-        after = (await extension(conn, "follow", sid))["entries"]
-        assert len(after) == len(before) + 1 and after[-1]["kind"] == "position_move"
+        before = (await extension(conn, "history", sid, all=True))["entries"]
+        point = next(e["id"] for e in entries if e["kind"] == "plugins")
+        await extension(conn, "move", sid, entryId=point)
+        after = (await extension(conn, "history", sid, all=True))["entries"]
+        assert len(after) == len(before) + 1 and after[-1]["kind"] == "position"
 
 
 async def test_acp_eof_interrupts_question_then_load_replays_before_recovery(
@@ -83,7 +86,7 @@ async def test_acp_eof_interrupts_question_then_load_replays_before_recovery(
     await asyncio.gather(task, return_exceptions=True)
     with sqlite3.connect(tmp_path / "store/history.sqlite3") as db:
         stopped = [json.loads(row[0]) for row in db.execute("SELECT record FROM entries")]
-    assert not any(e["kind"] in {"question_answer", "model_error", "turn_end"} for e in stopped)
+    assert not any(e["kind"] in {"inputAnswer", "modelError", "turnEnd"} for e in stopped)
     async with running(tmp_path, [reply("after recovery")], runtime_kind) as (conn, client, _):
         await conn.load_session(session_id=sid, cwd=str(tmp_path), mcp_servers=[])
         if runtime_kind == "durable":
@@ -96,9 +99,9 @@ async def test_acp_eof_interrupts_question_then_load_replays_before_recovery(
             assert text[-1] == "after recovery" and len(client.elicitations) == 1
         else:
             assert not client.elicitations
-        entries = (await extension(conn, "follow", sid))["entries"]
+        entries = (await extension(conn, "history", sid))["entries"]
         results = [
-            e for e in entries if e["kind"] == "tool_result" and e["call"] == "question-call"
+            e for e in entries if e["kind"] == "toolResult" and e["toolCallId"] == "question-call"
         ]
         assert len(results) == 1
 
@@ -137,7 +140,7 @@ async def test_acp_can_load_a_session_created_by_a_slash_command(tmp_path, runti
         await prompt(conn, sid)
         fork = await extension(conn, "command", sid, text="/fork")
         await conn.load_session(session_id=fork["session"], cwd=str(tmp_path), mcp_servers=[])
-        assert (await extension(conn, "follow", fork["session"]))["entries"]
+        assert (await extension(conn, "history", fork["session"]))["entries"]
 
 
 async def test_command_actor_cannot_erase_or_change_settings_via_feature_plugin(agent):
@@ -188,7 +191,7 @@ async def test_acp_gates_declaration_metadata_and_protocol_errors(tmp_path, runt
         assert "PRIVATE-CANARY-321" not in session.model_dump_json()
         with pytest.raises(acp.RequestError) as caught:
             await interface.ext_method(
-                "modular-agent/command", {"session": session.session_id, "text": "/canary_error"}
+                "modular-agent/command", {"sessionId": session.session_id, "text": "/canary_error"}
             )
         assert "PRIVATE-CANARY-321" not in str(caught.value)
         assert "REDACTED" in str(caught.value)

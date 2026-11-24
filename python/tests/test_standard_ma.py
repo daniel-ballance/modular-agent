@@ -16,6 +16,7 @@ from pydantic_monty import AsyncFunctionSnapshot, AsyncMontySession, AsyncNameLo
 import pytest
 
 from modular_agent import (
+    AgentError,
     Answer,
     ApiKey,
     OAuth,
@@ -35,7 +36,7 @@ from ma_standard import cli, oauth, prompt
 from modular_agent.chatgpt import ChatGPT
 from modular_agent.grok import Grok
 from ma_standard.code import code_tool, functions, prompt as function_prompt
-from ma_standard.config import Paths, login_file
+from ma_standard.config import Paths
 from test_swap import pid_exists
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -86,14 +87,14 @@ async def test_rust_auth_fixture(tmp_path: Path) -> None:
     # declaration order, BTreeMap keys sort, and there is no final newline.
     fixture = b"""{
   "logins": {
-    "openai-codex": {
+    "chatgpt": {
       "type": "oauth",
       "access": "test-access",
       "refresh": "test-refresh",
       "expires": 1,
       "account": "test-account"
     },
-    "xai": {
+    "grok": {
       "type": "api_key",
       "key": "test-key"
     }
@@ -106,9 +107,9 @@ async def test_rust_auth_fixture(tmp_path: Path) -> None:
     path.write_bytes(fixture)
     path.chmod(0o600)
     auth = subscription_logins(path)
-    assert auth.login("openai-codex") == OAuth("test-access", "test-refresh", 1, "test-account")
-    assert auth.login("xai") == ApiKey("test-key")
-    await auth.set_login("xai", ApiKey("test-key"))
+    assert auth.login("chatgpt") == OAuth("test-access", "test-refresh", 1, "test-account")
+    assert auth.login("grok") == ApiKey("test-key")
+    await auth.set_login("grok", ApiKey("test-key"))
     assert path.read_bytes() == fixture
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.with_suffix(".lock").stat().st_mode) == 0o600
@@ -143,9 +144,8 @@ async def _http(handler: Callable[[Request], Reply]) -> AsyncIterator[str]:
 
 
 async def test_secret_answer_is_written_to_shared_auth_not_history(tmp_path: Path) -> None:
-    logins = subscription_logins(tmp_path / "auth.json")
-    await logins.set_login("xai", ApiKey("test-key"))
-    auth = login_file(logins.path)
+    auth = subscription_logins(tmp_path / "auth.json")
+    await auth.set_login("grok", ApiKey("test-key"))
 
     async def ask(arguments, context):
         reply = await context.ask(
@@ -199,54 +199,75 @@ def ma_args(tmp_path, monkeypatch):
 
     def args(*arguments):
         result = cli._parser().parse_args(["--project", str(tmp_path), *arguments])
-        result.client_identity = "old-config-client"
+        result.client_identity = "test-client"
         return result
 
     return config, args
 
 
-@pytest.mark.parametrize(("old", "new"), [("openai-codex", "chatgpt"), ("xai", "grok")])
-async def test_ma_login_and_logout_aliases(ma_args, monkeypatch, old, new):
+@pytest.mark.parametrize(("key", "provider"), [("openai-codex", "chatgpt"), ("xai", "grok")])
+async def test_ma_requires_exact_subscription_id(ma_args, monkeypatch, key, provider):
     config, args = ma_args
-    path = config / "auth.json"
-    raw = subscription_logins(path)
-    await raw.set_login("openai-codex", ApiKey("old-fixture-1"))
-    await raw.set_login("xai", ApiKey("old-fixture-2"))
-    login = OAuth("new-fixture", "new-refresh", 2**62, "fixture-account")
-    calls = []
+    logins = subscription_logins(config / "auth.json")
+    await logins.set_login(key, ApiKey("unused"))
+    assert logins.login(provider) is None
+    for command in ("login", "logout"):
+        with pytest.raises(ValueError, match="unknown provider"):
+            await cli._run(args(command, key))
 
-    async def sign_in(provider, logins, *, device, on_step, paste, client_identity):
-        assert provider == new and device and paste is None
-        calls.append(client_identity)
-        await logins.set_login(provider, login)
+    async def sign_in(name, store, *, device, on_step, paste, client_identity):
+        assert name == provider and device and paste is None and client_identity == "test-client"
+        await store.set_login(name, ApiKey("device-key"))
 
     monkeypatch.setattr(oauth, "sign_in", sign_in)
-    assert await cli._run(args("--device", "login", old)) == 0
-    assert calls == ["old-config-client"]
-    assert raw.login(new) == login
-    assert set(json.loads(path.read_text())["logins"]) == {"chatgpt", "grok"}
-    # Logout must also find a login that has not yet been migrated.
-    await raw.set_login(new, None)
-    await raw.set_login(old, login)
-    assert await cli._run(args("logout", old)) == 0
-    assert raw.login(new) is None and raw.login(old) is None
+    assert await cli._run(args("--device", "login", provider)) == 0
+    assert logins.login(provider) == ApiKey("device-key")
+    assert await cli._run(args("logout", provider)) == 0
+    assert logins.login(provider) is None and logins.login(key) == ApiKey("unused")
+
+
+async def test_ma_does_not_rewrite_a_saved_unavailable_provider(ma_args, tmp_path):
+    config, args = ma_args
+    history = file_history(config / "state" / "sessions")
+    fixture = scripted_provider([{"text": "done"}])
+    fixture.id = "xai"
+    selection = "xai/" + fixture.models()[0]["id"]
+    async with create_agent(
+        project=tmp_path,
+        history=history,
+        data_dir=config / "state",
+        durability="kept",
+        providers=[fixture],
+        model=selection,
+    ) as agent:
+        session = await agent.session()
+        assert (await session.prompt("first")).text == "done"
+        before = await session.history()
+    with pytest.raises(AgentError, match="Unknown model: xai/"):
+        await cli._run(args("--runtime", "transient", "--session", session.id, "--history"))
+    async with create_agent(
+        project=tmp_path, data_dir=config / "state", history=history, durability="kept"
+    ) as agent:
+        saved = await agent.session_info(session.id)
+        assert saved["settings"]["model"]["provider"] == "xai"
+        reopened = await agent.open_session(session.id)
+        before_ids = {r["id"] for r in before}
+        assert not any(
+            e["kind"] == "setting" and e["id"] not in before_ids for e in await reopened.history()
+        )
 
 
 @pytest.mark.loopback
-@pytest.mark.parametrize(
-    ("old", "new", "model"),
-    [
-        ("openai-codex", "chatgpt", "gpt-6.1-sol"),
-        ("xai", "grok", "grok-4.7"),
-    ],
-)
+@pytest.mark.parametrize(("provider", "model"), [("chatgpt", "gpt-6.1-sol"), ("grok", "grok-4.7")])
 @pytest.mark.parametrize("source", ["flag", "settings", "reopen"])
-async def test_ma_selects_the_renamed_provider(
-    ma_args, tmp_path, monkeypatch, capsys, old, new, model, source
+async def test_ma_uses_selected_provider(
+    ma_args, tmp_path, monkeypatch, capsys, provider, model, source
 ):
     config, args = ma_args
     auth = subscription_logins(config / "auth.json")
-    await auth.set_login(old, OAuth("fixture-access", "fixture-refresh", 2**62, "fixture-account"))
+    await auth.set_login(
+        provider, OAuth("fixture-access", "fixture-refresh", 2**62, "fixture-account")
+    )
     sent = []
 
     def route(request):
@@ -264,15 +285,15 @@ async def test_ma_selects_the_renamed_provider(
         }
         return 200, "text/event-stream", f"data: {json.dumps(completed)}\n\n"
 
-    selection = f"{old}/{model}"
+    selection = f"{provider}/{model}"
     options = []
     if source == "flag":
         options = ["--model", selection]
     elif source == "settings":
         (config / "settings.json").write_text(json.dumps({"model": selection}))
     else:
-        fixture = scripted_provider([{"text": "Old turn"}])
-        fixture.id = old
+        fixture = scripted_provider([{"text": "First reply"}])
+        fixture.id = provider
         original_models = fixture.models
         fixture.models = lambda: [{**info, "id": model} for info in original_models()]
         history = config / "state" / "sessions"
@@ -286,7 +307,7 @@ async def test_ma_selects_the_renamed_provider(
             local_process_groups=True,
         ) as agent:
             session = await agent.session()
-            assert (await session.prompt("Before the rename")).text == "Old turn"
+            assert (await session.prompt("Hello")).text == "First reply"
         options = ["--session", session.id]
 
     async with _http(route) as url:
@@ -296,8 +317,8 @@ async def test_ma_selects_the_renamed_provider(
     assert capsys.readouterr().out == "Test response\n"
     [(headers, body)] = sent
     assert body["model"] == model
-    if new == "chatgpt":
-        assert headers["originator"] == "old-config-client"
+    if provider == "chatgpt":
+        assert headers["originator"] == "test-client"
     else:
         assert "originator" not in headers and "referrer" not in headers
     if source == "reopen":
@@ -309,20 +330,20 @@ async def test_ma_selects_the_renamed_provider(
             local_process_groups=True,
         ) as agent:
             saved = await agent.session_info(session.id)
-        assert saved["settings"]["model"] == {"provider": new, "id": model}
+        assert saved["settings"]["model"] == {"provider": provider, "id": model}
 
 
-async def test_ma_model_entries_accept_old_and_new_keys(ma_args, monkeypatch, capsys):
+async def test_ma_catalog_reads_only_the_selected_provider(ma_args, monkeypatch, capsys):
     config, args = ma_args
     auth = subscription_logins(config / "auth.json")
-    for key in ("openai-codex", "xai"):
+    for key in ("chatgpt", "grok"):
         await auth.set_login(key, ApiKey("fixture"))
     rows = {
         key: [{"id": "extra-" + key, "name": "Extra", "contextWindow": 12000, "maxTokens": 1234}]
         for key in ("openai-codex", "chatgpt", "xai", "grok")
     }
-    rows["openai-codex"].append({"id": "gpt-6.1-sol", "contextWindow": 12001, "maxTokens": 1234})
-    rows["xai"].append(
+    rows["chatgpt"].append({"id": "gpt-6.1-sol", "contextWindow": 12001, "maxTokens": 1234})
+    rows["grok"].append(
         {"id": "grok-4.7", "contextWindow": 12002, "maxTokens": 1234, "effort": {"high": "high"}}
     )
     (config / "models.json").write_text(json.dumps(rows))
@@ -339,9 +360,8 @@ async def test_ma_model_entries_accept_old_and_new_keys(ma_args, monkeypatch, ca
     shown = capsys.readouterr().out
     assert re.search(r"chatgpt/gpt-6.1-sol\s+context\s+12001\s+thinking minimal,low", shown)
     assert re.search(r"grok/grok-4.7\s+context\s+12002\s+thinking high", shown)
-    for provider, keys in (("chatgpt", ["openai-codex", "chatgpt"]), ("grok", ["xai", "grok"])):
-        for key in keys:
-            assert f"{provider}/extra-{key}" in shown
+    assert "chatgpt/extra-chatgpt" in shown and "grok/extra-grok" in shown
+    assert "extra-openai-codex" not in shown and "extra-xai" not in shown
 
 
 @pytest.mark.parametrize(

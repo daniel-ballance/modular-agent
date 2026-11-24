@@ -191,8 +191,9 @@ async def test_environment_and_tool_progress_on_same_peer():
         events = payload["events"]
         for event in events:
             if event["type"] == "toolOutput":
-                data = event["data"]
-                data["chunk"] = "gated " + data["chunk"]
+                for part in event["data"]["content"]:
+                    if part["type"] == "text":
+                        part["text"] = "gated " + part["text"]
         return {"redact": events}
 
     plugin = Plugin(
@@ -219,13 +220,11 @@ async def test_environment_and_tool_progress_on_same_peer():
             assert chunks == [
                 {
                     "toolCallId": result.call_id,
-                    "chunk": "gated starting",
-                    "content": preview("starting"),
+                    "content": preview("gated starting"),
                 },
                 {
                     "toolCallId": result.call_id,
-                    "chunk": "gated streamed",
-                    "content": [{"type": "text", "text": "streamed"}],
+                    "content": [{"type": "text", "text": "gated streamed"}],
                 },
             ]
 

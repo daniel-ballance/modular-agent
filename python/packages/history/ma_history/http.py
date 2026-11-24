@@ -20,6 +20,10 @@ from .portable import session_view
 from .profile import PendingErasure
 
 
+def _positive_ms(value):
+    return type(value) is int and 0 < value < 2**53
+
+
 def _suspend_aware_clock_id():
     if sys.platform == "darwin":
         # Darwin's CLOCK_MONOTONIC advances during sleep; time.monotonic()
@@ -95,7 +99,7 @@ class HTTPHistory(PendingErasure, Plugin):
         if info.get("binding") != "modular-agent-history/1":
             raise AgentError("Unsupported history service binding")
         self.ttl = info.get("ttlMs")
-        if type(self.ttl) is not int or self.ttl <= 0:
+        if not _positive_ms(self.ttl):
             raise AgentError("Invalid history lease TTL")
         version = info.get("pendingErasure")
         if type(version) is int and version == 1:
@@ -186,7 +190,7 @@ class HTTPHistory(PendingErasure, Plugin):
             lease["interrupt"] = asyncio.create_task(self.api.session("writer_lost", session=sid))
 
     def _check(self, sid, lease):
-        if lease_clock() >= lease["cutoff"]:
+        if not lease["lost"] and lease_clock() >= lease["cutoff"]:
             self._lose(sid, lease)
         if lease["lost"]:
             raise AgentError("History write lease was lost", "lost")
@@ -197,7 +201,7 @@ class HTTPHistory(PendingErasure, Plugin):
             self._check(sid, self.leases[sid])
 
     def _arm(self, sid, lease, sent, ttl):
-        if type(ttl) is not int or ttl <= 0:
+        if not _positive_ms(ttl):
             raise AgentError("Invalid history lease TTL", "lost")
         cutoff = sent + ttl / 2000 - self.margin
         if lease_clock() >= min(cutoff, lease.get("cutoff", cutoff)):
@@ -230,17 +234,18 @@ class HTTPHistory(PendingErasure, Plugin):
                     self.must_renew.add(sid)
                     raise held from exc
                 except ServiceError as exc:
-                    if exc.code != "held" or not wait_for_lease:
+                    if exc.code != "held":
+                        raise
+                    wait = exc.body.get("retryAfterMs")
+                    if exc.status != 409 or not _positive_ms(wait):
+                        raise AgentError("Invalid history lease hold", "lost") from exc
+                    if not wait_for_lease:
                         raise
                     held = exc
                     now = lease_clock()
                     if deadline is None:
                         deadline = now + self.ttl / 1000 + 1
-                    wait = exc.body.get("retryAfterMs")
-                    # Compatibility with the pre-edition local test service only.
-                    delay = 0.25 if wait is None else wait / 1000 if type(wait) is int else -1
-                    if delay <= 0:
-                        raise AgentError("Invalid history retry interval", "lost") from exc
+                    delay = wait / 1000
                     if now + delay >= deadline:
                         raise
                     with ot.span(
@@ -252,7 +257,7 @@ class HTTPHistory(PendingErasure, Plugin):
                             },
                         ),
                     ):
-                        await asyncio.sleep(max(0.001, delay))
+                        await asyncio.sleep(delay)
                 except (AgentError, asyncio.CancelledError):
                     # The grant may have reached the service. A future acquire
                     # for this session must not mistake it for a fresh grant.
@@ -264,14 +269,14 @@ class HTTPHistory(PendingErasure, Plugin):
                     r"[A-Za-z0-9_-]{1,128}", lease["id"]
                 ):
                     raise AgentError("Invalid history lease value", "lost")
-                self._arm(sid, lease, sent, value["ttlMs"])
+                self._arm(sid, lease, sent, value.get("ttlMs"))
                 if sid in self.must_renew:
                     sent = lease_clock()
                     renewal = path + "/" + self.segment(lease["id"]) + "/renew"
                     with ot.span("modular_agent.history.lease.renew", ot.attrs(sid)):
                         value = await self.request("POST", renewal)
                     self._check(sid, lease)
-                    self._arm(sid, lease, sent, value["ttlMs"])
+                    self._arm(sid, lease, sent, value.get("ttlMs"))
                     self.must_renew.discard(sid)
             except (AgentError, asyncio.CancelledError):
                 self._lose(sid, lease)

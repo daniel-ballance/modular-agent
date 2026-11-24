@@ -30,10 +30,9 @@ from ma_core.wire import (
     tool_in,
     tool_out,
 )
-from .rpc import MAX_FRAME, Peer, WireError, rpc_id
-from .rpc import trace_offer, work_method
+from .rpc import MAX_FRAME, Peer, WireError, exec_deadline, exec_timeout, rpc_id, work_method
 from .runtime_host import HostedRuntime
-from .server import BINDING, DATA
+from .server import BINDING
 from .websocket import connect_plugin
 
 
@@ -204,8 +203,7 @@ class Environment:
             params["point"] = d["point"]
         elif op == "exec":
             params["command"] = d["command"]
-            if d.get("timeout") is not None:
-                params["timeoutMs"] = d["timeout"] * 1000
+            params.update(exec_deadline(d.get("timeout")))
         return await self.plugin.request("env/" + op, params, d, emit)
 
     async def save(self, d, emit):
@@ -263,7 +261,6 @@ class Environment:
 
 
 class External(Plugin):
-    trace_context = True
     """One process may register several different capability kinds."""
 
     role = "feature"
@@ -340,12 +337,10 @@ class External(Plugin):
                 "plugin/initialize",
                 {
                     "binding": BINDING,
-                    "data": DATA,
                     "host": {"name": "modular-agent-py", "version": _package_version("ma-plugin")},
                     "project": str(self.project),
                     "home": str(self.home),
                     "config": self.spec.get("config", {}),
-                    **({"traceContext": 1} if self.trace_context else {}),
                 },
                 cancel_on_interrupt=False,
             ),
@@ -353,9 +348,6 @@ class External(Plugin):
         )
         if self.registration.get("binding") != BINDING or not self.registration.get("name"):
             raise WireError("Invalid registration", "invalid_request")
-        self.peer.trace_agreed = self.trace_context and trace_offer(
-            self.registration.get("traceContext")
-        )
         self.peer.trace_name = self.registration["name"]
         for source in self.registration.get("toolSources", []):
             if source["id"] in self.sources:
@@ -685,9 +677,7 @@ class External(Plugin):
         async def deliver():
             if fallback is None:
                 return await self.notification(method, p, parent)
-            received = (
-                ot.extract(p.get("traceContext")) if self.peer.trace_agreed else ot.extract(None)
-            )
+            received = ot.extract(p.get("traceContext"))
             with ot.use(received if ot.same_trace(fallback, received) else fallback):
                 return await self.notification(method, p, parent)
 
@@ -769,9 +759,7 @@ class External(Plugin):
                     )
             d = parent["context"]
             fallback = self.peer.outgoing_traces.get(p["parentRequestId"], parent["trace"])
-            received = (
-                ot.extract(p.get("traceContext")) if self.peer.trace_agreed else ot.extract(None)
-            )
+            received = ot.extract(p.get("traceContext"))
             trace_parent = received if ot.same_trace(fallback, received) else fallback
             attributes = ot.attrs(
                 d.get("session") or d.get("sessionId"),
@@ -928,9 +916,7 @@ class External(Plugin):
                 if trace_context
                 else ot.extract(None)
             )
-            received = (
-                ot.extract(p.get("traceContext")) if self.peer.trace_agreed else ot.extract(None)
-            )
+            received = ot.extract(p.get("traceContext"))
             if parent is None and ot.valid(fallback):
                 with ot.use(received if ot.same_trace(fallback, received) else fallback):
                     return await self._job_callback(method, p, args)
@@ -1166,7 +1152,7 @@ class External(Plugin):
 
             args = {**p, "session": sid, "cwd": str(cwd)}
             if op == "exec":
-                args["timeout"] = p.get("timeoutMs", 0) / 1000 or None
+                args["timeout"] = exec_timeout(p)
             try:
                 r = await self.api.call("environment", operations[op], args, output)
             except AgentError as exc:

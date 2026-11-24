@@ -179,7 +179,7 @@ async def _exercise(tmp_path, reason, placement, backend, provider, entered, can
                     if reason == "commitFailed":
                         await send(
                             4,
-                            "_modular-agent/submit",
+                            "_modular-agent/input",
                             {
                                 "sessionId": sid,
                                 "content": [{"type": "text", "text": "second"}],

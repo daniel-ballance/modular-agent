@@ -162,6 +162,13 @@ class Store:
         self.db, self.ttl_ms = db, ttl_ms
         self.witness = witness
         self.leases = {}
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        if version != 1 and (
+            version != 0
+            or previously_profiled
+            or db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        ):
+            raise Unavailable("Cannot initialize an erasure registry over an existing store")
         self.db.executescript(
             "PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;"
             "CREATE TABLE IF NOT EXISTS bound (ttl INTEGER NOT NULL);"
@@ -173,8 +180,7 @@ class Store:
         try:
             with self.db:
                 self.db.execute("BEGIN IMMEDIATE")
-                version = self.db.execute("PRAGMA user_version").fetchone()[0]
-                self.registry = Registry(self.db, initialized=previously_profiled or version != 0)
+                self.registry = Registry(self.db, initialized=version == 1)
         except (Unavailable, sqlite3.Error):
             pass
         if witness is not None:

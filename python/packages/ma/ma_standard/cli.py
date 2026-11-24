@@ -34,6 +34,7 @@ from modular_agent import (
     create_agent,
     file_history,
     http_history,
+    subscription_logins,
 )
 from modular_agent.chatgpt import chatgpt
 from modular_agent.claude import Claude, claude
@@ -44,7 +45,7 @@ from modular_agent.mcp import mcp
 from modular_agent.testing import ScriptedProvider
 
 from .code import code_tool
-from .config import PROVIDER_ALIASES, Paths, login_file, model_id, subscription_overrides
+from .config import Paths, subscription_overrides
 from .identity import DEFAULT_CLIENT_IDENTITY, validate_client_identity
 from .prompt import discover, prompt_plugin
 from .telemetry import configured
@@ -407,7 +408,7 @@ async def _agent(
     maximum = policy.max_approval_wait if approval is not None else None
     if maximum is not None:
         settings["approvalWait"] = "live" if args.prompt is not None else wait
-    auth = login_file(paths.config / "auth.json")
+    auth = subscription_logins(paths.config / "auth.json")
     providers: list[Provider] = []
     configured_model = settings.pop("model", None)
     if configured_model is not None and not isinstance(configured_model, str):
@@ -420,8 +421,6 @@ async def _agent(
         or saved_model
         or (configured_model if not args.acp or args.agui or acp_session else None)
     )
-    if model is not None:
-        model = model_id(model)
     if script:
         script_data = json.loads(Path(script).read_text(encoding="utf-8"))
         if not isinstance(script_data, list) or any(not isinstance(s, dict) for s in script_data):
@@ -524,7 +523,6 @@ async def _agent(
             *([] if inspecting else [mcp(project_servers=paths.mcp)]),
         ],
         model=model,
-        model_aliases=PROVIDER_ALIASES,
         settings=settings,
         approval=approval,
         approval_covers_nested=approval is not None,
@@ -571,7 +569,7 @@ async def _run(args: argparse.Namespace) -> int:
             args.command,
             args.provider,
             args.device,
-            login_file(paths.config / "auth.json"),
+            subscription_logins(paths.config / "auth.json"),
             _claude_status,
             client_identity=args.client_identity,
         )
@@ -725,7 +723,7 @@ async def _run(args: argparse.Namespace) -> int:
         if args.session:
             for key in ("model", "thinking"):
                 if value := getattr(args, key):
-                    await session.set_setting(key, model_id(value) if key == "model" else value)
+                    await session.set_setting(key, value)
         if args.history:
             _json({"sessionId": session.id, "entries": await session.history()})
             return 0

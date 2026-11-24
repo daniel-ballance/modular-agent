@@ -13,7 +13,7 @@ from typing import Any, TypedDict, cast, overload
 from inspect import signature
 
 from ma_plugin.host import External
-from ma_plugin.rpc import MAX_FRAME, Peer, WireError
+from ma_plugin.rpc import MAX_FRAME, Peer, WireError, exec_deadline
 from ma_plugin.server import BINDING, PluginServer
 from ma_plugin.websocket import (
     PLUGIN_PROTOCOL,
@@ -49,7 +49,6 @@ async def _serve(
     frames: WebSocketFrames | None = None,
     projects: frozenset[Path] = frozenset(),
     restrict_projects: bool = False,
-    trace_context: bool = True,
 ) -> None:
     environment_project: Path | None = None
     registrar: Registrar | None = None
@@ -312,9 +311,7 @@ async def _serve(
             "bash": "exec",
         }
         arguments = dict(params)
-        timeout = arguments.pop("timeout", None)
-        if isinstance(timeout, (int, float)):
-            arguments["timeoutMs"] = round(timeout * 1000)
+        arguments.update(exec_deadline(arguments.pop("timeout", None)))
         from uuid import uuid4
 
         callback_id = uuid4().hex
@@ -575,6 +572,8 @@ async def _serve(
             return None
 
     async def run_command(p: dict[str, Any], key: str | int) -> JsonObject:
+        if not isinstance(p.get("args"), str):
+            raise WireError("Command args must be text", "invalid_request")
         command = registered()._commands.get(p["name"])
         if command is None:
             raise WireError("Unknown command", "invalid_request")
@@ -753,7 +752,6 @@ async def _serve(
     )
     methods.update({f"env/{name}": bind_environment(name) for name in _METHODS})
     server = Server(registration, methods, initialize, stop)
-    server.trace_context = trace_context
     if frames is not None:
         await server.serve_frames(frames)
     elif streams is None:

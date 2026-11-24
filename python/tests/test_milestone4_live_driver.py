@@ -36,9 +36,9 @@ async def test_acp_validator_rejects_wrong_model(evidence):
 
 
 async def test_acp_validator_rejects_missing_or_duplicate_tool_results(evidence):
-    path = evidence / "follow.json"
+    path = evidence / "history.json"
     data = json.loads(path.read_text())
-    result = next(e for e in data["entries"] if e["kind"] == "tool_result")
+    result = next(e for e in data["entries"] if e["kind"] == "toolResult")
     data["entries"].append(result)
     path.write_text(json.dumps(data))
     with pytest.raises(AssertionError):

@@ -1,6 +1,7 @@
 """Lossless shared-data boundary translations. Native aliases stay inside the build."""
 
 from datetime import datetime
+import json
 
 from ma_core import plain
 
@@ -295,7 +296,7 @@ def model_request_fields(model, request, repeatable, *, auxiliary=False):
         "data": {
             "model": model,
             "safeToRepeat": repeatable,
-            **({"auxiliary": True} if auxiliary else {"tracksStepAfter": True}),
+            **({"auxiliary": True} if auxiliary else {}),
             "tools": [t["name"] for t in request["tools"]],
             **({"request": request} if repeatable else {}),
         },
@@ -559,7 +560,12 @@ def entry_out(e):
                 "id": d["id"],
                 "sessionId": e["session"],
                 "answerable": d.get("answerable", True),
-                **({"askedBy": d["asker"]} if d.get("approvalWait") else {}),
+                "askedBy": d["asker"],
+                **(
+                    {"answerers": d["restrictedResponders"]}
+                    if d.get("restrictedResponders") is not None
+                    else {}
+                ),
                 "toolCallId": d.get("call"),
                 "credential": d.get("name"),
                 "timeLimitMs": d.get(
@@ -637,11 +643,38 @@ def turn_end_out(d):
     return {"outcome": outcome, "result": result}
 
 
+def question_signature(q):
+    fields = {
+        k: q[k]
+        for k in (
+            "kind",
+            "question",
+            "options",
+            "name",
+            "binding",
+            "details",
+            "approval_call",
+            "approval_registration",
+            "coversNested",
+        )
+        if k in q
+    }
+    return json.dumps(
+        {
+            **fields,
+            "responders": q.get("restrictedResponders"),
+            "timeout": float(q["timeout"]) if q.get("timeout") is not None else None,
+            "park": q["park"],
+            "call": q.get("call"),
+        },
+        sort_keys=True,
+    )
+
+
 def entry_in(e, sid, default_actor="user"):
     if "session" in e and "sessionId" not in e:
-        return e  # SQLite data from before the shared storage format.
+        raise ValueError("History entry lacks its sessionId")
     from datetime import UTC
-    import json
 
     kind = e["kind"]
     native = {v: k for k, v in KINDS.items() if k not in {"question_closed", "authority"}}.get(
@@ -788,9 +821,8 @@ def entry_in(e, sid, default_actor="user"):
             **q,
             **details,
             "key": q.get("key") or q["id"],
-            "signature": q.get("signature") or json.dumps(details, sort_keys=True),
             "asker": q.get("askedBy", q.get("asker", e["writer"])),
-            **({"restrictedResponders": q["answerers"]} if "answerers" in q else {}),
+            "restrictedResponders": q.get("answerers"),
             **(
                 {
                     "approval_registration": {k: d[k] for k in ("call", "source", "definition")},
@@ -808,6 +840,10 @@ def entry_in(e, sid, default_actor="user"):
             "timeout": q["timeLimitMs"] / 1000 if q.get("timeLimitMs") is not None else None,
             "park": q.get("whenTimeLimit") == "leaveOpen",
         }
+        signature = question_signature(result["data"])
+        if "signature" in q and q["signature"] != signature:
+            raise ValueError("Question signature does not match the recorded request")
+        result["data"]["signature"] = signature
     elif kind == "secretAnswerAccepted":
         result["data"] = {"request": e["requestId"], "actor": e["actorId"]}
     elif kind == "inputAnswer":

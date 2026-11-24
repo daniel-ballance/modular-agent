@@ -6,6 +6,7 @@ from ma_core import AgentError, Plugin, content, identity, plain
 
 
 from ma_core.conformance import NEST
+from ma_core.wire import messages_out
 
 
 class Nest(Plugin):
@@ -50,20 +51,10 @@ class Echo(Plugin):
         ]
 
     async def generate(self, d, emit):
-        # Read authoritative turn entries, not a compacted context or old tool results.
-        inputs = await self.api.session(
-            "branch", session=d["session"], kind="input", fields=["content"], last=True
-        )
-        text = plain(inputs[-1]["content"]) if inputs else ""
-        turn = d.get("turn")
-        results = await self.api.session(
-            "branch",
-            session=d["session"],
-            turn=turn,
-            kind="tool_result",
-            visible=True,
-            fields=["content"],
-        )
+        messages = messages_out(d["messages"])
+        last = max((i for i, m in enumerate(messages) if m["role"] == "user"), default=-1)
+        text = plain(messages[last]["content"]) if last >= 0 else ""
+        results = [m for m in messages[last + 1 :] if m["role"] == "toolResult"]
         calls = []
         if text.startswith("fail:"):
             return {
@@ -73,13 +64,22 @@ class Echo(Plugin):
                 "error": {"kind": "other", "message": text[5:]},
             }
         if text.startswith("tool:"):
+            name, _, raw = text[5:].partition(" ")
+            try:
+                arguments = json.loads(raw)
+            except ValueError:
+                arguments = None
+            if not isinstance(arguments, dict) or name not in {tool["name"] for tool in d["tools"]}:
+                return {
+                    "content": [],
+                    "calls": [],
+                    "stop": "failed",
+                    "error": {"kind": "other", "message": "Invalid tool directive"},
+                }
             if results:
                 answer = "done: " + plain(results[0]["content"])[:200]
             else:
-                name, sep, raw = text[5:].partition(" ")
-                if not sep or not name:
-                    raise AgentError("Expected tool:<name> <json>")
-                calls = [{"id": identity(), "name": name, "input": json.loads(raw)}]
+                calls = [{"id": identity(), "name": name, "input": arguments}]
                 answer = ""
         else:
             answer = "echo: " + text

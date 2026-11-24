@@ -1610,7 +1610,7 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
                 return await self._effect(
                     d["session"],
                     self.commands[name][2],
-                    {**d, "actor": d.get("actor", command_session["actor"]), "args": args.strip()},
+                    {**d, "actor": d.get("actor", command_session["actor"]), "args": args},
                     allow_provisional=True,
                 )
             finally:
@@ -1934,7 +1934,7 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
         if op == "fork":
             await self.guard_erasure(sid)
             if s.get("busy"):
-                raise AgentError("Cannot fork during a turn")
+                raise AgentError("Cannot fork during a turn", "busy")
             branch = await self.handle("branch", d, emit)
             ended_jobs = {e["job"] for e in branch if e["kind"] == "job_end"}
             ended_calls = {e["call"] for e in branch if e["kind"] == "tool_result"}
@@ -1949,7 +1949,7 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
                 or (e["kind"] == "question_open" and e["data"]["id"] not in closed_questions)
                 for e in branch
             ):
-                raise AgentError("Cannot fork pending work; finish or cancel it first")
+                raise AgentError("Cannot fork pending work; finish or cancel it first", "busy")
             if "point" in d:
                 if d["point"] not in {e["id"] for e in branch}:
                     raise AgentError("Fork point must be on current branch")
@@ -1986,7 +1986,12 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
                     fork_source=e["id"],
                     copies=[e["id"]],
                 )
-                if "input" in copied.get("data", {}):
+                if copied["kind"] in {
+                    "input_queued",
+                    "input",
+                    "input_withdrawn",
+                    "turn_start",
+                } and "input" in copied.get("data", {}):
                     copied["data"]["input"] = mapping.get(
                         copied["data"]["input"], copied["data"]["input"]
                     )

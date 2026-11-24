@@ -26,7 +26,7 @@ async def test_acp_stdio_declaration_config_stream_key_and_lifecycle(tmp_path, r
         assert {o.id for o in session.config_options} >= {"model", "thinking"}
         result = await conn.set_config_option(session_id=sid, config_id="thinking", value="high")
         assert next(o.current_value for o in result.config_options if o.id == "thinking") == "high"
-        declaration = await extension(conn, "declaration", sid)
+        declaration = session.field_meta["modular-agent"]["declaration"]
         assert declaration["continuesAfterRestart"] == (runtime_kind == "durable")
         assert (
             declaration["plugins"]["claude"]["stateful"]
@@ -44,11 +44,11 @@ async def test_acp_stdio_declaration_config_stream_key_and_lifecycle(tmp_path, r
             == "streamed hello"
         )
         duplicate = await prompt(conn, sid, key="one")
-        assert duplicate.field_meta["modular-agent"]["receipt"]["duplicate"]
-        follow = await extension(conn, "follow", sid)
+        assert duplicate.field_meta["modular-agent"]["duplicate"]
+        follow = await extension(conn, "history", sid)
         assert len([e for e in follow["entries"] if e["kind"] == "input"]) == 1
         point = follow["entries"][-1]["id"]
-        assert (await extension(conn, "follow", sid, after=point))["entries"] == []
+        assert (await extension(conn, "history", sid, after=point))["entries"] == []
         assert sid in {x.session_id for x in (await conn.list_sessions()).sessions}
         await conn.close_session(session_id=sid)
         with pytest.raises(acp.RequestError) as error:
@@ -71,7 +71,7 @@ async def test_acp_reopen_new_process_and_follow_from_point(tmp_path, runtime_ki
     async with running(tmp_path, [reply("first answer")], runtime_kind) as (conn, _, _):
         sid = (await conn.new_session(cwd=str(tmp_path), mcp_servers=[])).session_id
         await prompt(conn, sid, key="first")
-        entries = (await extension(conn, "follow", sid))["entries"]
+        entries = (await extension(conn, "history", sid))["entries"]
         point = entries[-1]["id"]
     async with running(tmp_path, [reply("second answer")], runtime_kind) as (conn, client, _):
         await conn.load_session(session_id=sid, cwd=str(tmp_path), mcp_servers=[])
@@ -80,9 +80,12 @@ async def test_acp_reopen_new_process_and_follow_from_point(tmp_path, runtime_ki
             for _, u in client.updates
         )
         await prompt(conn, sid, "continue", key="second")
-        later = (await extension(conn, "follow", sid, after=point))["entries"]
+        later = (await extension(conn, "history", sid, after=point))["entries"]
         assert all(e["id"] not in {x["id"] for x in entries} for e in later)
-        assert any(e["kind"] == "response" and "second answer" in str(e["content"]) for e in later)
+        assert any(
+            e["kind"] == "response" and "second answer" in str(e["message"]["content"])
+            for e in later
+        )
 
 
 @pytest.mark.parametrize(
@@ -109,8 +112,7 @@ async def test_acp_approvals_are_permission_requests(tmp_path, runtime_kind, per
             assert answer["value"] == "allow"
         else:
             assert answer["declined"] is True and "value" not in answer
-        entries = (await extension(conn, "follow", sid))["entries"]
-        results = [e for e in entries if e["kind"] == "tool_result"]
+        results = [e for e in history["entries"] if e["kind"] == "toolResult"]
         assert len(results) == 1
         assert results[0]["data"]["status"] == ("completed" if allowed else "refused")
         assert any(u.session_update == "tool_call" for _, u in client.updates)
@@ -137,8 +139,8 @@ async def test_acp_free_text_and_choice_are_elicitation(tmp_path, runtime_kind, 
         sid = (await conn.new_session(cwd=str(tmp_path), mcp_servers=[])).session_id
         assert (await prompt(conn, sid)).stop_reason == "end_turn"
         assert len(client.elicitations) == 1
-        entries = (await extension(conn, "follow", sid))["entries"]
-        assert any(e["kind"] == "question_answer" and e["data"]["value"] == answer for e in entries)
+        entries = (await extension(conn, "history", sid))["entries"]
+        assert any(e["kind"] == "inputAnswer" and e["data"]["value"] == answer for e in entries)
 
 
 @pytest.mark.parametrize("kind,forms", [("secret", True), ("text", False)])
@@ -176,12 +178,15 @@ async def test_acp_no_insecure_form_or_unsupported_elicitation_fallback(
                 assert answer["accepted"]
             assert (await task).stop_reason == "end_turn"
         assert not client.elicitations
-        entries = (await extension(conn, "follow", sid))["entries"]
-        expected = "host fallback" if kind == "text" else "declined"
+        entries = (await extension(conn, "history", sid))["entries"]
+
+        def intended_answer(data):
+            return data.get("value") == "host fallback" if kind == "text" else data.get("declined")
+
         assert any(
-            e["kind"] == "question_answer"
-            and e["data"]["value"] == expected
-            and e["actor"] == "user"
+            e["kind"] == "inputAnswer"
+            and intended_answer(e["data"])
+            and e["data"]["actorId"] == "user"
             for e in entries
         )
         assert not (tmp_path / "store/credentials.json").exists()
@@ -200,27 +205,32 @@ async def test_acp_cancel_pending_permission_cannot_authorize_later(tmp_path, ru
             assert (await task).stop_reason == "cancelled"
         client.release.set()
         assert not (tmp_path / "never.txt").exists()
-        assert all(not q["answerable"] for q in await extension(conn, "questions", sid))
+        assert (await extension(conn, "requests", sid))["requests"] == []
 
 
 async def test_acp_session_mcp_isolation_and_private_connection_data(tmp_path, runtime_kind):
     spec = stdio()
     spec["env"] = [{"name": "OFFLINE_TEST_PRIVATE", "value": "not-in-history-9182"}]
-    async with running(tmp_path, [reply("ready")], runtime_kind) as (conn, _, _):
+    name = tool_name("local", "echo")
+    call = {"id": "echo", "name": name, "input": {"text": "host tool"}}
+    script = [reply(calls=[call]), reply("done"), reply(calls=[call]), reply("done")]
+    async with running(tmp_path, script, runtime_kind) as (conn, _, _):
         sid = (
             await conn.new_session(cwd=str(tmp_path), mcp_servers=[s.McpServerStdio(**spec)])
         ).session_id
         other = (await conn.new_session(cwd=str(tmp_path), mcp_servers=[])).session_id
         await prompt(conn, sid)
         await prompt(conn, other)
-        tool = tool_name("local", "echo")
-        result = await extension(conn, "tool", sid, name=tool, input={"text": "host tool"})
-        assert result["status"] == "completed"
-        pid = result["value"]["pid"]
-        assert (await extension(conn, "tool", other, name=tool, input={"text": "no"}))[
-            "status"
-        ] == "failed"
-        assert "not-in-history-9182" not in json.dumps(await extension(conn, "follow", sid))
+
+        async def result(session):
+            records = (await extension(conn, "history", session))["entries"]
+            return next(e["data"] for e in records if e["kind"] == "toolResult")
+
+        used = await result(sid)
+        assert used["status"] == "completed"
+        pid = used["value"]["pid"]
+        assert (await result(other))["status"] != "completed"
+        assert "not-in-history-9182" not in json.dumps(await extension(conn, "history", sid))
         await conn.close_session(session_id=sid)
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
@@ -231,14 +241,18 @@ async def test_acp_bad_requests_refuse_before_changes(tmp_path, runtime_kind):
         with pytest.raises(acp.RequestError):
             await conn.new_session(cwd=str(tmp_path / "other"), mcp_servers=[])
         sid = (await conn.new_session(cwd=str(tmp_path), mcp_servers=[])).session_id
-        setup = (await extension(conn, "follow", sid))["entries"]
+        setup = (await extension(conn, "history", sid))["entries"]
         with pytest.raises(acp.RequestError):
             await conn.set_config_option(session_id=sid, config_id="model", value="not-allowed")
         with pytest.raises(acp.RequestError):
-            await extension(conn, "move", sid, point="unknown-point", rewind=True)
+            await extension(conn, "move", sid, entryId="unknown-point", rewind=True)
         with pytest.raises(acp.RequestError):
             await conn.ext_method("not-implemented", {})
-        assert (await extension(conn, "follow", sid))["entries"] == setup
+        with pytest.raises(acp.RequestError):
+            await conn.ext_method("modular-agent/history", {"session": sid})
+        with pytest.raises(acp.RequestError):
+            await conn.ext_method("modular-agent/submit", {"sessionId": sid})
+        assert (await extension(conn, "history", sid))["entries"] == setup
 
 
 async def test_acp_async_submit_steering_withdraw_and_close(tmp_path, runtime_kind):
@@ -247,10 +261,10 @@ async def test_acp_async_submit_steering_withdraw_and_close(tmp_path, runtime_ki
         task = asyncio.create_task(prompt(conn, sid))
         await client.wait_event("step_started")
         after = await extension(
-            conn, "submit", sid, content=content("queued"), when="after", key="queued"
+            conn, "input", sid, content=content("queued"), when="propose", key="queued"
         )
-        assert (await extension(conn, "withdraw", sid, input=after["input"]))["withdrawn"]
-        steer = await extension(conn, "submit", sid, content=content("steer"), when="steer")
-        assert steer["when"] == "steer"
+        assert await extension(conn, "withdraw", sid, inputId=after["inputId"]) == {}
+        steer = await extension(conn, "input", sid, content=content("steer"), when="steer")
+        assert steer["taken"] == "inTurn"
         await conn.close_session(session_id=sid)
         assert (await task).stop_reason == "cancelled"

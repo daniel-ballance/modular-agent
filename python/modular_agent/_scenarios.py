@@ -311,10 +311,8 @@ async def run_scenario(
     )
     with scratch as temp:
         directory = Path(temp)
-        if "approvalsOutlastTurns" in scenario.get("requires", {}):
-            kit = path.parents[2] / "waiting.mjs"
-            if not kit.exists():
-                kit = Path(Path.cwd() / "conformance/sdk/waiting.mjs")
+        if path.parent.name == "waiting-approval":
+            kit = Path(__file__).resolve().parents[2] / "conformance/sdk/waiting.mjs"
             proc = await asyncio.create_subprocess_exec(
                 "node",
                 Path(__file__).resolve().parents[1] / "scripts/waiting-scenario.mjs",
@@ -531,12 +529,21 @@ async def run_scenario(
 
 async def _main(files: list[str]) -> int:
     repo = Path(__file__).resolve().parents[2]
-    paths = [Path(f).resolve() for f in files] or sorted(
-        [
-            *(repo / "conformance/sdk/scenarios").glob("*.json"),
-            *(repo / "conformance/sdk/fixtures/waiting-approval").glob("*.json"),
-        ]
-    )
+    paths = [Path(f).resolve() for f in files]
+    if not paths:
+        sdk = repo / "conformance/sdk"
+        paths = sorted((sdk / "scenarios").glob("*.json"))
+        waiting = sdk / "fixtures/waiting-approval"
+        names = json.loads((sdk / "waiting-scenarios.json").read_text())
+        if (
+            not paths
+            or not names
+            or sorted(names) != sorted(p.stem for p in waiting.glob("*.json"))
+        ):
+            raise ValueError(
+                "SDK scenarios are missing or differ from the waiting fixture manifest"
+            )
+        paths.extend(waiting / f"{name}.json" for name in names)
     success, failure = 0, 0
     for placement, command in placements(repo):
         for path in paths:
@@ -588,22 +595,6 @@ if __name__ == "__main__":
                     telemetry_run,
                 )
             )
-    elif len(sys.argv) > 1 and sys.argv[1] == "--waiting-probe":
-
-        async def probe() -> None:
-            async with test_agent(
-                script=[],
-                durability="kept",
-                data_dir=sys.argv[2],
-                approval="all",
-                several_actors=True,
-                late_answers_start_turns=True,
-                max_approval_wait=0.1,
-            ) as agent:
-                await agent.session()
-                print(json.dumps(agent.declaration()))
-
-        asyncio.run(probe())
     elif telemetry_run:
         with exporter(telemetry_run.endpoint), telemetry_run.observe():
             raise SystemExit(asyncio.run(_telemetry_main(telemetry_run)))

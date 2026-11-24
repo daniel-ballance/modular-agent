@@ -9,7 +9,6 @@ import webbrowser
 
 from modular_agent import SignInStep, SubscriptionLogins, sign_in, sign_out
 
-from .config import PROVIDER_ALIASES
 from .identity import DEFAULT_CLIENT_IDENTITY
 
 
@@ -111,7 +110,6 @@ async def account_command(
         raise ValueError(
             "which provider? chatgpt, grok or claude" if command == "login" else "which provider?"
         )
-    provider = PROVIDER_ALIASES.get(provider, provider)
     if provider == "claude":
         if command == "logout":
             raise ValueError("Claude Code holds that sign-in; run `claude auth logout`")

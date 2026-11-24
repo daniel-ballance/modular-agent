@@ -35,7 +35,6 @@ async def seed(a, sid, calls, definitions, started=(), receipts=()):
             "model": {"provider": "fake", "id": "fake"},
             "tools": [c["name"] for c in calls],
             "safeToRepeat": False,
-            "tracksStepAfter": True,
         },
     )
     await a.session(

@@ -8,33 +8,15 @@ import re
 import sys
 from typing import cast
 
-from modular_agent import Approval, Json, JsonObject, SubscriptionLogins, subscription_logins
+from modular_agent import Approval, Json, JsonObject
 from modular_agent.grok import GrokModelInfo
 
 
-PROVIDER_ALIASES = {"openai-codex": "chatgpt", "xai": "grok"}
-
-
-def login_file(path: Path) -> SubscriptionLogins:
-    return subscription_logins(path, aliases=PROVIDER_ALIASES)
-
-
-def model_id(value: str) -> str:
-    provider, slash, name = value.partition("/")
-    return f"{PROVIDER_ALIASES.get(provider, provider)}{slash}{name}"
-
-
 def model_overrides(path: Path, provider: str) -> list[JsonObject]:
-    doc = read_object(path)
-    overrides: list[JsonObject] = []
-    for key in [*(old for old, new in PROVIDER_ALIASES.items() if new == provider), provider]:
-        if key not in doc:
-            continue
-        rows = doc[key]
-        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-            raise ValueError(f"models for {key}: expected an array of objects")
-        overrides.extend(cast(list[JsonObject], rows))
-    return overrides
+    rows = read_object(path).get(provider, [])
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ValueError(f"models for {provider}: expected an array of objects")
+    return cast(list[JsonObject], rows)
 
 
 def subscription_overrides(

@@ -80,7 +80,7 @@ class Credentials(StagedCredentials):
         self.root = Path(root)
         self.claude_home = Path(claude_home or Path.home() / ".claude")
         self.intake = asyncio.Lock()
-        self.store = StagedFile(self.root / "credentials.json", legacy=True)
+        self.store = StagedFile(self.root / "credentials.json")
 
     async def get(self, d, emit):
         if d["name"] == "claude_login":

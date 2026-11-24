@@ -80,11 +80,10 @@ async def test_viewer_sees_question_but_cannot_answer_or_escalate(agent):
                 subject="other",
                 authority=["watch", "approve"],
             )
-        await owner.call(
-            "questions",
-            "answer",
-            {"session": sid, "actor": "user", "request": q["id"], "value": "refuse"},
-        )
+        scope = {"session": sid, "actor": "user", "request": q["id"]}
+        with pytest.raises(AgentError, match="offered options"):
+            await owner.call("questions", "answer", {**scope, "value": "refuse"})
+        await owner.call("questions", "answer", {**scope, "declined": True})
         assert (await task)["value"] == "declined"
         with pytest.raises(AgentError, match="closed"):
             await owner.call(
@@ -175,6 +174,39 @@ async def test_keyed_answers_reuse_only_on_current_branch_and_current_authority(
     assert again.get("open") and again["request"] != q["id"]
     await a.session("move", session=sid, point=None)
     assert await a.call("questions", "list", {"session": sid}) == []
+
+
+def test_portable_question_signature_includes_scope_and_policy():
+    from ma_core.wire import entry_in
+
+    draft = {
+        "id": "q",
+        "askedBy": "tools",
+        "kind": "text",
+        "question": "Proceed?",
+        "answerers": ["owner"],
+        "toolCallId": "call",
+        "timeLimitMs": 1200,
+        "whenTimeLimit": "leaveOpen",
+    }
+    row = {"id": "entry", "kind": "inputRequest", "writer": "questions", "data": {"request": draft}}
+    signature = json.loads(entry_in(row, "session")["data"]["signature"])
+    assert (
+        signature["responders"],
+        signature["call"],
+        signature["timeout"],
+        signature["park"],
+    ) == (
+        ["owner"],
+        "call",
+        1.2,
+        True,
+    )
+    draft["signature"] = json.dumps({"kind": "text", "question": "Proceed?"}, sort_keys=True)
+    with pytest.raises(ValueError, match="signature"):
+        entry_in(row, "session")
+    with pytest.raises(ValueError, match="sessionId"):
+        entry_in({"session": "session", "kind": "question_open", "data": draft}, "session")
 
 
 async def test_timeout_leaves_no_result_then_late_answer_runs_new_turn(agent):

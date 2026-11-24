@@ -194,9 +194,12 @@ async def test_prompt_waits_for_its_own_turn_not_the_job_report(
             await second_started.wait()
             result = await first
             assert result.stop_reason == "end_turn"
-            assert result.field_meta["modular-agent"]["result"]["content"] == content(
-                "first answer"
-            )
+            meta = result.field_meta["modular-agent"]
+            history = await h.api().session("branch", session=sid)
+            first_input = next(e for e in history if e["kind"] == "input")
+            assert meta["inputId"] == first_input["data"]["input"]
+            assert meta["outcome"]["kind"] == "completed"
+            assert "receipt" not in meta and "result" not in meta
             assert (await h.api().session("get", session=sid))["busy"]
     finally:
         release_first.set()
@@ -290,7 +293,6 @@ async def test_bound_cancel_returns_queued_input_and_preserves_original_outcome(
         assert duplicate.field_meta["modular-agent"] == {
             **meta,
             "duplicate": True,
-            "receipt": {**meta["receipt"], "duplicate": True},
         }
 
 

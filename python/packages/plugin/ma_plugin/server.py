@@ -19,13 +19,11 @@ from ma_local import local_for_platform, local_type
 from ma_tools import DEFINITIONS
 
 from ma_core.wire import tool_out
-from .rpc import MAX_FRAME, Peer, WireError
-from .rpc import trace_offer
+from .rpc import MAX_FRAME, Peer, WireError, exec_deadline, exec_timeout
 from .runtime_server import METHODS, RuntimeServer
 from .websocket import PLUGIN_PROTOCOL, listen_websocket, wait_for_stop
 
 BINDING = "modular-agent-plugin/1"
-DATA = "modular-agent-data/1"
 
 
 class PluginServer:
@@ -38,14 +36,12 @@ class PluginServer:
         self.initializing = False
         self.peer = None
 
-    trace_context = True
-
     async def dispatch(self, method, params, key):
         if method == "plugin/initialize":
             if self.ready or self.initializing:
                 raise WireError("Already initialized", "invalid_request")
-            if params.get("binding") != BINDING or params.get("data") != DATA:
-                raise WireError("Unsupported binding or data version", "not_supported")
+            if params.get("binding") != BINDING:
+                raise WireError("Unsupported plugin binding", "not_supported")
             self.initializing = True
             try:
                 if self.initialize:
@@ -53,12 +49,8 @@ class PluginServer:
                 self.ready = True
             finally:
                 self.initializing = False
-            registration = {k: v for k, v in self.registration.items() if k != "traceContext"}
-            if self.trace_context and trace_offer(params.get("traceContext")):
-                self.peer.trace_agreed = True
-                registration["traceContext"] = 1
-            self.peer.trace_name = registration["name"]
-            return registration
+            self.peer.trace_name = self.registration["name"]
+            return self.registration
         if not self.ready:
             raise WireError("Initialize first", "invalid_request")
         if method == "plugin/shutdown":
@@ -376,8 +368,7 @@ class Conformance(PluginServer):
                 raise WireError("Unknown tool", "invalid_request")
             callback_id = "env:" + str(key)
             self.output_handlers[callback_id] = key
-            if "timeout" in d:
-                d["timeoutMs"] = d.pop("timeout") * 1000
+            d.update(exec_deadline(d.pop("timeout", None)))
             try:
                 r = await self.peer.request("host/env/exec", d, key=callback_id)
             finally:
@@ -467,7 +458,7 @@ class Conformance(PluginServer):
                     "session": sid,
                     "cwd": cwd,
                     "command": p["command"],
-                    "timeout": p.get("timeoutMs", 0) / 1000 or None,
+                    "timeout": exec_timeout(p),
                 }
                 try:
                     result = await self.local.bash(d, output)

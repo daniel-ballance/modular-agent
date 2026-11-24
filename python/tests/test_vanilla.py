@@ -401,7 +401,6 @@ async def test_recovery_settles_or_resumes_as_declared(agent, runtime_kind):
             "model": {"provider": "fake", "id": "fake"},
             "tools": ["bash"],
             "safeToRepeat": False,
-            "tracksStepAfter": True,
         },
     )
     await a.session(
