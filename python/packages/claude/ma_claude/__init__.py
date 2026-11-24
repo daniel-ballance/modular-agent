@@ -8,6 +8,7 @@ Runtime result, with validation left to the agent rather than the SDK helper.
 
 import asyncio
 import dataclasses
+from importlib.metadata import version as _package_version
 import json
 import os
 import tempfile
@@ -26,6 +27,7 @@ from ma_core import AgentError, Plugin, clone, content, silent
 from mcp.server import Server
 from mcp.types import CallToolResult, ListToolsResult, Tool
 
+_CLIENT_APP = f"modular-agent-py/{_package_version('ma-claude')}"
 MODEL = "claude-haiku-5-5"
 PREFIX = "mcp__agent__"
 
@@ -102,7 +104,7 @@ def isolated_options(request, directory, server, login):
             "name": "Modular Agent",
         },
         stderr=lambda _: None,
-        client_app="modular-agent-py/0.1.0",
+        client_app=_CLIENT_APP,
     )
 
 

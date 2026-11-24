@@ -28,6 +28,8 @@ export function loadQuery(): Promise<QueryFunction> {
 	return loaded;
 }
 
+export const { version: packageVersion } = createRequire(import.meta.url)("../../package.json") as { version: string };
+
 /** The installed Agent SDK's version, read from its manifest. */
 export function installedSdkVersion(): string {
 	try {

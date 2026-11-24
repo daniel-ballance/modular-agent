@@ -1,5 +1,6 @@
 import { carrier, currentSpan, historyForPeer, readTrace, withTrace } from "@modular-agent/harness/telemetry";
 import { Readable, Writable } from "node:stream";
+import { createRequire } from "node:module";
 import { isDeepStrictEqual } from "node:util";
 import { type AgentApp, type AgentContext, type Stream, agent, methods, ndJsonStream, PROTOCOL_VERSION, RequestError } from "@agentclientprotocol/sdk";
 import type * as acp from "@agentclientprotocol/sdk";
@@ -25,6 +26,8 @@ import {
 	text,
 	textOf,
 } from "@modular-agent/harness";
+
+const { version } = createRequire(import.meta.url)("../../package.json") as { version: string };
 
 const APPROVAL = ["off", "ask", "all", "never"];
 /** The ACP host binding this Interface follows (docs/bindings/acp.md). */
@@ -254,7 +257,7 @@ export class AcpInterface implements InterfaceCapability {
 					// MCP servers the client passes are served only if a plugin can connect them.
 					mcpCapabilities: { http: this.options.hostMcpServers !== false && (!!this.mcp() || !!this.options.attachMcp), sse: false },
 				},
-				agentInfo: { name: "modular-agent", title: "Modular Agent", version: "0.1.0" },
+				agentInfo: { name: "modular-agent", title: "Modular Agent", version },
 				authMethods: [],
 				// What the agent supports, so a host never has to guess.
 				_meta: { [NS]: { binding: this.binding, declaration: this.bindingDeclaration(), extensions: EXTENSIONS, actor: { id: this.actorId, kind: this.actor().kind, rights: this.actor().authority } } },

@@ -32,6 +32,9 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/questions"
 )
 
+// Version is the release version shared by the SDK and ma.
+const Version = api.ImplementationVersion
+
 const localActor = "user"
 
 type Durability string

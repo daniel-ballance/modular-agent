@@ -3,6 +3,7 @@
 import asyncio
 from contextvars import ContextVar
 import functools
+from importlib.metadata import version as _package_version
 from inspect import signature
 import json
 from pathlib import Path
@@ -462,7 +463,9 @@ class ACP(Plugin):
         return s.InitializeResponse(
             protocol_version=1,
             auth_methods=[],
-            agent_info=s.Implementation(name="modular-agent-py", version="0.1.0"),
+            agent_info=s.Implementation(
+                name="modular-agent-py", version=_package_version("ma-acp")
+            ),
             field_meta={
                 NAMESPACE: {
                     "binding": self.binding,

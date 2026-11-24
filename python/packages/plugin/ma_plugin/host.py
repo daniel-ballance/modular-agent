@@ -5,6 +5,7 @@ import base64
 import json
 import os
 from functools import partial
+from importlib.metadata import version as _package_version
 from pathlib import Path
 
 from ma_core import telemetry as ot
@@ -340,7 +341,7 @@ class External(Plugin):
                 {
                     "binding": BINDING,
                     "data": DATA,
-                    "host": {"name": "modular-agent-py", "version": "0.1.0"},
+                    "host": {"name": "modular-agent-py", "version": _package_version("ma-plugin")},
                     "project": str(self.project),
                     "home": str(self.home),
                     "config": self.spec.get("config", {}),

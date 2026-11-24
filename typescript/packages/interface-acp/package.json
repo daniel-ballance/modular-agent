@@ -1,6 +1,6 @@
 {
   "name": "@modular-agent/interface-acp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "type": "module",
   "main": "dist/src/index.js",
@@ -12,7 +12,7 @@
     }
   },
   "dependencies": {
-    "@modular-agent/harness": "0.1.0",
+    "@modular-agent/harness": "0.2.0",
     "@agentclientprotocol/sdk": "2.7.0"
   }
 }

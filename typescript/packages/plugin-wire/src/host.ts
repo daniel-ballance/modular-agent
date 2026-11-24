@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { relative, isAbsolute, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { addUsage, interruptedNote, isToolCall, pendingToolCalls, restoreAnsweredStep, text, zeroUsage, type Harness, type HistoryEntry, type Usage } from "@modular-agent/harness";
@@ -34,6 +35,8 @@ import { checkOutputSize, mapOutput } from "@modular-agent/harness";
 import { fromWire, toWire } from "./translate.js";
 import { connectWebSocket, PLUGIN_PROTOCOL, receiveMessages } from "./websocket.js";
 import { DATA_BINDING, listDirectory, notFoundAsEnoent, optionalMethod, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
+
+const { version } = createRequire(import.meta.url)("../../package.json") as { version: string };
 
 /** One external plugin to start, as MODULAR_AGENT_PLUGINS lists it. */
 export interface ExternalPluginSpec {
@@ -170,7 +173,7 @@ export async function registerExternalPlugin(peer: WirePeer, info: { project: st
 	const registration = await controlWait(peer, peer.request<Registration>("plugin/initialize", {
 		binding: PLUGIN_BINDING,
 		data: DATA_BINDING,
-		host: { name: "modular-agent (TypeScript)", version: "0.1.0" },
+		host: { name: "modular-agent (TypeScript)", version },
 		project: info.project,
 		home: info.home,
 		config,

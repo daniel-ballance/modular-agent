@@ -1,6 +1,9 @@
 import { createMcpToolName, limitMcpContent, McpClient, normalizeMcpInputSchema, StdioTransport, StreamableHttpTransport, toLlmContent } from "@earendil-works/pi-mcp";
 import type { ContentPart, Plugin, PluginApi, ToolCall, ToolContext, ToolDefinition, ToolResult, ToolSource } from "@modular-agent/harness";
 import { text } from "@modular-agent/harness";
+import { createRequire } from "node:module";
+
+const { version } = createRequire(import.meta.url)("../../package.json") as { version: string };
 
 /** An MCP server: a program to start (stdio), or a URL (Streamable HTTP). The same shape as Pi's and Claude's mcpServers. */
 export type McpServerConfig =
@@ -55,7 +58,7 @@ export class McpTools implements ToolSource, McpServers {
 	}
 
 	async connect(server: string, config: McpServerConfig, cwd?: string): Promise<Connection | undefined> {
-		const client = new McpClient({ name: "modular-agent", version: "0.1.0", ...(cwd ? { roots: [{ uri: `file://${cwd}`, name: "project" }] } : {}) });
+		const client = new McpClient({ name: "modular-agent", version, ...(cwd ? { roots: [{ uri: `file://${cwd}`, name: "project" }] } : {}) });
 		try {
 			const transport =
 				"url" in config

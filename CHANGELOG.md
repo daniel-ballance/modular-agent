@@ -1,6 +1,6 @@
 # Changelog
 
-The four SDKs share one version, the revision of the [SDK specification](docs/sdk/README.md). Nothing is published to a registry; a version names a commit on `main`.
+The four SDKs and `ma` share one project version. The [SDK specification](docs/sdk/README.md) has its own revision. Nothing is published to a registry; a version names a commit on `main`.
 
 ## 0.2.0
 

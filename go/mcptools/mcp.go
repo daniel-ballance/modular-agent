@@ -163,7 +163,7 @@ func (m *Manager) add(ctx context.Context, id string, specs []Server, extend boo
 }
 func (m *Manager) connect(ctx context.Context, id string, spec Server) (*connection, error) {
 	c := &connection{spec: spec, routes: map[string]string{}, progress: map[string]func(string){}}
-	client := mcp.NewClient(&mcp.Implementation{Name: "modular-agent-go", Version: "0.4"}, &mcp.ClientOptions{
+	client := mcp.NewClient(&mcp.Implementation{Name: "modular-agent-go", Version: api.ImplementationVersion}, &mcp.ClientOptions{
 		Capabilities: &mcp.ClientCapabilities{},
 		ToolListChangedHandler: func(ctx context.Context, r *mcp.ToolListChangedRequest) {
 			if err := c.refresh(ctx, r.Session); err != nil {

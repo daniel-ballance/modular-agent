@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator, Callable, Sequence
 from copy import deepcopy
 from hashlib import sha256
+from importlib.metadata import version as _package_version
 import json
 import os
 import tempfile
@@ -28,6 +29,7 @@ from ._provider import ModelFailure, ModelInfo, ProviderCatalog, ProviderContext
 from ._subscription_models import SubscriptionModels
 from ._types import AgentError, ErrorCode, Json, JsonObject, ModelRef
 
+_CLIENT_APP = f"modular-agent-py/{_package_version('modular-agent')}"
 _PREFIX = "mcp__agent__"
 _SIGN_IN = "Run `claude auth login` and sign in to a Claude plan."
 
@@ -253,7 +255,7 @@ def _options(
             "name": "Modular Agent",
         },
         stderr=lambda _: None,
-        client_app="modular-agent-py/0.1.0",
+        client_app=_CLIENT_APP,
     )
 
 

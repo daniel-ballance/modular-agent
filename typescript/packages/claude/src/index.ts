@@ -1,7 +1,7 @@
 import { AgentError, defineProvider, type Provider } from "@modular-agent/core";
 import type { ModelEnrollment } from "@modular-agent/subscription";
 import { ClaudeProvider, type ProviderOptions } from "./provider.js";
-import { installedSdkVersion } from "./sdk.js";
+import { installedSdkVersion, packageVersion } from "./sdk.js";
 
 export interface ClaudeOptions {
   models?: readonly ModelEnrollment[];
@@ -14,7 +14,7 @@ export interface ClaudeOptions {
 /** Use the Claude Code plan sign-in. This Provider never signs in. */
 export function claude(options: ClaudeOptions = {}) {
   const impl = new ClaudeProvider({
-    version: "0.1.0", sdkVersion: options.test ? "fixture" : installedSdkVersion(),
+    version: packageVersion, sdkVersion: options.test ? "fixture" : installedSdkVersion(),
     env: process.env, ...options.test, models: options.models, log: options.log,
     checkApiRouting: true, onChange: () => provider.changed(),
   });

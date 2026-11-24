@@ -1,6 +1,6 @@
 {
   "name": "@modular-agent/core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "type": "module",
   "exports": {
@@ -12,7 +12,7 @@
     "@ag-ui/core": "1.0.5",
     "@earendil-works/pi-mcp": "1.5.2",
     "@modular-agent/approval": "*",
-    "@modular-agent/context-compaction": "0.1.0",
+    "@modular-agent/context-compaction": "0.2.0",
     "@modular-agent/env-local": "*",
     "@modular-agent/harness": "*",
     "@modular-agent/history-jsonl": "*",

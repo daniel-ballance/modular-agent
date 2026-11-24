@@ -4,7 +4,7 @@ import test from "node:test";
 import { createAgent, definePlugin, type AssistantMessage } from "@modular-agent/core";
 import { memoryEnvironment, overWire } from "@modular-agent/core/testing";
 import { chatgpt, subscriptionLogins, type OAuth } from "@modular-agent/subscription";
-import { access, body, fixture, loginFile, tokens } from "./fixtures.js";
+import { access, body, expectedUserAgent, fixture, loginFile, tokens } from "./fixtures.js";
 
 const old: OAuth = { type: "oauth", access: "fixture-expired", refresh: "fixture-once", expires: 0 };
 for (const served of [false, true]) {
@@ -18,7 +18,7 @@ for (const served of [false, true]) {
       assert.equal(req.headers.originator, expected);
       assert.equal(req.headers["chatgpt-account-id"], "fixture-account");
       assert.equal(req.headers["openai-beta"], "responses=experimental");
-      assert.equal(req.headers["user-agent"], "modular-agent/0.1.0");
+      assert.equal(req.headers["user-agent"], expectedUserAgent);
       assert.equal(req.headers["content-type"], "application/json");
       assert.equal(req.headers.authorization, `Bearer ${access}`);
       assert.ok(req.headers["session-id"]);

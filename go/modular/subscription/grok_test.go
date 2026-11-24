@@ -190,7 +190,7 @@ func TestGrokProviderPlacements(t *testing.T) {
 				if r.URL.String() != grokModel {
 					return nil, errors.New("unexpected fixture destination")
 				}
-				if r.Method != http.MethodPost || len(r.Header) != 4 || r.Header.Get("Authorization") != "Bearer fixture-access" || r.Header.Get("Accept") != "text/event-stream" || r.Header.Get("Content-Type") != "application/json" || r.Header.Get("User-Agent") != "modular-agent/0.1.0" {
+				if r.Method != http.MethodPost || len(r.Header) != 4 || r.Header.Get("Authorization") != "Bearer fixture-access" || r.Header.Get("Accept") != "text/event-stream" || r.Header.Get("Content-Type") != "application/json" || r.Header.Get("User-Agent") != "modular-agent/"+modular.Version {
 					t.Error("wrong Grok request headers")
 				}
 				var body struct {

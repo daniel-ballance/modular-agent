@@ -11,6 +11,9 @@ import (
 	"time"
 )
 
+// ImplementationVersion is the project release, not the binding version.
+const ImplementationVersion = "0.2.0"
+
 // ErrUnknownOutcome means execution may have had effects but no reliable result.
 var ErrUnknownOutcome = errors.New("call outcome unknown")
 var ErrInputConflict = errors.New("input disposition conflicts with current session state")

@@ -187,7 +187,7 @@ func load(ctx context.Context, h *harness.Harness, project, home string, specs [
 				close(r.exited)
 			}
 		}()
-		init := object{"binding": Binding, "data": DataBinding, "host": object{"name": "modular-agent-go", "version": "1"}, "project": project, "home": state, "config": spec.Config}
+		init := object{"binding": Binding, "data": DataBinding, "host": object{"name": "modular-agent-go", "version": api.ImplementationVersion}, "project": project, "home": state, "config": spec.Config}
 		if offersTraceContext(ctx) {
 			init["traceContext"] = 1
 		}
