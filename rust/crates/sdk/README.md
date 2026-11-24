@@ -207,19 +207,7 @@ The Harness declares `telemetry: 1`, whether export is installed or not. Set `Ag
 | ADR 0030. Resource limits | `AgentBuilder::resource_limits` sets counts. `AgentBuilder::byte_limits` opts into logical JSON byte accounting for retained history, pending input, settlement and held output at session, tenant and agent scope. ACP project compositions share the serving pool. `ma` uses both sets of limits from its operator policy. `resourceReservations` still reports counts only. Logical byte accounting does not allocate physical store space. |
 | ADR 0030. Pending erasure | Native file history puts the registry beside its snapshots. The snapshot-backed HTTP service declares [`pendingErasure: 1`](../../../docs/bindings/history-http.md#pending-erasure-registry-profile-pendingerasure-1). It stores the plans in the durable control record and orders publication, completion and guarded appends under the same lock. The old Rust routes and declaration are removed. On upgrade the service migrates existing private marks, keeping their bookkeeping IDs and completion flags. The client requires the profile to declare erasure, checks the registry before handoff and completes pending copies under the destination lease. Raw readers still bypass the Harness. Back up the registry and records together and verify restore freshness independently. |
 
-## Exact text for docs/sdk/languages.md
-
-Under **Rust**, replace the plugin-program bullet with:
-
-> A plugin program awaits `modular_agent::serve(plugin)` for stdio. For a single-token WebSocket listener use `serve_websocket(plugin, ServeOptions { listen, token_file, tls, projects })` or `serve_websocket_factory(factory, options)`. For named callers use `serve_websocket_named(|caller: AuthenticatedCaller| make_plugin(caller.caller_id), NamedServeOptions { listen, callers, ..Default::default() }).await?`. Each `PluginCaller::new(caller_id, token_file)` can set its own `projects`. The factory gets the authenticated ID on each new connection, not the token.
-
-Add the following bullet under **Rust**:
-
-> With the `agui` feature, `agent.serve_agui(AguiOptions { listen, actors, ..Default::default() }).await?` serves the host reads. Use the thread snapshot's `waitCursor` with `wait-closures?after=…` and, when it offers `runReceipts: 1`, use `run-receipt?runId=…`. These are authenticated HTTP reads, not methods on an answerable `Session`.
-
 ## Findings for the SDK specification
-
-- **[AG-UI, run receipts](../../../docs/bindings/agui.md#run-receipts):** Replace “A crash between release and recording leaves `unknown`.” with “Release means handing the complete gated terminal group to the transport. A crash after that handoff and before its marker commits leaves `unknown`, whether or not the client saw the bytes.” This distinguishes a transport handoff from proof of client receipt.
 
 - **[Placement, plugin environment scope](../../../docs/sdk/placement.md):** Add “A single-token Rust plugin listener serves one operator-assigned host trust scope. For multiple authenticated scopes, use the named-caller factory. Set each environment's exact project roots outside client control. Use independent factories, retained state, credentials and confinement for isolated hosts. A callback invoked by two connections may share captured state only if the operator intentionally provided shared trusted code.” The base conformance plugin also accepts `--serve-plugin --listen ADDR --host-policy FILE`. Give it a JSON list of `{ "tokenFile": "…", "project": "…", "state": "…" }` entries with distinct credentials and nonoverlapping existing project and state directories. Relative paths resolve beside the policy. The host's `home` does not choose retained state.
 
