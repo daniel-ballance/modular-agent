@@ -629,11 +629,17 @@ pub(crate) async fn extension(
                     actors(&api.snapshot(&session.id)?).contains_key(actor),
                     "unknown actor"
                 );
-                require_both(if q.kind == RequestKind::Approval {
+                let required = if q.kind == RequestKind::Approval {
                     "approve"
                 } else {
                     "answer"
-                })?;
+                };
+                if let Err(error) = require_both(required) {
+                    if q.waits_for_approval() {
+                        return Ok(json!({"accepted":false,"reason":"not_open"}));
+                    }
+                    return Err(error);
+                }
             }
             if q.kind == RequestKind::Approval
                 && !session
@@ -644,10 +650,12 @@ pub(crate) async fn extension(
             {
                 return Ok(json!({"accepted":false,"reason":"not_open"}));
             }
+            // The ACP polling route uses the same option IDs as the permission RPC.
+            let decline = p["declined"] == true
+                || (q.kind == RequestKind::Approval && p["value"] == "refuse");
             if q.waits_for_approval() {
                 let route = session.waiting_route()?;
                 let allow = p["value"] == "allow" && p["declined"] != true;
-                let decline = p["declined"] == true;
                 if route.actor != actor || (!allow && !decline) {
                     return Ok(json!({"accepted":false,"reason":"not_open"}));
                 }
@@ -676,7 +684,7 @@ pub(crate) async fn extension(
                     actor,
                     id,
                     p["value"].clone(),
-                    p["declined"] == true,
+                    decline,
                 )
                 .await
             {

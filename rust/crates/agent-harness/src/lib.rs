@@ -2733,10 +2733,17 @@ impl AgentApi for Harness {
         next.entries.push(entry.clone());
         let revoked = matches!(entry.kind.as_str(), "actor.grant" | "actor.left")
             && self.close_revoked_questions(&open.data, &mut next)?;
+        let settled_wait = revoked
+            && next.entries[open.data.entries.len()..]
+                .iter()
+                .any(|e| e.kind == "tool.result");
         self.commit(open, &next)?;
         open.data = next;
         if revoked {
             requests(self)?.decisions_changed();
+            if settled_wait {
+                self.wake_settled_approval(&open.data.id);
+            }
         }
         if let Some(content) = &entry.content {
             match entry.kind.as_str() {
