@@ -1,5 +1,6 @@
 //! A runner for the shared SDK scenarios (docs/sdk/testing.md#the-shared-scenarios).
 pub mod telemetry;
+pub mod waiting;
 use modular_agent::{
     Agent, Answer, Approval, Code, Durability, Error, HistoryServer, ProcessPlugin,
     ServeHistoryOptions, ServicePlugin, Session, SessionOptions, Timing, file_history,
@@ -164,6 +165,18 @@ pub fn scenarios() -> Vec<PathBuf> {
         .map(|e| e.unwrap().path())
         .filter(|p| p.extension().is_some_and(|e| e == "json"))
         .collect();
+    let waiting = std::env::var_os("MA_SDK_WAITING_FIXTURES")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dir.join("../fixtures/waiting-approval"));
+    if waiting.is_dir() {
+        files.extend(
+            std::fs::read_dir(waiting)
+                .unwrap()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|s| s == "json")),
+        );
+    }
     files.sort();
     files
 }
@@ -447,6 +460,20 @@ async fn run_at(
     let mut failures = vec![];
     let mut fail =
         |step: usize, what: String| failures.push(format!("{name} ({label}) step {step}: {what}"));
+
+    if scenario["requires"]["approvalsOutlastTurns"] == true {
+        let result = Command::new("node")
+            .arg(repo().join("rust/scripts/waiting-runner.mjs"))
+            .arg(path)
+            .arg(&run.dir)
+            .arg(crash_agent)
+            .args(run.placement.to_args())
+            .status();
+        if !result.is_ok_and(|s| s.success()) {
+            fail(0, "waiting scenario failed".into());
+        }
+        return failures;
+    }
 
     let _history = match start_history(&scenario, run).await {
         Ok(history) => history,

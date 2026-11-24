@@ -6,6 +6,10 @@ use std::io::Write;
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|v| v == "--waiting") {
+        sdk_scenarios::waiting::worker(&args[2..]).await.unwrap();
+        return;
+    }
     let request = telemetry::Request::from_env();
     let export = telemetry::install(request.as_ref().is_some_and(|r| r.sdk));
     if args.len() == 1 {
