@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/worktime"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 )
 
@@ -40,14 +41,14 @@ func (q *agRequest) waitCipher(s api.Session) (cipher.AEAD, []byte) {
 }
 func (q *agRequest) waitCursor(s api.Session, index int) string {
 	seal, scope := q.waitCipher(s)
-	return base64.RawURLEncoding.EncodeToString(seal.Seal(nil, nil, binary.BigEndian.AppendUint64(nil, uint64(index)), scope))
+	return base64.RawURLEncoding.EncodeToString(seal.Seal(nil, nil, binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, uint64(index)), uint64(worktime.Now().Add(24*time.Hour).Unix())), scope))
 }
 func (q *agRequest) waitAfter(s api.Session, cursor string) (int, error) {
 	seal, scope := q.waitCipher(s)
-	if len(cursor) == base64.RawURLEncoding.EncodedLen(8+seal.Overhead()) {
+	if len(cursor) == base64.RawURLEncoding.EncodedLen(16+seal.Overhead()) {
 		b, err := base64.RawURLEncoding.Strict().DecodeString(cursor)
 		if err == nil {
-			if p, err := seal.Open(nil, nil, b, scope); err == nil && len(p) == 8 {
+			if p, err := seal.Open(nil, nil, b, scope); err == nil && len(p) == 16 && worktime.Now().Unix() < int64(binary.BigEndian.Uint64(p[8:])) {
 				if n := binary.BigEndian.Uint64(p); n <= uint64(len(s.Entries)) {
 					return int(n), nil
 				}
@@ -106,6 +107,7 @@ func (q *agRequest) waitClosures(raw string) error {
 	if http.NewResponseController(q.w).Flush() != nil {
 		return nil
 	}
+	q.boundary("waitFollowing", "")
 	heartbeat := time.NewTicker(10 * time.Second)
 	defer heartbeat.Stop()
 	for {
@@ -114,6 +116,7 @@ func (q *agRequest) waitClosures(raw string) error {
 			if e.Kind != "question.answer" && e.Kind != "tool.result" {
 				continue
 			}
+			q.boundary("beforeWaitDelivery", "")
 			now, err := q.readCut()
 			if err != nil || branchVersion(now.snap) != version || len(now.snap.Entries)-len(cut.snap.Entries) > maxLag {
 				return nil

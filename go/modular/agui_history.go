@@ -358,6 +358,9 @@ func (q *agRequest) snapshotHTTP() error {
 	if watermark.Position != h.position || len(watermark.Entries) != h.entries {
 		return stale
 	}
+	if q.a.persistent {
+		v["runReceipts"] = 1
+	}
 	v["waitCursor"] = q.waitCursor(watermark, h.entries)
 	b, err := q.encode("agui.snapshot", v)
 	if err != nil {

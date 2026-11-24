@@ -711,6 +711,14 @@ func (c *client) Record(ctx context.Context, id string, e api.Entry) (api.Entry,
 	s.mu.Lock()
 	var admission api.Entry
 	if e.Kind == "question.answer" {
+		id, err := api.OperationEntry(ctx, s.data)
+		if err != nil {
+			s.mu.Unlock()
+			return e, err
+		}
+		if id != "" {
+			e.ID = id
+		}
 		a := api.Decode[api.Answer](e.Data)
 		for _, prior := range s.data.LiveEntries() {
 			if prior.Kind == "question.answer" && api.Decode[api.Answer](prior.Data).Request == a.Request {
@@ -1056,6 +1064,25 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (receipt a
 		}
 		event := v.(api.InputEvent)
 		if event.Handled {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			entry, err := api.OperationEntry(ctx, s.data)
+			if err != nil {
+				return api.Receipt{}, err
+			}
+			if entry != "" {
+				if !api.InputWatermarkMatches(ctx, s.data) || !c.authorizedBy(s.data, ctx, "input") {
+					return api.Receipt{}, api.ErrInputConflict
+				}
+				next := s.data
+				next.Entries = slices.Clip(next.Entries)
+				in.Taken = "now"
+				appendEntry(&next, api.Entry{ID: entry, Kind: "input.accepted", Actor: in.Actor, Data: api.JSON(in), Content: in.Content}, "harness", true)
+				appendEntry(&next, api.Entry{Kind: "input.returned", Actor: in.Actor, InputRef: in.ID, Copies: []string{entry}, Wire: api.JSON(map[string]any{"data": map[string]string{"reason": "handled"}})}, "harness", true)
+				if err := s.publishInitialLocked(next, ctx); err != nil {
+					return api.Receipt{}, err
+				}
+			}
 			return api.Receipt{ID: in.ID, When: "command", Command: event.Result}, nil
 		}
 		event.Input.Actor, event.Input.ViaActor, event.Input.ConnectionRights = in.Actor, in.ViaActor, in.ConnectionRights

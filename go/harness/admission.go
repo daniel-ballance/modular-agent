@@ -83,7 +83,11 @@ func (c *client) admitLocked(s *session, in api.Input, contexts ...context.Conte
 	if !slices.ContainsFunc(next.Entries, func(e api.Entry) bool { return e.Kind == "setting" }) {
 		appendEntry(&next, api.Entry{Kind: "setting", Data: api.JSON(next.Settings)}, "harness", true)
 	}
-	appendEntry(&next, api.Entry{Kind: "input.accepted", Job: in.Job, Data: api.JSON(in), Content: in.Content, Actor: attribution, Copies: in.Copies}, "harness", true)
+	id, err := api.OperationEntry(firstContext(contexts), s.data)
+	if err != nil {
+		return api.Receipt{}, err
+	}
+	appendEntry(&next, api.Entry{ID: id, Kind: "input.accepted", Job: in.Job, Data: api.JSON(in), Content: in.Content, Actor: attribution, Copies: in.Copies}, "harness", true)
 	if err := s.publishInitialLocked(next, contexts...); err != nil {
 		return api.Receipt{}, err
 	}

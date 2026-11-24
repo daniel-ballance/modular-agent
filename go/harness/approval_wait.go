@@ -323,7 +323,11 @@ func (h *Harness) decideApprovalLocked(ctx context.Context, s *session, w *api.W
 	sources := []string{w.Request.ID}
 	decision := w.Decision
 	if answer != nil && decision.ID == "" {
-		decision = appendEntry(&next, api.Entry{Kind: "question.answer", Turn: q.Turn, Step: q.Step, Call: q.Call, Actor: answer.Actor, OperatorAdmission: answer.Actor == "", Copies: slices.Clone(sources), Data: api.JSON(answer)}, "harness", true)
+		id, err := api.OperationEntry(ctx, s.data)
+		if err != nil {
+			return err
+		}
+		decision = appendEntry(&next, api.Entry{ID: id, Kind: "question.answer", Turn: q.Turn, Step: q.Step, Call: q.Call, Actor: answer.Actor, OperatorAdmission: answer.Actor == "", Copies: slices.Clone(sources), Data: api.JSON(answer)}, "harness", true)
 	}
 	if decision.ID != "" {
 		sources = append(sources, decision.ID)

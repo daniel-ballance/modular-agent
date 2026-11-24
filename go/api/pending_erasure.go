@@ -2,6 +2,7 @@ package api
 
 import "errors"
 
+var ErrPendingErasure = errors.New("source pending erasure")
 var ErrErasureUnavailable = errors.New("pending erasure unavailable")
 var ErrErasureUnsupported = errors.New("history has no pending erasure coordination")
 var ErrErasureBusy = errors.New("erase refused while a turn, call or job runs")

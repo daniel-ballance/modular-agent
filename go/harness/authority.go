@@ -106,7 +106,7 @@ func (s *session) updateActorsLocked(next api.Session, event api.Entry, writer s
 	appendEntry(&next, event, writer, true)
 	if s.h != nil {
 		c := &client{h: s.h}
-		if v, err := c.Get("questions"); err == nil {
+		if v, err := s.h.API().Get("questions"); err == nil {
 			if questions, ok := v.(interface {
 				RevokedQuestions(api.Session, api.Session, func(api.Session, string, string) bool) []api.Entry
 			}); ok {

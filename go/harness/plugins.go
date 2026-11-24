@@ -27,7 +27,11 @@ type handler struct {
 	order int
 	fn    api.Handler
 }
+
+func (h *Harness) SetReceiptDir(dir string) { h.receiptDir = dir }
+
 type Harness struct {
+	receiptDir           string
 	approvalCoversNested bool
 	maxApprovalWaitMs    int64
 	approvalRoutes       map[string]api.ApprovalRouteCheck

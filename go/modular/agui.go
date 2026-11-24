@@ -26,6 +26,7 @@ import (
 // ServeAGUIOptions selects one project (the serving Agent's) and creation tenant.
 // Use ClientID on each ACPActor. Rotated tokens may share a client only under the same policy.
 type ServeAGUIOptions struct {
+	probe   func(boundary, thread, run string) // test listener only
 	Listen  string
 	Actors  []ACPActor
 	TLS     *TLSOptions
@@ -210,6 +211,11 @@ func (a *Agent) serveAGUI(ctx context.Context, opt ServeAGUIOptions, wrap func(h
 	service, err := wswire.ListenAgent(ctx, opt.Listen, opt.TLS, wswire.ACP, tokens, ws, routes)
 	return service, appError(err, InvalidParams)
 }
+func (q *agRequest) boundary(name, run string) {
+	if q.opt.probe != nil {
+		q.opt.probe(name, q.id, run)
+	}
+}
 func (s *agServer) warn(field string) {
 	if s.opt.Warn != nil {
 		s.opt.Warn(field)
@@ -246,7 +252,7 @@ func (s *agServer) http(w http.ResponseWriter, r *http.Request, p *agPrincipal) 
 		w.Header().Set("Access-Control-Allow-Origin", origins[0])
 		w.Header().Set("Vary", "Origin")
 	}
-	queryRead := r.Method == "GET" && (r.URL.EscapedPath() == "/agui/v1/threads" || strings.HasSuffix(r.URL.EscapedPath(), "/wait-closures"))
+	queryRead := r.Method == "GET" && (r.URL.EscapedPath() == "/agui/v1/threads" || strings.HasSuffix(r.URL.EscapedPath(), "/wait-closures") || strings.HasSuffix(r.URL.EscapedPath(), "/run-receipt"))
 	if !queryRead && r.URL.RawQuery != "" || r.URL.User != nil {
 		agHTTPError(w, invalid)
 		return
@@ -541,6 +547,13 @@ func (q *agRequest) serve(r *http.Request) error {
 		return q.jsonReply(200, "agui.settings", agObject{"approval": value})
 	case r.Method == "GET" && strings.HasPrefix(path, base+"/threads/"):
 		threadPath := strings.TrimPrefix(path, base+"/threads/")
+		if id, read := strings.CutSuffix(threadPath, "/run-receipt"); read {
+			if id == "" || strings.ContainsAny(id, "/%") {
+				return missing
+			}
+			q.id = id
+			return q.runReceipt(r.URL.RawQuery)
+		}
 		if id, read := strings.CutSuffix(threadPath, "/wait-closures"); read {
 			if id == "" || strings.ContainsAny(id, "/%") {
 				return missing
@@ -591,6 +604,7 @@ func (q *agRequest) present() error {
 		s.mu.Lock()
 		s.disconnect()
 		s.presence = nil
+		q.boundary("presenceLost", "")
 		for id, v := range s.delivered {
 			if v.presence == p {
 				delete(s.delivered, id)
