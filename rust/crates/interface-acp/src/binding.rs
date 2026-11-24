@@ -1,4 +1,4 @@
-//! Shared wire vocabulary. The frozen in-process API and stored entries stay unchanged.
+//! ACP projection of the shared wire vocabulary.
 //! Source: docs/bindings/acp.md (modular-agent-acp/1).
 use super::*;
 
@@ -22,10 +22,7 @@ pub(crate) const EXTENSIONS: &[&str] = &[
     "interrupted",
     "declaration",
     "withdraw",
-    "drain",
     "command",
-    "commands",
-    "tool",
     "trust-project",
 ];
 
@@ -140,64 +137,6 @@ pub(crate) fn stop_reason(outcome: &Value) -> &'static str {
         _ => "end_turn",
     }
 }
-fn blocks(parts: &[Part]) -> Vec<Value> {
-    parts
-        .iter()
-        .map(|p| match p {
-            Part::Text { text } => json!({"type":"text","text":text}),
-            Part::ToolCall { call } => {
-                // Shared content uses arguments; input remains a legacy alias.
-                json!({"type":"toolCall","id":call.id,"name":call.name,"arguments":call.input,"input":call.input})
-            }
-            Part::Reasoning { .. } => wire::content(std::slice::from_ref(p)).remove(0),
-            Part::Other { name, data } => json!({"type":name,"data":data}),
-        })
-        .collect()
-}
-fn entry(e: Entry) -> Result<Value> {
-    let kind = match e.kind.as_str() {
-        "model.response" => "response",
-        "tool.result" => "toolResult",
-        "turn.start" => "turnStart",
-        "turn.end" => "turnEnd",
-        other => other,
-    };
-    let mut v = json!({"id":e.id,"parentId":e.parent,"kind":kind,"time":e.at,
-        "turnId":e.scope.turn,"toolCallId":e.scope.call,"actorId":e.scope.actor});
-    let Some(c) = e.content else {
-        v["erased"] = json!(true);
-        return Ok(v);
-    };
-    v["data"] = c.clone();
-    if e.kind == "input" {
-        v["inputId"] = c["inputId"]
-            .as_str()
-            .map_or_else(|| json!(e.id), |id| json!(id));
-    }
-    match e.kind.as_str() {
-        "input" => {
-            v["message"] = json!({"role":"user","content":[{"type":"text","text":c["text"]}]})
-        }
-        "model.response" => {
-            let response: ModelResponse = serde_json::from_value(c)?;
-            v["message"] = json!({"role":"assistant","content":blocks(&response.parts)});
-            wire::omit_provider_data(&mut v["message"]);
-            v["data"] = Value::Null;
-        }
-        "tool.result" => {
-            v["data"]["status"] = match c["status"].as_str() {
-                Some("unknown") => json!("outcomeUnknown"),
-                Some("not_started") => json!("notStarted"),
-                _ => c["status"].clone(),
-            };
-            v["message"] =
-                json!({"role":"toolResult","content":[{"type":"text","text":c["text"]}]});
-        }
-        "turn.end" => v["data"]["outcome"] = outcome(&serde_json::from_value(c)?),
-        _ => (),
-    }
-    Ok(v)
-}
 pub(crate) async fn gate_entry(
     api: &dyn AgentApi,
     scope: &Scope,
@@ -250,44 +189,11 @@ pub(crate) async fn history(session: &Session, p: &Value) -> Result<Value> {
             let q: Question = serde_json::from_value(e.content.clone().unwrap_or_default())?;
             shared["data"]["request"] = shared_question(q);
         }
-        let Some(gated) = gate_entry(session.api.as_ref(), &scope, shared.clone()).await? else {
-            return Err(withheld().into());
-        };
-        let entry = if gated != shared
-            || matches!(
-                e.kind.as_str(),
-                "actor.grant"
-                    | "actor.identity"
-                    | "actor.left"
-                    | "job.start"
-                    | "job.end"
-                    | "job.cleanup_unconfirmed"
-                    | "plugins.changed"
-                    | "turn.start"
-                    | "turn.end"
-                    | "erasure"
-                    | "input.accepted"
-                    | "input.withdrawn"
-                    | "input.returned"
-                    | "model.request"
-                    | "model.response"
-                    | recovery::STEP_AFTER
-                    | "tool.pending"
-                    | "result.feedback"
-                    | "tool.started"
-                    | "request.open"
-                    | "request.answer"
-                    | "request.closed"
-                    | "tenant"
-                    | "limit"
-            )
-            || e.content.is_none()
-        {
-            gated
-        } else {
-            entry(e)?
-        };
-        visible.push(entry);
+        visible.push(
+            gate_entry(session.api.as_ref(), &scope, shared)
+                .await?
+                .ok_or_else(withheld)?,
+        );
     }
     Ok(json!({"entries":visible}))
 }
@@ -936,6 +842,32 @@ pub(crate) async fn extension(
                 )
                 .await?;
             Ok(json!({}))
+        }
+        "command" => {
+            let name = string(p, "name")?;
+            let args = p
+                .get("args")
+                .map(|_| string(p, "args"))
+                .transpose()?
+                .unwrap_or("");
+            let value = api.command(&scope, name, args).await?;
+            if name == "fork"
+                && let Some(id) = value["session"].as_str()
+            {
+                api.close(id).await?;
+            }
+            Ok(value)
+        }
+        "trust-project" => {
+            require(api, &scope, "settings")?;
+            ensure!(p["confirm"] == true, "trust requires explicit confirm=true");
+            let project = Path::new(string(p, "cwd")?);
+            ensure!(
+                project.is_absolute() && project.canonicalize()? == session.project,
+                request_error("forbidden", "can only trust the attached project")
+            );
+            factory.trust(&session.project)?;
+            Ok(json!({"trusted":true,"applies":"new or reopened sessions"}))
         }
         "declaration" => {
             require(api, &scope, "watch")?;

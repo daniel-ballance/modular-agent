@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
             rpc(&cx,"session/set_config_option",json!({"sessionId":id,"configId":"model","value":"gpt-6-luna"})).await?;
             rpc(&cx,"session/set_config_option",json!({"sessionId":id,"configId":"thinking","value":"low"})).await?;
             let response=cx.send_request(PromptRequest::new(id.clone(),vec!["Use the read tool to read proof.txt. Then answer in one short sentence containing the filename and the exact proof token in that file. Do not use any other tool.".into()])).block_task().await;
-            *h.lock().unwrap()=rpc(&cx,"_modular/history",json!({"sessionId":id})).await?;
+            *h.lock().unwrap()=rpc(&cx,"_modular-agent/history",json!({"sessionId":id})).await?;
             cx.send_request(CloseSessionRequest::new(id)).block_task().await?;
             if response?.stop_reason != StopReason::EndTurn { return Err(acp::Error::new(-32000,"live turn did not finish")); }
             Ok(())
@@ -97,8 +97,8 @@ async fn main() -> anyhow::Result<()> {
     let records = original["entries"].as_array().unwrap();
     let calls: Vec<_> = records
         .iter()
-        .filter(|e| e["kind"] == "tool.call")
-        .map(|e| e["content"].clone())
+        .filter(|e| e["kind"] == "toolStarted")
+        .map(|e| e["data"]["call"].clone())
         .collect();
     anyhow::ensure!(
         !calls.is_empty() && calls.iter().all(|c| c["name"] == "read"),
@@ -160,8 +160,11 @@ async fn main() -> anyhow::Result<()> {
         replay_text.contains("cedar-lantern-73"),
         "new process did not replay the answer"
     );
-    let usage = agent_api::session_usage(&serde_json::from_value(original.clone())?)?;
-    let evidence = json!({"milestone":4,"timestamp_ms":agent_api::now(),"model":"gpt-6-luna","provider":"OpenAI Responses API","provider_keeps_state":false,"runtime":"durable","interface":"ACP v1 stdio","client_library":"agent-client-protocol 5.3.0","model_requests":records.iter().filter(|e|e["kind"] == "model.request").count(),"usage":usage,"tool_calls":calls,"permission_requests":*permissions.lock().unwrap(),"answer":text,"new_agent_process_replayed_and_listed_session":true,"new_agent_process_model_requests":0,"session":*saved.lock().unwrap()});
+    let usage = &records
+        .iter()
+        .find(|e| e["kind"] == "turnEnd")
+        .ok_or_else(|| anyhow::anyhow!("missing turnEnd"))?["data"]["usage"];
+    let evidence = json!({"milestone":4,"timestamp_ms":agent_api::now(),"model":"gpt-6-luna","provider":"OpenAI Responses API","provider_keeps_state":false,"runtime":"durable","interface":"ACP v1 stdio","client_library":"agent-client-protocol 5.3.0","model_requests":records.iter().filter(|e|e["kind"] == "modelRequest").count(),"usage":usage,"tool_calls":calls,"permission_requests":*permissions.lock().unwrap(),"answer":text,"new_agent_process_replayed_and_listed_session":true,"new_agent_process_model_requests":0,"session":*saved.lock().unwrap()});
     std::fs::create_dir_all("evidence")?;
     std::fs::write(
         "evidence/m4-real-run.json",

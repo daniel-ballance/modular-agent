@@ -308,10 +308,7 @@ impl State {
                     | "session/load"
                     | "session/resume"
                     | "session/close"
-                    | "_modular/submit"
-                    | "_modular/answer"
                     | "_modular-agent/input"
-                    | "_modular-agent/requests/answer"
                     | "_modular-agent/answer"
             ) {
             telemetry::extract(&request.params["_meta"]).unwrap_or_default()
@@ -454,7 +451,7 @@ impl State {
         cx: ConnectionTo<acp::Client>,
     ) -> Result<Value> {
         let p = request.params;
-        let mut method = request.method;
+        let method = request.method;
         if method == "initialize" {
             let _: InitializeRequest = serde_json::from_value(p.clone())?;
             if self.client.lock().unwrap().is_some() {
@@ -517,57 +514,26 @@ impl State {
             return Err(request_error("not_initialized", "initialize first").into());
         }
         if let Some(name) = method.strip_prefix("_modular-agent/") {
-            if [
-                "history",
-                "input",
-                "requests",
-                "actors",
-                "join",
-                "leave",
-                "release",
-                "proposals",
-                "withdraw",
-                "limit",
-                "tenant",
-                "answer",
-                "fork",
-                "move",
-                "erase",
-                "jobs",
-                "cancel-job",
-                "declaration",
-            ]
-            .contains(&name)
-            {
-                if name == "move" && p["rewind"] == true {
-                    // ACP may compose a different Harness for each session.
-                    // Serialize project opens with rewind across those Harnesses.
-                    let _setup = self.routes.setup.lock().await;
-                    let s = self.session(&p)?;
-                    require(s.api.as_ref(), &actor_scope(&s.id), "settings")?;
-                    if self.project_in_use(&s.project, &s.id) {
-                        return Err(
-                            request_error("conflict", "cannot rewind a shared project").into()
-                        );
-                    }
-                    let result =
-                        binding::extension(self.factory.as_ref(), s.clone(), name, &p).await;
-                    if s.api.rewind_pending(&s.id).unwrap_or(false) {
-                        self.routes
-                            .rewind_blocks
-                            .lock()
-                            .unwrap()
-                            .insert(s.project.clone(), s.id.clone());
-                    }
-                    return result;
+            if name == "move" && p["rewind"] == true {
+                // Serialize project opens with rewind across session-local Harnesses.
+                let _setup = self.routes.setup.lock().await;
+                let session = self.session(&p)?;
+                require(session.api.as_ref(), &actor_scope(&session.id), "settings")?;
+                if self.project_in_use(&session.project, &session.id) {
+                    return Err(request_error("conflict", "cannot rewind a shared project").into());
                 }
-                return binding::extension(self.factory.as_ref(), self.session(&p)?, name, &p)
-                    .await;
+                let result =
+                    binding::extension(self.factory.as_ref(), session.clone(), name, &p).await;
+                if session.api.rewind_pending(&session.id).unwrap_or(false) {
+                    self.routes
+                        .rewind_blocks
+                        .lock()
+                        .unwrap()
+                        .insert(session.project.clone(), session.id.clone());
+                }
+                return result;
             }
-            // Build-specific extras retain their old shapes, now in the binding namespace.
-            // Like every binding extension, they are scoped to an open session.
-            self.session(&p)?;
-            method = format!("_modular/{}", name.replace('-', "_"));
+            return binding::extension(self.factory.as_ref(), self.session(&p)?, name, &p).await;
         }
         match method.as_str() {
             "session/new" | "session/load" | "session/resume" => {
@@ -647,7 +613,6 @@ impl State {
                     .join("\n");
                 let key = p["_meta"]["modular-agent"]["key"]
                     .as_str()
-                    .or_else(|| p["_meta"]["modular-agent-rs/inputKey"].as_str())
                     .map(str::to_string);
                 session.prompt(&text, key).await
             }
@@ -742,162 +707,6 @@ impl State {
                 Ok(
                     json!({"configOptions":config,"_meta":{"modular-agent":{"declaration":declaration}}}),
                 )
-            }
-            "_modular/trust_project" => {
-                ensure!(p["confirm"] == true, "trust requires explicit confirm=true");
-                let project = Path::new(string(&p, "cwd")?);
-                ensure!(project.is_absolute(), "cwd must be absolute");
-                ensure!(
-                    self.factory.serves_project(&project.canonicalize()?)
-                        && self.principal.allows_project(&project.canonicalize()?)
-                        && self.principal.rights.has("settings"),
-                    request_error("forbidden", "cannot change project trust")
-                );
-                self.factory.trust(project)?;
-                Ok(json!({"trusted":true,"applies":"new or reopened sessions"}))
-            }
-            method if method.starts_with("_modular/") => {
-                let session = self.session(&p)?;
-                let scope = actor_scope(&session.id);
-                match method {
-                    "_modular/declaration" => session.api.declaration(),
-                    "_modular/history" => {
-                        let mut view = session.api.history_view(&session.id).await?;
-                        if let Some(after) = p["after"].as_str() {
-                            let entries = view["entries"]
-                                .as_array_mut()
-                                .ok_or_else(|| anyhow!("history unavailable"))?;
-                            let i = entries
-                                .iter()
-                                .position(|e| e["id"] == after)
-                                .ok_or_else(|| anyhow!("unknown history point"))?;
-                            entries.drain(..=i);
-                        }
-                        Ok(view)
-                    }
-                    "_modular/submit" => {
-                        let timing: Timing = serde_json::from_value(
-                            wire::optional(&p, "timing")
-                                .cloned()
-                                .unwrap_or(json!("after")),
-                        )?;
-                        Ok(json!(
-                            session
-                                .api
-                                .submit(
-                                    &session.id,
-                                    connection_actor().as_str(),
-                                    string(&p, "text")?,
-                                    timing,
-                                    p["key"].as_str().map(str::to_string)
-                                )
-                                .await?
-                        ))
-                    }
-                    "_modular/withdraw" => Ok(json!(
-                        session
-                            .api
-                            .withdraw(&session.id, string(&p, "input")?)
-                            .await?
-                    )),
-                    "_modular/drain" => session.drain().await,
-                    "_modular/commands" => Ok(json!(session.api.commands())),
-                    "_modular/command" => {
-                        let name = string(&p, "name")?;
-                        let value = session
-                            .api
-                            .command(&scope, name, p["args"].as_str().unwrap_or(""))
-                            .await?;
-                        if name == "fork"
-                            && let Some(id) = value["session"].as_str()
-                        {
-                            session.api.close(id).await?;
-                        }
-                        Ok(value)
-                    }
-                    "_modular/move" => {
-                        ensure!(
-                            p["rewind"] != true,
-                            "rewinding outside state is not supported"
-                        );
-                        session
-                            .api
-                            .move_position(&scope, p["position"].as_str().map(str::to_string))?;
-                        Ok(json!({"moved":true}))
-                    }
-                    "_modular/fork" => {
-                        let _guard = session
-                            .gate
-                            .try_lock()
-                            .map_err(|_| anyhow!("session busy"))?;
-                        let fork = session
-                            .api
-                            .fork(&scope, p["position"].as_str().map(str::to_string))?;
-                        session.api.close(&fork).await?;
-                        Ok(json!({"sessionId":fork,"openWith":"session/resume"}))
-                    }
-                    "_modular/erase" => Ok(json!(
-                        session
-                            .api
-                            .erase(&scope, serde_json::from_value(p["entries"].clone())?)
-                            .await?
-                    )),
-                    "_modular/questions" => Ok(json!(requests(session.api.as_ref())?.visible(
-                        session.api.as_ref(),
-                        &session.id,
-                        connection_actor().as_str()
-                    )?)),
-                    "_modular/answer" => {
-                        let id = string(&p, "request")?;
-                        let questions = requests(session.api.as_ref())?.visible(
-                            session.api.as_ref(),
-                            &session.id,
-                            connection_actor().as_str(),
-                        )?;
-                        ensure!(
-                            !questions
-                                .iter()
-                                .any(|q| q.id == id && q.kind == RequestKind::Secret),
-                            "ACP does not accept secret answers"
-                        );
-                        requests(session.api.as_ref())?
-                            .answer(
-                                session.api.clone(),
-                                &session.id,
-                                connection_actor().as_str(),
-                                id,
-                                p["value"].clone(),
-                                p["declined"] == true,
-                            )
-                            .await?;
-                        Ok(json!({"accepted":true}))
-                    }
-                    "_modular/jobs" => Ok(json!(jobs(&session.api.snapshot(&session.id)?)?)),
-                    "_modular/cancel_job" => Ok(json!(
-                        job_service(session.api.as_ref())?
-                            .cancel(
-                                session.api.clone(),
-                                &session.id,
-                                connection_actor().as_str(),
-                                string(&p, "job")?
-                            )
-                            .await?
-                    )),
-                    "_modular/tool" => {
-                        let _guard = session
-                            .gate
-                            .try_lock()
-                            .map_err(|_| anyhow!("session busy"))?;
-                        let runtime: Arc<dyn Runtime> =
-                            capability(session.api.as_ref(), "runtime")?;
-                        let mut call: ToolCall = serde_json::from_value(p["call"].clone())?;
-                        call.started_by = "ui".into();
-                        let result = runtime.tool(session.api.clone(), scope, call).await?;
-                        session.flush().await?;
-                        Ok(json!(result))
-                    }
-                    _ => bail!("method not found"),
-                }
             }
             _ => bail!("method not found"),
         }

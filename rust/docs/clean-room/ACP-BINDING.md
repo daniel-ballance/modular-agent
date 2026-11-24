@@ -32,7 +32,7 @@ The host must select `conformance/echo` through the model configuration option. 
 - Message, readable reasoning, tool-call and final-status updates pass the output gate, as do configuration updates, history, replay and RPC responses. Encrypted reasoning is not rendered.
 - The required methods are `_modular-agent/history`, `_modular-agent/input`, `_modular-agent/requests` and `_modular-agent/answer`.
 - Optional bound methods are `_modular-agent/fork`, `_modular-agent/move`, `_modular-agent/erase`, `_modular-agent/jobs` and `_modular-agent/cancel-job`.
-- Extra build-specific methods in the same namespace are declaration, withdraw, drain, command, commands, tool and trust-project. They require sessionId. Their old shapes are retained; trust-project also requires cwd and confirm=true. MILESTONE-4.md describes these earlier shapes. Legacy `_modular/` routes and the old prompt-key spelling are accepted but are not advertised.
+- Build-specific methods in the same namespace include `command` and `trust-project`. Both take an attached sessionId. Trust requires settings authority, the session's cwd and confirm=true.
 
 The ACP Interface owns a session-local input driver. It acknowledges extension input before running it and serializes subsequent turns through the existing Harness/Runtime API. Job reports and later answers can wake the same driver. Close cancels active work, awaits the driver and event pump, cancels jobs and closes session-local MCP servers. No agent service process is added.
 

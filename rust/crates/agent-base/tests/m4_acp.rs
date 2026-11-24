@@ -16,14 +16,13 @@ async fn acp_official_client_lifecycle_configuration_replay_and_keyed_input() {
   let prompt=json!({"sessionId":id,"prompt":[{"type":"text","text":"hi"}],"_meta":{"modular-agent":{"key":"one"}}});
   let _:PromptResponse=serde_json::from_value(rpc(&cx,"session/prompt",prompt.clone()).await?).unwrap();
   let duplicate=rpc(&cx,"session/prompt",prompt).await?; assert_eq!(duplicate["_meta"]["modular-agent"]["duplicate"],true);
-  let history=rpc(&cx,"_modular/history",json!({"sessionId":id})).await?;
-  assert_eq!(history["entries"].as_array().unwrap().iter().filter(|e|e["kind"] == "model.response").count(),1);
+  let history=rpc(&cx,"_modular-agent/history",json!({"sessionId":id})).await?;
+  assert_eq!(history["entries"].as_array().unwrap().iter().filter(|e|e["kind"] == "response").count(),1);
   let point=history["entries"].as_array().unwrap().last().unwrap()["id"].clone();
-  let tail=rpc(&cx,"_modular/history",json!({"sessionId":id,"after":point})).await?; assert!(tail["entries"].as_array().unwrap().is_empty());
-  let shared=rpc(&cx,"_modular-agent/history",json!({"sessionId":id})).await?;
-  assert!(shared["entries"].as_array().unwrap().iter().any(|e|e["kind"] == "actorJoined" && e["data"]["actor"]["kind"] == "host" && e["data"]["actor"]["id"] == agent_api::ACP_HOST_ACTOR));
+  let tail=rpc(&cx,"_modular-agent/history",json!({"sessionId":id,"after":point})).await?; assert!(tail["entries"].as_array().unwrap().is_empty());
+  assert!(history["entries"].as_array().unwrap().iter().any(|e|e["kind"] == "actorJoined" && e["data"]["actor"]["kind"] == "host" && e["data"]["actor"]["id"] == agent_api::ACP_HOST_ACTOR));
   let list=cx.send_request(ListSessionsRequest::new()).block_task().await?; assert_eq!(list.sessions.len(),1);
-  let declaration=rpc(&cx,"_modular/declaration",json!({"sessionId":id})).await?; assert_eq!(declaration["provider_state"],false); assert_eq!(declaration["rewinding"],true);
+  let declaration=rpc(&cx,"_modular-agent/declaration",json!({"sessionId":id})).await?; assert_eq!(declaration["keepsStateAtProvider"],false); assert_eq!(declaration["rewinding"],true);
   let count=events.lock().unwrap().len();
   cx.send_request(CloseSessionRequest::new(id.clone())).block_task().await?;
   cx.send_request(ResumeSessionRequest::new(id.clone(),cwd.clone())).block_task().await?;
@@ -53,17 +52,17 @@ async fn acp_permissions_and_form_elicitation_are_recorded_answers() {
         cx.send_request(PromptRequest::new(id.clone(), vec!["work".into()]))
             .block_task()
             .await?;
-        let history = rpc(&cx, "_modular/history", json!({"sessionId":id})).await?;
+        let history = rpc(&cx, "_modular-agent/history", json!({"sessionId":id})).await?;
         let entries = history["entries"].as_array().unwrap();
         assert!(
             entries
                 .iter()
-                .any(|e| e["kind"] == "request.answer" && e["content"]["value"] == "allow")
+                .any(|e| e["kind"] == "inputAnswer" && e["data"]["value"] == "allow")
         );
         assert!(
             entries
                 .iter()
-                .any(|e| e["kind"] == "request.answer" && e["content"]["value"] == "blue")
+                .any(|e| e["kind"] == "inputAnswer" && e["data"]["value"] == "blue")
         );
         assert_eq!(std::fs::read_to_string(cwd.join("receipt")).unwrap(), "ok");
         cx.send_request(CloseSessionRequest::new(id))
@@ -114,13 +113,13 @@ async fn acp_permission_refusal_and_missing_forms_use_extension_answers() {
         assert_eq!(answer["accepted"], true);
         pending.await?;
         assert!(!cwd.join("denied").exists());
-        let history = rpc(&cx, "_modular/history", json!({"sessionId":id})).await?;
+        let history = rpc(&cx, "_modular-agent/history", json!({"sessionId":id})).await?;
         assert!(
             history["entries"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|e| e["kind"] == "tool.result" && e["content"]["status"] == "refused")
+                .any(|e| e["kind"] == "toolResult" && e["data"]["status"] == "refused")
         );
         cx.send_request(CloseSessionRequest::new(id))
             .block_task()
