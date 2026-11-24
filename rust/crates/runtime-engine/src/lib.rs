@@ -875,7 +875,10 @@ impl Engine {
                 step: entry.scope.step.clone(),
                 ..scope
             };
-            let result = self.execute(api, &execution, &scope, call, &entry).await?;
+            let step = telemetry::Operation::internal("modular_agent.step", &scope);
+            let result = step
+                .run(self.execute(api, &execution, &scope, call, &entry))
+                .await?;
             if self
                 .publish_tool_result(api, &scope, &entry, result)
                 .await?

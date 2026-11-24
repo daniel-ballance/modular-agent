@@ -2,6 +2,8 @@
 //! delivery is deliberately kept on the open session, never in history.
 use super::*;
 
+pub type Audience = Arc<dyn Fn(&SessionData, &str) -> Option<Authority> + Send + Sync>;
+pub(super) type Audiences = BTreeMap<(String, String), Vec<Audience>>;
 pub(super) type Views = BTreeMap<(String, String), (String, ApprovalRoute)>;
 
 pub(super) fn add_sources(data: &SessionData, scope: &Scope, draft: &mut Draft) {
@@ -55,6 +57,20 @@ fn binding(data: &SessionData, e: &Entry, q: &Question) -> bool {
     }) else {
         return false;
     };
+    if q.timeout_ms
+        .and_then(|ms| e.at.checked_add(ms))
+        .is_none_or(|at| Some(at) != q.extra["deadlineAt"].as_u64())
+        || q.extra["whenTimeLimit"] != "decline"
+        || q.answerable
+        || q.scope.turn != e.scope.turn
+        || q.scope.step != e.scope.step
+        || (data.origin.is_some()
+            && e.copies
+                .iter()
+                .any(|source| !data.entries.iter().any(|r| &r.id == source)))
+    {
+        return false;
+    }
     let offered = branch.iter().any(|r| {
         r.kind == "model.request"
             && r.scope.turn == e.scope.turn
@@ -128,7 +144,6 @@ fn settlement(
         ),
     };
     let call = wire::parse_call(&q.extra["approvalCall"])?;
-    telemetry::disposition(&e.scope, &call, &status);
     push(
         next,
         &e.scope,
@@ -149,6 +164,40 @@ impl Harness {
             .get(session)
             .map(|s| s.generation.clone())
             .ok_or_else(|| anyhow!("session is closed"))
+    }
+    pub fn register_approval_audience(&self, binding: String, principal: String, check: Audience) {
+        self.approval_audiences
+            .write()
+            .unwrap()
+            .entry((binding, principal))
+            .or_default()
+            .push(check);
+    }
+    pub fn inherit_approval_audiences(&self, other: &Harness) {
+        *self.approval_audiences.write().unwrap() =
+            other.approval_audiences.read().unwrap().clone();
+    }
+    fn route_ceiling(
+        &self,
+        data: &SessionData,
+        binding: &str,
+        principal: &str,
+        actor: &str,
+    ) -> Authority {
+        if binding == "sdk" && principal == "user" {
+            return Authority::full();
+        }
+        self.approval_audiences
+            .read()
+            .unwrap()
+            .get(&(binding.to_owned(), principal.to_owned()))
+            .and_then(|checks| {
+                checks
+                    .iter()
+                    .filter_map(|check| check(data, actor))
+                    .reduce(|a, b| a.intersect(&b))
+            })
+            .unwrap_or_default()
     }
     pub fn configure_approval_wait(&self, max: u64) {
         self.approval_maximum.set(max).expect("configured once");
@@ -192,6 +241,36 @@ impl Harness {
             return Ok(Authority::default());
         }
         Ok(a.intersect(&p))
+    }
+    pub(super) fn invalidate_ineligible_approval_views(
+        &self,
+        open: &mut OpenSession,
+    ) -> Result<()> {
+        let views = std::mem::take(&mut open.approval_views);
+        for (key, (id, route)) in views {
+            let Some(q) = open
+                .data
+                .entries
+                .iter()
+                .find(|e| e.id == id)
+                .and_then(|e| e.content.clone())
+                .and_then(|v| serde_json::from_value::<Question>(v).ok())
+            else {
+                continue;
+            };
+            if !route.live.is_cancelled()
+                && eligible(&self.approval_rights(
+                    &open.data,
+                    &q,
+                    &route.actor,
+                    &route.principal,
+                    &route.ceiling,
+                )?)
+            {
+                open.approval_views.insert(key, (id, route));
+            }
+        }
+        Ok(())
     }
     fn has_approver(&self, data: &SessionData, q: &Question) -> bool {
         std::iter::once("user".to_string())
@@ -277,6 +356,17 @@ impl Harness {
     }
     fn commit_approval(&self, open: &mut OpenSession, next: SessionData) -> Result<()> {
         let from = open.data.entries.len();
+        let operation = next.entries[from..]
+            .iter()
+            .find(|e| {
+                matches!(
+                    e.kind.as_str(),
+                    "request.answer" | "request.closed" | "tool.result"
+                )
+            })
+            .filter(|_| !telemetry::current().span().is_recording())
+            .map(|e| Operation::internal("modular_agent.question.answer", &e.scope));
+        let _span = operation.as_ref().map(Operation::enter);
         self.commit(open, &next)?;
         open.data = next;
         for e in &open.data.entries[from..] {
@@ -284,6 +374,22 @@ impl Harness {
             let mut events = self.pending_events.lock().unwrap();
             events.push(Event::new(&e.scope, "history.entry", json!(e)));
             if e.kind == "tool.result" {
+                if let Some(result) = e
+                    .content
+                    .clone()
+                    .and_then(|v| serde_json::from_value::<ToolResult>(v).ok())
+                    && matches!(result.status, ToolStatus::NotStarted | ToolStatus::Refused)
+                    && let Some(call) = open
+                        .data
+                        .entries
+                        .iter()
+                        .find(|r| marked(r) && r.scope.call == e.scope.call)
+                        .and_then(|r| {
+                            wire::parse_call(&r.content.as_ref()?["extra"]["approvalCall"]).ok()
+                        })
+                {
+                    telemetry::disposition(&e.scope, &call, &result.status);
+                }
                 events.push(Event::new(
                     &e.scope,
                     "tool.ended",
@@ -393,24 +499,22 @@ impl Harness {
                 .iter()
                 .find(|r| r.kind == "turn.end" && r.scope.turn == e.scope.turn);
             let decision = decision(&branch, &q.id);
-            let reason = if self.max_approval_wait_ms().is_none() {
+            let reason = if self.max_approval_wait_ms().is_none()
+                || ended.is_some_and(|r| {
+                    r.content
+                        .as_ref()
+                        .is_none_or(|v| v["outcome"] != "completed")
+                }) {
                 Some(("noLongerAnswerable", ToolStatus::NotStarted))
-            } else if ended.is_some_and(|r| {
-                r.content
-                    .as_ref()
-                    .is_none_or(|v| v["outcome"] != "completed")
-            }) {
-                Some(("turnEnded", ToolStatus::NotStarted))
             } else if now() >= deadline {
                 Some(("timeLimit", ToolStatus::NotStarted))
             } else if next.settings["approvalWait"] != "untilDeadline"
                 || q.timeout_ms > self.max_approval_wait_ms()
+                || decision.is_some_and(|a| {
+                    a.kind == "request.closed"
+                        || a.content.as_ref().is_none_or(|v| v["declined"] == true)
+                })
             {
-                Some(("refused", ToolStatus::Refused))
-            } else if decision.is_some_and(|a| {
-                a.kind == "request.closed"
-                    || a.content.as_ref().is_none_or(|v| v["declined"] == true)
-            }) {
                 Some(("refused", ToolStatus::Refused))
             } else if decision.is_none() && !self.has_approver(&next, &q) {
                 Some(("noLongerAnswerable", ToolStatus::Refused))
@@ -432,6 +536,15 @@ impl Harness {
         }
         if open.data.entries.len() != next.entries.len() {
             self.commit_approval(open, next)?;
+            // A settings change or a poll can observe expiry before its timer.
+            // In all cases wake the driver from the committed settlement.
+            let h = self.me.clone();
+            let id = open.data.id.clone();
+            tokio::spawn(async move {
+                if let Some(h) = h.upgrade() {
+                    let _ = h.interface_work_ready(&id).await;
+                }
+            });
             return Ok(true);
         }
         Ok(false)
@@ -440,7 +553,7 @@ impl Harness {
         let projection = q.approval_projection();
         let (recipient, value) = match binding {
             "sdk" => (actor, json!({"question":projection})),
-            "acp" => (
+            b if b.starts_with("acp:") => (
                 "interface.acp",
                 json!({"method":"_modular-agent/requests","result":{"requests":[projection]}}),
             ),
@@ -492,12 +605,16 @@ impl Harness {
         self.refresh_open_erasure(open)?;
         self.reconcile_open_approvals(open, false)?;
         let key = (route.instance.clone(), id.to_owned());
+        open.approval_views
+            .retain(|_, (_, r)| !r.live.is_cancelled());
+        let permitted =
+            self.route_ceiling(&open.data, &route.binding, &route.principal, &route.actor);
         let rights = self.approval_rights(
             &open.data,
             &q,
             &route.actor,
             &route.principal,
-            &route.ceiling,
+            &route.ceiling.intersect(&permitted),
         )?;
         if !unchanged
             || !eligible(&rights)
@@ -580,7 +697,29 @@ impl Harness {
             .iter()
             .find(|e| marked(e) && e.scope.call == scope.call)
         else {
-            return Ok(None);
+            // A continuation with an orphan gate checkpoint must not become
+            // an ordinary fresh call just because its request body is gone.
+            let orphan = branch.iter().any(|p| {
+                p.kind == "tool.pending"
+                    && p.scope.call == scope.call
+                    && p.scope.turn != scope.turn
+                    && p.content.as_ref().is_none_or(|v| {
+                        v["toolStartedId"].is_null()
+                            && v["requestIds"].as_array().is_none_or(|ids| {
+                                ids.is_empty()
+                                    || ids.iter().any(|id| {
+                                        !branch.iter().any(|q| {
+                                            q.kind == "request.open"
+                                                && q.scope.call == scope.call
+                                                && q.content
+                                                    .as_ref()
+                                                    .is_some_and(|b| b["id"] == *id)
+                                        })
+                                    })
+                            })
+                    })
+            });
+            return Ok(orphan.then_some(ToolStatus::Refused));
         };
         let denied = Some(ToolStatus::Refused);
         let q: Question = serde_json::from_value(e.content.clone().unwrap())?;
@@ -614,6 +753,31 @@ impl Harness {
             || body["declined"] != false
             || body["actor"] != a.scope.actor
             || proof["requestEntryId"] != e.id
+            || data
+                .entries
+                .iter()
+                .skip_while(|r| r.id != a.id)
+                .skip(1)
+                .any(|r| {
+                    let Some(v) = &r.content else {
+                        return authority_record(r);
+                    };
+                    let who = if r.kind == "actor.left" {
+                        &v["actorId"]
+                    } else {
+                        &v["actor"]
+                    };
+                    let concerns_actor = who == principal || who == &a.scope.actor;
+                    (r.kind == "actor.left" && concerns_actor)
+                        || (r.kind == "actor.grant"
+                            && concerns_actor
+                            && serde_json::from_value::<Authority>(v["authority"].clone())
+                                .map_or(true, |g| !eligible(&g)))
+                        || (r.kind == "limit"
+                            && !v["rights"].is_null()
+                            && serde_json::from_value::<Authority>(v["rights"].clone())
+                                .map_or(true, |g| !eligible(&g)))
+                })
             || terminal(&data, e)
             || self.max_approval_wait_ms().is_none()
             || q.timeout_ms > self.max_approval_wait_ms()
@@ -630,7 +794,13 @@ impl Harness {
                         .is_some_and(|v| v["continuesTurnId"].as_str() == e.scope.turn.as_deref())
             })
             || !same_json(&wire::call(call, scope), &q.extra["approvalCall"])
-            || !eligible(&self.approval_rights(&data, &q, &a.scope.actor, principal, &ceiling)?)
+            || !eligible(&self.approval_rights(
+                &data,
+                &q,
+                &a.scope.actor,
+                principal,
+                &ceiling.intersect(&self.route_ceiling(&data, route, principal, &a.scope.actor)),
+            )?)
         {
             return Ok(denied);
         }

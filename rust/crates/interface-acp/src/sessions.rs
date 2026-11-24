@@ -3,6 +3,7 @@ use crate::events::Message;
 use crate::routes::Fanout;
 use tokio::sync::{mpsc, oneshot};
 pub(crate) struct SharedSession {
+    borrowed_writer: bool,
     pub id: String,
     pub project: PathBuf,
     pub api: Api,
@@ -83,7 +84,9 @@ impl Session {
         let actor = connection_actor();
         Ok(ApprovalRoute {
             instance: self.route.clone(),
-            binding: "acp".into(),
+            binding: PRINCIPAL
+                .try_with(|p| p.approval_route())
+                .map_err(|_| anyhow!("no ACP principal"))?,
             actor: actor.clone(),
             principal: actor.clone(),
             ceiling: self.api.authority(&self.id, &actor)?,
@@ -194,7 +197,7 @@ impl Session {
         }
         self.detach_route().await;
         let open = self.api.snapshot(&self.id).is_ok();
-        if open && self.api.is_running(&self.id) {
+        if open && !self.borrowed_writer && self.api.is_running(&self.id) {
             self.cancel().await?;
         }
         let driver = self.driver.lock().unwrap().take();
@@ -202,7 +205,7 @@ impl Session {
             let _ = driver.await;
         }
         let _guard = self.gate.lock().await;
-        let result = if open {
+        let result = if open && !self.borrowed_writer {
             self.api.close(&self.id).await
         } else {
             Ok(())
@@ -732,7 +735,12 @@ impl State {
                 }
             }
         };
+        // The embedded SDK can already own this writer for an AG-UI thread.
+        // Attach only a route. Do not recover, cancel or release its writer.
+        let borrowed_writer =
+            reopening && !self.factory.owns_session_agent() && api.snapshot(&id).is_ok();
         let (session, rx) = Session::new(Arc::new(SharedSession {
+            borrowed_writer,
             id: id.clone(),
             project: project.clone(),
             api: api.clone(),
@@ -759,7 +767,10 @@ impl State {
                         .unwrap_or(json!([])),
                 )
                 .await?;
-            let handed_back = if reopening {
+            let handed_back = if borrowed_writer {
+                join_host(api.as_ref(), &id)?;
+                vec![]
+            } else if reopening {
                 let inputs = api.install_recovery(&id).await?;
                 self.routes.rewind_blocks.lock().unwrap().remove(&project);
                 inputs
@@ -778,7 +789,7 @@ impl State {
             *session.driver.lock().unwrap() = Some(tokio::spawn(with_principal(
                 self.principal.clone(),
                 self.ceiling.clone(),
-                session.clone().drive(reopening),
+                session.clone().drive(reopening && !borrowed_writer),
             )));
             self.routes
                 .sessions
@@ -789,7 +800,7 @@ impl State {
         } else {
             // Release the writer even if an error after installation stranded an
             // interrupted turn. No turn driver was started in this case.
-            if api.is_running(&id) {
+            if !borrowed_writer && api.is_running(&id) {
                 let _ = api.cancel(&id).await;
                 let _ = api.run_recovery(&id).await;
             }

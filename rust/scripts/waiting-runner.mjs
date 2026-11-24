@@ -8,7 +8,10 @@ import { createInterface } from 'node:readline';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 const [path, dir, binary, placement, ...command] = process.argv.slice(2);
-const { waitingStep, waitingRecords, skipReason } = await import(pathToFileURL(resolve(dirname(path), '../../waiting.mjs')));
+const reference=process.env.MA_SDK_WAITING_FIXTURES ? resolve(process.env.MA_SDK_WAITING_FIXTURES,'../../waiting.mjs') : resolve(dirname(path),'../../waiting.mjs');
+const { waitingStep, waitingRecords, skipReason } = await import(pathToFileURL(existsSync(reference)?reference:resolve('conformance/sdk/waiting.mjs')));
+const trace=process.env.MODULAR_AGENT_TELEMETRY_RUN && JSON.parse(readFileSync(process.env.MODULAR_AGENT_TELEMETRY_RUN));
+let declaration, parked;
 const spec = JSON.parse(readFileSync(path));
 const state = {}, groups = [];
 let worker, session, clock = 1_800_000_000_000;
@@ -60,7 +63,7 @@ async function run() {
   await stop('close');
   if(reason){console.error(`${spec.scenario} ${placement}: ${reason}`);return;}
   try {
-    const actual=await start('init');session=actual.id;
+    const actual=await start('init');session=actual.id;declaration=actual.declaration;
     for(const [k,v] of Object.entries(spec.expectDeclaration??{})) assert.equal(actual.declaration[k]??false,v);
   } catch(e) {
     if(e.code!==spec.expectCreateError?.code || (spec.expectCreateError?.messageContains && !e.message.includes(spec.expectCreateError.messageContains))) throw e;
@@ -69,7 +72,7 @@ async function run() {
   assert.equal(spec.expectCreateError,undefined);
   for(const step of spec.steps) {
     const expect=step.expect??{};let result;
-    const io={questions:(as,present)=>rpc({op:'poll',as,present}),answer:(as,id,answer)=>rpc({op:'decide',as,id,answer}),
+    const io={questions:(as,present)=>rpc({op:'poll',as,present}),answer:(as,id,answer)=>rpc({op:'decide',as,id,answer,reason:answer==='decline'?trace?.values.answer:undefined}),
       setClock:async at=>{assert.ok(at>=clock);clock=at;if(worker)await rpc({op:'clock',at});},
       barrier:async barrier=>{if(barrier.arm==='afterEffect') return;if(barrier.reached==='afterEffect') return afterEffect();await rpc({op:'barrier',barrier});},
       change:change=>rpc({op:'change',change,as:step.as}),stop};
@@ -84,6 +87,18 @@ async function run() {
     if(expect.toolResults){assert.equal(result.toolResults.length,expect.toolResults.length);expect.toolResults.forEach((t,i)=>{for(const [k,v] of Object.entries(t))assert.deepEqual(result.toolResults[i][k],v);});}
     if(expect.count!==undefined) assert.equal(count(),expect.count);
     waitingRecords(spec,expect,state,batches(),result);
+    if(trace && expect.parked && !parked) {
+      const originBatches=batches(),counterAtPark=count();
+      const activeWorkAtPark=await rpc({op:'parked',flush:spec.scenario!=='waiting-approval-expire-stopped'});
+      parked={originBatches,counterAtPark,...(trace.sdk?{activeWorkAtPark}:{})};
+      assert.equal((await fetch(trace.parkedUrl,{method:'POST'})).status,204);
+    }
+  }
+  if(trace) {
+    const finalBatches=batches(); const es=finalBatches.flat();
+    const outcome=es.findLast(e=>e.kind==='turnEnd').data.outcome.kind;
+    await rpc({op:'flush'});
+    writeFileSync(trace.reportPath,JSON.stringify({scenario:spec.scenario,placement,passed:true,sessionId:session,turnId:state.request.turnId,outcome,historyKinds:es.map(e=>e.kind),declarations:{session:declaration},waiting:{...parked,finalBatches,counterAfter:count()}}));
   }
 }
 try {await run();} finally {await stop('kill');}

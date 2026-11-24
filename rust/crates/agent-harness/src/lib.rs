@@ -94,6 +94,7 @@ pub struct Harness {
     agent_name: std::sync::OnceLock<String>,
     project: Option<PathBuf>,
     approval_maximum: std::sync::OnceLock<u64>,
+    approval_audiences: RwLock<waiting_approvals::Audiences>,
     model_provider_aliases: std::sync::OnceLock<&'static [(&'static str, &'static str)]>,
     tenants: RwLock<tenants::Tenants>,
     registry: RwLock<Registry>,
@@ -122,6 +123,7 @@ impl Harness {
             agent_name: Default::default(),
             project,
             approval_maximum: Default::default(),
+            approval_audiences: Default::default(),
             model_provider_aliases: Default::default(),
             tenants: RwLock::default(),
             registry: RwLock::new(registry),
@@ -556,7 +558,13 @@ impl Harness {
             data.settings["approval"].as_str(),
             Some("off" | "ask_unless_read_only" | "ask_always" | "never_ask")
         ) {
-            data.settings["approval"] = json!("ask_always");
+            data.settings["approval"] = if data.settings["approval"].is_string()
+                && (self.max_approval_wait_ms().is_some() || waiting_approvals::outstanding(&data))
+            {
+                json!("never_ask")
+            } else {
+                json!("ask_always")
+            };
         }
         self.normalize_model(&mut data.settings);
         data.project = data.project.canonicalize()?;
@@ -1011,6 +1019,9 @@ impl Harness {
             }
         }
         Ok(accepted)
+    }
+    pub fn gates_output(&self) -> bool {
+        self.registry.read().unwrap().gates_output()
     }
     fn holds_remote_output(&self) -> bool {
         self.registry.read().unwrap().declaration()["remote_output"] == true
@@ -2695,7 +2706,7 @@ impl AgentApi for Harness {
             }
         }
         if authority_record(&entry) {
-            open.approval_views.clear();
+            self.invalidate_ineligible_approval_views(open)?;
         }
         if entry.kind == "turn.end" || authority_record(&entry) {
             self.reconcile_open_approvals(open, false)?;
@@ -3632,12 +3643,11 @@ fn next_continuation(data: &SessionData) -> Result<Option<(Input, Vec<ToolCall>)
     let qs = questions(data)?;
     let mut resume = vec![];
     for e in branch.iter().filter(|e| e.kind == "tool.call") {
-        if branch
+        if branch.iter().any(|r| {
+            (interface_handoff(r) || waiting_approvals::marked(r)) && r.scope.turn == e.scope.turn
+        }) || branch
             .iter()
-            .any(|r| interface_handoff(r) && r.scope.turn == e.scope.turn)
-            || branch
-                .iter()
-                .any(|r| r.kind == "tool.result" && r.scope.call == e.scope.call)
+            .any(|r| r.kind == "tool.result" && r.scope.call == e.scope.call)
         {
             continue;
         }

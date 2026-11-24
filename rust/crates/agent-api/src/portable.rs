@@ -509,7 +509,9 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
         "request.open" => {
             let q: Question = serde_json::from_value(c.clone())?;
             let mut request = json!({"id":q.id,"sessionId":q.scope.session,"kind":q.extra["kind"].as_str().map(|s|json!(s)).unwrap_or_else(||json!(q.kind)),"question":q.text,"answerable":q.answerable,"options":q.options});
-            request["askedBy"] = json!(q.scope.actor);
+            if q.waits_for_approval() {
+                request["askedBy"] = json!(q.scope.actor);
+            }
             request["rust.route"] = json!(q.route);
             request["rust.responders"] = json!(q.responders);
             request["rust.extra"] = q.extra.clone();

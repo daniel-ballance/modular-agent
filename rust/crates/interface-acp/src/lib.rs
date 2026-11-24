@@ -58,6 +58,23 @@ impl Identity {
     fn trusts_trace(&self) -> bool {
         self.trust_trace_context.unwrap_or(!self.network)
     }
+    /// Stable binding route; the socket instance is separate and never persisted.
+    pub fn approval_route(&self) -> String {
+        // Distinguish operator scopes for the same actor, without a socket
+        // identifier, a token, or a project path in the saved decision.
+        let scope = json!([
+            self.network,
+            self.id,
+            self.projects,
+            self.tenants,
+            self.represents,
+            self.rights
+        ]);
+        format!(
+            "acp:{}",
+            transport_websocket::scope_fingerprint(scope.to_string().as_bytes())
+        )
+    }
     pub fn may_discover(&self, data: &SessionData) -> bool {
         sessions::discoverable(self, data)
     }

@@ -66,8 +66,35 @@ pub struct Session {
     inner: Arc<Inner>,
     id: String,
     driver: Arc<Driver>,
-    approval_route: String,
+    approval_route: Arc<PollHandle>,
     actor: String,
+}
+
+struct PollHandle {
+    instance: String,
+    live: base::CancellationToken,
+}
+impl PollHandle {
+    fn new(inner: &Inner, id: &str) -> Arc<Self> {
+        let live = inner
+            .harness
+            .session_generation(id)
+            .map(|t| t.child_token())
+            .unwrap_or_else(|_| {
+                let t = base::CancellationToken::new();
+                t.cancel();
+                t
+            });
+        Arc::new(Self {
+            instance: base::id(),
+            live,
+        })
+    }
+}
+impl Drop for PollHandle {
+    fn drop(&mut self) {
+        self.live.cancel();
+    }
 }
 
 /// Membership and a grant for an embedded actor.
@@ -269,10 +296,10 @@ impl Session {
                 })
         };
         Session {
+            approval_route: PollHandle::new(&inner, &id),
             inner,
             id,
             driver,
-            approval_route: base::id(),
             actor: LOCAL.into(),
         }
     }
@@ -346,7 +373,7 @@ impl Session {
         }
         Ok(Self {
             actor: actor_id.into(),
-            approval_route: base::id(),
+            approval_route: PollHandle::new(&self.inner, &self.id),
             ..self.clone()
         })
     }
@@ -462,18 +489,29 @@ impl Session {
             .visible(h, &self.id, &self.actor)?
             .into_iter()
             .filter(|q| q.answerable && q.answer.is_none())
-            .map(|q| crate::Question::from_base(&q))
+            .map(|q| {
+                let mut view = crate::Question::from_base(&q);
+                // A synchronous listing cannot await a filter. Return only
+                // the waiting identity; the async polling route gates the card.
+                if q.waits_for_approval() && h.gates_output() {
+                    view.question.clear();
+                    view.call = None;
+                    view.deadline = None;
+                    view.options.clear();
+                }
+                view
+            })
             .collect())
     }
 
     fn approval_route(&self) -> base::ApprovalRoute {
         base::ApprovalRoute {
-            instance: self.approval_route.clone(),
+            instance: self.approval_route.instance.clone(),
             binding: "sdk".into(),
             actor: self.actor.clone(),
             principal: LOCAL.into(),
             ceiling: Rights::full(),
-            live: self.inner.crash.clone(),
+            live: self.approval_route.live.clone(),
         }
     }
 

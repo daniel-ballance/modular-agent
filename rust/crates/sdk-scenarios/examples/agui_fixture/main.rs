@@ -31,6 +31,7 @@ struct Kit {
     name: String,
     dir: PathBuf,
     restarted: bool,
+    redacted_client: Mutex<String>,
     api: OnceLock<base::Api>,
     changed: Notify,
     latches: Mutex<BTreeSet<(String, String)>>,
@@ -104,7 +105,7 @@ impl Kit {
             .map(|v| v[1].clone())
             .collect::<Vec<_>>();
         Ok(
-            json!({"batches":batches,"dispatches":dispatches,"spans":spans,"model":lines(std::env::var("MODULAR_AGENT_SCRIPT_LOG")?)?,"erasure":*self.erasure.lock().unwrap(),"warnings":lines(self.dir.join("warnings"))?}),
+            json!({"batches":batches,"dispatches":dispatches,"counter":sdk::testing::fixtures::count(&self.dir.join("count")),"project":d.project,"spans":spans,"model":lines(std::env::var("MODULAR_AGENT_SCRIPT_LOG")?)?,"erasure":*self.erasure.lock().unwrap(),"warnings":lines(self.dir.join("warnings"))?}),
         )
     }
     async fn control(&self, v: Value) -> Result<Value> {
@@ -117,6 +118,13 @@ impl Kit {
         match v["operation"].as_str() {
             Some("inspect") => return self.inspect(id),
             Some("tls") => return read(self.dir.join("tls-client.json")),
+            Some("approvalGate") if v["mode"] == "redact" => {
+                *self.redacted_client.lock().unwrap() =
+                    v["client"].as_str().context("client")?.into();
+            }
+            Some("barrier") if self.name.starts_with("waiting-") && v["name"] == "presenceLost" => {
+                self.barrier(id, "presenceLost").await
+            }
             Some("barrier") if v["name"] == "presenceLost" => {
                 self.until(|| {
                     self.file(id)
@@ -152,7 +160,14 @@ impl Kit {
             Some("advance") => {
                 let ms = v["milliseconds"].as_u64().context("time")?;
                 base::advance_clock_for_test(ms);
-                let ends = if self.name == "report-cutoffs" { 2 } else { 1 };
+                if self.name.starts_with("waiting-") {
+                    fs::write(self.dir.join("clock"), base::now().to_string())?;
+                }
+                let ends = if self.name == "report-cutoffs" || self.name == "waiting-expiry" {
+                    2
+                } else {
+                    1
+                };
                 self.until(|| {
                     self.file(id).is_ok_and(|s| {
                         s.entries.iter().filter(|e| e.kind == "turn.end").count() >= ends
@@ -200,6 +215,9 @@ impl log::Log for Logger {
             "modular_agent::agui::warning" => {
                 let _ = self.0.append("warnings", json!(r.args().to_string()));
             }
+            "modular_agent::agui::presence_lost" => {
+                self.0.latch(&r.args().to_string(), "presenceLost")
+            }
             "modular_agent::agui::handoff" => {
                 if let Some((s, id)) = r.args().to_string().split_once(' ') {
                     let _ = self.0.append("dispatches", json!([s, id]));
@@ -233,6 +251,19 @@ async fn serve(config: Value) -> Result<()> {
         base::advance_clock_for_test(0);
     }
     let dir = PathBuf::from(std::env::var("MODULAR_AGENT_DATA_DIR")?);
+    if config["name"]
+        .as_str()
+        .is_some_and(|s| s.starts_with("waiting-"))
+    {
+        let clock = dir.join("clock");
+        let at = if clock.exists() {
+            fs::read_to_string(&clock)?.parse()?
+        } else {
+            1_800_000_000_000u64
+        };
+        fs::write(clock, at.to_string())?;
+        base::set_clock_for_test(at);
+    }
     let project = PathBuf::from(config["project"].as_str().context("project")?);
     let listen = std::env::var("MA_AGUI_LISTEN")?;
     ensure!(
@@ -251,6 +282,7 @@ async fn serve(config: Value) -> Result<()> {
         name: config["name"].as_str().context("name")?.into(),
         dir: dir.clone(),
         restarted,
+        redacted_client: Default::default(),
         api: Default::default(),
         changed: Default::default(),
         latches: Default::default(),
@@ -263,6 +295,9 @@ async fn serve(config: Value) -> Result<()> {
     log::set_max_level(log::LevelFilter::Debug);
     let mut def = config["offer"].clone();
     def["callers"] = json!(["model"]);
+    if k.name.starts_with("waiting-mixed-") {
+        def["hints"]["readOnly"] = json!(true);
+    }
     let store = store::Journal {
         inner: history_fs::FileHistory::new(&dir.join("ledger"))?,
         state: k.clone(),
@@ -303,6 +338,24 @@ async fn serve(config: Value) -> Result<()> {
             result_timeout_ms: 60_000,
             tools: vec![def],
         }]);
+    if k.name.starts_with("waiting-") {
+        builder = builder
+            .max_approval_wait_ms(5000)
+            .setting(
+                "approvalWait",
+                json!(if k.name == "waiting-live" {
+                    "live"
+                } else {
+                    "untilDeadline"
+                }),
+            )
+            .approval(if k.name.starts_with("waiting-mixed-") {
+                sdk::Approval::Ask
+            } else {
+                sdk::Approval::All
+            })
+            .tool(sdk::testing::fixtures::counter(dir.join("count")));
+    }
     builder = hooks::install(builder, &k);
     let agent = builder.build().await?;
     let _ = k.api.set(sdk::testing::fixture_host(&agent));

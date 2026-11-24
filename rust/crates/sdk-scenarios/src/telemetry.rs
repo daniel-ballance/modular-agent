@@ -100,6 +100,56 @@ impl Request {
 }
 
 /// Only the scenario binaries install exporters. The SDK still uses only the API.
+// A test processor observes live work; an exporter only sees ended spans.
+type ActiveMap = std::collections::HashMap<opentelemetry::trace::SpanId, (String, String)>;
+#[derive(Clone, Default, Debug)]
+struct ActiveWork(Arc<Mutex<ActiveMap>>);
+static ACTIVE: std::sync::OnceLock<ActiveWork> = std::sync::OnceLock::new();
+pub fn active_work(session: &str) -> Vec<String> {
+    ACTIVE
+        .get()
+        .map(|s| {
+            s.0.lock()
+                .unwrap()
+                .values()
+                .filter(|(id, _)| id == session)
+                .map(|(_, n)| n.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+impl opentelemetry_sdk::trace::SpanProcessor for ActiveWork {
+    fn on_start(&self, span: &mut opentelemetry_sdk::trace::Span, _: &opentelemetry::Context) {
+        if let Some(d) = span.exported_data()
+            && (d.name.starts_with("invoke_agent")
+                || d.name.starts_with("execute_tool")
+                || d.name.starts_with("modular_agent.question.")
+                || d.name == "modular_agent.step")
+            && let Some(attr) = d
+                .attributes
+                .iter()
+                .find(|a| a.key.as_str() == "gen_ai.conversation.id")
+        {
+            self.0.lock().unwrap().insert(
+                d.span_context.span_id(),
+                (attr.value.to_string(), d.name.into_owned()),
+            );
+        }
+    }
+    fn on_end(&self, span: opentelemetry_sdk::trace::SpanData) {
+        self.0.lock().unwrap().remove(&span.span_context.span_id());
+    }
+    fn force_flush(&self) -> opentelemetry_sdk::error::OTelSdkResult {
+        Ok(())
+    }
+    fn shutdown_with_timeout(
+        &self,
+        _: std::time::Duration,
+    ) -> opentelemetry_sdk::error::OTelSdkResult {
+        Ok(())
+    }
+}
+
 pub fn install(enabled: bool) -> Option<SdkTracerProvider> {
     if !enabled {
         return None;
@@ -114,6 +164,7 @@ pub fn install(enabled: bool) -> Option<SdkTracerProvider> {
     let provider = SdkTracerProvider::builder()
         .with_sampler(Sampler::AlwaysOn)
         .with_resource(opentelemetry_sdk::Resource::builder_empty().build())
+        .with_span_processor(ACTIVE.get_or_init(Default::default).clone())
         .with_span_processor(BatchSpanProcessor::builder(exporter, Tokio).build())
         .build();
     global::set_tracer_provider(provider.clone());

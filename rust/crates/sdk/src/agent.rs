@@ -322,9 +322,6 @@ impl Agent {
         let mut declaration = interface_acp::declaration(api, session)?;
         // These core modes have no SDK 0.1 Provider operations.
         declaration["runsToolsAtProvider"] = json!(false);
-        if self.inner.harness.max_approval_wait_ms().is_some() {
-            declaration["approvalsOutlastTurns"] = json!(true);
-        }
         declaration["liveSessions"] = json!(false);
         declaration["portableSessions"] = json!(self.inner.persistent);
         declaration["severalActors"] = json!(self.inner.several_actors);
@@ -683,9 +680,7 @@ impl AgentBuilder {
             None => file_history(state.join("sessions"))?,
         };
         if let Some(max) = self.max_approval_wait_ms
-            && (!(1..=9_007_199_254_740_991).contains(&max)
-                || !persistent
-                || self.approval.is_none())
+            && (!(1..=9_007_199_254_740_991).contains(&max) || self.approval.is_none())
         {
             return Err(Error::new(
                 Code::InvalidComposition,
@@ -953,7 +948,8 @@ impl AgentBuilder {
         }
         if let Some(max) = self.max_approval_wait_ms {
             let d = harness.declaration()?;
-            if d["questions_outlast_turn"] != true
+            if !saved_history.1
+                || d["questions_outlast_turn"] != true
                 || d["runtime"]["interface_tools"] != true
                 || !d["approval_policies"].is_array()
             {

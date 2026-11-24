@@ -12,7 +12,7 @@ impl Plugin for ApprovalPlugin {
             handler(|api, scope, value| {
                 Box::pin(async move {
                     let settings = api.snapshot(&scope.session)?.settings;
-                    let policy = settings["approval"].as_str().unwrap_or("ask_always");
+                    let policy = settings["approval"].as_str().unwrap_or("off");
                     let refuse = |text: &str| HookResult {
                         refused: Some(text.into()),
                         ..HookResult::default()
@@ -66,11 +66,20 @@ impl Plugin for ApprovalPlugin {
                         });
                     }
                     // Never ask a replacement question on a continuation's bound call.
-                    if questions(&api.snapshot(&scope.session)?)?
+                    if let Some(old) = questions(&api.snapshot(&scope.session)?)?
                         .iter()
-                        .any(|old| old.scope.call == scope.call && old.waits_for_approval())
+                        .find(|old| old.scope.call == scope.call && old.waits_for_approval())
                     {
-                        return Ok(answer(value));
+                        return Ok(
+                            if ["approvalCall", "source", "definition"]
+                                .iter()
+                                .all(|key| wire::json_eq(&old.extra[key], &q.extra[key]))
+                            {
+                                answer(value)
+                            } else {
+                                refuse("the call changed at its approval gate")
+                            },
+                        );
                     }
                     match requests(api.as_ref())?
                         .ask(api.clone(), q, api.cancellation(&scope.session)?)

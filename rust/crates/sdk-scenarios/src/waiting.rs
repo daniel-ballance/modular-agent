@@ -254,6 +254,9 @@ async fn build(s: &Value, run: &Run, controls: &Arc<Controls>, probe: bool) -> R
     } else {
         b = place(b, spec, run)?;
     }
+    if !probe && let Some(request) = telemetry::Request::from_env() {
+        b = request.configure(b);
+    }
     Ok(b.build().await?)
 }
 
@@ -268,6 +271,7 @@ pub async fn worker(args: &[String]) -> R<()> {
     fs::create_dir_all(run.project())?;
     let controls = Arc::new(Controls::default());
     let mut agent = None;
+    let mut export = None;
     let mut handles = BTreeMap::<String, Session>::new();
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await? {
@@ -276,6 +280,10 @@ pub async fn worker(args: &[String]) -> R<()> {
         let response: R<Value> = async {
             if op == "init" || op == "probe" {
                 agent_api::set_clock_for_test(p["clock"].as_u64().unwrap());
+                if op == "init" {
+                    export =
+                        telemetry::install(telemetry::Request::from_env().is_some_and(|r| r.sdk));
+                }
                 let a = build(&s, &run, &controls, op == "probe").await?;
                 let session = if op == "probe" {
                     a.session().await?
@@ -313,6 +321,19 @@ pub async fn worker(args: &[String]) -> R<()> {
             let session = &handles[id];
             let null = Value::Null;
             Ok(match op {
+                "parked" => {
+                    let active = telemetry::active_work(session.id());
+                    if let Some(provider) = export.clone()
+                        && p["flush"] == true
+                    {
+                        tokio::task::spawn_blocking(move || provider.force_flush()).await??;
+                    }
+                    json!(active)
+                }
+                "flush" => {
+                    telemetry::flush(export.take()).await;
+                    null
+                }
                 "prompt" => json!(session.prompt(p["text"].as_str().unwrap()).await?),
                 "wait" => {
                     session.wait_idle().await?;
@@ -324,7 +345,16 @@ pub async fn worker(args: &[String]) -> R<()> {
                     session.questions()?
                 }),
                 "decide" => match session
-                    .answer(p["id"].as_str().unwrap(), scenario_answer(&p["answer"])?)
+                    .answer(
+                        p["id"].as_str().unwrap(),
+                        if let Some(reason) = p["reason"].as_str() {
+                            Answer::Declined {
+                                reason: Some(reason.into()),
+                            }
+                        } else {
+                            scenario_answer(&p["answer"])?
+                        },
+                    )
                     .await
                 {
                     Ok(()) => json!(true),

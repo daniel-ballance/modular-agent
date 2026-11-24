@@ -298,6 +298,11 @@ impl Registry {
             .value
             .clone())
     }
+    pub fn gates_output(&self) -> bool {
+        ["output", "output.stream"]
+            .iter()
+            .any(|p| self.handlers.get(*p).is_some_and(|h| !h.is_empty()))
+    }
     pub fn has_credential_claim(&self, name: &str) -> bool {
         self.credentials.contains_key(name)
     }

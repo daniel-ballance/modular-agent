@@ -2,6 +2,12 @@
 use anyhow::{Context, Result, anyhow, ensure};
 use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
+
+/// A stable opaque identifier for an operator-defined route scope. Only
+/// non-secret configuration belongs in the descriptor, never bearer tokens.
+pub fn scope_fingerprint(descriptor: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(descriptor))
+}
 use std::{
     future::Future,
     net::SocketAddr,

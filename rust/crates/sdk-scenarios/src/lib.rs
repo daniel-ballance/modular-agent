@@ -732,7 +732,29 @@ async fn run_at(
     let report = if failures.is_empty()
         && let (Some(request), Some((a, session, _))) = (request, &current)
     {
-        Some(evidence.report(request, run, a, session, before_crash))
+        let mut report = evidence.report(request, run, a, session, before_crash);
+        if request.scenario == "first-turn"
+            && let Ok(r) = &mut report
+        {
+            let probe = test_agent()
+                .project(run.project())
+                .data_dir(run.dir.join("waiting-probe"))
+                .several_actors(true)
+                .durability(Durability::Kept)
+                .approval(Approval::All)
+                .max_approval_wait_ms(100)
+                .build()
+                .await
+                .expect("waiting support probe");
+            r["declarations"]["waitingSession"] = probe
+                .session()
+                .await
+                .expect("kept probe")
+                .declaration()
+                .expect("probe declaration");
+            probe.close().await.expect("release probe");
+        }
+        Some(report)
     } else {
         None
     };
