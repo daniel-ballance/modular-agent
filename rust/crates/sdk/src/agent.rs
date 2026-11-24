@@ -1062,6 +1062,18 @@ impl AgentBuilder {
         if agent.inner.harness.has_interface_tools() || self.max_approval_wait_ms.is_some() {
             let inner = Arc::downgrade(&agent.inner);
             agent.inner.harness.on_interface_work(Arc::new(move |id| {
+                #[cfg(feature = "agui")]
+                if agent_harness::receipt::BIND_ENTRY
+                    .try_with(|b| {
+                        matches!(
+                            b.operation,
+                            agent_harness::receipt::ReceiptOperation::Report(_)
+                        )
+                    })
+                    .unwrap_or(false)
+                {
+                    log::debug!(target:"modular_agent::agui::report_committed","{id}");
+                }
                 if let Some(inner) = inner.upgrade() {
                     Session::new(inner, id.to_owned()).drive();
                 }

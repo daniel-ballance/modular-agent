@@ -131,6 +131,30 @@ impl Kit {
         let scope = base::Scope::session(id);
         match v["operation"].as_str() {
             Some("inspect") => return self.inspect(id),
+            Some("openWait") if v["kind"] == "leaveOpen" => {
+                let api = self.api()?.clone();
+                api.submit(
+                    id,
+                    "kit-owner",
+                    "Ask inside the pending call.",
+                    base::Timing::Now,
+                    None,
+                )
+                .await?;
+                let thread = id.to_owned();
+                tokio::spawn(async move { api.next_turn(&thread).await });
+                let question = |d: base::SessionData| {
+                    base::questions(&d)
+                        .ok()?
+                        .into_iter()
+                        .find(|q| q.extra["whenTimeLimit"] == "leaveOpen")
+                };
+                self.until(|| self.file(id).ok().and_then(question).is_some())
+                    .await;
+                return Ok(
+                    json!({"requestId":question(self.file(id)?).context("leaveOpen question")?.id}),
+                );
+            }
             Some("openWait") => {
                 let kind = v["kind"].as_str().context("kind")?;
                 let mut scope = scope;
@@ -216,6 +240,14 @@ impl Kit {
                 *self.redacted_client.lock().unwrap() =
                     v["client"].as_str().context("client")?.into();
             }
+            Some("barrier") if self.name == "closure-presence" && v["name"] == "presenceLost" => {
+                self.barrier(id, "presenceLost").await;
+                self.until(|| {
+                    self.file(id)
+                        .is_ok_and(|d| d.entries.iter().any(|e| e.kind == "request.closed"))
+                })
+                .await;
+            }
             Some("barrier")
                 if (self.name.starts_with("waiting-") || self.name.starts_with("closure-"))
                     && v["name"] == "presenceLost" =>
@@ -257,6 +289,23 @@ impl Kit {
             Some("advance") => {
                 let ms = v["milliseconds"].as_u64().context("time")?;
                 base::advance_clock_for_test(ms);
+                if self.name.starts_with("closure-") {
+                    self.until(|| {
+                        self.file(id).is_ok_and(|d| {
+                            d.entries.iter().any(|e| {
+                                if self.name == "closure-left-open" {
+                                    e.kind == "tool.pending"
+                                } else {
+                                    e.kind == "request.closed"
+                                        && e.content
+                                            .as_ref()
+                                            .is_some_and(|v| v["reason"] == "timeLimit")
+                                }
+                            })
+                        })
+                    })
+                    .await;
+                }
                 if self.name.starts_with("waiting-") {
                     fs::write(self.dir.join("clock"), base::now().to_string())?;
                 }
@@ -420,8 +469,15 @@ async fn serve(config: Value) -> Result<()> {
         inner: history_fs::FileHistory::new(&dir.join("ledger"))?,
         state: k.clone(),
     };
+    let mut steps = read(std::env::var("MODULAR_AGENT_SCRIPT")?)?;
+    if k.name == "closure-left-open" {
+        steps
+            .as_array_mut()
+            .context("fixture script")?
+            .insert(1, json!({"toolCalls":[{"name":"kit_choose","input":{}}]}));
+    }
     let script = standard::script::Script::new(
-        read(std::env::var("MODULAR_AGENT_SCRIPT")?)?,
+        steps,
         Some(std::env::var("MODULAR_AGENT_SCRIPT_LOG")?.into()),
     );
     let durable = !matches!(
@@ -448,7 +504,9 @@ async fn serve(config: Value) -> Result<()> {
         .model("scripted/script")
         .approval_covers_nested(k.name.starts_with("approval") || k.name.starts_with("waiting-"))
         .approval(
-            if k.name.starts_with("approval") || k.name == "closure-presence" {
+            if k.name.starts_with("approval")
+                || matches!(k.name.as_str(), "closure-presence" | "closure-routes")
+            {
                 sdk::Approval::All
             } else {
                 sdk::Approval::Off
@@ -501,6 +559,20 @@ async fn serve(config: Value) -> Result<()> {
         } else {
             builder = builder.tool(sdk::testing::fixtures::counter(counter));
         }
+    }
+    if k.name == "closure-left-open" {
+        builder = builder.tool(sdk::Tool::new("kit_choose", "Choose a label").run(
+            |_: Value, cx| async move {
+                cx.ask_with(
+                    sdk::Ask::choice("Choose a label.", &["yes", "no"]),
+                    sdk::AskWait {
+                        wait: std::time::Duration::from_secs(5),
+                    },
+                )
+                .await?;
+                Ok("Answered.".to_owned())
+            },
+        ));
     }
     builder = hooks::install(builder, &k);
     let agent = builder.build().await?;

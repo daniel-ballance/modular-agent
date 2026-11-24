@@ -133,7 +133,6 @@ dependencies = [
  "agent-api",
  "anyhow",
  "async-trait",
- "log",
  "serde",
  "serde_json",
  "tokio",
@@ -4904,6 +4903,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tools-code",
+ "transport-websocket",
 ]
 
 [[package]]

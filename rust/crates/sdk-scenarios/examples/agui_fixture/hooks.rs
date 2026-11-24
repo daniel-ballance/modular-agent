@@ -109,7 +109,16 @@ pub fn install(b: sdk::AgentBuilder, k: &Arc<Kit>) -> sdk::AgentBuilder {
             {
                 return Ok(OutputDecision::Block);
             }
-            if k.name == "closure-buffered" && out.recipient == "kit-primary" {
+            if out.recipient == "kit-primary" && v["method"] == "agui.runReceipt" {
+                let mode = k.receipt_gate.lock().unwrap().clone();
+                if matches!(mode.as_str(), "terminal" | "work") {
+                    v["result"][mode] = json!("changed");
+                    return Ok(OutputDecision::Redact(v));
+                }
+            }
+            if matches!(k.name.as_str(), "closure-order" | "closure-buffered")
+                && out.recipient == "kit-primary"
+            {
                 if v["question"]["id"].is_string()
                     && k.latches
                         .lock()
@@ -132,6 +141,10 @@ pub fn install(b: sdk::AgentBuilder, k: &Arc<Kit>) -> sdk::AgentBuilder {
                     }
                     _ => false,
                 } {
+                    if mode == "notice" {
+                        v["data"]["reason"] = json!("changed");
+                        return Ok(OutputDecision::Redact(v));
+                    }
                     return Ok(OutputDecision::Block);
                 }
             }

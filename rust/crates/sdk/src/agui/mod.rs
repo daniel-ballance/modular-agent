@@ -251,8 +251,7 @@ impl Agent {
         }
         let routes = self.acp_routes();
         if options.acp {
-            self.acp_factory(options.acp_composition.clone(), routes.clone())
-                .await?;
+            self.acp_factory(None, routes.clone()).await?;
         }
         let open_routes = Arc::new(interface_acp::OpenRoutes::default());
         let origins = options.origins;
@@ -277,7 +276,7 @@ impl Agent {
                 let mut response=if req.method()==Method::OPTIONS && origin.is_some() {reply(204,"text/plain",Body::empty())} else if let Some(actor)=actor {
                     if req.uri().path()=="/" && let Some((compose,routes,open))=acp {
                         let identity=actor.acp_identity();
-                        let factory=service.agent.connection_factory(compose,routes);
+                        let factory=service.agent.connection_factory(compose,routes,true);
                         return upgrade.acp(req,move |conn| async move { let _=interface_acp::run_websocket(factory,identity,conn,open).await; }).unwrap_or_else(||Fail::Invalid.response());
                     }
                     let ceiling=Arc::new(base::ConnectionCeiling::new(actor.principal.actor.id.clone(),actor.principal.actor.rights.clone()));

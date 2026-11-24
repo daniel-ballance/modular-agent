@@ -199,15 +199,7 @@ impl InputRequests for Questions {
                     *allowed && may_answer(api.as_ref(), &q, session, actor)
                 })
             {
-                api.append(
-                    &q.scope,
-                    "feature.questions",
-                    Draft::new(
-                        "request.closed",
-                        false,
-                        json!({"request":q.id,"reason":"noLongerAnswerable"}),
-                    ),
-                )?;
+                self.close_if_open(api.as_ref(), &q, "refused")?;
                 return Ok(RequestReply::Declined);
             }
             tokio::select! {
