@@ -26,7 +26,7 @@ test('runner launches a scripted agent command', async () => {
 });
 
 test('managed host reads fail without fixture controls', async () => {
-  await assert.rejects(exec(process.execPath, [here('run.mjs'), '--only', 'closure-order,receipt-durable', '--', process.execPath, here('fake-agent.mjs')], { signal: deadline() }), e => e.code === 1 && /0\/2 AG-UI cases passed/.test(e.stdout));
+  await assert.rejects(exec(process.execPath, [here('run.mjs'), '--only', 'closure-order,receipt-durable', '--', process.execPath, here('fake-agent.mjs')], { signal: deadline() }), e => e.code === 1 && /managed fixture must report its control URL/.test(e.stderr) && /0\/2 AG-UI cases passed/.test(e.stdout));
 });
 
 test('runner connects to an existing scripted agent with a token file', async () => {
