@@ -52,7 +52,7 @@ const fixtureEnv = (kit, role, options) => ({ MODULAR_AGENT_PLUGINS: JSON.string
 
 // The listener deliberately has several credentials. For stdio, a new process
 // loads the next profile over the same trusted data directory.
-async function host(kit, scopes, { extraEnv = {}, dir, which = kit.command, limits } = {}) {
+async function host(kit, scopes, { extraEnv = {}, dir, which = kit.command, limits, captureStderr = false } = {}) {
 	const peers = [];
 	const tokens = [];
 	const actors = kit.network && scopes.map((scope) => {
@@ -64,9 +64,12 @@ async function host(kit, scopes, { extraEnv = {}, dir, which = kit.command, limi
 	});
 	const env = kit.profile({ stdio: scopes[0], ...(actors ? { actors } : {}), limits }, extraEnv, dir);
 	const directory = env.MODULAR_AGENT_DATA_DIR;
-	const listener = kit.network && kit.managed.variant(env);
+	const listener = kit.network && kit.managed.variant(env, { captureStderr });
 	return {
 		directory, listener, tokens,
+		async processes() {
+			return listener ? [await listener] : peers.map((peer) => peer.spawned);
+		},
 		async peer(index = 0, version = 1) {
 			const e = !kit.network && index !== 0 ? kit.profile({ stdio: scopes[index], limits }, extraEnv, directory) : env;
 			const a = kit.connect(which, e, tokens[index], listener || undefined);
@@ -505,8 +508,14 @@ async function eraseAcrossWriters(kit, cutoff) {
 			}
 		},
 	});
-	const h = await host(kit, [scope], { extraEnv: proxy ? { MODULAR_AGENT_HISTORY_URL: proxy.url } : {} });
-	let reader, reopener, releaseLease, dst;
+	const hosts = [];
+	const startHost = async (role, options) => {
+		const profile = await host(kit, [scope], { ...options, captureStderr: true });
+		hosts.push({ role, profile });
+		return profile;
+	};
+	const h = await startHost("eraser", { extraEnv: proxy ? { MODULAR_AGENT_HISTORY_URL: proxy.url } : {} });
+	let reader, reopener, releaseLease, dst, failure, diagnostics;
 	const takeoverLoad = async (peer, sid, ms, label) => {
 		const started = performance.now();
 		try {
@@ -517,7 +526,6 @@ async function eraseAcrossWriters(kit, cutoff) {
 				.then((rows) => rows.map((e) => e.erased ? `${e.kind} (erased)` : e.kind), (e) => e.message);
 			throw new Error(`${label} after ${elapsedMs} ms: ${error.message} ${JSON.stringify({
 				code: error.code, dataCode: error.data?.code, records,
-				exitCode: peer.child?.exitCode, signal: peer.child?.signalCode,
 			})}`, { cause: error });
 		}
 	};
@@ -554,7 +562,7 @@ async function eraseAcrossWriters(kit, cutoff) {
 		if (!copy || !equal(copy.sources, [firstCopy.id])) throw Error("fork-of-fork did not name its source admission");
 		stage = "hold the destination and attach the independent reader";
 		releaseLease = await holdLease(store, store.path(dst));
-		reader = await host(kit, [scope]);
+		reader = await startHost("independent reader");
 		const { a: r } = await reader.peer();
 		await within(loadMs, load(r, first, project), "independent writer attaches first fork");
 		const erase = (p) => ext(p, "erase", { sessionId: sid, entryIds: [target.id] });
@@ -574,6 +582,7 @@ async function eraseAcrossWriters(kit, cutoff) {
 		await kit.crash(a);
 		releaseReply.resolve();
 		const visible = await history(r, first, { all: true }).catch((e) => e);
+		if (connectionLost(visible)) throw visible;
 		check("an attached independent reader does not disclose pending content after initiator loss",
 			(Array.isArray(visible.entries) && !contains(visible, secret)) || refusal(visible, "unavailable"));
 		await reader.stop();
@@ -583,7 +592,7 @@ async function eraseAcrossWriters(kit, cutoff) {
 		releaseLease = undefined;
 		await release();
 		stage = "reopen and reconcile the pending intent";
-		reopener = await host(kit, [scope], { which: kit.second });
+		reopener = await startHost("reopener", { which: kit.second });
 		const { a: next } = await reopener.peer();
 		await takeoverLoad(next, dst, loadMs, "new writer reconciles fork-of-fork");
 		const kept = await store.pages(dst);
@@ -597,12 +606,32 @@ async function eraseAcrossWriters(kit, cutoff) {
 		check("repeated authorized erase reports convergence without duplicate bookkeeping", pair(done.erased, dst, copy.id) && !pair(done.pending, dst, copy.id) &&
 			rows("erasure", await store.pages(dst)).length === 1 && rows("erasure", await store.pages(sid)).length === 1);
 	} catch (error) {
-		const diagnostic = proxy ? `; fault reached: ${faultReached}; history HTTP: ${JSON.stringify(trace)}` : "";
-		throw Error(`${stage}: ${error.message}${diagnostic}`, { cause: error });
+		const traceDetail = proxy ? `; fault reached: ${faultReached}; history HTTP: ${JSON.stringify(trace)}` : "";
+		failure = Error(`${stage}: ${error.message}${traceDetail}`, { cause: error });
+		if (connectionLost(error)) {
+			diagnostics = (await Promise.all(hosts.map(async ({ role, profile }) =>
+				(await profile.processes()).map((agent) => {
+					const { exitCode, signal } = agent.status();
+					return { role, agent, beforeCleanup: { exitCode, signal } };
+				})))).flat();
+		}
 	} finally {
 		releaseReply.resolve();
 		if (releaseLease) await releaseLease().catch(() => {});
 		await Promise.all([reader?.stop(), reopener?.stop(), h.stop()]);
 		proxy?.stop();
 	}
+	if (diagnostics) {
+		const agents = await Promise.all(diagnostics.map(async ({ role, agent, beforeCleanup }) => {
+			// A child can exit before its last stderr bytes arrive. Drain after cleanup.
+			const drained = await within(5000, agent.closed, "drain agent diagnostics").then(() => true, () => false);
+			return { role, beforeCleanup, ...agent.status(), drained };
+		}));
+		failure.message += `; agent processes (exit status after cleanup): ${JSON.stringify(agents)}`;
+	}
+	if (failure) throw failure;
+}
+
+function connectionLost(error) {
+	return /connection (closed|failed)/i.test(error?.message ?? "");
 }

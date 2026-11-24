@@ -168,6 +168,7 @@ for group in "${groups[@]}"; do
     # Go's base CLI has no ACP listener; Go ma does.
     if [ "$language:$launcher" = go:base ]; then continue; fi
     # Each production profile writes an actors policy and supplies its own token files.
+    # Replace the shell so the kit gets the agent's exit status and stderr.
     printf -v service_command '%q ' "${command[@]}"
     run "ACP $launcher WebSocket $group" node run.mjs --group "$group" \
       --connect "ws://127.0.0.1:$(free_port)/" --token-file "$work/acp-token" \

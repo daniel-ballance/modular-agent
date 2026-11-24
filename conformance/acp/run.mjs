@@ -14,7 +14,7 @@ import { createInterface } from "node:readline";
 import { client, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import { historyService } from "./history.mjs";
 import { portableProblems, validActor } from "./portable.mjs";
-import { manageServices } from "./service.mjs";
+import { manageServices, trackProcess } from "./service.mjs";
 import { capacity, erasure, isolation } from "./production.mjs";
 import { coveredApproval } from "./covered.mjs";
 import { waitingChecks } from "./waiting.mjs";
@@ -157,7 +157,7 @@ function spawnAgent(which, extraEnv, captureStderr = false) {
 		env: agentEnv(which, extraEnv),
 	});
 	children.push(child);
-	return child;
+	return trackProcess(child, verbose);
 }
 
 // A managed fixture starts a fresh agent, not just a WebSocket handshake.
@@ -201,7 +201,8 @@ function webTransport(service, token) {
 
 /** Connect the official ACP client to a process or service. */
 function connect(which = command, extraEnv = {}, token = network?.token, sharedListener) {
-	const child = network ? null : spawnAgent(which, extraEnv);
+	const spawned = network ? null : spawnAgent(which, extraEnv, group === "erasure");
+	const child = spawned?.child;
 	const variant = !sharedListener && !!managed && Object.keys(extraEnv).length > 0;
 	const service = sharedListener ?? (variant ? managed.variant(extraEnv) : Promise.resolve(managed ? managed.primary() : null));
 	const wire = network && webTransport(service, token);
@@ -217,7 +218,7 @@ function connect(which = command, extraEnv = {}, token = network?.token, sharedL
 			return state.permissionHandler ? await state.permissionHandler(params) : { outcome: { outcome: "selected", optionId: state.permissionAnswer } };
 		});
 	const connection = app.connect(wire || ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout)));
-	return { child, service, variant, wire, ctx: connection.agent, updates, permissions, state };
+	return { child, spawned, service, variant, wire, ctx: connection.agent, updates, permissions, state };
 }
 async function stop(agent) {
 	if (agent.wire) {
@@ -882,7 +883,7 @@ if (probeChecks) for (const [name, plugins] of [
 		} finally { await stop(peer); }
 		return;
 	}
-	const child = spawnAgent(command, settings);
+	const { child } = spawnAgent(command, settings);
 	const lines = createInterface({ input: child.stdout });
 	try {
 		// Observe the wire and the natural exit. Do not close stdin or signal the host to make it exit.
@@ -2006,14 +2007,7 @@ async function runProduction() {
 	const invalid = async (policy) => {
 		const extraEnv = profile(policy);
 		const service = network && await managed.variant(extraEnv, { captureStderr: true });
-		const child = service ? service.child : spawnAgent(command, extraEnv, true);
-		const exited = service ? service.exited : new Promise((resolve, reject) => {
-			child.once("exit", (code, signal) => resolve({ code, signal }));
-			child.once("error", reject);
-		});
-		let stderr = "";
-		child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr = (stderr + chunk).slice(-4096); });
-		const drained = new Promise((resolve) => child.stderr.once("end", resolve));
+		const { child, exited, closed, status } = service || spawnAgent(command, extraEnv, true);
 		const successfulInit = !service && new Promise((resolve) => {
 			const lines = createInterface({ input: child.stdout });
 			lines.on("line", (line) => {
@@ -2025,9 +2019,9 @@ async function runProduction() {
 			child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1, clientCapabilities: {} } }) + "\n");
 		});
 		try {
-			const exit = Promise.all([exited, drained]).then(([status]) => status);
+			const exit = closed.then(() => exited);
 			const { code } = await within(CONTROL_MS, successfulInit ? Promise.race([exit, successfulInit]) : exit, "invalid policy startup refusal");
-			return { code, stderr };
+			return { code, stderr: status().stderr };
 		} finally { if (service) await managed.stop(service); else await stop({ child }); }
 	};
 	await attempt(group, () => production[group]({
