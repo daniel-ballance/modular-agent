@@ -324,7 +324,7 @@ func (c *client) recoverRewind(ctx context.Context, s *session) error {
 }
 
 // Read the journal in append order, not from the selected branch. Only a
-// matching completion clears it; an unrelated position or legacy failure does
+// matching completion clears it; an unrelated position does
 // not establish which files are present. Invalid progress fails closed.
 func pendingRewind(entries []api.Entry) (api.PositionChange, string, bool, error) {
 	var pending api.PositionChange

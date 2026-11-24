@@ -60,6 +60,20 @@ func TestSessionsSurviveRestartAndUnusedLeavesNothing(t *testing.T) {
 		t.Fatal("invalid identity allowed")
 	}
 }
+func TestDoNotReplaceMissingRegistryOverExistingState(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "kept.json"), []byte(`{"id":"kept"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := history.New(dir); err == nil {
+		t.Fatal("created a registry over existing history")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatal("changed unsupported store", err)
+	}
+}
+
 func TestRefuseUnsupportedSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	store, err := history.New(dir)
