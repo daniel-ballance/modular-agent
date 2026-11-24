@@ -19,9 +19,12 @@ import { AuthFile, expired } from "./auth.js";
 import { claude } from "@modular-agent/claude";
 import { chatgpt, grok, resolveClientIdentity, signIn, signOut, type ClientIdentityOptions, type SignInStep } from "@modular-agent/subscription";
 import { subscriptionModelOverrides } from "./subscription-model-overrides.js";
-import { formerProviderIds, modelRef, providerId } from "./provider-ids.js";
 
 const { version } = createRequire(import.meta.url)("../../package.json") as { version: string };
+
+function modelRef(value: unknown): string | undefined {
+  return typeof value === "string" ? value : value && typeof value === "object" && "provider" in value && "id" in value ? `${value.provider}/${value.id}` : undefined;
+}
 
 function approvalPolicy(value: unknown, source: string): Approval {
   if (value === "off" || value === "ask" || value === "all" || value === "never") return value;
@@ -56,7 +59,7 @@ function parse(argv: string[]) {
       case "--all": opts.all = true; break;
       case "--project": opts.project = value(); break;
       case "--session": opts.session = value(); break;
-      case "--model": opts.settings.model = modelRef(value()); break;
+      case "--model": opts.settings.model = value(); break;
       case "--thinking": {
         const level = value();
         if (!["off", "minimal", "low", "medium", "high", "xhigh"].includes(level)) throw new Error("thinking must be off, minimal, low, medium, high or xhigh");
@@ -98,8 +101,7 @@ function show(step: SignInStep) {
   }
 }
 async function authCommand(argv: string[], auth: AuthFile, identity: ClientIdentityOptions) {
-  const [cmd, name, ...rest] = argv;
-  const provider = name && providerId(name);
+  const [cmd, provider, ...rest] = argv;
   if (cmd === "auth") {
     for (const vendor of ["chatgpt", "grok"] as const) {
       const login = await auth.login(vendor);
@@ -207,10 +209,6 @@ async function main(argv: string[]) {
   }
   const inspecting = opts.history || opts.declaration || opts.command === "models";
   const overrides = script || conformance ? {} : await optionalJson(join(p.config, "models.json"));
-  // Canonical keys win when both spellings of the same catalog are present.
-  for (const [former, current] of Object.entries(formerProviderIds)) {
-    if (!Object.hasOwn(overrides, current) && Object.hasOwn(overrides, former)) overrides[current] = overrides[former];
-  }
   const chatgptOverrides = subscriptionModelOverrides("chatgpt", overrides);
   const grokOverrides = subscriptionModelOverrides("grok", overrides);
   const projectMcp = async (cwd: string) => mcpServers(p, cwd, await trusted(p, cwd));
@@ -246,7 +244,7 @@ async function main(argv: string[]) {
     return createAgent({ ...base, project: cwd, settings, credentials: auth.credentials(), model: opts.command === "models" ? undefined : model, providers, plugins,
       compaction: !conformance, conformance, questionsOutlastTurns: true, jobReportsStartTurns: true, settingsDuringTurn: "refused",
       approval, approvalCoversNested: approval !== undefined, maxApprovalWaitMs,
-      pluginHost: serving, reopenModelAliases: formerProviderIds });
+      pluginHost: serving });
   };
   const scoped = opts.listen ? policy.actors?.some(actor => actor.projects !== undefined) : policy.stdio?.projects !== undefined;
   const agent = await build(project, modelRef(opts.settings.model) ?? savedModel, !serving || !scoped);

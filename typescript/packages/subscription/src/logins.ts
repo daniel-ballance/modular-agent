@@ -25,7 +25,7 @@ const ordered = <T>(entries: Record<string, T>) => Object.fromEntries(Object.ent
 export class SubscriptionLogins {
   readonly #lockPath: string;
   readonly #directory: string;
-  constructor(readonly path: string, readonly aliases: Readonly<Record<string, string>> = {}) {
+  constructor(readonly path: string) {
     this.#directory = dirname(path);
     const extension = extname(path);
     this.#lockPath = (extension ? path.slice(0, -extension.length) : path) + ".lock";
@@ -49,11 +49,6 @@ export class SubscriptionLogins {
       if (!object(logins)) throw new Error();
       const result: LoginContents = { logins: Object.create(null), ...rest };
       for (const [name, login] of Object.entries(logins)) result.logins[name] = loginValue(login);
-      for (const [former, current] of Object.entries(this.aliases)) {
-        if (!Object.hasOwn(result.logins, former)) continue;
-        result.logins[current] ??= result.logins[former];
-        delete result.logins[former];
-      }
       return result;
     } catch { throw new Error(`${this.path} is not a valid credential file`); }
   }
@@ -108,6 +103,6 @@ export class SubscriptionLogins {
   }
 }
 
-export function subscriptionLogins(path: string, options: { aliases?: Readonly<Record<string, string>> } = {}): SubscriptionLogins {
-  return new SubscriptionLogins(path, options.aliases);
+export function subscriptionLogins(path: string): SubscriptionLogins {
+  return new SubscriptionLogins(path);
 }

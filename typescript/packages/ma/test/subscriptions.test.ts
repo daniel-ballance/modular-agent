@@ -10,9 +10,7 @@ import { createAgent } from "@modular-agent/core";
 
 const exec = promisify(execFile);
 const cli = fileURLToPath(new URL("../src/main.js", import.meta.url));
-const aliases = [["openai-codex", "chatgpt", "gpt-6.1-sol"], ["xai", "grok", "grok-4.7"]] as const;
 const fixtureAccess = `fixture.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture-account" } })).toString("base64url")}.fixture`;
-const fixtureLogin = { type: "oauth", access: fixtureAccess, refresh: "fixture-refresh", expires: Date.now() + 60_000, account: "fixture-account" };
 
 async function project(t: TestContext) {
   const dir = await mkdtemp(join(tmpdir(), "ma-subscriptions-"));
@@ -54,49 +52,39 @@ async function project(t: TestContext) {
   return { run, put, config, project, auth };
 }
 
-for (const [former, current, model] of aliases) {
-  const host = current === "chatgpt" ? "chatgpt.com" : "api.x.ai";
-  test(`ma login and logout accept ${former} and migrate old logins on write`, async t => {
+for (const [provider, host] of [["chatgpt", "chatgpt.com"], ["grok", "api.x.ai"]]) {
+  test(`ma uses the ${provider} login for its configured models`, async t => {
     const p = await project(t);
-    await p.put("auth.json", { logins: Object.fromEntries(aliases.map(([old]) => [old, fixtureLogin])), answers: { fixture: "keep" }, extra: true });
-    const { stderr } = await p.run("login", former, "--device");
+    await p.put("auth.json", { answers: { fixture: "keep" } });
+    const { stderr } = await p.run("login", provider, "--device");
     assert.match(stderr, /enter the code: FIXTURE[\s\S]*Waiting for the sign-in to finish/);
-    assert.deepEqual(Object.keys((await p.auth()).logins), ["chatgpt", "grok"]);
-    if (current === "grok") assert.equal(Object.hasOwn((await p.auth()).logins.grok, "account"), false);
-    assert.deepEqual((await p.auth()).answers, { fixture: "keep" });
-    assert.equal((await p.auth()).extra, true);
-    await p.put("auth.json", { logins: { [former]: fixtureLogin } });
-    await p.run("logout", former);
-    assert.deepEqual((await p.auth()).logins, {});
-  });
-
-  test(`ma --model, settings.json and models.json accept ${former}`, async t => {
-    const p = await project(t);
-    await p.put("auth.json", { logins: { [former]: fixtureLogin } });
-    assert.equal((await p.run("--model", `${former}/${model}`, "-p", "hello")).stdout.trim(), `${host}/${model}`);
-    assert.ok(Object.hasOwn((await p.auth()).logins, former)); // Reading alone is not a migration.
-    await p.put("settings.json", { model: `${former}/fixture-model` });
-    await p.put("models.json", { [former]: [{ id: "fixture-model", name: "Fixture", contextWindow: 32768, maxTokens: 2048, effort: { low: "low" } }] });
-    assert.match((await p.run("models")).stdout, new RegExp(`${current}/fixture-model`));
-    assert.equal((await p.run("-p", "hello")).stdout.trim(), `${host}/fixture-model`);
-  });
-
-  test(`ma reopens a session whose saved model is ${former}/${model}`, async t => {
-    const p = await project(t);
-    await p.put("auth.json", { logins: { [former]: fixtureLogin } });
-    const old = await createAgent({ project: p.project, dataDir: join(p.config, "state"), durability: "kept", providers: [{
-      id: former, supports: { keepsState: false, safeToRepeat: true },
-      models: () => [{ provider: former, id: model, contextWindow: 32768, maxOutput: 2048, input: ["text"], reasoning: false }],
-      request: () => ({ role: "assistant", stop: "finished", content: [{ type: "text", text: "saved fixture" }] }),
-    }] });
-    const id = await (async () => {
-      try {
-        const session = await old.session();
-        assert.equal((await session.prompt("save this session")).text, "saved fixture");
-        assert.deepEqual((await old.sessionInfo(session.id)).settings.model, { provider: former, id: model });
-        return session.id;
-      } finally { await old.close(); }
-    })();
-    assert.equal((await p.run("--session", id, "-p", "hello")).stdout.trim(), `${host}/${model}`);
+    const { logins } = await p.auth();
+    assert.deepEqual(Object.keys(logins), [provider]);
+    assert.equal(logins[provider].account, provider === "grok" ? undefined : "fixture-account");
+    await p.put("models.json", { [provider]: [{ id: "fixture", name: "Fixture", contextWindow: 4096, maxTokens: 512, effort: {} }] });
+    await p.put("settings.json", { model: `${provider}/fixture` });
+    assert.equal((await p.run("-p", "hello")).stdout.trim(), `${host}/fixture`);
+    await p.run("logout", provider);
+    assert.deepEqual(await p.auth(), { logins: {}, answers: { fixture: "keep" } });
   });
 }
+
+test("ma does not use another provider's login, catalog or saved selection", async t => {
+  const p = await project(t);
+  await p.put("auth.json", { logins: { "openai-codex": { type: "api_key", key: "fixture" } } });
+  await p.put("models.json", { xai: [{ id: "extra", name: "Extra", contextWindow: 4096, maxTokens: 512, effort: {} }] });
+  assert.doesNotMatch((await p.run("models")).stdout, /grok\/extra/);
+  assert.match((await p.run("auth")).stdout, /chatgpt[^\n]*not signed in/);
+  await assert.rejects(p.run("login", "openai-codex", "--device"), /unknown provider/);
+  await assert.rejects(p.run("logout", "xai"), /unknown provider/);
+  await assert.rejects(p.run("--model", "xai/grok-4.7", "-p", "hello"), /model is not offered/);
+  const id = "openai-codex", model = "gpt-6.1-sol";
+  const a = await createAgent({ project: p.project, dataDir: join(p.config, "state"), durability: "kept", providers: [{
+    id, supports: { keepsState: false, safeToRepeat: true },
+    models: () => [{ provider: id, id: model, contextWindow: 32768, maxOutput: 2048, input: ["text"], reasoning: false }],
+    request: () => ({ role: "assistant", stop: "finished", content: [] }),
+  }] });
+  const session = await a.session();
+  try { await session.prompt("save"); } finally { await a.close(); }
+  await assert.rejects(p.run("--session", session.id, "-p", "hello"), /model is not offered/);
+});

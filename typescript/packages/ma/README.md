@@ -37,8 +37,6 @@ The WebSocket listener requires a loopback address and an owner-only bearer toke
 
 `ma` uses `chatgpt({ logins })` and `grok({ logins })` from `@modular-agent/subscription`. Subscription login writes and refreshes use `auth.lock` next to the private `auth.json`. The lock is shared with the other SDKs. Linux needs util-linux `flock`; macOS uses `/usr/bin/perl` to call `flock(2)`. `ma login claude` runs `claude auth login`. The TypeScript `ma` uses the Claude Agent SDK in process and does not need a sidecar.
 
-`openai-codex` and `xai` still work in `--model`, `ma login`, `ma logout`, `settings.json`, `models.json`, and saved sessions. `ma` moves old login keys to `chatgpt` and `grok` on the next write. If old and new keys coexist, the new key wins. `ma models` prints only the new ids.
-
 Configuration is shared in `$XDG_CONFIG_HOME/modular-agent`, or `~/.config/modular-agent`. State is kept in `$XDG_STATE_HOME/modular-agent/typescript`, or `~/.local/state/modular-agent/typescript`. `MODULAR_AGENT_DATA_DIR` sets the configuration directory and puts state under its `state/` subdirectory. Use `--runtime transient` to keep history without resuming a turn cut off by a crash.
 
 ### Approval
