@@ -374,8 +374,10 @@ impl State {
         }
         let session = before.or_else(|| result.as_ref().ok().and_then(|v| self.session(v).ok()));
         if let Some(session) = session {
-            let failed = result.is_err();
-            let value = result.unwrap_or_else(|error| json!({"error":error.to_string()}));
+            let (value, failure) = match result {
+                Ok(value) => (value, None),
+                Err(error) => (json!({"error":error.to_string()}), Some(error)),
+            };
             // Withdraw only this connection's delivery when a re-poll is withheld.
             if method == "_modular-agent/requests" {
                 let waiting = questions(&session.api.snapshot(&session.id)?)?
@@ -425,9 +427,10 @@ impl State {
             } else if method == "_modular-agent/history" {
                 binding::mark_history_views(&session, &payload["result"], &mut value)?;
             }
-            if failed {
-                let error = value["error"].as_str().ok_or_else(withheld)?;
-                bail!("{error}");
+            if let Some(error) = failure {
+                // Keep the refusal type, but expose only the gated message.
+                let message = value["error"].as_str().ok_or_else(withheld)?;
+                return Err(error.context(message.to_owned()));
             }
             let outcome = &value["_meta"]["modular-agent"]["outcome"];
             if prompt
@@ -514,10 +517,12 @@ impl State {
             return Err(request_error("not_initialized", "initialize first").into());
         }
         if let Some(name) = method.strip_prefix("_modular-agent/") {
+            binding::validate_history_params(name, &p)?;
             if name == "move" && p["rewind"] == true {
                 // Serialize project opens with rewind across session-local Harnesses.
                 let _setup = self.routes.setup.lock().await;
                 let session = self.session(&p)?;
+                binding::require_feature(self.factory.as_ref(), &session, "rewinding")?;
                 require(session.api.as_ref(), &actor_scope(&session.id), "settings")?;
                 if self.project_in_use(&session.project, &session.id) {
                     return Err(request_error("conflict", "cannot rewind a shared project").into());
@@ -716,6 +721,53 @@ impl State {
 pub fn request_error(code: &str, message: &str) -> acp::Error {
     acp::Error::new(-32602, message).data(json!({"code":code}))
 }
+fn operation_code(error: &OperationError) -> &'static str {
+    match error {
+        OperationError::NotFound(_) => "not_found",
+        OperationError::Busy(_) => "busy",
+        OperationError::Unavailable(_) => "unavailable",
+        OperationError::Forbidden(_) => "forbidden",
+        OperationError::Conflict(_) => "conflict",
+        OperationError::InvalidParams(_) => "invalid_params",
+        OperationError::ResultTooLarge(_) => "result_too_large",
+    }
+}
+
+fn rpc_error(error: anyhow::Error) -> acp::Error {
+    let message = error.to_string();
+    if let Some(error) = error.downcast_ref::<acp::Error>() {
+        return error.clone();
+    }
+    if error.is::<LostPart>() {
+        return acp::Error::new(-32000, message).data(json!({"code":"lost"}));
+    }
+    if let Some(held) = error.downcast_ref::<HistoryHeld>() {
+        return acp::Error::new(-32000, message)
+            .data(json!({"code":"held","retryAfterMs":held.retry_after_ms}));
+    }
+    let code = if let Some(issue) = error.downcast_ref::<OperationError>() {
+        operation_code(issue)
+    } else if let Some(issue) = error.downcast_ref::<RewindError>() {
+        match issue {
+            RewindError::Busy(_) => "busy",
+            RewindError::Conflict(_) => "conflict",
+            RewindError::NotSupported => "not_supported",
+        }
+    } else if error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|e| e.kind() == std::io::ErrorKind::Unsupported)
+    {
+        "not_supported"
+    } else if message == "method not found" {
+        return acp::Error::method_not_found();
+    } else if message.starts_with("actor lacks ") || message.starts_with("unknown tenant ") {
+        "forbidden"
+    } else {
+        "invalid_params"
+    };
+    request_error(code, &message)
+}
+
 fn withheld() -> acp::Error {
     acp::Error::new(-32000, "response withheld by output gate").data(json!({"code":"withheld"}))
 }
@@ -843,46 +895,10 @@ async fn run_connection(
                     requests.principal.clone(),
                     requests.ceiling.clone(),
                     async move {
-                        let result = requests.dispatch(request, connection).await.map_err(|e| {
-                            if let Some(error) = e.downcast_ref::<acp::Error>() {
-                                error.clone()
-                            } else if let Some(lost) = e.downcast_ref::<LostPart>() {
-                                acp::Error::new(-32000, lost.to_string())
-                                    .data(json!({"code":"lost"}))
-                            } else if let Some(held) = e.downcast_ref::<HistoryHeld>() {
-                                acp::Error::new(-32000, held.to_string())
-                                    .data(json!({"code":"held","retryAfterMs":held.retry_after_ms}))
-                            } else if e.to_string() == "method not found" {
-                                acp::Error::method_not_found()
-                            } else {
-                                let message = e.to_string();
-                                let code = if matches!(
-                                    e.downcast_ref::<OperationError>(),
-                                    Some(OperationError::Unavailable(_))
-                                ) {
-                                    "unavailable"
-                                } else if matches!(
-                                    e.downcast_ref::<OperationError>(),
-                                    Some(OperationError::Busy(_))
-                                ) {
-                                    "busy"
-                                } else if message.starts_with("actor lacks ")
-                                    || message.starts_with("unknown tenant ")
-                                {
-                                    "forbidden"
-                                } else if message == "initial history append is too large" {
-                                    "result_too_large"
-                                } else if matches!(
-                                    message.as_str(),
-                                    "session busy" | "settle pending work before moving or forking"
-                                ) {
-                                    "busy"
-                                } else {
-                                    "invalid_params"
-                                };
-                                acp::Error::new(-32602, message).data(json!({"code":code}))
-                            }
-                        });
+                        let result = requests
+                            .dispatch(request, connection)
+                            .await
+                            .map_err(rpc_error);
                         responder.respond_with_result(result)
                     },
                 ))

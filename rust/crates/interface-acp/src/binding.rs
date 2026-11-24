@@ -375,16 +375,55 @@ pub(crate) fn mark_history_views(
 }
 fn proposal_result<T>(result: Result<T>) -> Result<T> {
     result.map_err(|error| {
-        let code = match error.downcast_ref::<OperationError>() {
-            Some(OperationError::NotFound(_)) => "not_found",
-            Some(OperationError::Conflict(_)) => "conflict",
-            Some(OperationError::Forbidden(_)) => "forbidden",
-            Some(OperationError::InvalidParams(_)) => "invalid_params",
-            _ => return error,
+        let Some(reason) = error.downcast_ref::<OperationError>() else {
+            return error;
         };
-        request_error(code, &error.to_string()).into()
+        request_error(operation_code(reason), &error.to_string()).into()
     })
 }
+pub(crate) fn require_feature(
+    factory: &dyn Factory,
+    session: &Session,
+    feature: &str,
+) -> Result<()> {
+    ensure!(
+        factory.session_declaration(session.api.as_ref(), &session.id)?[feature] == true,
+        request_error("not_supported", "feature is disabled in this session")
+    );
+    Ok(())
+}
+
+pub(crate) fn validate_history_params(method: &str, p: &Value) -> Result<()> {
+    let id = |v: &Value| v.as_str().is_some_and(|s| !s.is_empty());
+    match method {
+        "erase" => ensure!(
+            p["entryIds"]
+                .as_array()
+                .is_some_and(|ids| !ids.is_empty() && ids.iter().all(id)),
+            request_error(
+                "invalid_params",
+                "entryIds must be a nonempty array of entry ids"
+            )
+        ),
+        "fork" | "move" => {
+            ensure!(
+                id(&p["entryId"]),
+                request_error("invalid_params", "entryId must be a nonempty string")
+            );
+            ensure!(
+                method != "move" || p.get("rewind").is_none_or(Value::is_boolean),
+                request_error("invalid_params", "rewind must be a boolean")
+            );
+        }
+        _ => return Ok(()),
+    }
+    ensure!(
+        id(&p["sessionId"]),
+        request_error("invalid_params", "sessionId must be a nonempty string")
+    );
+    Ok(())
+}
+
 pub(crate) async fn extension(
     factory: &dyn Factory,
     session: Arc<Session>,
@@ -406,12 +445,12 @@ pub(crate) async fn extension(
         }
         "limit" => Some("sessionLimits"),
         "tenant" => Some("tenants"),
+        "erase" => Some("erasure"),
+        "fork" => Some("forking"),
         _ => None,
     };
-    if let Some(feature) = feature
-        && factory.session_declaration(session.api.as_ref(), &session.id)?[feature] != true
-    {
-        return Err(request_error("not_supported", "feature is disabled in this session").into());
+    if let Some(feature) = feature {
+        require_feature(factory, &session, feature)?;
     }
     let actor = if matches!(method, "input" | "answer") {
         let actor = p
@@ -704,10 +743,11 @@ pub(crate) async fn extension(
             }
         }
         "fork" | "move" => {
+            require(api, &scope, "settings")?;
             let _guard = session
                 .gate
                 .try_lock()
-                .map_err(|_| anyhow!("session busy"))?;
+                .map_err(|_| request_error("busy", "session busy"))?;
             let data = session.api.snapshot(&session.id)?;
             let branch = data.branch();
             ensure!(
@@ -719,7 +759,7 @@ pub(crate) async fn extension(
                             .entries
                             .iter()
                             .any(|r| r.kind == "tool.result" && r.scope.call == e.scope.call)),
-                "settle pending work before moving or forking"
+                request_error("busy", "settle pending work before moving or forking")
             );
             let target = string(p, "entryId")?;
             let entry = data
@@ -737,22 +777,7 @@ pub(crate) async fn extension(
             let position = target.to_owned();
             if method == "move" {
                 if p["rewind"] == true {
-                    let out = session
-                        .api
-                        .rewind(&scope, position)
-                        .await
-                        .map_err(|error| match error.downcast_ref::<RewindError>() {
-                            Some(issue) => request_error(
-                                match issue {
-                                    RewindError::Busy(_) => "busy",
-                                    RewindError::Conflict(_) => "conflict",
-                                    RewindError::NotSupported => "not_supported",
-                                },
-                                &error.to_string(),
-                            )
-                            .into(),
-                            None => error,
-                        })?;
+                    let out = session.api.rewind(&scope, position).await?;
                     if !out.is_empty() {
                         return Ok(json!({"outOfReach":out}));
                     }

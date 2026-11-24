@@ -1140,7 +1140,8 @@ impl Session {
 
     /// Fork at a recorded entry, or at the current position.
     pub fn fork_with(&self, entry_id: Option<&str>) -> Result<Session> {
-        self.require("input")?;
+        self.require("watch")?;
+        self.require("settings")?;
         let data = self.snapshot()?;
         if entry_id.is_some_and(|id| !data.entries.iter().any(|e| e.id == id)) {
             return Err(Error::new(Code::NotFound, "unknown fork point"));

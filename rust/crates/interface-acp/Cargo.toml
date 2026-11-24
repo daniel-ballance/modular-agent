@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 transport-websocket = { path = "../transport-websocket" }
 agent-api.workspace = true
+anyhow.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
 serde.workspace = true

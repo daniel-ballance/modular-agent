@@ -9,6 +9,7 @@ pub enum OperationError {
     Forbidden(String),
     Conflict(String),
     InvalidParams(String),
+    ResultTooLarge(String),
 }
 
 impl std::fmt::Display for OperationError {
@@ -19,7 +20,8 @@ impl std::fmt::Display for OperationError {
             | Self::Unavailable(message)
             | Self::Forbidden(message)
             | Self::Conflict(message)
-            | Self::InvalidParams(message) => f.write_str(message),
+            | Self::InvalidParams(message)
+            | Self::ResultTooLarge(message) => f.write_str(message),
         }
     }
 }

@@ -38,7 +38,7 @@ async fn actor_views_use_current_shared_rights() -> Result<()> {
     let agent = test_agent()
         .several_actors(true)
         .session_limits(true)
-        .tenants(json!({"trial":{"rights":["input","watch","grant","administer"]}}))
+        .tenants(json!({"trial":{"rights":["input","watch","settings","grant","administer"]}}))
         .script(json!([{"text":"Hello."}]))
         .build()
         .await?;
@@ -59,6 +59,14 @@ async fn actor_views_use_current_shared_rights() -> Result<()> {
         .await?;
     let guest = session.r#as("guest")?;
     assert_eq!(guest.cancel().await.unwrap_err().code(), Code::Forbidden);
+    assert!(matches!(guest.fork(), Err(e) if e.code() == Code::Forbidden));
+    session
+        .join(Actor {
+            id: "guest".into(),
+            kind: "user".into(),
+            rights: Rights::only(&["input", "watch", "settings"]),
+        })
+        .await?;
     let fork = guest.fork()?;
     assert_eq!(fork.cancel().await.unwrap_err().code(), Code::Forbidden);
     assert_eq!(fork.prompt("hello").await?.text, "Hello.");

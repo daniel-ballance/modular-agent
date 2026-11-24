@@ -1183,7 +1183,7 @@ impl HistoryStore for HttpHistory {
             ensure!(
                 serde_json::to_vec(&envelope)?.len() - 2 + serde_json::to_vec(&entries)?.len()
                     <= BODY_LIMIT,
-                "initial history append is too large"
+                OperationError::ResultTooLarge("initial history append is too large".into())
             );
             let mut meta = json!({"project":data.project,"created":data.entries.first().map(|e|e.at).unwrap_or(0)});
             if let Some((parent, entry)) = &data.origin {

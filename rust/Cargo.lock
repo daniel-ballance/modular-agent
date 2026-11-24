@@ -2145,6 +2145,7 @@ version = "0.2.0"
 dependencies = [
  "agent-api",
  "agent-client-protocol",
+ "anyhow",
  "async-trait",
  "blocking",
  "futures",
