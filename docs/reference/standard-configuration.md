@@ -82,7 +82,6 @@ With no `--model` and none in settings, `ma` uses the first Provider that is sig
 - **The configuration folder** is `$XDG_CONFIG_HOME/modular-agent`, or `~/.config/modular-agent`.
 - **The state folder** is `$XDG_STATE_HOME/modular-agent/<language>`, or `~/.local/state/modular-agent/<language>`, where `<language>` is `rust`, `typescript`, `go` or `python`. It holds sessions, command state and the full output of commands whose output was cut.
 - **`MODULAR_AGENT_DATA_DIR`** puts both in that one folder, as the ACP binding requires of a host that isolates an agent: the configuration files directly in it, and the state in `state/` under it. It affects only `ma`, not other programs reading `XDG_CONFIG_HOME` or `XDG_STATE_HOME`.
-- **Earlier Rust sessions.** Before this page, the Rust `ma` kept state directly in `modular-agent/`. To keep those sessions, stop the agent and move `sessions/` and `commands/` together into `modular-agent/rust/`.
 
 **`auth.json`** is `{"logins": {PROVIDER: LOGIN}, "answers": {NAME: VALUE}}`. A login is `{"type": "oauth", "access", "refresh", "expires", "account"?}`, with `expires` in milliseconds since the epoch already brought forward by the refresh margin, or `{"type": "api_key", "key"}`. Every implementation writes it with mode 0600 and, while refreshing a token, holds an exclusive lock on `auth.lock` beside it, so two agents in any languages never spend one refresh token.
 
