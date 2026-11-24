@@ -336,7 +336,10 @@ func erasureTombstones(snap api.Session) map[string]bool {
 func checkRemotePlans(plans []api.ErasurePlan, tombstones map[string]bool) error {
 	for _, p := range plans {
 		for _, copy := range p.Copies {
-			if !copy.Complete || !tombstones[copy.ID] {
+			if !copy.Complete {
+				return errors.Join(api.ErrPendingErasure, api.ErrErasureUnavailable)
+			}
+			if !tombstones[copy.ID] {
 				return api.ErrErasureUnavailable
 			}
 		}

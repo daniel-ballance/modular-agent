@@ -38,6 +38,12 @@ type Marker struct {
 	Questions []string `json:"questions,omitempty"`
 	Calls     []string `json:"calls,omitempty"`
 	Code      string   `json:"code,omitempty"`
+	// Only a handoff group needs its snapshot position and cursor. The
+	// digest checks that the gate sees the original group, not a subset.
+	Position    string `json:"position,omitempty"`
+	Cursor      string `json:"cursor,omitempty"`
+	GroupDigest string `json:"groupDigest,omitempty"`
+	FixedError  bool   `json:"fixedError,omitempty"`
 }
 
 type Slot struct{ file *os.File }
@@ -71,9 +77,10 @@ func Reserve(root, thread, key string) (*Slot, error) {
 	}
 	return &Slot{f}, nil
 }
-func (s *Slot) Close()   { _ = s.file.Close() }
-func (s *Slot) Discard() { _ = os.Remove(s.file.Name()) }
-func Fits(m Marker) bool { return len(api.JSON(m))+sha256.Size <= SlotBytes }
+func (s *Slot) Close()                           { _ = s.file.Close() }
+func (s *Slot) Discard()                         { _ = os.Remove(s.file.Name()) }
+func GroupDigest(group []json.RawMessage) string { return digest(group) }
+func Fits(m Marker) bool                         { return len(api.JSON(m))+sha256.Size <= SlotBytes }
 func (s *Slot) Release(m Marker) error {
 	if !Fits(m) {
 		return api.ErrCapacity
@@ -194,6 +201,18 @@ func Erase(root string, row api.Session, ids []string) error {
 			return err
 		}
 		w := Fold(row.Entries, f.Name(), m)
+		if m.GroupDigest != "" {
+			// The snapshot in an executable release depends on displayed
+			// messages on this prefix, not later turns or another branch.
+			prefix := row
+			prefix.Position = m.Position
+			for _, e := range prefix.Branch() {
+				switch e.Kind {
+				case "input", "model", "tool.started", "tool.result":
+					w.Sources = append(w.Sources, e)
+				}
+			}
+		}
 		for _, e := range w.Sources {
 			if slices.Contains(ids, e.ID) {
 				if err = os.Remove(filepath.Join(folder, f.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {

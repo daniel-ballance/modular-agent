@@ -343,6 +343,7 @@ type agHost interface {
 	JoinHost(string, api.Actor) error
 	ViewForOutput(context.Context, string) (api.Session, error)
 	ReadForHost(context.Context, string, string) (api.Session, <-chan struct{}, error)
+	RecordHostRelease(string, int, func() error) error
 	HostHistoryView(context.Context, api.Session) (api.Session, error)
 	OutputValueFor(context.Context, string, api.Event) (api.Event, error)
 	ErasureEpoch(string) (int, error)

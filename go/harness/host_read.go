@@ -53,6 +53,22 @@ func (c *client) ReadForHost(ctx context.Context, project, id string) (api.Sessi
 	return row, next, nil
 }
 
+// RecordHostRelease serializes a private transport marker with source erasure.
+// No user or plugin code runs under the lock; write only syncs the reserved slot.
+func (c *client) RecordHostRelease(id string, epoch int, write func() error) error {
+	s, err := c.find(id)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	got, err := c.ErasureEpoch(id)
+	if err != nil || got != epoch {
+		return api.ErrErasureUnavailable
+	}
+	return write()
+}
+
 // HostHistoryView applies the native policy to the same snapshot the reader
 // is projecting. The Interface then gates each source as a shared entry.
 func (c *client) HostHistoryView(ctx context.Context, snap api.Session) (api.Session, error) {

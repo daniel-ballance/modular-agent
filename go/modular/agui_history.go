@@ -36,7 +36,17 @@ func (q *agRequest) history(beforeStepsOf ...string) (h agHistory, err error) {
 	if err != nil {
 		return h, err
 	}
-	h.position, h.entries = snap.Position, len(snap.Entries)
+	h, err = q.projectHistory(snap, h.epoch, beforeStepsOf...)
+	if err == nil {
+		err = q.fresh(h.epoch)
+	}
+	return h, err
+}
+
+// projectHistory needs only a gated snapshot. A receipt read can project a
+// previous watermark without opening the session or installing a history cursor.
+func (q *agRequest) projectHistory(snap api.Session, epoch int, beforeStepsOf ...string) (agHistory, error) {
+	h := agHistory{position: snap.Position, entries: len(snap.Entries), epoch: epoch}
 	branch := snap.Branch()
 	if len(beforeStepsOf) > 0 {
 		for i, e := range branch {
@@ -163,7 +173,7 @@ func (q *agRequest) history(beforeStepsOf ...string) (h agHistory, err error) {
 		}
 	}
 	h.digest = sha256.Sum256(api.JSON([]any{h.messages, cutoffs, h.epoch}))
-	return h, q.fresh(h.epoch)
+	return h, nil
 }
 func (h agHistory) last() any {
 	if len(h.messages) == 0 {
@@ -409,7 +419,10 @@ func (q *agRequest) rememberWaiting(d agQuestion) {
 	s.delivered[d.q.ID] = agDelivery{d.presence, sha256.Sum256(api.JSON(d.view))}
 }
 func (q *agRequest) snapshotFrames(h agHistory) ([][]byte, string, error) {
-	cursor := api.ID()
+	return q.snapshotFramesAt(h, api.ID())
+}
+
+func (q *agRequest) snapshotFramesAt(h agHistory, cursor string) ([][]byte, string, error) {
 	m, err := q.encode("agui.event", agObject{"type": "MESSAGES_SNAPSHOT", "messages": h.messages})
 	if err != nil {
 		return nil, "", err

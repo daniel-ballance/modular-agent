@@ -555,13 +555,14 @@ func (x *agExchange) event(v agObject) error {
 func (x *agExchange) fail(err error) {
 	_, code := agStatus(err)
 	v := agObject{"type": "RUN_ERROR", "code": code, "message": "Run could not be delivered."}
-	if x.event(v) != nil {
+	fixed := x.event(v) != nil
+	if fixed {
 		code = withheld
 		if x.frame([]byte(`{"type":"RUN_ERROR","code":"output_withheld","message":"Output withheld."}`)) != nil {
 			return
 		}
 	}
-	x.recordRelease(runreceipt.Marker{Class: "error", Code: string(code)})
+	x.recordRelease(runreceipt.Marker{Class: "error", Code: string(code), FixedError: fixed})
 }
 func (x *agExchange) sendSnapshot(h agHistory) error {
 	s := x.state
@@ -665,6 +666,7 @@ func (x *agExchange) finish(out api.Outcome, interrupts []agObject) error {
 	if err = x.fresh(x.epoch); err != nil {
 		return err
 	}
+	marker := runreceipt.Marker{Class: agString(terminal, "type")}
 	if len(calls) > 0 {
 		// Gate the entire executable group, not just its separately valid pieces.
 		group := make([]json.RawMessage, len(frames))
@@ -677,11 +679,11 @@ func (x *agExchange) finish(out api.Outcome, interrupts []agObject) error {
 		if err = x.fresh(x.epoch); err != nil {
 			return err
 		}
+		marker.Cursor, marker.Position, marker.GroupDigest = cursor, h.position, runreceipt.GroupDigest(group)
 		if err = x.conn.connection.CheckGroup(x.ctx, x.turn, calls); err != nil {
 			return err
 		}
 	}
-	marker := runreceipt.Marker{Class: agString(terminal, "type")}
 	for _, v := range interrupts {
 		marker.Questions = append(marker.Questions, agString(v, "id"))
 	}
@@ -733,7 +735,7 @@ func (x *agExchange) finish(out api.Outcome, interrupts []agObject) error {
 func (x *agExchange) recordRelease(m runreceipt.Marker) {
 	if x.slot != nil {
 		x.boundary("terminalReleased", x.in.run)
-		if x.slot.Release(m) == nil {
+		if x.host().RecordHostRelease(x.id, x.epoch, func() error { return x.slot.Release(m) }) == nil {
 			x.boundary("terminalRecorded", x.in.run)
 		}
 	}

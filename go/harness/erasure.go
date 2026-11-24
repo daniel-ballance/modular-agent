@@ -26,16 +26,26 @@ func (c *client) ErasureEpoch(id string) (int, error) {
 				return 0, err
 			}
 			if len(plans) != 0 {
-				if s == nil {
-					return 0, api.ErrErasureUnavailable
-				}
-				tombstones := s.erasureTombstones.Load()
-				for _, p := range plans {
-					for _, copy := range p.Copies {
-						if !copy.Complete || tombstones == nil || !(*tombstones)[copy.ID] {
-							return 0, api.ErrErasureUnavailable
+				var tombstones map[string]bool
+				if s != nil {
+					if seen := s.erasureTombstones.Load(); seen != nil {
+						tombstones = *seen
+					}
+				} else {
+					// A read on a closed session cannot open a writer to check a plan.
+					rows, err := v.(api.Store).List("")
+					if err != nil {
+						return 0, errors.Join(api.ErrErasureUnavailable, err)
+					}
+					for _, row := range rows {
+						if row.ID == id {
+							tombstones = erasureTombstones(row)
+							break
 						}
 					}
+				}
+				if err := checkRemotePlans(plans, tombstones); err != nil {
+					return 0, err
 				}
 			}
 			return len(plans), nil
