@@ -1,7 +1,7 @@
 """A login file shared by independent agents and languages."""
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 import fcntl
@@ -61,9 +61,8 @@ type Login = OAuth | ApiKey
 
 
 class SubscriptionLogins:
-    def __init__(self, path: str | Path, *, aliases: Mapping[str, str] | None = None) -> None:
+    def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self._aliases = dict(aliases or {})
 
     def _read(self) -> tuple[JsonObject, dict[str, Login]]:
         try:
@@ -101,15 +100,12 @@ class SubscriptionLogins:
                         logins[provider] = ApiKey(key)
                     case _:
                         raise TypeError
-            for old, new in self._aliases.items():
-                if old in logins:
-                    logins.setdefault(new, logins.pop(old))
             return cast(JsonObject, doc), logins
         except TypeError:
             raise ValueError(f"{self.path} is not a valid credential file") from None
 
     def login(self, provider: str) -> Login | None:
-        return self._read()[1].get(self._aliases.get(provider, provider))
+        return self._read()[1].get(provider)
 
     def metadata(self) -> JsonObject:
         """Read the other top-level members, without the logins."""
@@ -182,7 +178,6 @@ class SubscriptionLogins:
                 temp.unlink(missing_ok=True)
 
     async def set_login(self, provider: str, login: Login | None) -> None:
-        provider = self._aliases.get(provider, provider)
         async with self._locked():
             doc, logins = self._read()
             if login is None:
@@ -198,8 +193,6 @@ class SubscriptionLogins:
         *,
         rejected: str | None = None,
     ) -> Login:
-        provider = self._aliases.get(provider, provider)
-
         def require(login: Login | None) -> Login:
             if login is None:
                 raise ModelFailure(
@@ -225,7 +218,5 @@ class SubscriptionLogins:
             return login
 
 
-def subscription_logins(
-    path: str | Path, *, aliases: Mapping[str, str] | None = None
-) -> SubscriptionLogins:
-    return SubscriptionLogins(path, aliases=aliases)
+def subscription_logins(path: str | Path) -> SubscriptionLogins:
+    return SubscriptionLogins(path)

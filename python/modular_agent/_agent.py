@@ -1103,7 +1103,6 @@ def create_agent(
     service_control_timeout: float = 5.0,
     plugin_host: bool | None = None,
     model: str | ModelRef | None = None,
-    model_aliases: Mapping[str, str] | None = None,
     settings: JsonObject | None = None,
     approval: Approval | None = None,
     approval_covers_nested: bool = False,
@@ -1245,29 +1244,6 @@ def create_agent(
             await h.load(questions)
             agent._credentials = credentials or environment_credentials()
             await h.load(_CredentialAdapter(agent._credentials))
-            if model_aliases:
-                aliases = dict(model_aliases)
-
-                async def migrate_model(payload: JsonObject) -> None:
-                    sid = cast(str, payload["session"])
-                    selected = h.sessions[sid]["settings"].get("model")
-                    if isinstance(selected, str):
-                        provider, slash, name = selected.partition("/")
-                        if slash and provider in aliases:
-                            # Record the operator's renamed Provider before recovery
-                            # or ACP reads the active settings. Never rewrite history.
-                            await h.handle(
-                                "append",
-                                {
-                                    "session": sid,
-                                    "writer": "@harness",
-                                    "kind": "setting",
-                                    "data": {"model": f"{aliases[provider]}/{name}"},
-                                },
-                                None,
-                            )
-
-                h.on("embedding", "session.prepare", migrate_model, "first")
             h.on("embedding", "session.start", agent._present, "first")
             h.on("embedding", "session.suspend", agent._interrupted, "first")
             if approval_covers_nested:
