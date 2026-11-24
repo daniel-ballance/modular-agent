@@ -46,6 +46,11 @@ test('only the named agents can queue work; replay and failed verdicts have boun
     s.handOff(triage, 'coder', 'fix limit', 'seed');
     s.handOff(triage, 'coder', 'duplicate', 'seed');
     const revision = 'a'.repeat(40);
+    // Thread IDs come from separate agents and need not be globally unique.
+    s.thread(triage, 'local-thread');
+    s.thread(s.next('coder'), 'local-thread');
+    assert.equal(s.activeThread('coder', 'local-thread').agent, 'coder');
+    assert.equal(s.activeThread('triage', 'local-thread').agent, 'triage');
     for (let i = 0; i < 3; i++) {
       const coder = s.next('coder');
       assert.equal(coder.attempt, i);
@@ -66,6 +71,29 @@ test('only the named agents can queue work; replay and failed verdicts have boun
     assert.equal(s.routes().length, 7);
   } finally {
     s.close();
+  }
+});
+
+test('closures and their per-thread cursor survive a host restart; a reset invents no reason', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ops-desk-feed-')), path = join(dir, 'desk.sqlite');
+  let s = new Store(path);
+  try {
+    s.receive('event', 'build-failed', 'suite', null);
+    const r = s.next('triage');
+    s.thread(r, 'thread-one');
+    const questions = ['answered', 'declined', 'expired', 'revoked', 'unseen'].map(id => ({ id, reason: 'approval', message: id }));
+    s.seedWaits(r, 'initial', questions);
+    for (const { id } of questions.slice(0, 4)) s.waitClosed(r, { cursor: 'after-' + id, requestId: id, reason: id });
+    s.close();
+    s = new Store(path);
+    s.seedWaits(r, 'newer-snapshot', []); // reconnect must not skip the gap
+    assert.equal(s.waitCursor(r), 'after-revoked');
+    s.resetWaits(r, 'reset', []); // cursor_expired
+    assert.equal(s.waitCursor(r), 'reset');
+    assert.deepEqual(s.inbox().map(q => [q.id, q.status]), questions.slice(0, 4).map(({id}) => [id, id]));
+  } finally {
+    s.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

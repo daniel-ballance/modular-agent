@@ -19,7 +19,8 @@ for (const batch of payloads) {
       for (const span of scope.spans ?? []) {
         if (span.name === 'desk.event') events.push(span.traceId);
         if (attr(span, 'gen_ai.operation.name') === 'invoke_agent') {
-          invocations.push({ service: attr(resource, 'service.name'), trace: span.traceId });
+          invocations.push({ service: attr(resource, 'service.name'), trace: span.traceId,
+            thread: attr(span, 'gen_ai.conversation.id'), span: span.spanId, links: span.links ?? [] });
         }
       }
     }

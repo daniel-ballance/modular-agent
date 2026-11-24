@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import type { Question, Route } from './store.js';
+import type { Question, Receipt, Route, WaitClosure } from './store.js';
 import { operation } from './trace.js';
 
 export type Snapshot = {
   threadId: string;
   messages: { role: string; content?: unknown }[];
   cursor: string;
+  waitCursor: string;
+  runReceipts: 1;
   waiting: { questions: Question[]; toolCalls: { toolCallId: string; expiresAt: string }[] };
 };
 export type Decision = { interruptId: string; status: 'resolved' | 'cancelled'; payload?: unknown };
@@ -27,6 +29,39 @@ export class HttpError extends Error {
     super(message);
   }
 }
+async function* events(res: Response) {
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  const reader = res.body!.getReader();
+  let rest = '';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      rest += decoder.decode(value, { stream: true });
+      let newline;
+      while ((newline = rest.indexOf('\n')) !== -1) {
+        const line = rest.slice(0, newline).trimEnd();
+        rest = rest.slice(newline + 1);
+        if (!line || line.startsWith(':')) continue;
+        if (!line.startsWith('data: ')) throw Error('Invalid AG-UI SSE frame');
+        yield JSON.parse(line.slice(6));
+      }
+      if (rest.length > 64 * 1024 * 1024) throw Error('Oversized AG-UI frame');
+    }
+    if (rest || decoder.decode()) throw new LostExchange('Incomplete AG-UI frame');
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+}
+async function* closureItems(res: Response): AsyncGenerator<WaitClosure> {
+  for await (const item of events(res)) {
+    const question = typeof item.requestId === 'string' && ['answered', 'declined', 'expired', 'revoked',
+      'cancelled', 'noLongerAnswerable', 'refused', 'superseded'].includes(item.reason);
+    const tool = typeof item.toolCallId === 'string' && item.reason === 'settled' && typeof item.status === 'string';
+    if (typeof item.cursor !== 'string' || !item.cursor || (!question && !tool)) throw Error('Invalid wait closure');
+    yield item;
+  }
+}
 export class Agui {
   constructor(
     readonly origin: string,
@@ -37,7 +72,6 @@ export class Agui {
   }
   private async request(path: string, parent: string | null, init: RequestInit = {}) {
     const span = operation('desk.agui', parent);
-    // The station can hold presence without installing its own exporter.
     const traceparent = span.header ?? parent;
     try {
       const res = await fetch(this.origin + '/agui/v1' + path, {
@@ -90,12 +124,33 @@ export class Agui {
     const s = await (await this.request(this.path(r), r.parent)).json();
     if (
       s.threadId !== r.thread ||
+      s.runReceipts !== 1 ||
+      typeof s.waitCursor !== 'string' || !s.waitCursor ||
       !Array.isArray(s.messages) ||
       !Array.isArray(s.waiting?.questions) ||
       !Array.isArray(s.waiting.toolCalls)
     )
       throw Error('Invalid thread snapshot');
     return s;
+  }
+  async receipt(thread: string, runId: string): Promise<Receipt | null> {
+    const path = this.path({ thread }) + '/run-receipt?' + new URLSearchParams({ runId });
+    try {
+      const v = await (await this.request(path, null)).json();
+      if (!['unknown', 'success', 'interrupt', 'cancelled', 'error'].includes(v.terminal) ||
+          !['unsettled', 'completed', 'cancelled', 'failed', 'limit', 'handled', 'handedBack'].includes(v.work))
+        throw Error('Invalid run receipt');
+      return { terminal: v.terminal, work: v.work };
+    } catch (e) {
+      // Missing and inaccessible look alike. Neither authorizes another POST.
+      if (e instanceof HttpError && (e.status === 404 || e.status === 403)) return null;
+      throw e;
+    }
+  }
+  async closures(r: Route, after: string, signal: AbortSignal) {
+    const path = this.path(r) + '/wait-closures?' + new URLSearchParams({ after });
+    const res = await this.request(path, r.parent, { signal, headers: { Accept: 'text/event-stream' } });
+    return closureItems(res);
   }
   async presence(r: Pick<Route, 'thread' | 'parent'>, stop: AbortController, lost: () => void) {
     const signal = AbortSignal.any([this.signal, stop.signal]);
@@ -117,11 +172,11 @@ export class Agui {
   }
   async run(
     r: Route,
+    runId: string,
     view: Snapshot,
     decisions: Decision[] | undefined,
     admitted: () => void
   ): Promise<Outcome> {
-    const runId = decisions ? randomUUID() : r.runKey;
     const messages = decisions
       ? view.messages
       : [...view.messages, { id: randomUUID(), role: 'user', content: admission(r) }];
@@ -144,37 +199,17 @@ export class Agui {
         ...(decisions ? { resume: decisions } : {})
       })
     });
-    let started = false,
-      terminal: Outcome | undefined,
-      rest = '';
-    const decoder = new TextDecoder('utf-8', { fatal: true });
-    const reader = res.body!.getReader();
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        rest += decoder.decode(value, { stream: true });
-        let newline;
-        while ((newline = rest.indexOf('\n')) !== -1) {
-          const line = rest.slice(0, newline).trimEnd();
-          rest = rest.slice(newline + 1);
-          if (!line || line.startsWith(':')) continue;
-          if (!line.startsWith('data: ')) throw Error('Invalid AG-UI SSE frame');
-          const e = JSON.parse(line.slice(6));
-          if (e.type === 'RUN_STARTED') {
-            if (e.threadId !== r.thread || e.runId !== runId || started) throw Error('Wrong run identity');
-            started = true;
-            admitted();
-          } else if (e.type === 'RUN_ERROR') throw Error('Agent ended the run: ' + e.code);
-          else if (e.type === 'RUN_FINISHED' && started && e.threadId === r.thread && e.runId === runId)
-            terminal = e.outcome;
-        }
-        if (rest.length > 64 * 1024 * 1024) throw Error('Oversized AG-UI frame');
-      }
-    } finally {
-      await reader.cancel().catch(() => {});
+    let started = false, terminal: Outcome | undefined;
+    for await (const e of events(res)) {
+      if (e.type === 'RUN_STARTED') {
+        if (e.threadId !== r.thread || e.runId !== runId || started) throw Error('Wrong run identity');
+        started = true;
+        admitted();
+      } else if (e.type === 'RUN_ERROR') terminal = { type: 'error' };
+      else if (e.type === 'RUN_FINISHED' && started && e.threadId === r.thread && e.runId === runId)
+        terminal = e.outcome;
     }
-    if (rest || !terminal) throw new LostExchange('AG-UI stream ended without a terminal event');
+    if (!terminal) throw new LostExchange('AG-UI stream ended without a terminal event');
     return terminal;
   }
 }

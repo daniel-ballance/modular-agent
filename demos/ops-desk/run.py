@@ -20,7 +20,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 DEMO = Path(__file__).resolve().parent
 HOST = DEMO / 'host/dist/main.js'
-CASES = ['happy', 'refusal', 'verification', 'restart', 'duplicate', 'host-restart']
+CASES = ['happy', 'refusal', 'verification', 'restart', 'duplicate', 'host-restart', 'host-decline', 'callers']
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -70,7 +70,7 @@ class Desk:
     def state(self):
         check(self.proc.poll() is None, 'host exited')
         s = self.request('/state')
-        check(not any(r['state'] == 'failed' for r in s['routes']),
+        check(not any(r['state'] in ('failed', 'unconfirmed') for r in s['routes']),
               'route failed: ' + str([p['text'] for p in s['posts'] if p['kind'] == 'notice']))
         return s
 
@@ -79,8 +79,11 @@ class Desk:
             s = self.state()
             return next((q for q in s['inbox'] if q['answerable']), None)
         q = wait(first, 'coder approval')
-        check(q['agent'] == 'coder' and q['reason'] == 'approval' and q['toolCallId'] and
-              'apply_change' in q['message'] and 'return' in q['message'] and q['expiresAt'], 'wrong approval view')
+        script = json.loads((DEMO / 'coder/model.json').read_text())[0]['toolCalls'][0]['input']['code']
+        check(q['agent'] == 'coder' and q['reason'] == 'approval' and q['toolCallId'] and q['expiresAt'] and
+              q.get('metadata', {}).get('modular-agent.coversNested') is True and
+              'codemode' in q['message'] and json.dumps(script) in q['message'],
+              'approval did not show the complete script and its nested-call coverage')
         return q
 
     def answer(self, q):
@@ -90,7 +93,7 @@ class Desk:
     def settled(self):
         def done():
             s = self.state()
-            return s if s['routes'] and all(r['state'] in ('done', 'reopened') for r in s['routes']) else None
+            return s if s['routes'] and all(r['state'] == 'done' for r in s['routes']) else None
         return wait(done, 'settled routes')
 
     def tree(self, agent, *args):
@@ -143,10 +146,14 @@ def check_traces():
             result = json.loads(out)
             events, invocations = result['events'], result['invocations']
             check(len(events) == 1 and len(events[0]) == 32 and int(events[0], 16), 'expected one desk.event trace')
-            check({s['service'] for s in invocations} == {'desk-triage', 'desk-coder', 'desk-verifier'},
-                  f'missing agent invocation: {invocations}')
-            for span in invocations:
-                check(span['trace'] == events[0], f"{span['service']} used trace {span['trace']}, expected {events[0]}")
+            origins = [s for s in invocations if s['trace'] == events[0]]
+            check({s['service'] for s in origins} == {'desk-triage', 'desk-coder', 'desk-verifier'},
+                  f'missing agent invocation in the event trace: {origins}')
+            coder = next(s for s in origins if s['service'] == 'desk-coder')
+            check(len(invocations) == 4 and any(
+                s['thread'] == coder['thread'] and any(link['traceId'] == coder['trace'] and
+                link['spanId'] == coder['span'] for link in s['links']) for s in invocations),
+                'the approval continuation did not link to the coder turn')
         finally:
             stop(proc)
 
@@ -157,8 +164,9 @@ def station(env, cwd, log):
                             env=env, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                             stderr=log, text=True)
     try:
-        check(side.stdout.readline().strip() == 'ready', 'agent station did not start')
-        yield
+        url = side.stdout.readline().strip()
+        check(url.startswith('ws://127.0.0.1:'), 'agent station did not print its loopback plugin address')
+        yield url
     finally:
         stop(side)
 
@@ -182,7 +190,7 @@ def start(temp, case, trace_endpoint=None):
         fixtures = sample / 'cases.json'
         fixtures.write_text(json.dumps([*json.loads(fixtures.read_text()), [135, 100]]))
         env['DESK_SAMPLE'] = str(sample)
-    with (temp / 'host.log').open('w') as log, station(env, temp, log):
+    with (temp / 'host.log').open('w') as log, station(env, temp, log) as tools:
         def launch():
             proc = subprocess.Popen(['node', HOST], cwd=temp, env=env, stdin=subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=log, text=True)
@@ -201,6 +209,7 @@ def start(temp, case, trace_endpoint=None):
         try:
             desk = Desk(root, *launch(), time.monotonic() + 600 if case == 'live' else None)
             desk.launch = launch
+            desk.tools = tools
             yield desk
         except Exception:
             if case == 'live':
@@ -242,7 +251,7 @@ def run(d, case):
               not q['answerable'], 'wrong expired approval')
         check(not any(r['agent'] == 'verifier' for r in s['routes']), 'unapproved hand-off')
         check([(x['id'], x['status']) for x in s['inbox']] == [(q['id'], 'expired')], 'wrong inbox closure')
-        check(any('Approval refused' in p['text'] for p in s['posts']), 'missing refusal post')
+        check(any(f"Question {q['id']}: expired" == p['text'] for p in s['posts']), 'missing expiry post')
         try:
             d.answer(q)
         except HTTPError as error:
@@ -250,22 +259,43 @@ def run(d, case):
         else:
             raise RuntimeError('accepted a late answer')
         view = d.request(f"/sessions/{q['route']}")
-        check(not view['waiting']['questions'] and 'refused' in json.dumps(view['messages']).lower(),
-              'agent snapshot does not show the refused change')
+        check(not view['waiting']['questions'] and any(m.get('toolCallId') == q['toolCallId'] and
+              m.get('error') == 'timeLimit' for m in view['messages']), 'missing deadline settlement')
         check(d.tree('coder', 'rev-parse', 'HEAD') == seed and not d.tree('coder', 'status', '--porcelain'),
               'deadline changed the checkout')
         return
     q = d.approval()
-    if case == 'host-restart':
+    if case == 'callers':
+        subprocess.run([DEMO / 'triage/.venv/bin/python', DEMO / 'scripts/check-callers.py', d.tools, q['thread']],
+                       cwd=d.root, check=True, timeout=20)
+    if case in ('host-restart', 'host-decline'):
         d.proc.kill()
         check(d.proc.wait() == -signal.SIGKILL, 'host was not killed')
         d.proc.stdout.close()
+        if case == 'host-decline':
+            # Commit the decision directly on the coder while no desk can observe the run.
+            subprocess.run(['node', DEMO / 'scripts/decline.mjs', q['thread'], q['id']],
+                           cwd=d.root, check=True, timeout=20)
+            with sqlite3.connect(d.root / 'desk.sqlite') as db:
+                db.execute('DELETE FROM inbox')  # no prompt cache; only the feed has the reason
+            d.proc, d.url = d.launch()
+            s = d.settled()
+            check([(item['id'], item['status']) for item in s['inbox']] == [(q['id'], 'declined')],
+                  'host missed the decline committed while it was down')
+            check(d.tree('coder', 'rev-parse', 'HEAD') == seed and not d.tree('coder', 'status', '--porcelain'),
+                  'declined script wrote files')
+            return
         # Erase both shortcuts. The route and event are the host's own data.
         with sqlite3.connect(d.root / 'desk.sqlite') as db:
             db.execute('DELETE FROM inbox')
+            db.execute('UPDATE runs SET terminal=NULL,work=NULL')
+            db.execute('UPDATE wait_feeds SET cursor=? WHERE agent=? AND thread=?', ('foreign', 'coder', q['thread']))
             db.execute('UPDATE routes SET thread=NULL WHERE id=?', (q['route'],))
         d.proc, d.url = d.launch()
         again = d.approval()
+        receipts = [r for r in d.state()['runs'] if r['thread'] == q['thread']]
+        check([(r['kind'], r['terminal'], r['work']) for r in receipts] == [('input', 'interrupt', 'completed')],
+              'the restored receipt must describe the parked input, not its later answer')
         check(all(again[k] == q[k] for k in ('route', 'thread', 'id', 'message', 'toolCallId', 'expiresAt')),
               'listing did not restore the same open approval')
     check(d.tree('coder', 'rev-parse', 'HEAD') == seed and not d.tree('coder', 'status', '--porcelain'),
@@ -276,6 +306,10 @@ def run(d, case):
             marker = d.root / 'held-handoff'
             pid = wait(lambda: int(marker.read_text()) if marker.exists() and marker.stat().st_size else None,
                        'queued hand-off before its tool result')
+            # This agent does not keep feed cursors across its own restart. Drain
+            # the decision we assert below before taking that reader away.
+            wait(lambda: any(i['id'] == q['id'] and i['status'] == 'answered' for i in d.state()['inbox']),
+                 'committed allow in the closure feed')
             os.kill(pid, signal.SIGKILL)
             # The in-flight HTTP exchange can fail, never resubmit the answer.
             try:
@@ -296,24 +330,39 @@ def run(d, case):
         check(posts[3]['text'] == 'FAIL: percentage(135): expected 100, got 135', 'first verdict is not the failed test')
     check([p['kind'] for p in posts] == kinds, 'unexpected post order: ' + str([p['kind'] for p in posts]))
     check(posts[-1]['text'] == f"PASS: {3 if case == 'verification' else 2} percentage checks passed", 'wrong pass verdict')
-    check(not any(q['status'] == 'open' for q in s['inbox']), 'inbox still has open questions')
+    check(all(q['status'] == 'answered' for q in s['inbox']), 'missing allowed decision from feed')
     check([r['agent'] for r in s['routes']] == ['triage', 'coder', 'verifier'] + (['coder', 'verifier'] if case == 'verification' else []), 'duplicate or missing route')
     check(s['cursor'] == 1, 'wrong listener cursor')
     commit = d.tree('coder', 'rev-parse', 'HEAD')
     check(commit != seed and commit == d.tree('verifier', 'rev-parse', 'HEAD') == s['routes'][-1]['revision'],
           'verifier did not test the coder commit')
+    check(d.tree('verifier', 'diff', '--name-only', 'seed', 'HEAD').splitlines() == ['change.txt', 'limits.py'] and
+          d.tree('coder', 'rev-list', '--count', 'seed..HEAD') == ('2' if case == 'verification' else '1') and
+          len(s['inbox']) == (2 if case == 'verification' else 1),
+          'expected both file changes and just one approval per script')
     if case == 'restart':
-        check(s['routes'][1]['state'] == 'reopened' and s['routes'][1]['thread'] == q['thread'], 'coder session not reopened')
+        receipts = [r for r in s['runs'] if r['thread'] == q['thread']]
+        check([(r['kind'], r['terminal'], r['work']) for r in receipts] ==
+              [('input', 'interrupt', 'completed'), ('answer', 'unknown', 'completed')] and
+              receipts[1]['stream'] == 'lost' and receipts[0]['runId'] != receipts[1]['runId'],
+              'lost answer stream and recovered work were not reported separately: ' + str(receipts))
+        check(s['routes'][1]['state'] == 'done' and s['routes'][1]['thread'] == q['thread'], 'coder work not completed')
         snap = d.request(f"/sessions/{q['route']}")
         messages = snap['messages']
         check(snap['threadId'] == q['thread'] and snap['declaration']['continuesAfterRestart'] and
               not snap['waiting']['questions'], 'wrong recovered session')
         check(len([m for m in messages if m['role'] == 'user']) == 1, 'coder input admitted twice')
-        check(any('effects are unknown' in m.get('error', '') for m in messages) and
+        check(any(m.get('toolCallId') == q['toolCallId'] and m.get('error') == 'interrupted after start'
+                  for m in messages) and
               any(m.get('content') == 'The coder turn is finished.' for m in messages),
               'missing uncertain settlement or recovered completion')
         verifier = d.request(f"/sessions/{s['routes'][-1]['id']}")
         check(len([m for m in verifier['messages'] if m['role'] == 'user']) == 1, 'hand-off delivered twice')
+    if case == 'host-restart':
+        receipts = [r for r in s['runs'] if r['thread'] == q['thread']]
+        check([(r['kind'], r['terminal'], r['work']) for r in receipts] ==
+              [('input', 'interrupt', 'completed'), ('answer', 'success', 'completed')],
+              'missing receipt for the restored approval or its answer')
     if case in ('happy', 'duplicate'):
         wait(lambda: all(v == 'stopped' for v in d.state()['agents'].values()), 'idle agents to stop')
         snap = d.request(f"/sessions/{posts[1]['route']}")
@@ -374,7 +423,7 @@ def run_live(d, approve):
         seen = len(s['posts'])
         if approve == 'auto':
             allow_approvals(d, s['inbox'])
-        if s['routes'] and all(r['state'] in ('done', 'reopened') for r in s['routes']):
+        if s['routes'] and all(r['state'] == 'done' for r in s['routes']):
             check_live_result(d, s)
             return
         time.sleep(0.25)

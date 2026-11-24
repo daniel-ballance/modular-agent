@@ -2,7 +2,7 @@ import { connect } from 'node:net';
 import { createInterface } from 'node:readline';
 import { Agui } from './agui.js';
 import { token } from './processes.js';
-import type { Agent, Route } from './store.js';
+import type { Agent } from './store.js';
 
 // Private process control, not a source of session IDs. Discover work over AG-UI.
 export class Control {
@@ -58,12 +58,6 @@ export class Control {
         if (!abort.signal.aborted) await this.request({ op: 'stop', agent });
       }
     };
-  }
-  presence(r: Route) {
-    return this.request({ op: 'presence', agent: r.agent, thread: r.thread, parent: r.parent });
-  }
-  detach(r: Route) {
-    return this.request({ op: 'detach', agent: r.agent, thread: r.thread });
   }
   close() {
     this.socket.end();

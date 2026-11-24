@@ -1,6 +1,6 @@
 # Ops desk: design
 
-Status: accepted by the owner, 2026-11-23. Steps 1–4 ran with scripted models and with three subscription Providers.
+The original desk ran with scripted models and with three subscription Providers. The changes for 0.3.0 were checked with scripted models only.
 
 ## Purpose
 
@@ -12,7 +12,7 @@ An ops desk for a small sample repository:
 
 1. An event arrives at the host's webhook: a failing build or a new issue.
 2. The **triage** agent reads it, posts a summary to the conversation, and hands the fix to the coder.
-3. The **coder** agent makes the change in its own checkout. It asks for approval before writing; the approval appears in the inbox.
+3. The **coder** agent proposes a script in its own checkout. The inbox shows the whole script before it can start.
 4. The coder posts what it changed and hands the result to the verifier.
 5. The **verifier** agent runs the tests in a separate checkout of the coder's commit and posts a verdict. If the tests fail, the host hands the failure back to the coder, at most twice.
 
@@ -26,8 +26,8 @@ An ops desk for a small sample repository:
 
 ```text
   phone / browser ── HTTP ──▶  host (TypeScript)  ◀── webhook ── scripts/send-event.mjs
-                                │  SQLite: conversation, inbox, routes, listener cursor
-                                │  serves the `desk` tool plugin over WebSocket
+                                │  SQLite: posts, inbox, routes, run IDs, cursors
+                                │  local station: one WebSocket plugin listener
              ┌──────────────────┼──────────────────┐
            AG-UI              AG-UI              AG-UI
              │                  │                  │
@@ -36,8 +36,8 @@ An ops desk for a small sample repository:
                     each exports OpenTelemetry to Phoenix
 ```
 
-- **The host** is a TypeScript program in `demos/ops-desk/host/`. It owns everything that spans agents: the conversation, the inbox, the routing between agents, the listener and its cursor, and starting agent processes. It drives each agent as an authenticated AG-UI client. A local station holds that client's presence stream for the life of the agent, so restarting the host does not detach the answer route.
-- **The `desk` tool plugin** is served by the station over the [WebSocket transport](../../docs/bindings/websocket.md), one token per agent. Its tools:
+- **The host** is a TypeScript program in `demos/ops-desk/host/`. It owns everything that spans agents: the conversation, the inbox, the routing between agents, the listener and its cursor, and starting agent processes. It drives each agent as an authenticated AG-UI client. The HTTP host holds presence on each active thread. The local station owns the processes. A new host opens a new presence; it cannot reuse the old host's delivery.
+- **The `desk` tool plugin** is served by the station over the [WebSocket transport](../../docs/bindings/websocket.md), with [named callers](../../docs/bindings/websocket.md#named-callers). All agents use the same address. Their token files are different. The per-connection factory selects the agent from the authenticated caller ID. Its tools:
   - `post(text, kind)`: adds a post to the conversation, with a link to the agent's session as the debug view. `kind` is `summary`, `change` or `verdict`.
   - `hand_off(to, task)`: asks the host to give work to another agent. The host's routing rules decide whether to accept it. The call returns once the host has queued it; it does not wait for the other agent.
 
@@ -51,8 +51,10 @@ An ops desk for a small sample repository:
 ## The conversation and the inbox
 
 - **The conversation** holds posts from all three agents in order, plus the events that started them. It never shows raw sessions; each post links to the AG-UI snapshot of the turn that made it.
-- **The inbox** lists open questions and approvals from all three agents, merged by deadline. Each item keeps its source agent, session and question ID; the answer goes back to that agent over its presence route. The host rechecks that a question is still answerable before showing the answer button.
-- **Approvals** have deadlines of a few minutes (decision 2(a)). An approval not answered in time is refused by the agent, and the refusal appears in the inbox and the conversation.
+- **The inbox** lists open questions and approvals from all three agents, merged by deadline. Each item keeps its source agent, session and question ID; the answer goes back to that agent over its presence route. The host reads the gated snapshot before showing an answer button and again before posting the answer. Neither an inbox row nor a closure notice is an answerable delivery.
+- **Approvals** use [`ma --approval ask`](../../docs/reference/standard-configuration.md#approval). The caller sees the unchanged interrupt, call ID and deadline. The coverage flag says the allow also covers this dispatch's nested file writes, commands and desk calls. Other gates still apply. With `approval_wait: "untilDeadline"` and the operator's `approvalWaitMaxMs`, the origin turn ends before the script starts. A timely allow starts a continuation; expiry leaves the checkout untouched.
+- **Closed items** come from the [wait-closure feed](../../docs/bindings/agui.md#wait-closures). A saved cursor belongs to an agent and thread. The desk also keeps the outstanding request IDs separately from cached prompts, so it does not stop an idle agent before catching up. SQLite removes the ID and commits the notice and its cursor together. A restart uses the saved cursor before following live. On `409 cursor_expired` the host replaces open waits from a new snapshot without assigning reasons to missing rows.
+- **Run receipts** describe one exchange, not the last turn in the thread. The host saves both input and answer run IDs before sending. On reconnect it reads [each receipt](../../docs/bindings/agui.md#run-receipts) as the original client. A release marker is not proof of delivery. A 404 is not proof the POST failed.
 
 ## The listener
 
@@ -73,38 +75,37 @@ All three agents can export to Phoenix (`scripts/phoenix.sh`). The host saves th
 
 `demos/ops-desk/run.py`, run by `scripts/check.sh` in the shared phase, with scripted models for all three agents:
 
-1. **Happy path:** an event, triage's post and hand-off, the coder's approval answered from the inbox, the change, the verifier's pass verdict. The conversation has the posts in order; the inbox is empty at the end. A loopback OTLP receiver checks that all three agents exported `invoke_agent` in the `desk.event` trace.
+1. **Happy path:** an event, triage's post and hand-off, the coder's approval answered from the inbox, the change, the verifier's pass verdict. The parent approval covers both file changes and the git command. The conversation has the posts in order; the inbox records the answer. A loopback OTLP receiver checks the three input turns in the event trace and the new coder turn's link to the first.
 2. **Refusal:** the coder's approval passes its deadline. The refusal reaches the inbox and the conversation, and no file changes.
 3. **Failing verification:** the verifier's first verdict fails; the coder gets one more try; the second verdict passes.
-4. **Restart:** the coder's process is killed with `SIGKILL` during its turn. The host restarts it, reopens the session, and the work completes or settles as the recovery rules say. No hand-off is delivered twice.
+4. **Restart:** the coder's process is killed with `SIGKILL` during its turn. The host reads the input and answer receipts after recovery. The input released an interrupt; the answer stream was lost but its work completed. No hand-off is delivered twice.
 5. **Duplicate event:** the same event ID twice starts one piece of work.
-6. **Host restart:** kill the HTTP host with `SIGKILL` during approval. Delete its inbox rows and the coder route's thread link. The replacement finds the same question in the listing, answers it and finishes the route once.
+6. **Host restart:** kill the HTTP host with `SIGKILL` during approval. Delete its inbox rows, cached receipt statuses and coder route's thread link. Give the host an invalid wait cursor to exercise the snapshot reset. The replacement checks the parked input's receipt. It lists the thread, delivers the question on a fresh presence and answers once. The two run IDs have different receipts.
+7. **Host down at the decision:** decline directly on the coder while the HTTP host is dead. Delete the cached prompt. The replacement reads the committed decline, not a guessed expiry.
+8. **Named callers:** the shared listener rejects a wrong token with HTTP 401. All three token files work there. Claims in the handshake and tool call cannot turn the verifier into the coder.
 
 With real models (`--live`) the same flow runs against your sign-ins; it is not part of `check.sh`.
 
 ## Findings
 
-Expected findings (checked against the scripted desk):
+- **Approval in stock `ma` and approvals that wait — used.** The desk used to ask inside a custom editing tool and refuse every other edit or command. The [built-in gate](../../docs/contracts.md#approvals-that-cover-nested-calls) now asks before `codemode`. On allow, `tools.edit`, `tools.write` and the fixed commit command run without another approval. The sample scope gate does not ask or grant permission. [ADR 0034](../../docs/adr/0034-approvals-that-wait.md) lets the desk park this exact call until its original deadline. The station no longer keeps a presence alive for a dead host.
+- **How a wait closed — used.** The host records `answered`, `declined`, `expired` and `revoked` only from the gated feed. The local clock can disable a button, not decide a question. A lost presence alone produces no closure. The desk also watches the plugin's `turn.end` notification: a parked origin has an open call, and closing its question is not the end of the continuation.
+- **What happened to the run — used.** A receipt supplies `terminal` and `work` independently. After killing the coder during hand-off, the input receipt is `interrupt/completed`; the answer receipt is `unknown/completed`. A missing receipt is shown as unavailable. Neither an EOF nor a snapshot makes it safe to dispatch again.
+- **Identifying plugin callers — used.** One listener loads the operator's caller table. The matched ID and the session ID select the active route together. The ID also selects the checkout for a hand-off. Initialization paths, claimed names and call arguments grant no access to another route.
+- **Finding and waking work — deployment still starts processes.** At startup the host pages the [thread listing](../../docs/bindings/agui.md#listing-threads). The Rust coder uses [`--resume-open`](../../docs/reference/standard-configuration.md#resuming-at-start-up), the Python server uses `resume_open`, and the verifier calls `ResumeInterrupted`. Listing alone does not wake a stopped service. A snapshot cannot authorize a missed Interface hand-off.
+- **Posts during a turn — kept as plugin tools.** A frontend hand-off ends the exchange. A custom event is not a committed, acknowledged post. The desk stores plugin posts by route and call ID.
+- **Tracing — used.** All three work tokens trust the desk's trace parent. The host carries it across the queue. The approval continuation has its own turn span linked to the origin. [Telemetry v1](../../docs/telemetry.md#what-later-versions-add) does not link the receiving turn to another agent's `hand_off` call.
+- **Earlier fixes.** Rust accepts the approval schema without choice options. All three AG-UI adapters run; their status text was corrected.
 
-- **Approvals cannot wait past a turn — confirmed.** The [interrupt rules](../../docs/bindings/agui.md#interrupts-and-frontend-tools) require an existing presence and forbid extending an approval past its turn. In the deadline check the question disappeared from `waiting.questions`, the change tool was refused, and the file and commit stayed unchanged. A stored inbox row did not make a late answer valid. The desk keeps a presence stream and uses three-minute deadlines; someone reading it hours later finds a refusal. [ADR 0034](../../docs/adr/0034-approvals-that-wait.md), accepted for 0.3.0, specifies parking the model call at its approval gate before the change tool starts. The desk would need to move its check there; the demo still exercises the live-only rule.
-- **Finding and waking open work — resolved for a running desk.** At start-up and at each agent launch the host pages [the thread listing](../../docs/bindings/agui.md#listing-threads), then reads the gated snapshots of open work. SQLite still owns events, routes and debug links; it is not an index of agent waits. The coder starts with [`--resume-open`](../../docs/reference/standard-configuration.md#resuming-at-start-up). Triage uses the Python server's `resume_open` option. The Go verifier calls `ResumeInterrupted` on unfinished sessions before it accepts clients.
-- **Someone still has to start the processes and keep the answer route alive.** The local agent station owns the three processes, their tool listeners and the original presence streams. Killing the HTTP host does not move an approval to a new presence. If the station or agent dies, that approval cannot be restored; ordinary recovery settles the turn. A listed Interface call without a received handoff cannot be executed from its snapshot. Listing is not a wake-up signal for a stopped service.
-- **Posts during a turn — confirmed for Interface tools.** A frontend handoff ends the exchange; it cannot acknowledge a post and continue that step. A server tool can. A plugin can also emit a gated custom event, but that is a live notification, not a committed, acknowledged post. The desk authenticates each tool service separately and stores posts by session and call ID.
-- **One trace across agents — resolved.** The coder's [policy entry](../../docs/reference/standard-configuration.md#connection-policy-and-limits) sets `traceTrusted: true` for the desk. The receiver sees triage, coder and verifier in the event's trace. The host still carries the parent across the queue. [Telemetry v1](../../docs/telemetry.md#what-later-versions-add) does not add a span link from a receiving turn to the previous agent's `hand_off` call.
+### New finding: displaying the script as code
 
-Additional findings:
+The [AG-UI interrupt](../../docs/bindings/agui.md#interrupts-and-frontend-tools) carries the exact name and arguments in `message`, not in structured fields. The page always shows that unchanged message. To also show the script with actual line breaks, it has to recognize Rust `ma`'s prompt and decode the JSON inside it. This parsing is for display only.
 
-- **Stock `ma` cannot switch on write approval.** The [standard configuration](../../docs/reference/standard-configuration.md#the-program) omits the approval feature. A remote `tool.before` gate [cannot ask](../../docs/bindings/plugin.md#from-core-hooks-to-wire-hooks). A separate coder tool therefore asks inside its own `tools/call`, then invokes `edit` on the approved arguments. The gate refuses other edits, writes and shell commands.
-- **Rust tool-originated approval needed an extra field — fixed.** Rust checked an approval answer against the draft's `options` as for a choice, so `{allow:true}` was refused unless the tool listed `allow`. It now accepts `allow` as [the data binding](../../docs/bindings/data.md#questions) says, and the coder's approval lists no options.
-- **A closed run has no closure feed.** [Presence](../../docs/bindings/agui.md#listener-and-authentication) carries comments, not events. A snapshot lists only still-answerable questions, not the reason a former question disappeared. The host checks a fresh snapshot before showing or sending answers. It can label a deadline refusal here because it controls the sole answer route. It also observes the desk plugin's `turn.end` hook so it does not stop a coder that is still finishing after expiry.
-- **Recovery gives a thread snapshot, not a run receipt or terminal outcome.** After `SIGKILL`, GET reopened the coder session. Its snapshot showed the interrupted tool's effects as unknown and the recovered assistant reply. There is no AG-UI operation to reattach to the lost run stream or fetch its terminal event. The host records “reopened,” not a synthetic `RUN_FINISHED`. It saves the thread ID before sending input, uses one thread per routed task, and never replays a tool from a snapshot. A 404 for a saved provisional thread cannot distinguish loss before first input from an inaccessible session; the host does not silently start over on a new thread.
-- **Identifying callers of the desk service takes three listeners.** The public [plugin service API](../../docs/sdk/placement.md#services) takes one `tokenFile`, not a token-to-principal map. `tools/call` has a session and a call, not an authenticated agent name. Each listener closes over the identity whose token it accepts. Neither model text nor plugin initialization config selects that identity.
-
-All three real AG-UI adapters ran. The binding and SDK placement pages that said no build implemented AG-UI were corrected.
+Proposed addition to **Interrupts and frontend tools / Questions**: “For an approval, the adapter SHOULD include `metadata["modular-agent.approvalCall"] = { name, input }` from the exact gated request in both the run interrupt and the snapshot interrupt. When supplied, the object MUST be part of the unchanged approval view. A client MAY render this object as code. It MUST NOT use model history to fill missing arguments or treat the object as authority to execute.”
 
 ### Two live events
 
-On 2026-11-23, `run.py --live --approve auto` sent the same build failure to two fresh desks. Both posted an event, a summary that `percentage(37)` returned zero, a change and `PASS: 2 percentage checks passed`. Each needed one approval and one verifier checkout. No turn failed or needed a second fix.
+These measurements are from the earlier editing tool, not the new script approval. On 2026-11-23, `run.py --live --approve auto` sent the same build failure to two fresh desks. Both posted an event, a summary that `percentage(37)` returned zero, a change and `PASS: 2 percentage checks passed`. Each needed one approval and one verifier checkout. No turn failed or needed a second fix.
 
 | Run | Approved replacement for `0` in `limits.py` | Commit tested | Event to last agent finish |
 |---|---|---|---:|
@@ -129,15 +130,16 @@ Triage and the verifier shared the event trace in both runs. Both runs predate t
 
 | Finding | Outcome |
 |---|---|
-| Approvals cannot wait past a turn | [ADR 0034](../../docs/adr/0034-approvals-that-wait.md), accepted; implemented in 0.3.0 |
-| Finding and waking open work | Resolved: [thread listing](../../docs/bindings/agui.md#listing-threads), `sessionSummary` in every SDK, [`ma --resume-open`](../../docs/reference/standard-configuration.md#resuming-at-start-up) |
-| Someone must start the processes | Deployment's job, by design ([ADR 0012](../../docs/adr/0012-one-agent-is-the-scope.md)) |
-| Posts during a turn | Kept as plugin tools; Interface-run tools suit client actions |
-| One trace across agents | Resolved: `traceTrusted` in `ma`'s policy; a span link to the `hand_off` call waits for a later [telemetry version](../../docs/telemetry.md#what-later-versions-add) |
-| Approval in stock `ma` | [Open questions](../../docs/open-questions.md#a-host-driving-several-agents) |
-| Closure feed; run receipt; one token per service | [ADR 0035](../../docs/adr/0035-host-limits-from-the-ops-desk.md), implemented in 0.3.0; the desk still uses the workarounds above until it moves to them |
-| Rust approval answers | Fixed |
-| AG-UI status text | Fixed |
+| Approvals outlasting a turn | The desk sets the operator maximum and the session wait mode; a returning approver opens a fresh presence ([ADR 0034](../../docs/adr/0034-approvals-that-wait.md)). |
+| Approval in stock `ma` | The coder uses `--approval ask` and covered approvals, not a tool that asks inside its call. |
+| Closure feed | The host follows and checkpoints the per-thread cursor ([ADR 0035](../../docs/adr/0035-host-limits-from-the-ops-desk.md)). |
+| Run receipt | The host saves every run ID and reports exchange release separately from work settlement. |
+| One token per service | The station uses one named-caller listener with three token files. |
+| Finding and waking open work | The host lists threads; the station starts the processes ([ADR 0012](../../docs/adr/0012-one-agent-is-the-scope.md)). |
+| Posts during a turn | Server tools acknowledge committed posts without ending the turn. |
+| One trace across agents | `traceTrusted` and a queued trace parent for inputs; a span link for the approval continuation. |
+| Rust approval answers; AG-UI status text | Fixed in the framework. |
+| Rendering the unchanged approval as code | [Proposed interrupt metadata](#new-finding-displaying-the-script-as-code). |
 
 ## Plan
 

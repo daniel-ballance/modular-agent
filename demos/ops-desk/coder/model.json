@@ -4,7 +4,7 @@
       {
         "name": "codemode",
         "input": {
-          "code": "source = tools.read(path='limits.py')\nold = 'return 0' if 'return 0' in source else 'return max(0, value)'\nnew = 'return max(0, value)' if old == 'return 0' else 'return min(100, max(0, value))'\ntools.apply_change(old=old, new=new)\ntools.post(text='Committed limits.py: ' + new, kind='change')\ntools.hand_off(to='verifier', task='Run the percentage tests on my commit.')"
+          "code": "source = tools.read(path='limits.py')\nold = 'return 0' if 'return 0' in source else 'return max(0, value)'\nnew = 'return max(0, value)' if old == 'return 0' else 'return min(100, max(0, value))'\ntools.edit(path='limits.py', edits=[{'oldText': old, 'newText': new}])\ntools.write(path='change.txt', content='limits.py: ' + new + '\\n')\ncommit = tools.exec(command=\"git add -- limits.py change.txt && git commit -m 'Fix percentage bounds' -- limits.py change.txt\")\nif commit['exit_code'] != 0:\n    raise RuntimeError('Commit failed')\ntools.post(text='Committed limits.py: ' + new, kind='change')\ntools.hand_off(to='verifier', task='Run the percentage tests on my commit.')"
         }
       }
     ]

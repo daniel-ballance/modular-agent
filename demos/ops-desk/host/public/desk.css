@@ -40,7 +40,8 @@ label {
 small {
   display: block;
 }
-p {
+p,
+pre {
   white-space: pre-wrap;
 }
 a {

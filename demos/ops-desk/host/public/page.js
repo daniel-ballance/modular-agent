@@ -11,11 +11,16 @@ async function refresh() {
   const n = ++generation,
     res = await fetch('/state');
   if (!res.ok) throw Error('Could not load the desk.');
-  const { agents, inbox, posts } = await res.json();
+  const { agents, inbox, posts, runs } = await res.json();
   if (n !== generation) return;
   byId('agents').textContent = Object.entries(agents)
     .map(([a, s]) => a + ': ' + s)
     .join(' · ');
+  byId('runs').replaceChildren(...runs.map(r => {
+    const li = el('li', `${r.agent} · ${r.kind} · stream ${r.stream} · terminal ${r.terminal ?? 'not available'} · work ${r.work ?? 'not available'}`);
+    li.append(el('small', `Thread ${r.thread} · run ${r.runId}`));
+    return li;
+  }));
   byId('posts').replaceChildren(
     ...posts.map((p) => {
       const li = el('li');
@@ -32,7 +37,7 @@ async function refresh() {
   byId('closed').replaceChildren(
     ...inbox
       .filter((q) => q.status !== 'open')
-      .map((q) => el('li', q.agent + ' · ' + q.status + ': ' + q.message))
+      .map((q) => el('li', q.agent + ' · ' + q.status + ': ' + (q.message ?? q.id)))
   );
   if (previous === JSON.stringify(open)) return;
   previous = JSON.stringify(open);
@@ -53,7 +58,20 @@ function questionForm(questions) {
     answers = new Map();
   form.append(el('strong', questions[0].agent));
   for (const q of questions) {
-    const label = el('label', q.message);
+    const label = el('label');
+    label.append(el('pre', q.message)); // the unchanged interrupt, not a description from the model
+    if (q.toolCallId) label.append(el('small', 'Call: ' + q.toolCallId));
+    if (q.metadata?.['modular-agent.coversNested'] === true) {
+      label.append(el('strong', 'Allow covers the writes, commands and other calls this script makes.'));
+      // ma puts the exact JSON input in the prompt. Also show its code with real line breaks.
+      const input = /^Allow codemode with (\{.*\})\? /.exec(q.message);
+      if (input) {
+        try {
+          const { code } = JSON.parse(input[1]);
+          if (typeof code === 'string') label.append(el('pre', code));
+        } catch { /* Other prompt formats still show the complete unchanged view. */ }
+      }
+    }
     form.append(label);
     if (q.expiresAt) form.append(el('small', 'Deadline: ' + new Date(q.expiresAt).toLocaleTimeString()));
     if (!q.answerable) {
