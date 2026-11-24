@@ -233,11 +233,6 @@ impl TestAgentBuilder {
         self.observe = Some(Box::new(observe));
         self
     }
-    /// Simulate a host that predates the trace context offer.
-    pub fn omit_plugin_trace_offer(mut self) -> Self {
-        self.builder.omit_plugin_trace_offer = true;
-        self
-    }
     pub fn tool(mut self, tool: Tool) -> Self {
         self.builder = self.builder.tool(tool);
         self
@@ -386,10 +381,6 @@ pub async fn restart(agent: Agent) -> Result<Agent> {
 
 /// The fixture plugins every SDK implements identically (docs/sdk/testing.md#the-fixture-plugins).
 /// Each is an ordinary plugin, so the same code runs in process and served.
-/// Serve the fixture as a peer that does not accept the trace context offer.
-pub async fn serve_without_trace_acceptance(plugin: crate::Plugin) -> Result<()> {
-    crate::serve::serve_stdio(plugin, false).await
-}
 
 pub mod fixtures {
     use super::*;

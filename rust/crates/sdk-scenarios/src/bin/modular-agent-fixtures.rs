@@ -51,8 +51,6 @@ async fn main() {
             Ok(stopped?)
         }
         .await
-    } else if std::env::var(telemetry::HANDSHAKE).as_deref() == Ok("no-acceptance") {
-        modular_agent::testing::serve_without_trace_acceptance(plugin).await
     } else {
         serve(plugin).await
     };

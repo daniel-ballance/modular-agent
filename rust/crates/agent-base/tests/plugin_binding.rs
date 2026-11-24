@@ -136,7 +136,7 @@ async fn closing_plugin_stdin_joins_a_running_command_and_its_setsid_descendant(
             .unwrap(),
     );
     let mut output = std::io::BufReader::new(child.0.stdout.take().unwrap());
-    writeln!(child.0.stdin.as_mut().unwrap(),"{}",json!({"jsonrpc":"2.0","id":1,"method":"plugin/initialize","params":{"binding":"modular-agent-plugin/1","data":"modular-agent-data/1","host":{"name":"test","version":"1"},"project":project.path(),"home":home.path(),"config":{}}})).unwrap();
+    writeln!(child.0.stdin.as_mut().unwrap(),"{}",json!({"jsonrpc":"2.0","id":1,"method":"plugin/initialize","params":{"binding":"modular-agent-plugin/1","host":{"name":"test","version":"1"},"project":project.path(),"home":home.path(),"config":{}}})).unwrap();
     let mut initialized = String::new();
     output.read_line(&mut initialized).unwrap();
     assert!(

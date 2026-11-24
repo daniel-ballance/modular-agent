@@ -87,7 +87,7 @@ fn matches_registration(decision: &Allowance, current: Option<&(Value, ToolDefin
 impl Runtime for RemoteRuntime {
     fn declaration(&self) -> Value {
         let s = &self.registration["supports"];
-        json!({"id":self.registration["id"],"transient":s["continuesAfterRestart"]!=true,"input_during_turn":s["inputDuringTurn"]==true,"continues_after_restart":s["continuesAfterRestart"]==true,"waits_through_restart":s["waitingThroughRestart"]==true,"rewinding":false,"cancel_cancels_jobs":false,"interface_tools":s["interfaceTools"]==true})
+        json!({"id":self.registration["id"],"transient":s["continuesAfterRestart"]!=true,"input_during_turn":s["inputDuringTurn"]==true,"continues_after_restart":s["continuesAfterRestart"]==true,"waits_through_restart":s["waitingThroughRestart"]==true,"rewinding":false,"cancel_cancels_jobs":false,"interface_tools":s["interfaceTools"]==true,"nested_tools":self.ui_runtime.as_ref().is_some_and(|local| local.declaration()["nested_tools"] == true)})
     }
     async fn run(&self, api: Api, input: TurnInput) -> Result<TurnResult> {
         let continuation = api
@@ -146,6 +146,19 @@ impl Runtime for RemoteRuntime {
             .await?;
         api.emit(Event::new(&scope, "turn.result", json!(result)))
             .await
+    }
+    async fn nested_tool(
+        &self,
+        api: Api,
+        scope: Scope,
+        call: ToolCall,
+        cancel: CancellationToken,
+    ) -> Result<ToolResult> {
+        let local = self
+            .ui_runtime
+            .as_ref()
+            .ok_or_else(|| anyhow!("no host Runtime for nested calls"))?;
+        local.nested_tool(api, scope, call, cancel).await
     }
     async fn tool(&self, api: Api, scope: Scope, call: ToolCall) -> Result<ToolResult> {
         let ui = self

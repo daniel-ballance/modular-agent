@@ -71,7 +71,7 @@ async fn serving_exec_treats_zero_null_and_absent_timeout_as_no_limit() {
         .call(
             "plugin/initialize",
             json!({
-                "binding":"modular-agent-plugin/1", "data":"modular-agent-data/1",
+                "binding":"modular-agent-plugin/1",
                 "host":{"name":"test","version":"1"},
                 "project":project.path(), "home":home.path(), "config":{}
             }),

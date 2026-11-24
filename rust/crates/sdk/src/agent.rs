@@ -165,7 +165,6 @@ pub struct AgentBuilder {
     max_approval_wait_ms: Option<u64>,
     on_question: Option<QuestionHandler>,
     pub(crate) restartable: bool,
-    pub(crate) omit_plugin_trace_offer: bool,
 }
 
 /// Overrides and initial membership for a new session.
@@ -897,10 +896,7 @@ impl AgentBuilder {
                     &project,
                     &home,
                     index,
-                    plugin_stdio::LoadOptions {
-                        readiness,
-                        omit_trace_offer: self.omit_plugin_trace_offer,
-                    },
+                    plugin_stdio::LoadOptions { readiness },
                 )
                 .await
             {

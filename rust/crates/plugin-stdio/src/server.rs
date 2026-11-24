@@ -274,7 +274,7 @@ impl Endpoint for Conformance {
     ) -> Reply {
         if method == "plugin/initialize" {
             let _guard = self.initializing.lock().await;
-            if p["binding"] != "modular-agent-plugin/1" || p["data"] != "modular-agent-data/1" {
+            if p["binding"] != "modular-agent-plugin/1" {
                 return Err(Fault::new("not_supported", "unsupported binding"));
             }
             if self.state.lock().unwrap().is_some() {
@@ -321,17 +321,9 @@ impl Endpoint for Conformance {
                 .await?;
             }
             h.load(Arc::new(Sink(peer.clone()))).await?;
-            let agreed = p["traceContext"] == 1;
             *self.state.lock().unwrap() = Some((h, p));
-            let mut registration = self.registration();
-            if agreed {
-                registration["traceContext"] = json!(1);
-            }
-            peer.configure_trace(
-                registration["name"].as_str().unwrap_or("conformance"),
-                agreed,
-                true,
-            );
+            let registration = self.registration();
+            peer.configure_trace(registration["name"].as_str().unwrap_or("conformance"), true);
             return Ok(registration);
         }
         let api = self.state().map_err(|e| Fault::new("invalid_request", e))?;
@@ -738,13 +730,12 @@ pub(crate) async fn environment(
             let command = p["command"]
                 .as_str()
                 .ok_or_else(|| Fault::new("invalid_request", "command required"))?;
-            // The binding accepts legacy zero as no limit, just like null or omission.
-            let timeout = p["timeoutMs"].as_u64().filter(|ms| *ms > 0);
+            let timeout = wire::exec_timeout(p).map_err(|e| Fault::new("invalid_request", e))?;
             let token = cancel.child_token();
             let timer_token = token.clone();
             let timer = tokio::spawn(async move {
-                if let Some(ms) = timeout {
-                    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                if let Some(duration) = timeout {
+                    tokio::time::sleep(duration).await;
                     timer_token.cancel();
                 } else {
                     std::future::pending::<()>().await;
