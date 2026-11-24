@@ -17,7 +17,7 @@ The Harness saves valid span context with a durable turn. After a restart it sta
 
 Version 1 records metadata only: no content leaves through telemetry, so the exporter holds nothing erasure must account for. Content capture comes in a later version. Its design is settled here so that version only implements it: capture is opt-in, uses only the view that passed the output gate for a telemetry recipient, removes known secrets before calling OpenTelemetry, records a content-free disclosure marker first, and reports the exporter in `outOfReach` on an affected erasure.
 
-A plugin in another process gets trace context only if it agrees in the handshake: the host offers `traceContext: 1` in `plugin/initialize` and the plugin returns it in its registration. An operator setting was rejected because it can disagree with what the plugin supports without anyone noticing.
+A plugin may receive trusted trace context for a work operation. Understanding the carrier does not require installing an OpenTelemetry SDK, enabling export or trusting the connection.
 
 Tracing will grow in later versions: content capture, streaming detail, more metrics, traces across agents and correlated logs ([What later versions add](../telemetry.md#what-later-versions-add)).
 
@@ -29,11 +29,11 @@ Tracing will grow in later versions: content capture, streaming detail, more met
 
 ## Consequences
 
-The draft makes no binding edits. Acceptance would require these compatible additions, with absent fields keeping current behavior:
+The binding rules for telemetry are:
 
 | Binding and section | Change |
 |---|---|
-| [Plugin: Transport](../bindings/plugin.md#transport) and [Choosing plugins at start](../bindings/plugin.md#choosing-plugins-at-start) | Allow `params.traceContext` on work requests and notifications in both directions after both sides agree with `traceContext: 1` in `plugin/initialize` and the registration. Responses and control messages are unchanged. |
+| [Plugin: Transport](../bindings/plugin.md#transport) and [Choosing plugins at start](../bindings/plugin.md#choosing-plugins-at-start) | Allow `params.traceContext` on work requests and notifications in both directions. Responses and control messages carry no context. |
 | [Plugin: Runtime callbacks](../bindings/plugin.md#runtime-callbacks), [What a plugin may ask the host](../bindings/plugin.md#what-a-plugin-may-ask-the-host) and [Jobs](../bindings/plugin.md#jobs) | Tie callback context to live `parentRequestId` or authorized job scope. No trace metadata can change those checks. Peer support is a wire concern, not an authority grant. `host/declaration` uses the ACP declaration projection. |
 | [Plugin: The host asks the Runtime](../bindings/plugin.md#the-host-asks-the-runtime) and [Runtime records and effects](../bindings/plugin.md#runtime-records-and-effects) | Carry the new segment's context on `runtime/resumeTurn` through the common field. Reserve trace checkpoints and disclosure markers for the Harness; the Runtime cannot submit them. |
 | [ACP: Metadata](../bindings/acp.md#metadata), [Prompts](../bindings/acp.md#prompts), [Approvals](../bindings/acp.md#approvals) and [Questions](../bindings/acp.md#questions) | Describe unprefixed W3C keys in supported request `_meta`, outside `_meta["modular-agent"]`, in both binding versions. Describe the starting input's context and that steering does not reparent work. |
