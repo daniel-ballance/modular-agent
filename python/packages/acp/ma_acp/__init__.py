@@ -1000,11 +1000,8 @@ class ACP(Plugin):
                     options=options,
                     **{**params["_meta"], **(ot.inject() if self.trace_trusted else {})},
                 )
-                if response.outcome.outcome == "selected" and response.outcome.option_id in {
-                    "allow",
-                    "refuse",
-                }:
-                    value = response.outcome.option_id
+                if response.outcome.outcome == "selected" and response.outcome.option_id == "allow":
+                    value = "allow"
             elif q["kind"] in {"text", "choice"}:
                 capabilities = self.client_capabilities.elicitation
                 if capabilities is None or capabilities.form is None:
@@ -1278,7 +1275,9 @@ class ACP(Plugin):
                         "delivery_token": self.name,
                         "request": params["requestId"],
                         "value": params.get("value"),
-                        "declined": params.get("declined", False),
+                        "declined": params.get("declined", False)
+                        or "value" not in params
+                        or (question["kind"] == "approval" and params.get("value") == "refuse"),
                         "reason": params.get("reason"),
                     },
                 )

@@ -80,11 +80,10 @@ async def test_viewer_sees_question_but_cannot_answer_or_escalate(agent):
                 subject="other",
                 authority=["watch", "approve"],
             )
-        await owner.call(
-            "questions",
-            "answer",
-            {"session": sid, "actor": "user", "request": q["id"], "value": "refuse"},
-        )
+        scope = {"session": sid, "actor": "user", "request": q["id"]}
+        with pytest.raises(AgentError, match="offered options"):
+            await owner.call("questions", "answer", {**scope, "value": "refuse"})
+        await owner.call("questions", "answer", {**scope, "declined": True})
         assert (await task)["value"] == "declined"
         with pytest.raises(AgentError, match="closed"):
             await owner.call(

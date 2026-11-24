@@ -917,7 +917,13 @@ class Turns:
             },
         )
         await self.api.event(
-            "tool_progress", session=sid, turn=turn, step=step, call=call["id"], content=[], final=True
+            "tool_progress",
+            session=sid,
+            turn=turn,
+            step=step,
+            call=call["id"],
+            content=[],
+            final=True,
         )
 
     async def _tools(self, sid, turn, step, calls, tools, *, continuation_of=None):

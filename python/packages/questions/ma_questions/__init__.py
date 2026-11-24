@@ -306,7 +306,7 @@ class Questions(Plugin):
         details = {
             "kind": kind,
             "question": d["question"],
-            "options": ["allow", "refuse"] if kind == "approval" else d.get("options", []),
+            "options": d.get("options", []) if kind == "choice" else [],
             "name": d.get("name"),
             "binding": d.get("binding"),
             **({"details": d["details"]} if d.get("details") is not None else {}),
@@ -519,7 +519,11 @@ class Questions(Plugin):
         if q.get("coversNested") and value == "allow" and d.get("exact_cover_view") is False:
             raise AgentError("This route has not delivered the unchanged approval", "forbidden")
         if not isinstance(value, str) or (
-            not declined and q["kind"] in {"approval", "choice"} and value not in q["options"]
+            not declined
+            and (
+                (q["kind"] == "approval" and value != "allow")
+                or (q["kind"] == "choice" and value not in q["options"])
+            )
         ):
             raise AgentError("Answer is not one of the offered options", "invalid_request")
         accepted = await self._accept(
@@ -622,8 +626,6 @@ class Questions(Plugin):
         actor_decision=False,
         entry_id=None,
     ):
-        if q["kind"] == "approval" and value == "refuse":
-            value, declined = "declined", True
         if declined is None:
             declined = value == "declined"
         current = (await self._state(sid)).get(q["id"])
