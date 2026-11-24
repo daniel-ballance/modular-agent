@@ -23,7 +23,7 @@ export function fakeClosures(name, fault, model) {
   function decide(s, data, reason) {
     const requestId = s.waitQ; s.waitQ = undefined;
     if (s.question?.id === requestId) delete s.question;
-    s.batches.push([{ kind: 'inputAnswer', id: randomUUID(), data: { requestId, ...data } }]);
+    s.batches.push([{ kind: 'inputAnswer', id: randomUUID(), requestId, data }]);
     publish(s, { requestId, reason, ...(fault === 'answer-in-notice' && { value: 'yes' }) });
   }
   return {
@@ -82,7 +82,7 @@ export function fakeClosures(name, fault, model) {
         const q = s.question?.id;
         base.disconnect(s, client);
         if (q && !s.question) {
-          if (fault === 'mark-loss-revoked') s.batches.flat().find(e => e.kind === 'inputAnswer' && e.data.requestId === q).data.cause = 'revoked';
+          if (fault === 'mark-loss-revoked') s.batches.flat().find(e => e.kind === 'inputAnswer' && e.requestId === q).data.cause = 'revoked';
           publish(s, { requestId: q, reason: fault === 'guess-revocation' ? 'revoked' : 'refused' });
         }
       }

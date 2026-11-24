@@ -81,13 +81,13 @@ export const closures = {
       saved = await feed.expect(question(live, 'declined'));
     });
     const timed = await ask(control, 'deadline'); await control('advance', { milliseconds: 5000 });
-    const expiry = records(await control('inspect'), 'inputAnswer').filter(e => e.data.requestId === timed);
+    const expiry = records(await control('inspect'), 'inputAnswer').filter(e => e.requestId === timed);
     assert.ok(expiry.length === 1 && expiry[0].data.declined && !expiry[0].data.actorId && expiry[0].data.reason === 'timeLimit', 'expiry has a committed system timeLimit');
     await follow(peer.api, id, saved, async feed => {
       await feed.expect(question(timed, 'expired'));
       const restricted = await ask(control, 'revocable'); await poll(restricted);
       await control('revokeRight', { right: 'answer' });
-      const decisions = records(await control('inspect'), 'inputAnswer').filter(e => e.data.requestId === restricted);
+      const decisions = records(await control('inspect'), 'inputAnswer').filter(e => e.requestId === restricted);
       assert.ok(decisions.length === 1 && decisions[0].data.cause === 'revoked' && decisions[0].data.declined && !decisions[0].data.actorId &&
         ['refused', 'noLongerAnswerable'].includes(decisions[0].data.reason), 'recorded revocation caused the system decision');
       await feed.expect(question(restricted, 'revoked'));
@@ -135,7 +135,7 @@ export const closures = {
       await follow(peer.api, id, snap.waitCursor, async feed => {
         await ctl('barrier', { name: 'waitFollowing' });
         await presence.close(); await ctl('barrier', { name: 'presenceLost' });
-        const decisions = records(await ctl('inspect'), 'inputAnswer').filter(e => e.data.requestId === q.id);
+        const decisions = records(await ctl('inspect'), 'inputAnswer').filter(e => e.requestId === q.id);
         assert.ok(decisions.length === 1 && decisions[0].data.reason === 'refused' && !Object.hasOwn(decisions[0].data, 'cause'), 'loss of last presence is a refusal, not a recorded revocation');
         await feed.expect(question(q.id, 'refused'));
       });
@@ -149,7 +149,7 @@ export const closures = {
       const evidence = await control('inspect');
       const opening = records(evidence, 'inputRequest').find(e => e.data.request.id === q);
       assert.ok(opening?.data.request.whenTimeLimit === 'leaveOpen' && records(evidence, 'toolPending').some(e => e.data.requestIds.includes(q)), 'the leaveOpen wait actually reached pending');
-      assert.ok(!records(evidence, 'inputAnswer').some(e => e.data.requestId === q), 'the timeout did not commit a decision');
+      assert.ok(!records(evidence, 'inputAnswer').some(e => e.requestId === q), 'the timeout did not commit a decision');
       await poll(q); await answer(q);
       await feed.expect(question(q, 'answered')); // The deadline ended the synchronous wait, not the question.
       const fence = await ask(control); await poll(fence); await answer(fence, true);

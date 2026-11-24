@@ -32,7 +32,7 @@ async function initial(peer, id, { mixed = false, present = false, live = false 
   }
   const otherOpen = mixed ? [one(es, 'modular-agent.interfaceHandoff').toolCallId] : [];
   const e = parked(seen.batches, 'bump', args, { otherOpen });
-  if (v.declaration.approvalCoversNested === true) assert.equal(e.data.request.coversNested, true, 'parked call offers coverage');
+  assert.equal(e.data.request.coversNested, true, 'parked call offers coverage');
   assert.ok(!r.calls.has(e.toolCallId) && !r.terminal.outcome?.pendingToolCallIds?.includes(e.toolCallId), 'no triad, result or executable ID for the parked call');
   assert.deepEqual(r.pending.map(x => x.id), otherOpen, 'only handed-off siblings are executable');
   if (mixed) {
@@ -60,10 +60,11 @@ async function outcome(peer, id, e, status, decision, actor, cause) {
 }
 function scenario(run, { mixed, restart, roles = [] } = {}) {
   return { model: [{ toolCalls: [bump, ...(mixed ? [{ name: offer.name, input: draft }] : [])] }, { text: second }],
-    requires: 'approvalsOutlastTurns', control: true, restart, async run(peer) {
+    control: true, restart, async run(peer) {
       const { threadId, declaration } = await peer.api.create();
-      if (declaration.approvalsOutlastTurns !== true) return { skipped: 'session does not declare approvalsOutlastTurns' };
-      if (mixed && !declaration.interfaceTools) return { skipped: 'session does not declare interfaceTools' };
+      assert.equal(declaration.approvalsOutlastTurns, true, 'fixture must declare approvalsOutlastTurns');
+      assert.equal(declaration.approvalCoversNested, true, 'fixture must declare approvalCoversNested');
+      if (mixed) assert.equal(declaration.interfaceTools, true, 'fixture must declare interfaceTools');
       assert.ok(peer.control, 'waiting cases require fixture controls');
       if (restart) assert.ok(peer.restart, 'restart case requires a managed command');
       for (const role of roles) assert.ok(peer.tokens[role], `case needs the ${role} token`);
@@ -90,13 +91,12 @@ export const waiting = {
       assert.equal(r.pending.length, 0); assert.equal(finalView(r).messages.filter(m => m.role === 'user').length, 1);
       await outcome(peer, id, e, 'completed', 'allow', 'kit-owner');
       const after = await peer.api.view(id); assert.deepEqual(after.waiting.questions, []);
-      if (after.declaration.approvalCoversNested === true) {
-        const es = (await state(peer, id)).batches.flat();
-        assert.equal(rows(es, 'inputRequest').length, 1, 'only the parent asked');
-        const child = one(es.filter(r => r.data?.call?.parentCallId === e.toolCallId), 'toolStarted');
-        assert.deepEqual(child.data.approvalCoveredBy, { toolCallId: e.toolCallId, requestId: e.requestId }, 'child start names the covering request');
-        assert.equal(one(es.filter(r => r.toolCallId === child.toolCallId), 'toolResult').data.status, 'completed');
-      } else console.log('SKIP  continued child coverage (session does not declare approvalCoversNested)');
+      assert.equal(after.declaration.approvalCoversNested, true, 'reopened fixture must declare approvalCoversNested');
+      const es = (await state(peer, id)).batches.flat();
+      assert.equal(rows(es, 'inputRequest').length, 1, 'only the parent asked');
+      const child = one(es.filter(r => r.data?.call?.parentCallId === e.toolCallId), 'toolStarted');
+      assert.deepEqual(child.data.approvalCoveredBy, { toolCallId: e.toolCallId, requestId: e.requestId }, 'child start names the covering request');
+      assert.equal(one(es.filter(r => r.toolCallId === child.toolCallId), 'toolResult').data.status, 'completed');
       await reportRefused(await peer.api.post(resume(after, e.requestId), opts(after)));
       await outcome(peer, id, e, 'completed', 'allow', 'kit-owner');
     } finally { await fresh.close(); }
