@@ -62,6 +62,71 @@ async fn an_allow_delivered_after_turn_end_buys_one_start() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_late_result_follows_its_call_before_the_newer_user_message() -> Result<()> {
+    use modular_agent::{Agent, Capacity, Outcome, ResourceLimits, testing::acp_conformance};
+
+    let dir = tempfile::tempdir()?;
+    let agent = acp_conformance(Agent::builder())
+        .project(dir.path())
+        .data_dir(dir.path())
+        .durability(Durability::Kept)
+        .model("conformance/echo")
+        .approval(Approval::All)
+        .max_approval_wait_ms(60_000)
+        .setting("approvalWait", json!("untilDeadline"))
+        .resource_limits(ResourceLimits {
+            session: Capacity {
+                calls: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .build()
+        .await?;
+    let session = agent.session().await?;
+    let origin = session.prompt(r#"tool:read {"path":"first"}"#).await?;
+    let probe = r#"tool:read {"path":"second"}"#;
+    assert_eq!(
+        session.prompt(probe).await?.outcome,
+        Some(Outcome::Limit {
+            limit: "capacity".into()
+        })
+    );
+    let question = session.questions_present().await?.remove(0);
+    session
+        .answer(&question.id, Answer::Declined { reason: None })
+        .await?;
+    session.wait_idle().await?;
+
+    let history = session.history().await?;
+    let request = history
+        .iter()
+        .rfind(|e| e["kind"] == "modelRequest")
+        .unwrap();
+    let messages = request["data"]["request"]["messages"].as_array().unwrap();
+    let roles: Vec<_> = messages
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(roles, ["user", "assistant", "toolResult", "user"]);
+    assert_eq!(messages[1]["content"][0]["id"], origin.open_tool_calls[0]);
+    assert_eq!(messages[2]["toolCallId"], origin.open_tool_calls[0]);
+    assert_eq!(messages[3]["content"][0]["text"], probe);
+
+    let pending = session.questions_present().await?;
+    assert_eq!(
+        pending.len(),
+        1,
+        "the older result does not answer the probe"
+    );
+    assert_eq!(
+        pending[0].call.as_ref().unwrap()["input"],
+        json!({"path":"second"})
+    );
+    agent.close().await
+}
+
+#[tokio::test]
 async fn policies_and_the_default_live_session_do_not_park_calls() -> Result<()> {
     for (policy, mode, readonly, count) in [
         (Approval::Off, "untilDeadline", false, 1),
