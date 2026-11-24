@@ -791,32 +791,27 @@ await attempt("environment", async () => {
 	}
 	check("env/read of a missing file is not_found", code(missing) === "not_found", JSON.stringify(missing));
 	mkdirSync(join(work, "listed-dir"), { recursive: true });
-	let listing, listError;
-	try {
-		listing = await p.request("env/list", { cwd: work, sessionId: "s1", path: "." });
-	} catch (e) {
-		listError = e;
-	}
-	if (listing) {
-		const kind = (name) => (listing.entries ?? []).find((e) => e.name === name)?.kind;
-		check("env/list: entries carry a name and a kind", Array.isArray(listing.entries) && kind("w.txt") === "file" && kind("listed-dir") === "directory" && listing.entries.every((e) => typeof e.name === "string" && !e.name.includes("/") && ![".", ".."].includes(e.name) && ["file", "directory", "other"].includes(e.kind)), String(JSON.stringify(listing)).slice(0, 200));
-		const failure = async (path) => {
-			try {
-				await p.request("env/list", { cwd: work, sessionId: "s1", path });
-			} catch (e) {
-				return code(e);
-			}
-		};
-		check("env/list of a missing directory is not_found", (await failure("no-such-dir")) === "not_found");
-		check("env/list of a file is invalid_request", (await failure("w.txt")) === "invalid_request");
-	} else check("env/list: an environment that does not list says so", ["not_supported", "method_not_found"].includes(code(listError)), JSON.stringify(listError));
+	const listing = await p.request("env/list", { cwd: work, sessionId: "s1", path: "." });
+	const kind = (name) => (listing.entries ?? []).find((e) => e.name === name)?.kind;
+	check("env/list: entries carry a name and a kind", Array.isArray(listing.entries) && kind("w.txt") === "file" && kind("listed-dir") === "directory" && listing.entries.every((e) => typeof e.name === "string" && !e.name.includes("/") && ![".", ".."].includes(e.name) && ["file", "directory", "other"].includes(e.kind)), String(JSON.stringify(listing)).slice(0, 200));
+	const failure = async (path) => {
+		try {
+			await p.request("env/list", { cwd: work, sessionId: "s1", path });
+		} catch (e) {
+			return code(e);
+		}
+	};
+	check("env/list of a missing directory is not_found", (await failure("no-such-dir")) === "not_found");
+	check("env/list of a file is invalid_request", (await failure("w.txt")) === "invalid_request");
 	const nb = p.notes.length;
 	const e = p.request("env/exec", { cwd: work, sessionId: "s1", command: "echo env-out" });
 	const er = await e;
 	check("env/exec: exit code and output", er.exitCode === 0 && er.output.includes("env-out"), JSON.stringify(er));
 	check("env/exec: streamed env/output", p.notes.slice(nb).some((n) => n.method === "env/output" && n.params?.parentRequestId === e.id && n.params.chunk.includes("env-out")));
-	const z = await p.request("env/exec", { cwd: work, sessionId: "s1", command: "echo no-limit", timeoutMs: 0 });
-	check("env/exec: timeoutMs 0 means no limit", z.exitCode === 0 && z.output.includes("no-limit") && !z.timedOut, JSON.stringify(z));
+	for (const timeoutMs of [0, null, -1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+		const err = await p.request("env/exec", { cwd: work, sessionId: "s1", command: "echo invalid", timeoutMs }).catch(e => e);
+		check(`env/exec refuses timeoutMs ${timeoutMs}`, code(err) === "invalid_request");
+	}
 	const t1 = Date.now();
 	const tl = await p.request("env/exec", { cwd: work, sessionId: "s1", command: "sleep 20", timeoutMs: 300 }, 20000);
 	check("env/exec: a positive timeoutMs stops the command and reports timedOut", tl.timedOut === true && tl.exitCode === null && Date.now() - t1 <= 5300, `${JSON.stringify(tl)} after ${Date.now() - t1} ms`);
