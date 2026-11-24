@@ -37,6 +37,7 @@ from ._plugin import (
     _SUPPORTED_HOOKS,
 )
 from ._tool import LeftOpen, ToolContext
+from ._time import iso_time
 from ._types import (
     AgentError,
     Answer,
@@ -146,7 +147,7 @@ def _question(sid: str, q: dict[str, Any]) -> Question:
         tuple(q.get("options") or ()),
         q.get("details"),
         q.get("approval_call"),
-        q.get("deadline"),
+        iso_time(q["deadlineAt"]) if q.get("approvalWait") else q.get("deadline"),
         q.get("answerable", True),
         q.get("approvalWait"),
         q.get("call"),

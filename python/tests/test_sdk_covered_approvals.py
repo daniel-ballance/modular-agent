@@ -138,7 +138,7 @@ async def test_waiting_allow_covers_only_what_the_saved_view_offered(tmp_path, m
         tools=tree(ran),
         approval="all",
         late_answers_start_turns=True,
-        max_approval_wait_ms=60_000,
+        max_approval_wait=60.0,
     )
     async with make_agent(script=SCRIPT, **options, approval_covers_nested=marked) as first:
         session = await first.session(settings={"approvalWait": "untilDeadline"})

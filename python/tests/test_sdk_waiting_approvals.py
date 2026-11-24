@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -35,7 +36,7 @@ def options(
         "durability": durability,
         "approval": "all",
         "late_answers_start_turns": True,
-        "max_approval_wait_ms": 30_000,
+        "max_approval_wait": 30.0,
         "tools": [bump],
         "process_plugins": [
             {
@@ -76,7 +77,9 @@ async def test_allow_on_exact_handle_after_turn(tmp_path, process):
         [q] = await session.questions(present=True)
         assert q.call == {"name": "bump", "input": {"amount": 1}}
         assert q.tool_call_id == cid and q.approval_wait == "untilDeadline"
-        assert q.deadline == request["data"]["request"]["deadlineAt"]
+        assert datetime.fromisoformat(q.deadline) == datetime.fromtimestamp(
+            request["data"]["request"]["deadlineAt"] / 1000, UTC
+        )
         with pytest.raises(AgentError):
             await session.as_actor("user").answer(q.id, "allow")
         await session.answer(q.id, "allow")
@@ -97,10 +100,28 @@ async def test_allow_on_exact_handle_after_turn(tmp_path, process):
             await session.answer(q.id, "allow")
 
 
-@pytest.mark.parametrize("bad", [True, 0, -1, 1.5, float("inf"), 2**53])
+@pytest.mark.parametrize("seconds,ms", [(0.001, 1), (1.001, 1001)])
+async def test_wait_bound_in_seconds_is_recorded_in_whole_milliseconds(
+    tmp_path, seconds, ms, monkeypatch
+):
+    from ma_harness import waiting_approvals
+
+    now = 1_800_000_000_123
+    monkeypatch.setattr(waiting_approvals, "clock_ms", lambda: now)
+    async with make_agent(**options(tmp_path, max_approval_wait=seconds)) as agent:
+        session = await agent.session(settings={"approvalWait": "untilDeadline"})
+        await session.prompt("bump")
+        [entry] = [e for e in await session.history() if e["kind"] == "inputRequest"]
+        wire = entry["data"]["request"]
+        assert entry["time"] == now and wire["timeLimitMs"] == ms and wire["deadlineAt"] == now + ms
+        [q] = await session.questions(present=True)
+        assert datetime.fromisoformat(q.deadline) == datetime.fromtimestamp((now + ms) / 1000, UTC)
+
+
+@pytest.mark.parametrize("bad", [True, 0, -1, 0.0005, 0.0015, float("nan"), float("inf"), 2**53])
 async def test_invalid_maximum(tmp_path, bad):
     with pytest.raises(AgentError) as error:
-        await make_agent(**options(tmp_path, max_approval_wait_ms=bad))
+        await make_agent(**options(tmp_path, max_approval_wait=bad))
     assert error.value.code == "invalid_composition"
 
 
@@ -117,7 +138,7 @@ async def test_incompatible_wait_composition(tmp_path, incompatible):
 @pytest.mark.parametrize("capable", [True, False])
 async def test_live_is_still_the_default(tmp_path, capable):
     async with make_agent(
-        **options(tmp_path, max_approval_wait_ms=30_000 if capable else None)
+        **options(tmp_path, max_approval_wait=30.0 if capable else None)
     ) as agent:
         session = await agent.session()
         assert (await session.settings()).get("approvalWait", "live") == "live"
@@ -189,15 +210,16 @@ async def test_decision_and_handoff_are_separate(tmp_path, process, how, monkeyp
         await session.wait_idle()
         approver = session.as_actor("approver")
         [q] = await approver.questions(present=True)
-        assert q.deadline == now + (10_000 if how == "early" else 30_000)
+        deadline = now + (10_000 if how == "early" else 30_000)
+        assert datetime.fromisoformat(q.deadline) == datetime.fromtimestamp(deadline / 1000, UTC)
         if how == "early":
-            now = q.deadline
+            now = deadline
             with pytest.raises(AgentError):
                 await approver.answer(q.id, "allow")
         elif how == "decline":
             await approver.answer(q.id, "decline")
         else:
-            now = q.deadline - 1
+            now = deadline - 1
             continuing = True
             await approver.answer(q.id, "allow")
             try:
@@ -271,9 +293,9 @@ async def test_reopen_with_changed_composition(tmp_path, process, changed):
     if changed == "source":
         opts["plugins"] = [Plugin("replacement", tools=opts.pop("tools"))]
     elif changed == "maximum":
-        opts["max_approval_wait_ms"] = 500
+        opts["max_approval_wait"] = 0.5
     elif changed == "unsupported":
-        opts["max_approval_wait_ms"] = None
+        opts["max_approval_wait"] = None
     async with make_agent(**opts) as other:
         s = await other.open_session(sid)
         if changed not in ("maximum", "unsupported"):

@@ -167,7 +167,7 @@ async def test_waiting_approval_on_returning_presence(tmp_path):
         approval="all",
         approval_covers_nested=True,
         late_answers_start_turns=True,
-        max_approval_wait_ms=60_000,
+        max_approval_wait=60.0,
         settings={"approvalWait": "untilDeadline"},
     ) as agent:
         listener = await agent.serve_agui(listen="127.0.0.1:0", actors=[a])

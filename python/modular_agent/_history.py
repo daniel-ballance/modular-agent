@@ -12,6 +12,7 @@ from typing import Literal
 
 from ._history_port import HistoryPort, _route
 from ._types import AgentError, ErrorCode
+from ._time import duration_ms
 
 
 @dataclass(frozen=True)
@@ -68,13 +69,7 @@ def serve_history(
         raise AgentError(ErrorCode.NOT_SUPPORTED, f"Cannot serve {store._kind} history")
     if not isinstance(store, HistoryStore) and not store.persistent:
         raise AgentError(ErrorCode.NOT_SUPPORTED, f"Cannot serve {type(store).__name__} history")
-    ttl_error = "lease_ttl must be a positive duration in whole milliseconds"
-    if not isinstance(lease_ttl, (int, float)) or not 0.001 <= lease_ttl <= (2**53 - 1) / 1000:
-        raise AgentError(ErrorCode.INVALID_PARAMS, ttl_error)
-    ttl_ms = round(lease_ttl * 1000)
-    # Compare in seconds: for example, 1.001 * 1000 is not exactly 1001 as a float.
-    if lease_ttl != ttl_ms / 1000:
-        raise AgentError(ErrorCode.INVALID_PARAMS, ttl_error)
+    ttl_ms = duration_ms(lease_ttl, "lease_ttl", ErrorCode.INVALID_PARAMS)
 
     if witness is not None and not isinstance(store, HistoryStore):
         raise AgentError(ErrorCode.NOT_SUPPORTED, "A custom history port owns its freshness checks")

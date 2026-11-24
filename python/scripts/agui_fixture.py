@@ -239,7 +239,7 @@ class Fixture:
             else "all"
             if self.waiting or self.name.startswith("approval")
             else "off",
-            max_approval_wait_ms=5000 if self.waiting else None,
+            max_approval_wait=5.0 if self.waiting else None,
             late_answers_start_turns=self.waiting,
             settings={
                 "approval_timeout": 5,

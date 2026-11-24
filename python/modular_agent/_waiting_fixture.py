@@ -6,6 +6,7 @@ import asyncio
 import ctypes
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 import select
 import sys
@@ -249,7 +250,9 @@ class Worker:
                     "kind": q.kind,
                     "question": q.question,
                     "approvalWait": q.approval_wait,
-                    "deadline": q.deadline,
+                    "deadline": round(datetime.fromisoformat(q.deadline).timestamp() * 1000)
+                    if q.deadline
+                    else None,
                     "answerable": q.answerable,
                     "call": {"id": q.tool_call_id, **cast(dict[str, Any], q.call or {})},
                 }

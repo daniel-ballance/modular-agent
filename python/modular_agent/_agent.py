@@ -72,6 +72,7 @@ from ._serve import _MemoryExternal, _OverWire
 from ._session import Session, _events
 from ._tool import Tool
 from ._working import _WorkingPart
+from ._time import duration_ms
 from ._types import (
     Actor,
     AgentError,
@@ -1114,7 +1115,7 @@ def create_agent(
     agent_name: str | None = None,
     job_reports_start_turns: bool = False,
     late_answers_start_turns: bool = False,
-    max_approval_wait_ms: int | None = None,
+    max_approval_wait: float | None = None,
     resource_reservations: Mapping[str, Mapping[str, int]] | None = None,
 ) -> AgentStart:
     async def build() -> Agent:
@@ -1483,12 +1484,10 @@ def create_agent(
                 durability == "durable"
             ):
                 raise ValueError("Runtime does not match the requested durability")
-            if max_approval_wait_ms is not None:
+            if max_approval_wait is not None:
                 declaration = agent.declaration()
                 if (
-                    type(max_approval_wait_ms) is not int
-                    or not 0 < max_approval_wait_ms < 2**53
-                    or "approval" not in h.plugins
+                    "approval" not in h.plugins
                     or not all(
                         declaration.get(k)
                         for k in (
@@ -1503,7 +1502,9 @@ def create_agent(
                         ErrorCode.INVALID_COMPOSITION,
                         "Waiting approval needs a positive Duration, kept history, approval and a Runtime with late and empty-call continuations",
                     )
-                h.max_approval_wait_ms = max_approval_wait_ms
+                h.max_approval_wait_ms = duration_ms(
+                    max_approval_wait, "max_approval_wait", ErrorCode.INVALID_COMPOSITION
+                )
             h.validate_wait_setting(defaults)
             models = await agent.models()
             choices = {f"{m['provider']}/{m['id']}" for m in models}

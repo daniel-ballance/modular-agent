@@ -45,12 +45,12 @@ class AcpPolicy:
                     raise
                 raw = {}
             _shape(raw, {"stdio", "actors", "limits", "approvalWaitMaxMs"}, "policy")
-            self.approval_wait_max_ms: int | None = None
+            self.max_approval_wait: float | None = None
             if "approvalWaitMaxMs" in raw:
                 maximum = raw["approvalWaitMaxMs"]
                 if type(maximum) is not int or not 0 < maximum < 2**53:
                     raise ValueError("approvalWaitMaxMs must be a positive integer in milliseconds")
-                self.approval_wait_max_ms = maximum
+                self.max_approval_wait = maximum / 1000
             self.stdio = (
                 cast(StdioPolicy, _principal(raw["stdio"], several_actors=several_actors))
                 if "stdio" in raw

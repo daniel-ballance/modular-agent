@@ -400,7 +400,7 @@ async def _agent(
         else paths.settings(project)
     )
     approval, wait = paths.approval(args.approval)
-    maximum = policy.approval_wait_max_ms if approval is not None else None
+    maximum = policy.max_approval_wait if approval is not None else None
     if maximum is not None:
         settings["approvalWait"] = "live" if args.prompt is not None else wait
     auth = login_file(paths.config / "auth.json")
@@ -524,7 +524,7 @@ async def _agent(
         settings=settings,
         approval=approval,
         approval_covers_nested=approval is not None,
-        max_approval_wait_ms=maximum,
+        max_approval_wait=maximum,
         resource_reservations=policy.limits,
         tenants=policy.tenants,
         plugin_host=True,

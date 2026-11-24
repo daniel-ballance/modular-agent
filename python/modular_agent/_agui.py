@@ -22,7 +22,8 @@ from ma_harness.authority import CONNECTION_AUTHORITY
 from ma_harness.interface_tools import branch_entries, same_json
 from opentelemetry.context import Context
 
-from ._agui_wire import Obj, Failure, content, encode, event, fingerprint, iso, parse_run, require
+from ._agui_wire import Obj, Failure, content, encode, event, fingerprint, parse_run, require
+from ._time import iso_time as iso
 from ._interface_tools import InterfaceToolConnection
 from ._listing import still_disclosable
 from ._types import AgentError, ErrorCode, JsonObject

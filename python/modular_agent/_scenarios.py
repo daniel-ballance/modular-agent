@@ -166,7 +166,10 @@ async def _agent(
         settings=options.get("settings"),
         several_actors=options.get("severalActors", False),
         plugins=[*plugins, *controls],
-        max_approval_wait_ms=options.get("maxApprovalWaitMs"),
+        max_approval_wait=options["maxApprovalWaitMs"] / 1000
+        if "maxApprovalWaitMs" in options
+        else None,
+        approval_covers_nested=options.get("approvalCoversNested", False),
         late_answers_start_turns=options.get("lateAnswersStartTurns", False),
         agent_name=telemetry.request["agentName"] if telemetry else agent_name,
         process_plugins=processes or None,
@@ -595,7 +598,7 @@ if __name__ == "__main__":
                 approval="all",
                 several_actors=True,
                 late_answers_start_turns=True,
-                max_approval_wait_ms=100,
+                max_approval_wait=0.1,
             ) as agent:
                 await agent.session()
                 print(json.dumps(agent.declaration()))
