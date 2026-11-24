@@ -13,6 +13,7 @@ import (
 
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/harness"
+	"github.com/daniel-ballance/modular-agent/go/internal/runreceipt"
 	"github.com/daniel-ballance/modular-agent/go/internal/telemetry"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 )
@@ -159,6 +160,7 @@ func (q *agRequest) plan(in agInput, suffix []agObject, c *InterfaceToolConnecti
 }
 
 type agExchange struct {
+	slot            *runreceipt.Slot
 	presenceAtStart *agPresence
 	*agRequest
 	in           agInput
@@ -205,6 +207,15 @@ func (x *agExchange) matches(snap api.Session, turn string) bool {
 }
 func (q *agRequest) run(r *http.Request, in agInput) error {
 	s := q.state
+	if q.a.persistent {
+		snap, err := q.a.a.Snapshot(q.id)
+		if err != nil {
+			return err
+		}
+		if _, err = api.OperationEntry(api.WithOperationEntry(q.ctx, q.id, runreceipt.Key(q.id, q.Actor.ID, q.client, in.run)), snap); err != nil {
+			return err
+		}
+	}
 	s.mu.Lock()
 	runKey := sha256.Sum256([]byte(in.run))
 	if s.active || slices.Contains(s.runs, runKey) {
@@ -279,8 +290,32 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 			return denied
 		}
 	}
+	q.boundary("beforeAdmission", in.run)
+	opCtx := q.ctx
+	if q.a.persistent {
+		key := runreceipt.Key(q.id, q.Actor.ID, q.client, in.run)
+		opCtx = api.WithOperationEntry(q.ctx, q.id, key)
+		snap, err := q.a.a.Snapshot(q.id)
+		if err != nil {
+			return err
+		}
+		if _, err = api.OperationEntry(opCtx, snap); err != nil {
+			return err
+		}
+		x.slot, err = runreceipt.Reserve(q.a.receiptDir, q.id, key)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			defer x.slot.Close()
+			snap, err := q.a.a.Snapshot(q.id)
+			if err == nil && !slices.ContainsFunc(snap.LiveEntries(), func(e api.Entry) bool { return e.ID == key }) {
+				x.slot.Discard()
+			}
+		}()
+	}
 	if p.user != nil {
-		ctx := api.WithInputWatermark(q.ctx, q.id, h.position, h.entries)
+		ctx := api.WithInputWatermark(opCtx, q.id, h.position, h.entries)
 		receipt, err := q.a.a.Submit(ctx, q.id, api.Input{Actor: q.Actor.ID, When: "now", Key: p.key, Content: p.user})
 		if err != nil {
 			return err
@@ -311,13 +346,14 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 			}
 			s.mu.Unlock()
 			if live[a.Request].q.ApprovalWait == api.UntilDeadline {
-				err = q.a.a.(api.WaitingApprovalHost).AnswerWaiting(q.ctx, q.id, d.presence.instance, a)
+				err = q.a.a.(api.WaitingApprovalHost).AnswerWaiting(opCtx, q.id, d.presence.instance, a)
 			} else {
-				err = q.a.q.manager().AnswerOnClient(q.ctx, q.id, q.client, a)
+				err = q.a.q.manager().AnswerOnClient(opCtx, q.id, q.client, a)
 			}
 			if err != nil {
 				return err
 			}
+			opCtx = q.ctx // Only the first accepted operation owns the link.
 			s.mu.Lock()
 			if s.presence != nil && s.presence.detach[a.Request] != nil {
 				s.presence.detach[a.Request]()
@@ -330,7 +366,8 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 			s.mu.Unlock()
 		}
 		for _, report := range p.reports {
-			d, err := c.ReportToolResult(q.ctx, report)
+			d, err := c.ReportToolResult(opCtx, report)
+			opCtx = q.ctx
 			if err != nil {
 				return err
 			}
@@ -518,9 +555,14 @@ func (x *agExchange) event(v agObject) error {
 func (x *agExchange) fail(err error) {
 	_, code := agStatus(err)
 	v := agObject{"type": "RUN_ERROR", "code": code, "message": "Run could not be delivered."}
-	if x.event(v) != nil {
-		_ = x.frame([]byte(`{"type":"RUN_ERROR","code":"output_withheld","message":"Output withheld."}`))
+	fixed := x.event(v) != nil
+	if fixed {
+		code = withheld
+		if x.frame([]byte(`{"type":"RUN_ERROR","code":"output_withheld","message":"Output withheld."}`)) != nil {
+			return
+		}
 	}
+	x.recordRelease(runreceipt.Marker{Class: "error", Code: string(code), FixedError: fixed})
 }
 func (x *agExchange) sendSnapshot(h agHistory) error {
 	s := x.state
@@ -624,6 +666,7 @@ func (x *agExchange) finish(out api.Outcome, interrupts []agObject) error {
 	if err = x.fresh(x.epoch); err != nil {
 		return err
 	}
+	marker := runreceipt.Marker{Class: agString(terminal, "type")}
 	if len(calls) > 0 {
 		// Gate the entire executable group, not just its separately valid pieces.
 		group := make([]json.RawMessage, len(frames))
@@ -636,9 +679,19 @@ func (x *agExchange) finish(out api.Outcome, interrupts []agObject) error {
 		if err = x.fresh(x.epoch); err != nil {
 			return err
 		}
+		marker.Cursor, marker.Position, marker.GroupDigest = cursor, h.position, runreceipt.GroupDigest(group)
 		if err = x.conn.connection.CheckGroup(x.ctx, x.turn, calls); err != nil {
 			return err
 		}
+	}
+	for _, v := range interrupts {
+		marker.Questions = append(marker.Questions, agString(v, "id"))
+	}
+	for _, c := range calls {
+		marker.Calls = append(marker.Calls, c.ID)
+	}
+	if x.slot != nil && !runreceipt.Fits(marker) {
+		return tooLarge
 	}
 	var deliveries []agQuestion
 	for i, b := range frames {
@@ -663,10 +716,14 @@ func (x *agExchange) finish(out api.Outcome, interrupts []agObject) error {
 		if err = x.fresh(x.epoch); err != nil {
 			return err
 		}
+		if i == len(frames)-1 {
+			x.boundary("beforeTerminal", x.in.run)
+		}
 		if err = x.frame(b); err != nil {
 			return err
 		}
 	}
+	x.recordRelease(marker) // A failed record leaves unknown, never a second terminal.
 	s.cursor, s.digest = cursor, h.digest
 	for _, d := range deliveries {
 		x.rememberWaiting(d)
@@ -674,6 +731,14 @@ func (x *agExchange) finish(out api.Outcome, interrupts []agObject) error {
 	x.terminal = true
 	x.interrupted = len(interrupts) > 0 && len(out.Open) == 0
 	return nil
+}
+func (x *agExchange) recordRelease(m runreceipt.Marker) {
+	if x.slot != nil {
+		x.boundary("terminalReleased", x.in.run)
+		if x.host().RecordHostRelease(x.id, x.epoch, func() error { return x.slot.Release(m) }) == nil {
+			x.boundary("terminalRecorded", x.in.run)
+		}
+	}
 }
 func (x *agExchange) toolFrames(c api.Call, h agHistory, result agObject) ([][]byte, error) {
 	start := agObject{"type": "TOOL_CALL_START", "toolCallId": c.ID, "toolCallName": c.Name}

@@ -19,10 +19,11 @@ import (
 )
 
 type Manager struct {
-	a       api.API
-	mu      sync.Mutex
-	changed chan struct{}
-	present map[answerRoute]int
+	a        api.API
+	mu       sync.Mutex
+	changed  chan struct{}
+	routesMu sync.RWMutex // read under the writer lock when a grant changes
+	present  map[answerRoute]int
 }
 
 // A route can advertise presence without an answerable approval. An AG-UI
@@ -112,16 +113,20 @@ func (m *Manager) OfferApproval(session, actor, client, question string) func() 
 
 func (m *Manager) connect(route answerRoute) func() {
 	m.mu.Lock()
+	m.routesMu.Lock()
 	m.present[route]++
+	m.routesMu.Unlock()
 	m.mu.Unlock()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			m.mu.Lock()
+			m.routesMu.Lock()
 			m.present[route]--
 			if m.present[route] == 0 {
 				delete(m.present, route)
 			}
+			m.routesMu.Unlock()
 			close(m.changed)
 			m.changed = make(chan struct{})
 			m.mu.Unlock()
@@ -389,7 +394,16 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 	}
 	for {
 		m.mu.Lock()
-		s, e := m.a.Snapshot(q.Session)
+		var s api.Session
+		var committed <-chan struct{}
+		var e error
+		if host, ok := m.a.(interface {
+			CommittedSnapshot(string) (api.Session, <-chan struct{}, error)
+		}); ok {
+			s, committed, e = host.CommittedSnapshot(q.Session)
+		} else {
+			s, e = m.a.Snapshot(q.Session)
+		}
 		if e != nil {
 			m.mu.Unlock()
 			return api.Answer{}, e
@@ -452,6 +466,7 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 			}
 			return api.Answer{}, ctx.Err()
 		case <-ch:
+		case <-committed:
 		case <-deadline:
 			if q.Defer {
 				return api.Answer{}, api.ErrQuestionOpen
@@ -575,6 +590,12 @@ func (m *Manager) Present(id, actor string) bool {
 }
 
 func (m *Manager) approvalRouteLocked(q api.Question, actor string) bool {
+	m.routesMu.RLock()
+	defer m.routesMu.RUnlock()
+	return m.hasRoute(q, actor)
+}
+
+func (m *Manager) hasRoute(q api.Question, actor string) bool {
 	for r := range m.present {
 		if r.session == q.Session && r.actor == actor && r.approval && (r.question == "" || r.question == q.ID) {
 			return true

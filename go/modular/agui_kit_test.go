@@ -92,6 +92,8 @@ type agFixture struct {
 	mu                              sync.Mutex
 	redactClient                    string
 	edges                           map[string]chan struct{}
+	holds                           map[string]string
+	gateMode, gateID                string
 	warnings                        []string
 	erasure                         api.ProviderErasure
 }
@@ -267,7 +269,7 @@ func (f *agFixture) parts() api.Plugin {
 				if portable.EqualJSON(c.Call.Input, []byte(`{"color":"draft-blue"}`)) {
 					c.Call.Input = api.JSON(map[string]string{"color": "dispatch-blue"})
 				}
-				if strings.HasPrefix(f.Name, "approval") {
+				if strings.HasPrefix(f.Name, "approval") || f.Name == "closure-presence" {
 					qs, _ := a.Get("questions")
 					ans, err := qs.(api.Questions).Ask(ctx, api.Question{Session: c.Session, Turn: c.Turn, Actor: c.Call.Actor, Call: c.Call.ID, Kind: "approval", Key: "check:" + c.Call.ID, Prompt: "Allow " + c.Call.Name + " " + string(c.Call.Input) + "?", ApprovalCall: &c.Call, Wait: 5 * time.Second})
 					if err != nil || ans.Value != "allow" || ans.Declined {
@@ -307,8 +309,9 @@ func (f *agFixture) parts() api.Plugin {
 		}
 		if err = a.Handle("runtime.turn.start", "", func(ctx context.Context, v any) (api.Decision, error) {
 			t := v.(api.Turn)
+			f.checkpoint("afterAdmission", t.Session, "")
 			switch f.Name {
-			case "questions":
+			case "receipt-interrupt", "questions":
 				return api.Decision{}, ask(ctx, t.Session, t.ID, t.Actor)
 			case "output-size":
 				a.Emit(ctx, api.Event{Session: t.Session, Turn: t.ID, Kind: "plugin.kit.kit.oversized", Data: api.JSON(strings.Repeat("x", wswire.MaxFrame))})
@@ -352,6 +355,9 @@ func (f *agFixture) parts() api.Plugin {
 		return a.Handle("output.batch", "", func(ctx context.Context, v any) (api.Decision, error) {
 			b := v.(api.OutputBatch)
 			for i, e := range b.Events {
+				if refuse := f.hostReadGate(b.Recipient, &e); refuse {
+					return api.Decision{Refuse: true}, nil
+				}
 				f.mu.Lock()
 				redact := f.redactClient == b.Recipient && f.redactClient != ""
 				f.mu.Unlock()
@@ -428,6 +434,9 @@ func (f *agFixture) control(ctx context.Context, op, id, name string, ms int64) 
 		}
 		return f.evidence(id), nil
 	case "advance":
+		if strings.HasPrefix(f.Name, "closure-") {
+			return struct{}{}, f.advanceWaits(ctx, id, ms)
+		}
 		f.clock.advance(ms)
 		_, err := f.host.Wait(ctx, id)
 		return struct{}{}, err
@@ -502,6 +511,11 @@ func TestAGUIKitProgram(t *testing.T) {
 	must(err)
 	var replies []modulartest.Reply
 	must(json.Unmarshal(raw, &replies))
+	if f.Name == "closure-left-open" {
+		var scripted []modulartest.Reply
+		must(json.Unmarshal([]byte(`[{"toolCalls":[{"name":"question","input":{}}]},{"text":"done"}]`), &scripted))
+		replies = append(replies[:1], scripted...)
+	}
 	provider := modulartest.ScriptedProvider(replies)
 	request := provider.Request
 	provider.Request = func(ctx context.Context, ref modular.ModelRef, r modular.ModelRequest, pc *modular.ProviderContext) (modular.AssistantMessage, error) {
@@ -550,7 +564,7 @@ func TestAGUIKitProgram(t *testing.T) {
 	store, err := history.New(filepath.Join(f.dir, "history"))
 	must(err)
 	mode := modular.Durable
-	if f.Name == "crash-before-handoff" {
+	if f.Name == "crash-before-handoff" || f.Name == "receipt-after-admission" {
 		mode = modular.Kept
 	}
 	opts := []modular.Option{modular.WithPluginHost(true), modular.WithProject(f.Project), modular.WithDataDir(f.dir), modular.WithHistory(modular.NewHistoryStore(&kitStore{store, &f}, true, true)), modular.WithEnvironment(modulartest.MemoryEnvironment()), modular.WithDurability(mode), modular.WithProvider(provider), modular.WithModel(modulartest.ScriptedModel), modular.WithSeveralActors(true), modular.WithTenants(map[string]modular.Tenant{"test": {Rights: api.Rights}}), modular.WithInterfaceTools(modular.InterfaceToolSource{SourceID: "kit", ActorID: "kit-owner", RouteID: "kit-primary", ResultTimeoutMS: 60000, Tools: []modular.ToolDefinition{f.Offer}})}
@@ -578,6 +592,15 @@ func TestAGUIKitProgram(t *testing.T) {
 				return "counted", f.log("counter", 1)
 			}, modular.Callers("plugin"))))
 		}
+	}
+	if f.Name == "closure-routes" {
+		opts = append(opts, modular.WithApproval(modular.All), modular.WithTool(modular.NewTool("review", "Review.", func(context.Context, struct{}, *modular.ToolContext) (string, error) { return "reviewed", nil })))
+	}
+	if f.Name == "closure-left-open" {
+		opts = append(opts, modular.WithLateAnswersStartTurns(true), modular.WithTool(modular.NewTool("question", "Ask.", func(ctx context.Context, _ struct{}, tc *modular.ToolContext) (string, error) {
+			a, err := tc.Ask(ctx, modular.Question{Kind: "choice", Question: "Choose.", Options: []string{"yes", "no"}}, modular.AskOptions{Wait: 5 * time.Second, Then: "leaveOpen"})
+			return a.Value, err
+		})))
 	}
 	a, err := modular.New(t.Context(), opts...)
 	must(err)
@@ -614,6 +637,7 @@ func TestAGUIKitProgram(t *testing.T) {
 		}
 		opt.Actors = append(opt.Actors, p)
 	}
+	modular.AGUIFixtureProbe(&opt, f.checkpoint)
 	service, err := a.AGUIFixtureListener(t.Context(), opt, func(w http.ResponseWriter) http.ResponseWriter { return &kitWriter{ResponseWriter: w, f: &f} })
 	must(err)
 	defer service.Close()
@@ -629,8 +653,8 @@ func TestAGUIKitProgram(t *testing.T) {
 			return
 		}
 		var req struct {
-			Operation, ThreadID, Name, Client, Mode string
-			Milliseconds                            int64
+			Operation, ThreadID, Name, Client, Mode, Kind, Right, RequestID, Cursor, RunID string
+			Milliseconds                                                                   int64
 		}
 		if json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&req) != nil {
 			w.WriteHeader(400)
@@ -643,7 +667,10 @@ func TestAGUIKitProgram(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(struct{}{})
 			return
 		}
-		v, err := f.control(r.Context(), req.Operation, req.ThreadID, req.Name, req.Milliseconds)
+		v, handled, err := f.readControl(r.Context(), req.Operation, req.ThreadID, req.Name, req.Mode, req.Kind, req.Right, req.RequestID, req.RunID)
+		if !handled {
+			v, err = f.control(r.Context(), req.Operation, req.ThreadID, req.Name, req.Milliseconds)
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "control %s: %v\n", req.Operation, err)
 			w.WriteHeader(409)

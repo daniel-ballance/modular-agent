@@ -151,7 +151,7 @@ func (c *client) eraseRemote(ctx context.Context, store api.Store, remote api.Re
 				if writer, ok := lease.(api.RemoteErasureLease); ok {
 					if actual, err := writer.LoadErasure(); err == nil {
 						if plans, _, err := remote.ErasurePlans(id); err == nil {
-							_, _ = completeRemoteCopies(lease, actual, plans)
+							_, _ = completeRemoteCopies(lease, actual, plans, c.h.receiptDir)
 						}
 					}
 				}
@@ -227,7 +227,7 @@ func (s *session) reconcileRemoteErasureLocked(remote api.RemoteErasureCoordinat
 	if err != nil {
 		return errors.Join(api.ErrErasureUnavailable, err)
 	}
-	snap, err := completeRemoteCopies(s.lease, actual, plans)
+	snap, err := completeRemoteCopies(s.lease, actual, plans, s.h.receiptDir)
 	if err != nil {
 		return errors.Join(api.ErrErasureUnavailable, err)
 	}
@@ -336,7 +336,10 @@ func erasureTombstones(snap api.Session) map[string]bool {
 func checkRemotePlans(plans []api.ErasurePlan, tombstones map[string]bool) error {
 	for _, p := range plans {
 		for _, copy := range p.Copies {
-			if !copy.Complete || !tombstones[copy.ID] {
+			if !copy.Complete {
+				return errors.Join(api.ErrPendingErasure, api.ErrErasureUnavailable)
+			}
+			if !tombstones[copy.ID] {
 				return api.ErrErasureUnavailable
 			}
 		}
@@ -344,7 +347,7 @@ func checkRemotePlans(plans []api.ErasurePlan, tombstones map[string]bool) error
 	return nil
 }
 
-func completeRemoteCopies(lease api.Lease, snap api.Session, plans []api.ErasurePlan) (api.Session, error) {
+func completeRemoteCopies(lease api.Lease, snap api.Session, plans []api.ErasurePlan, receiptDir string) (api.Session, error) {
 	writer, ok := lease.(api.RemoteErasureLease)
 	if !ok {
 		return snap, api.ErrErasureUnsupported
@@ -365,7 +368,7 @@ func completeRemoteCopies(lease api.Lease, snap api.Session, plans []api.Erasure
 		}
 		intent := api.ErasureIntent{ID: p.IntentID, Source: p.SourceID, Copies: p.Copies}
 		var err error
-		snap, err = reconcileCopyRecords(lease, snap, []api.ErasureIntent{intent}, map[string]string{intent.ID: p.RecordID})
+		snap, err = reconcileCopyRecords(lease, snap, []api.ErasureIntent{intent}, map[string]string{intent.ID: p.RecordID}, receiptDir)
 		if err != nil {
 			return snap, err
 		}

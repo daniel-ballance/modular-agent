@@ -19,6 +19,14 @@ func main() {
 	if len(os.Args) < 2 {
 		log.Fatal("usage: fixtures NAME [--listen ADDR --token-file FILE]")
 	}
+	if os.Args[1] == "named-callers" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := serveNamedFixture(ctx); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	flags := flag.NewFlagSet("fixtures", flag.ExitOnError)
 	addr := flags.String("listen", "", "WebSocket listen address")
 	token := flags.String("token-file", "", "bearer token file")

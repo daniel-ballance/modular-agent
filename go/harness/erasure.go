@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/runreceipt"
 )
 
 // ErasureEpoch lets a delivery discard a view captured before the cutoff.
@@ -25,16 +26,26 @@ func (c *client) ErasureEpoch(id string) (int, error) {
 				return 0, err
 			}
 			if len(plans) != 0 {
-				if s == nil {
-					return 0, api.ErrErasureUnavailable
-				}
-				tombstones := s.erasureTombstones.Load()
-				for _, p := range plans {
-					for _, copy := range p.Copies {
-						if !copy.Complete || tombstones == nil || !(*tombstones)[copy.ID] {
-							return 0, api.ErrErasureUnavailable
+				var tombstones map[string]bool
+				if s != nil {
+					if seen := s.erasureTombstones.Load(); seen != nil {
+						tombstones = *seen
+					}
+				} else {
+					// A read on a closed session cannot open a writer to check a plan.
+					rows, err := v.(api.Store).List("")
+					if err != nil {
+						return 0, errors.Join(api.ErrErasureUnavailable, err)
+					}
+					for _, row := range rows {
+						if row.ID == id {
+							tombstones = erasureTombstones(row)
+							break
 						}
 					}
+				}
+				if err := checkRemotePlans(plans, tombstones); err != nil {
+					return 0, err
 				}
 			}
 			return len(plans), nil
@@ -52,7 +63,7 @@ func (c *client) ErasureEpoch(id string) (int, error) {
 				if copy.SessionID == id {
 					matches = true
 					if !copy.Complete {
-						return api.ErrErasureUnavailable
+						return errors.Join(api.ErrPendingErasure, api.ErrErasureUnavailable)
 					}
 				}
 			}
@@ -180,7 +191,7 @@ func (c *client) EraseDetails(ctx context.Context, id string, ids []string) (api
 				if err != nil {
 					return err
 				}
-				_, err = reconcileCopies(lease, row, intents)
+				_, err = reconcileCopyRecords(lease, row, *intents, nil, c.h.receiptDir)
 				return err
 			})
 			_ = lease.Close()
@@ -268,7 +279,7 @@ func (s *session) reconcileErasureLocked() error {
 		if err != nil {
 			return errors.Join(api.ErrErasureUnavailable, err)
 		}
-		snap, err := reconcileCopies(s.lease, actual, intents)
+		snap, err := reconcileCopyRecords(s.lease, actual, *intents, nil, s.h.receiptDir)
 		if err != nil {
 			return errors.Join(api.ErrErasureUnavailable, err)
 		}
@@ -303,10 +314,10 @@ func needsErasure(row api.Session, intents []api.ErasureIntent) bool {
 }
 
 func reconcileCopies(lease api.Lease, snap api.Session, intents *[]api.ErasureIntent) (api.Session, error) {
-	return reconcileCopyRecords(lease, snap, *intents, nil)
+	return reconcileCopyRecords(lease, snap, *intents, nil, "")
 }
 
-func reconcileCopyRecords(lease api.Lease, snap api.Session, intents []api.ErasureIntent, records map[string]string) (api.Session, error) {
+func reconcileCopyRecords(lease api.Lease, snap api.Session, intents []api.ErasureIntent, records map[string]string, receiptDir string) (api.Session, error) {
 	exact, ok := lease.(api.ExactErasureLease)
 	if !ok {
 		return snap, api.ErrErasureUnsupported
@@ -333,6 +344,9 @@ func reconcileCopyRecords(lease api.Lease, snap api.Session, intents []api.Erasu
 		}
 		if len(ids) == 0 {
 			continue
+		}
+		if err := runreceipt.Erase(receiptDir, snap, ids); err != nil {
+			return snap, err
 		}
 		record := api.ErasureRecord{EntryIDs: ids}
 		for _, e := range snap.Entries {

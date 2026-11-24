@@ -51,6 +51,8 @@ Run `go/scripts/check-agui.sh` from the repository root for the managed kit. It 
 
 Use `GET /agui/v1/threads` to find this client's kept threads without opening them. Each row reports counts of eligible questions and Interface calls, and whether its turn is running, interrupted or absent. Use the thread snapshot to read content.
 
+The thread snapshot offers two host reads. Use `waitCursor` with `GET /agui/v1/threads/{threadId}/wait-closures?after=...`. Apply notices in order and save the last applied cursor. After `cursor_expired`, get a new snapshot. On kept history, `runReceipts: 1` offers `GET /agui/v1/threads/{threadId}/run-receipt?runId=...` to the original authenticated client. It reports the released terminal class and the disposition of that run's work. Neither read marks presence, grants permission to answer or tells a client to execute a tool. There is no new flag or declaration key.
+
 ## Resuming at startup
 
 Recovery normally waits for a client to open the session. Pass `--resume-open` with `--acp` or `--agui` to start it before accepting clients. To make that the default, put `{"resume_open": true}` in the global `settings.json`. A project setting cannot enable or disable it. The option does not change interactive or print mode.

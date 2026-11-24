@@ -441,7 +441,11 @@ func (h *Harness) appendInterfaceResultLocked(s *session, checkpoint api.Entry, 
 	result.Content = clone(result.Content)
 	next := s.data
 	next.Entries = slices.Clip(next.Entries)
-	entry := appendEntry(&next, api.Entry{Kind: "tool.result", Turn: checkpoint.Turn, Step: checkpoint.Step, Call: checkpoint.Call, Actor: actor, Visible: true, Content: result.Content, Data: api.JSON(result), Copies: copies}, "harness", true)
+	id, err := api.OperationEntry(ctx, s.data)
+	if err != nil {
+		return api.Entry{}, err
+	}
+	entry := appendEntry(&next, api.Entry{ID: id, Kind: "tool.result", Turn: checkpoint.Turn, Step: checkpoint.Step, Call: checkpoint.Call, Actor: actor, Visible: true, Content: result.Content, Data: api.JSON(result), Copies: copies}, "harness", true)
 	entry.Actor = actor // System settlement has no reporting actor.
 	next.Entries[len(next.Entries)-1] = entry
 	err = s.commitLocked(next, ctx)

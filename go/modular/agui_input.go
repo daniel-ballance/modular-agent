@@ -52,6 +52,10 @@ func agRead(r *http.Request) (agObject, error) {
 	if len(raw) > wswire.MaxFrame {
 		return nil, tooLarge
 	}
+	return agDecodeObject(raw)
+}
+
+func agDecodeObject(raw []byte) (agObject, error) {
 	// jsontext enforces unique decoded keys and well-formed UTF-8 (including escaped surrogate pairs).
 	if !jsontext.Value(raw).IsValid() {
 		return nil, invalid

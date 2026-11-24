@@ -102,12 +102,23 @@ func (s *session) joinActorLocked(who string, actor api.Actor, writer string) er
 
 func (s *session) updateActorsLocked(next api.Session, event api.Entry, writer string) error {
 	old := s.data
-	s.data = next
-	_, err := s.recordLocked(event, writer, true)
-	if err != nil {
-		s.data = old
-	} else if s.h != nil {
-		err = s.h.afterApprovalChangeLocked(context.Background(), s)
+	next.Entries = slices.Clip(next.Entries)
+	appendEntry(&next, event, writer, true)
+	if s.h != nil {
+		c := &client{h: s.h}
+		if v, err := s.h.API().Get("questions"); err == nil {
+			if questions, ok := v.(interface {
+				RevokedQuestions(api.Session, api.Session, func(api.Session, string, string) bool) []api.Entry
+			}); ok {
+				for _, e := range questions.RevokedQuestions(old, next, c.authorized) {
+					appendEntry(&next, e, "questions", true)
+				}
+			}
+		}
+	}
+	err := s.commitLocked(next)
+	if err == nil && s.h != nil {
+		err = s.h.afterApprovalChangeLocked(context.Background(), s, old)
 	}
 	return err
 }

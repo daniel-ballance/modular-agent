@@ -245,6 +245,7 @@ type Agent struct {
 	a                                     api.API
 	project                               string
 	scratch                               string
+	receiptDir                            string
 	persistent                            bool
 	jobReports, lateAnswers               bool
 	erasure                               bool
@@ -393,6 +394,18 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	if err != nil {
 		return nil, appError(err, InvalidComposition)
 	}
+	if a.persistent {
+		dir := state
+		if o.dataDir == "" {
+			dir, err = os.UserConfigDir()
+			if err != nil {
+				return nil, err
+			}
+			dir = filepath.Join(dir, "modular-agent")
+		}
+		a.receiptDir = filepath.Join(dir, "agui-receipts")
+	}
+	h.SetReceiptDir(a.receiptDir)
 	runtime := o.runtime
 	if runtime == nil {
 		runtime = TransientRuntime()
