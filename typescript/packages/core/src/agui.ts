@@ -25,7 +25,7 @@ interface Host extends AguiProjectionOptions {
   owner(id: string): Target;
   locate(p: Principal, id?: string): Promise<Target>; associate(id: string, agent: Agent): void;
 }
-export interface Presence { response: ServerResponse; questions: Set<string>; rejected: Set<string> }
+export interface Presence { delivered: Set<string>; response: ServerResponse; questions: Set<string>; rejected: Set<string> }
 export interface Client {
   cursor?: { id: string; digest: string; branch: string; http: boolean }; active?: Exchange; busy?: boolean; presence?: Presence;
   held?: { connection: InterfaceToolConnection; turnId: string; setDeliver(fn: (call: ToolCall) => void): void };
@@ -95,7 +95,10 @@ export class AguiBinding {
       if (input) return route.run(res, input, req);
       if (match && match[2]) return route.presence(res);
       try {
+        const presence = client.presence;
         const snap = await route.snapshot(true);
+        if (res.destroyed) fail("conflict");
+        await route.deliverApprovals(presence, snap.view.waiting.questions);
         json(res, 200, snap.view); route.remember(snap);
       } catch (e) { client.cursor = undefined; client.needsSnapshot = true; throw e; }
     };
@@ -123,11 +126,12 @@ export class Route {
   rights() { return this.scoped(() => rights(this.api, this.id, this.p)); }
   pending(records: HistoryEntry[]) { return this.rights().includes("tools") ? pending(records, this.p) : []; }
   async questions(records: HistoryEntry[]): Promise<InterruptView[]> {
+    await this.api.refreshApprovals(this.id);
     const result: InterruptView[] = [];
     for (const request of this.api.openRequests(this.id)) {
       const e = records.find(e => e.kind === "inputRequest" && !e.erased && e.requestId === request.id);
       const inTurn = !records.some(e => e.kind === "turnEnd" && e.turnId === request.turnId);
-      if (!e || inTurn && !this.c.presence?.questions.has(request.id) || request.kind === "approval" && !inTurn) continue;
+      if (!e || inTurn && !this.c.presence?.questions.has(request.id) || request.kind === "approval" && !inTurn && (!request.approvalWait || !this.c.presence || this.c.presence.response.destroyed)) continue;
       const view = await interrupt(this.api, this.id, this.p, request, e, inTurn);
       if (view) result.push(view);
       else if (inTurn && this.c.presence) {
@@ -151,6 +155,16 @@ export class Route {
     await this.current();
     return { view: gated, cursor: { id: cursor, digest: hash(gated.messages), branch, http } };
   }
+  async deliverApprovals(presence: Presence | undefined, views: Interrupt[]) {
+    for (const q of views) {
+      const r = this.api.openRequests(this.id).find(r => r.id === q.id);
+      if (!r?.approvalWait) continue;
+      const present = () => !!presence && this.c.presence === presence && !presence.response.destroyed;
+      if (!presence || !present() || !await this.api.presentApproval(this.id, r.id, { routeId: "agui:" + this.p.clientId,
+        actorId: this.p.actor.id, submittedBy: this.p.actor.id, handle: presence, present }) || !present()) fail("conflict");
+      presence.delivered.add(r.id);
+    }
+  }
   async branchGeneration() {
     const all = await this.scoped(() => this.api.readHistory(this.id, { all: true }));
     return hash(all.filter(e => e.kind === "position" || e.erased).map(e => e.id));
@@ -159,14 +173,14 @@ export class Route {
   presence(res: ServerResponse) {
     const { c, id, api, p } = this;
     if (c.presence) fail("conflict");
-    const presence: Presence = { response: res, questions: new Set(), rejected: new Set() };
+    const presence: Presence = { response: res, questions: new Set(), rejected: new Set(), delivered: new Set() };
     c.presence = presence;
     // In-turn offers belong to this exact live route. A replacement never inherits them.
     const off = this.t.h.connectInterface({ id: `agui:${p.clientId}`, actorId: p.actor.id,
       present: (session, q) => session === id && !res.destroyed && this.rights().includes("watch") && (!q || q.kind !== "secret" && !presence.rejected.has(q.id) && this.rights().includes(q.kind === "approval" ? "approve" : "answer") &&
         (presence.questions.has(q.id) || !!c.active && c.active.eligible(q))),
       onInputRequest: q => { if (!presence.rejected.has(q.id)) presence.questions.add(q.id); },
-      onInputRequestClosed: q => { presence.questions.delete(q); presence.rejected.delete(q); } });
+      onInputRequestClosed: q => { presence.questions.delete(q); presence.rejected.delete(q); presence.delivered.delete(q); } });
     this.binding.track(res); sse(res); res.write(": present\n\n");
     const beat = setInterval(() => { void this.current().then(() => { if (!res.write(": present\n\n")) res.destroy(); }, () => res.destroy()); }, 15_000).unref();
     res.once("close", () => { clearInterval(beat); off(); c.presence = undefined; api.presenceChanged(id); if (!c.active) { c.held?.connection.disconnect(); c.held = undefined; } });
@@ -213,7 +227,7 @@ export class Route {
         return [{ call, report: { callId: call.toolCallId, status: m.error === undefined ? "completed" as const : "failed" as const, content } }];
       });
       const answers = (input.resume ?? []).flatMap(a => {
-        const q = questions.find(q => q.wire.id === a.interruptId && (c.delivered.has(a.interruptId) || !q.inTurn));
+        const q = questions.find(q => q.wire.id === a.interruptId && (q.request.approvalWait ? c.presence?.delivered.has(a.interruptId) : c.delivered.has(a.interruptId) || !q.inTurn));
         if (!q) {
           if (records.some(e => e.kind === "inputRequest" && e.requestId === a.interruptId)) fail("conflict");
           this.binding.warn("resume.interruptId"); return [];
@@ -226,7 +240,7 @@ export class Route {
         return [{ q, answer: { requestId: r.id, actorId: p.actor.id, declined, ...(value === undefined ? {} : { value }) } }];
       });
       if (new Set(answers.map(a => a.q.wire.id)).size !== answers.length || new Set(reports.map(r => r.report.callId)).size !== reports.length) fail("invalid_request");
-      if (questions.some(q => c.delivered.has(q.wire.id) && !answers.some(a => a.q.wire.id === q.wire.id)) || !user && !answers.length && !reports.length) fail("conflict");
+      if (questions.some(q => (q.request.approvalWait ? c.presence?.delivered.has(q.wire.id) : c.delivered.has(q.wire.id)) && !answers.some(a => a.q.wire.id === q.wire.id)) || !user && !answers.length && !reports.length) fail("conflict");
       const origins = new Set([...answers.map(a => a.q.request.turnId), ...reports.map(r => r.call.turnId)]);
       if (origins.size > 1 || calls.some(c => c.ended && (user || origins.has(c.turnId) && !reports.some(r => r.report.callId === c.toolCallId)))) fail("conflict");
       const content = user && parts(user, this.binding.warn);
@@ -257,7 +271,7 @@ export class Route {
           const origin = [...origins][0];
           if (answers.some(a => a.q.inTurn)) x.turn = origin; else x.origin = origin;
           for (const { q, answer } of answers) {
-            if (q.inTurn && !c.presence?.questions.has(q.wire.id) || !(await api.submitAnswer(id, answer)).accepted) fail("conflict");
+            if (q.inTurn && !c.presence?.questions.has(q.wire.id) || !(await api.submitAnswer(id, answer, q.request.approvalWait ? c.presence : undefined)).accepted) fail("conflict");
           }
           for (const { report } of reports) if ((await conn?.reportInterfaceToolResult(report))?.status !== "accepted") fail("conflict");
         }

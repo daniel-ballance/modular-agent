@@ -211,6 +211,7 @@ export class Exchange {
     const { r } = this;
     for (const step of new Set([...this.steps, ...this.streams.keys()])) await this.closeStep(step);
     if (kind === "failed") fail("unavailable");
+    const presence = r.c.presence;
     const records = await r.records();
     const owned = r.c.held?.turnId === this.turn ? r.c.held : undefined;
     const connection = owned?.connection ?? this.connection;
@@ -225,6 +226,7 @@ export class Exchange {
     const groups = calls.map(c => callFrames(c.call, c.call.stepId && snap.view.messages.some(m => m.id === assistantId(c.call.stepId!)) ? assistantId(c.call.stepId) : undefined));
     await r.events([...groups.flat(), ...terminal]); // Do not authorize a terminal or a subset in isolation.
     if (await r.branchGeneration() !== snap.cursor.branch) fail("conflict");
+    await r.deliverApprovals(presence, questions);
     const tail = terminal.map(frame).join("");
     const frames = groups.map(group => group.map(frame).join(""));
     const end = () => {

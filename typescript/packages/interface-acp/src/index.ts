@@ -35,6 +35,15 @@ export const BINDING = "modular-agent-acp/1";
 const NS = "modular-agent";
 const BINDING_V2 = "modular-agent-acp/2";
 const MAX_LINE_BYTES = 64 * 1024 * 1024;
+/** Reconstruct the polling view from the immutable entry, not the saved client response. */
+export async function unchangedAcpApproval(api: PluginApi, entry: HistoryEntry, recipient: string) {
+	const { request, call } = entry.data as { request: InputRequest; call: { name: string; input: object } };
+	const view = { id: request.id, kind: request.kind, question: request.question, toolCallId: entry.toolCallId,
+		call: { name: call.name, input: call.input }, approvalWait: request.approvalWait, deadlineAt: request.deadlineAt };
+	const method = "_modular-agent/requests";
+	const reply = await api.gateOutput(entry.sessionId, recipient, "reply", { method, result: { requests: [structuredClone(view)] } });
+	return reply?.method === method && isDeepStrictEqual(reply.result.requests, [view]);
+}
 const bindingError = (code: string, message = code) => new RequestError(code === "lost" ? -32000 : -32602, message, { code });
 const notOpen = () => ({ accepted: false, reason: "not_open" });
 const EXTENSIONS = ["history", "input", "requests", "answer", "actors", "join", "leave", "release", "proposals", "withdraw", "limit", "tenant", "fork", "move", "jobs", "cancel-job", "erase", "interrupted"];
@@ -111,6 +120,7 @@ export interface AcpOptions {
 	/** Accept per-request trace context from this operator-trusted peer. */
 	traceTrusted?: boolean;
 	actorId?: string;
+	approvalRouteId?: string;
 	actor?: Actor;
 	allowTenant?(tenant: string | null): boolean;
 	allowAttached?(project: string, tenant?: string): boolean;
@@ -342,6 +352,11 @@ export class AcpInterface implements InterfaceCapability {
 				if (value !== "default" && !thinkingLevels(model).includes(String(value))) throw RequestError.invalidParams(undefined, "Reasoning level is not offered");
 				await this.apiFor(params.sessionId).setSetting(params.sessionId, "thinking", String(value), this.actorId);
 			}
+			else if (params.configId === "approvalWait") {
+				if (!this.bindingDeclaration(params.sessionId).approvalsOutlastTurns) throw bindingError("not_supported");
+				if (value !== "live" && value !== "untilDeadline") throw bindingError("invalid_params");
+				await this.apiFor(params.sessionId).setSetting(params.sessionId, "approvalWait", value, this.actorId);
+			}
 			else if (params.configId === "approval" && this.options.showApproval !== false) {
 				if (!APPROVAL.includes(String(value))) throw RequestError.invalidParams(undefined, `approval must be one of ${APPROVAL.join(", ")}`);
 				await this.apiFor(params.sessionId).setSetting(params.sessionId, "approval", String(value), this.actorId);
@@ -523,14 +538,25 @@ export class AcpInterface implements InterfaceCapability {
 		extension("requests", async ({ params }) => {
 			const sessionId = open(params.sessionId);
 			this.requireRight(sessionId, this.actorId, "watch");
+			const api = this.apiFor(sessionId);
+			await api.refreshApprovals(sessionId);
 			const view = await this.requestViews(sessionId);
 			for (const q of view.requests) if (q.kind === "approval") this.deliveredPollApprovals.delete(q.id);
 			const gated = await this.gateReply(sessionId, "_modular-agent/requests", view);
-			return { requests: gated.requests.map((q) => {
-				const answerable = this.canAnswer(sessionId, q.id) && (q.kind !== "approval" || isDeepStrictEqual(q, view.requests.find((r) => r.id === q.id)));
+			return { requests: await Promise.all(gated.requests.map(async (q) => {
+				let answerable = this.canAnswer(sessionId, q.id) && (q.kind !== "approval" || isDeepStrictEqual(q, view.requests.find((r) => r.id === q.id)));
+				if (q.approvalWait && answerable) {
+					const r = api.openRequests(sessionId).find(r => r.id === q.id);
+					const actor = r && this.route(r);
+					const handle = this.sessions.get(sessionId);
+					answerable = !!actor && !!handle && !!this.options.approvalRouteId && await api.presentApproval(sessionId, q.id, {
+						handle, routeId: this.options.approvalRouteId, actorId: actor, submittedBy: this.actorId,
+						present: () => this.sessions.get(sessionId) === handle && this.attached(sessionId) && this.presentActors(sessionId).includes(actor),
+					});
+				}
 				if (q.kind === "approval" && answerable) this.deliveredPollApprovals.add(q.id);
 				return { ...q, answerable };
-			}) };
+			})) };
 		});
 		extension("answer", async ({ params }) => {
 			const sessionId = open(params.sessionId);
@@ -545,7 +571,7 @@ export class AcpInterface implements InterfaceCapability {
 			const declined = params.declined === true || params.value === undefined || request.kind === "approval" && params.value === "refuse";
 			if ((request.kind === "secret" && params.value !== undefined) || !declined && (typeof params.value !== "string" || (request.kind === "choice" && !request.options?.includes(params.value)) ||
 				(request.kind === "approval" && params.value !== "allow"))) throw bindingError("invalid_params", "Invalid answer value");
-			const answer = await this.checked(() => this.traced(params._meta, () => this.apiFor(sessionId).submitAnswer(sessionId, { requestId: request.id, actorId, delegatedBy: actorId === this.actorId ? undefined : this.actorId, value: declined ? undefined : params.value, declined })));
+			const answer = await this.checked(() => this.traced(params._meta, () => this.apiFor(sessionId).submitAnswer(sessionId, { requestId: request.id, actorId, delegatedBy: actorId === this.actorId ? undefined : this.actorId, value: declined ? undefined : params.value, declined }, this.sessions.get(sessionId))));
 			return answer.accepted ? answer : notOpen();
 		});
 		extension("actors", ({ params }) => {
@@ -694,6 +720,7 @@ export class AcpInterface implements InterfaceCapability {
 			inputKeys: bool("inputKeys"),
 			portableSessions: bool("portableSessions"),
 			questionsOutlastTurns: bool("questionsOutlastTurns"),
+			...(scoped.approvalsOutlastTurns === true && bool("approvalsOutlastTurns") ? { approvalsOutlastTurns: true } : {}),
 			lateAnswersStartTurns: bool("questionsOutlastTurns"),
 			startsTurnsUnasked: d.startsTurnsUnasked && d.startsTurnsUnasked !== "never" ? "jobReports" : "never",
 			queuedInputAfterRestart: d.queuedInputAfterRestart,
@@ -934,6 +961,8 @@ export class AcpInterface implements InterfaceCapability {
 			{ id: "model", name: "Model", category: "model", type: "select", currentValue: current, options },
 			...(levels.length ? [{ id: "thinking", name: "Reasoning", category: "thought_level", type: "select" as const,
 				currentValue: thinking, options: [{ value: "default", name: "Default" }, ...levels.map(value => ({ value, name: value }))] }] : []),
+			...(this.bindingDeclaration(sessionId).approvalsOutlastTurns ? [{ id: "approvalWait", name: "Approval wait", type: "select" as const,
+				currentValue: settings.approvalWait === "untilDeadline" ? "untilDeadline" : "live", options: ["live", "untilDeadline"].map(value => ({ value, name: value })) }] : []),
 			...(this.options.showApproval === false ? [] : [{ id: "approval", name: "Approval", type: "select" as const, currentValue: APPROVAL.includes(String(settings.approval)) ? String(settings.approval) : "all", options: APPROVAL.map((v) => ({ value: v, name: v })) }]),
 		];
 	}
@@ -950,6 +979,7 @@ export class AcpInterface implements InterfaceCapability {
 			id: r.id, kind: r.kind, question: r.question, ...(r.kind === "choice" && r.options ? { options: r.options } : {}),
 			...(r.kind === "link" && r.details ? { details: r.details } : {}), ...(r.toolCallId ? { toolCallId: r.toolCallId } : {}),
 			...(call ? { call: { name: call.name, input: call.input } } : {}),
+			...(r.approvalWait ? { approvalWait: r.approvalWait, deadlineAt: r.deadlineAt } : {}),
 		};
 	}
 
@@ -974,7 +1004,7 @@ export class AcpInterface implements InterfaceCapability {
 	onInputRequest(request: InputRequest): void { this.scoped(() => this.offerInputRequest(request)); }
 
 	private offerInputRequest(request: InputRequest): void {
-		if (!this.sessions.has(request.sessionId) || !this.client || this.pending.has(request.id)) return;
+		if (request.approvalWait || !this.sessions.has(request.sessionId) || !this.client || this.pending.has(request.id)) return;
 		const actorId = this.route(request);
 		if (!actorId) return;
 		// Without form support, free text and choices stay open for the binding's requests/answer extensions.

@@ -98,6 +98,30 @@ test("listing counts committed waits per client, pages in change order and does 
   assert.deepEqual(recovered, []); assert.deepEqual(opened, [call]);
 });
 
+test("a presence opened after the turn receives a waiting approval only on its own snapshot", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "agui-approval-")); t.after(() => rm(dir,{recursive:true,force:true}));
+  let effects = 0;
+  const {thread, run, request} = await setup(t, {dataDir:dir, durability:"kept", approval:"all", maxApprovalWaitMs:60_000,
+    questionsOutlastTurns:true, settings:{approvalWait:"untilDeadline"}, tools:[tool({name:"bump", description:"Increment", input:{type:"object"}, run:()=>String(++effects)})],
+    providers:[scriptedProvider([{toolCalls:[{name:"bump", input:{amount:1}}]},{text:"Done"}])]});
+  const id = await thread(), path = "/threads/" + id;
+  const end = (await events(await run(id,[prompt("Increment")]))).at(-1);
+  assert.deepEqual(end.outcome,{type:"success"}); assert.equal(effects,0);
+  assert.deepEqual((await (await request(path)).json() as any).waiting,{questions:[],toolCalls:[]});
+  const presence = await request(path + "/presence");
+  try {
+    const snap = await (await request(path)).json() as any;
+    const [q] = snap.waiting.questions;
+    assert.equal(q.reason,"approval"); assert.match(q.message,/bump.*amount/s); assert.ok(Date.parse(q.expiresAt));
+    const resume = [{interruptId:q.id, status:"resolved", payload:{allow:true}}];
+    const other = await (await request(path,undefined,1)).json() as any;
+    assert.deepEqual(other.waiting.questions,[]);
+    assert.equal((await run(id,other.messages,{resume},1)).status,409);
+    const continuation = await events(await run(id,snap.messages,{resume}));
+    assert.equal(continuation.at(-1).outcome.type,"success"); assert.equal(effects,1);
+  } finally { await presence.body?.cancel(); }
+});
+
 test("a withheld HTTP snapshot retires its cursor, even if the gate later opens",async t=>{
   let blocked=false;
   const plugin=definePlugin({name:"privacy", hooks:{output:({events})=> {if (blocked && events.some(e=>(e.data as any)?.method==="agui.snapshot")) return "block";}}});

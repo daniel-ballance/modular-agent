@@ -10,8 +10,10 @@ import { approval } from "@modular-agent/approval";
 import { transientRuntime } from "@modular-agent/runtime-transient";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { startExternalPlugin, startPluginService, pluginSpecsFromEnv, conformanceProvider, conformanceTools, ACP_PROTOCOL, listenWebSocket, receiveMessages, type ListenOptions, type ServiceServer, type ExternalPluginSpec, type PluginSpec, type ServicePluginSpec } from "@modular-agent/plugin-wire";
-import { acpInterface, localAcpActor } from "@modular-agent/interface-acp";
+import { acpInterface, localAcpActor, unchangedAcpApproval } from "@modular-agent/interface-acp";
 import { HistoryArchive, historyClientOptions, historyRelay, historyService, HttpHistoryStore, type HistoryServiceStore } from "@modular-agent/services";
+import { interrupt, type Principal } from "./agui-view.js";
+import { createHash } from "node:crypto";
 import { AguiBinding, type AguiProjectionOptions, type Target } from "./agui.js";
 import { fail } from "./agui-wire.js";
 import { AgentError, checked, messageOf } from "./errors.js";
@@ -659,6 +661,33 @@ export class Agent {
         allowTenant: (tenant: string | null) => tenants.has(tenant),
         allowProject: (project: string) => (!!options.compose || project === this.#project) && (!projects || projects.has(project)) };
     };
+    const installers: ((agent: Agent) => void)[] = [];
+    const cleanRoutes: (() => void)[] = [];
+    const acpRouteId = (scope: Awaited<ReturnType<typeof makeScope>>) => "acp:" + createHash("sha256").update(JSON.stringify([scope.scopeKey, [...scope.represents].sort()])).digest("hex");
+    const installRoutes = (scope: Awaited<ReturnType<typeof makeScope>> & { clientId?: string }) => {
+      const install = (agent: Agent) => {
+        if (!agent.declaration().approvalsOutlastTurns) return;
+        const api = agent.#api;
+        const ceiling = (id: string, actor: string, principal: string) => {
+          const session = api.session(id);
+          return principal === scope.actor.id && (actor === principal || scope.represents.has(actor)) &&
+            scope.allowProject(session.project) && scope.allowTenant(session.tenant ?? null) ? scope.actor.authority : [];
+        };
+        if (!agui || agui.acp) cleanRoutes.push(api.registerApprovalRoute({ id: acpRouteId(scope), ceiling,
+          unchanged: entry => unchangedAcpApproval(api, entry, scope.actor.id) }));
+        if (agui && scope.clientId) {
+          const p = scope as Principal;
+          cleanRoutes.push(api.registerApprovalRoute({ id: "agui:" + p.clientId, ceiling: (id, actor, principal) =>
+            actor === principal ? ceiling(id, actor, principal) : [],
+            unchanged: async entry => {
+              const raw = (entry.data as { request: import("@modular-agent/harness").InputRequest }).request;
+              const request = { ...raw, answerers: raw.answerers ?? [], turnId: entry.turnId };
+              return !!await interrupt(api, entry.sessionId, p, request, entry, false);
+            } }));
+        }
+      };
+      installers.push(install); install(this);
+    };
     const selectProject = async (project: string, id?: string, saved?: SessionInfo) => {
       const key = JSON.stringify([project, saved?.id]);
       let selected = id ? sessions.get(id) : undefined;
@@ -673,6 +702,7 @@ export class Agent {
               agent.#h.shareReservations(this.#h);
               agent.#acp = true;
               await installMcp(agent);
+              for (const install of installers) install(agent);
               return agent;
             } catch (error) { await agent.close(); throw error; }
           })();
@@ -708,7 +738,7 @@ export class Agent {
       };
       const binding = acpInterface({
         actor,
-        represents: scope.represents,
+        represents: scope.represents, approvalRouteId: acpRouteId(scope),
         connectionScope: run => scope.ceiling ? this.#h.withConnectionActor(actor, run) : run(),
         allowTenant: scope.allowTenant,
         allowAttached: (project, tenant) => !disconnected && scope.allowProject(project) && scope.allowTenant(tenant ?? null),
@@ -777,6 +807,7 @@ export class Agent {
           rights: list(options.rights, r => ALL_AUTHORITY.includes(r), "rights") ?? [...ALL_AUTHORITY] };
         const scope = await makeScope(localActor, options, options.actor !== undefined || options.rights !== undefined);
         await installMcp(this);
+        installRoutes(scope);
         await resumeOpen(scope);
         const { binding, detach } = prepareConnection(scope, false);
         try { await binding.acp.serveStdio(); } finally { detach(); }
@@ -818,6 +849,7 @@ export class Agent {
             return target(agent);
           } });
       }
+      for (const { value } of actors) installRoutes(value);
       await installMcp(this);
       const server = await listenWebSocket(options, ACP_PROTOCOL, actors, agui && !agui.acp ? undefined : async (ws, scope) => {
         const { binding, detach } = prepareConnection(scope, true);
@@ -830,7 +862,7 @@ export class Agent {
           });
         } finally { detach(); if (ws.readyState === ws.OPEN) ws.close(1000); }
       }, http, options.resumeOpen ? () => resumeOpen() : undefined);
-      const stopListener = async () => { http?.close(); await server.close(); };
+      const stopListener = async () => { for (const off of cleanRoutes.splice(0)) off(); http?.close(); await server.close(); };
       this.#stopAcp = async () => { await stopListener(); await disposeProjects(); };
       if (agui) { serving = true; return { url: new URL(server.url.replace(/^ws/, "http")).origin, close: stopListener }; }
       serving = true;
