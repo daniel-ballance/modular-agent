@@ -273,6 +273,10 @@ impl TestAgentBuilder {
         self.builder = self.builder.setting(key, value);
         self
     }
+    pub fn max_approval_wait_ms(mut self, maximum: u64) -> Self {
+        self.builder = self.builder.max_approval_wait_ms(maximum);
+        self
+    }
     pub fn approval(mut self, policy: Approval) -> Self {
         self.builder = self.builder.approval(policy);
         self

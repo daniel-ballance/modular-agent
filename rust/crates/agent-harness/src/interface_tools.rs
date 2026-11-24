@@ -287,6 +287,9 @@ impl Harness {
         self.interface_tools.configuration.get().is_some()
     }
 
+    pub(super) fn is_interface_tool(&self, name: &str) -> bool {
+        self.interface_source(name).is_some()
+    }
     fn interface_source(&self, name: &str) -> Option<&Arc<Source>> {
         self.interface_tools.configuration.get()?.sources.get(name)
     }
@@ -783,7 +786,7 @@ impl Harness {
         Ok(())
     }
 
-    async fn interface_work_ready(&self, session: &str) -> Result<()> {
+    pub(super) async fn interface_work_ready(&self, session: &str) -> Result<()> {
         if let Some(wake) = self.interface_tools.wake.get() {
             wake(session);
         }
@@ -966,7 +969,7 @@ impl Harness {
         scope: &Scope,
         result: &mut TurnResult,
     ) -> Result<()> {
-        if !self.has_interface_tools() {
+        if !self.has_interface_tools() && self.max_approval_wait_ms().is_none() {
             return Ok(());
         }
         let mut sessions = self.sessions.lock().unwrap();
@@ -982,6 +985,7 @@ impl Harness {
         scope: &Scope,
         result: &mut TurnResult,
     ) -> Result<()> {
+        self.finish_approval_turn(open, scope, result)?;
         for handoff in open
             .data
             .branch()
@@ -1123,13 +1127,13 @@ pub(super) fn next_interface_continuation(data: &SessionData) -> Result<Option<C
                     complete = false;
                     break;
                 }
-                if data
+                found_interface |= questions
+                    .iter()
+                    .any(|q| q.scope.call.as_deref() == Some(id) && q.waits_for_approval());
+                let settled = data
                     .entries
                     .iter()
-                    .any(|e| e.kind == "tool.result" && e.scope.call.as_deref() == Some(id))
-                {
-                    continue;
-                }
+                    .any(|e| e.kind == "tool.result" && e.scope.call.as_deref() == Some(id));
                 let Some(source) = branch.iter().find(|e| {
                     e.kind == "tool.call"
                         && e.scope.call.as_deref() == Some(id)
@@ -1139,7 +1143,9 @@ pub(super) fn next_interface_continuation(data: &SessionData) -> Result<Option<C
                     break;
                 };
                 sources.push(source.id.clone());
-                calls.push(serde_json::from_value(source.content.clone().unwrap())?);
+                if !settled {
+                    calls.push(serde_json::from_value(source.content.clone().unwrap())?);
+                }
                 for (order, answer) in data.entries.iter().enumerate().filter(|(_, e)| {
                     matches!(e.kind.as_str(), "request.answer" | "request.closed")
                         && e.scope.call.as_deref() == Some(id)
@@ -1195,7 +1201,7 @@ fn listed(end: &Entry, checkpoint: &Entry) -> bool {
         })
 }
 
-fn same_authority_record(a: &SessionData, b: &SessionData, scope: &Scope) -> bool {
+pub(super) fn same_authority_record(a: &SessionData, b: &SessionData, scope: &Scope) -> bool {
     let records = |data: &SessionData| {
         data.entries
             .iter()
@@ -1216,7 +1222,7 @@ fn eligible(cap: &Authority) -> bool {
     cap.has("watch") && cap.has("tools")
 }
 impl Harness {
-    fn executor_rights(
+    pub(super) fn executor_rights(
         &self,
         data: &SessionData,
         actor: &str,

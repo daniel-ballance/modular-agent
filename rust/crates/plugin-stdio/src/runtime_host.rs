@@ -1340,7 +1340,13 @@ impl TurnWork {
                         name == "tool.before",
                         "only tool.before can leave a call open"
                     );
-                    self.record_pending(api, &scope, None)?;
+                    if !committed_pending(
+                        &api.snapshot(&scope.session)?,
+                        scope.turn.as_deref(),
+                        scope.call.as_deref(),
+                    ) {
+                        self.record_pending(api, &scope, None)?;
+                    }
                     result["pending"] = json!("waiting for answer");
                 } else if name == "tool.before" {
                     let call: ToolCall = serde_json::from_value(r.value["call"].clone())?;
@@ -1410,6 +1416,11 @@ impl TurnWork {
             return Ok(wire::result(&result));
         }
         let current = self.registration(api, &scope, &call.name)?;
+        if let Some(status)=api.waiting_dispatch(&scope,&call,false).await? {
+            telemetry::disposition(&scope,&call,&status);
+            let r=self.settle_tool(api,&scope,&entry,ToolResult::new(&call,status,"waiting approval no longer permits dispatch")).await?;
+            return Ok(wire::result(&r));
+        }
         if !matches_registration(&decision, current.as_ref()) {
             return Err(Fault::new(
                 "invalid_request",

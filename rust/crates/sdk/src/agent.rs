@@ -160,6 +160,7 @@ pub struct AgentBuilder {
     settings: serde_json::Map<String, Value>,
     model_provider_aliases: &'static [(&'static str, &'static str)],
     approval: Option<Approval>,
+    max_approval_wait_ms: Option<u64>,
     on_question: Option<QuestionHandler>,
     pub(crate) restartable: bool,
     pub(crate) omit_plugin_trace_offer: bool,
@@ -205,6 +206,7 @@ impl Agent {
                 "internal settings cannot be changed",
             ));
         }
+        self.inner.harness.validate_approval_wait(&patch)?;
         if let Some(model) = patch.get("model") {
             require_model(
                 self.inner.harness.as_ref(),
@@ -254,7 +256,8 @@ impl Agent {
             return Err(error.into());
         }
         let session = Session::new(self.inner.clone(), id.to_string());
-        if harness.has_interface_tools() {
+        session.offer_waiting_handler();
+        if harness.has_interface_tools() || harness.max_approval_wait_ms().is_some() {
             session.drive();
         }
         Ok(session)
@@ -319,6 +322,9 @@ impl Agent {
         let mut declaration = interface_acp::declaration(api, session)?;
         // These core modes have no SDK 0.1 Provider operations.
         declaration["runsToolsAtProvider"] = json!(false);
+        if self.inner.harness.max_approval_wait_ms().is_some() {
+            declaration["approvalsOutlastTurns"] = json!(true);
+        }
         declaration["liveSessions"] = json!(false);
         declaration["portableSessions"] = json!(self.inner.persistent);
         declaration["severalActors"] = json!(self.inner.several_actors);
@@ -583,6 +589,11 @@ impl AgentBuilder {
         self.settings.insert(key.into(), value);
         self
     }
+    pub fn max_approval_wait_ms(mut self, maximum: u64) -> Self {
+        self.max_approval_wait_ms = Some(maximum);
+        self
+    }
+
     pub fn approval(mut self, policy: Approval) -> Self {
         self.approval = Some(policy);
         self
@@ -671,6 +682,16 @@ impl AgentBuilder {
             None if self.durability == Durability::Ephemeral || !has_data_dir => memory_history(),
             None => file_history(state.join("sessions"))?,
         };
+        if let Some(max) = self.max_approval_wait_ms
+            && (!(1..=9_007_199_254_740_991).contains(&max)
+                || !persistent
+                || self.approval.is_none())
+        {
+            return Err(Error::new(
+                Code::InvalidComposition,
+                "waiting approvals need a positive safe maximum, kept history and the approval plugin",
+            ));
+        }
         let mut saved_history = History(history.clone(), persistent, store_name, portable.clone());
         if let Some(recipe) = &mut restart {
             recipe.project = Some(project.clone());
@@ -930,6 +951,20 @@ impl AgentBuilder {
             let _ = base::AgentApi::shutdown(harness.as_ref()).await;
             return Err(Error::new(Code::InvalidComposition, error.to_string()));
         }
+        if let Some(max) = self.max_approval_wait_ms {
+            let d = harness.declaration()?;
+            if d["questions_outlast_turn"] != true
+                || d["runtime"]["interface_tools"] != true
+                || !d["approval_policies"].is_array()
+            {
+                let _ = base::AgentApi::shutdown(harness.as_ref()).await;
+                return Err(Error::new(
+                    Code::InvalidComposition,
+                    "the approval gate, late questions and empty-call continuations are required",
+                ));
+            }
+            harness.configure_approval_wait(max);
+        }
         harness.rebuild_reservations()?;
         hub.harness.set(Arc::downgrade(&harness)).ok();
 
@@ -989,7 +1024,7 @@ impl AgentBuilder {
             }),
         };
         agent.inner.hub.inner.set(Arc::downgrade(&agent.inner)).ok();
-        if agent.inner.harness.has_interface_tools() {
+        if agent.inner.harness.has_interface_tools() || self.max_approval_wait_ms.is_some() {
             let inner = Arc::downgrade(&agent.inner);
             agent.inner.harness.on_interface_work(Arc::new(move |id| {
                 if let Some(inner) = inner.upgrade() {

@@ -603,6 +603,8 @@ impl Engine {
                 };
                 if input.cancel.is_cancelled() {
                     ToolResult::new(call, ToolStatus::Cancelled, "turn cancelled")
+                } else if let Some(status) = api.waiting_dispatch(scope, &changed, false).await? {
+                    ToolResult::new(call, status, "waiting approval no longer permits dispatch")
                 } else if !current()? {
                     ToolResult::new(
                         call,
@@ -869,6 +871,10 @@ impl Engine {
                 .into_iter()
                 .find(|e| e.kind == "tool.call" && e.scope.call == scope.call)
                 .ok_or_else(|| anyhow!("open call left branch"))?;
+            let scope = Scope {
+                step: entry.scope.step.clone(),
+                ..scope
+            };
             let result = self.execute(api, &execution, &scope, call, &entry).await?;
             if self
                 .publish_tool_result(api, &scope, &entry, result)

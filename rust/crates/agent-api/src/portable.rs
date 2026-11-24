@@ -192,6 +192,11 @@ pub fn public_entry(e: &Entry, session: &SessionData) -> Result<Value> {
 }
 
 pub fn omit_trace_metadata(entry: &mut Value) {
+    if entry["kind"] == "inputAnswer"
+        && let Some(data) = entry["data"].as_object_mut()
+    {
+        data.remove("approvalView");
+    }
     if entry["kind"] == telemetry::TURN_TRACE || entry["kind"] == INTERFACE_HANDOFF {
         if let Some(object) = entry.as_object_mut() {
             object.remove("data");
@@ -504,6 +509,7 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
         "request.open" => {
             let q: Question = serde_json::from_value(c.clone())?;
             let mut request = json!({"id":q.id,"sessionId":q.scope.session,"kind":q.extra["kind"].as_str().map(|s|json!(s)).unwrap_or_else(||json!(q.kind)),"question":q.text,"answerable":q.answerable,"options":q.options});
+            request["askedBy"] = json!(q.scope.actor);
             request["rust.route"] = json!(q.route);
             request["rust.responders"] = json!(q.responders);
             request["rust.extra"] = q.extra.clone();
@@ -519,7 +525,13 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
             if let Some(name) = q.credential {
                 request["credential"] = json!(name);
             }
-            for k in ["details", "whenTimeLimit"] {
+            for k in [
+                "details",
+                "whenTimeLimit",
+                "approvalWait",
+                "deadlineAt",
+                "answerers",
+            ] {
                 if let Some(value) = q.extra.get(k) {
                     request[k] = value.clone();
                 }
@@ -560,6 +572,9 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
                 answer["stored"] = name.clone();
             } else if !a.value.is_null() {
                 answer["value"] = a.value;
+            }
+            if let Some(view) = c.get("approvalView") {
+                answer["approvalView"] = view.clone();
             }
             answer
         }
@@ -945,6 +960,20 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                     }
                     extra
                 });
+                if r["approvalWait"] == "untilDeadline" {
+                    for k in ["approvalWait", "deadlineAt", "whenTimeLimit", "answerers"] {
+                        if let Some(v) = r.get(k) {
+                            q.extra[k] = v.clone();
+                        }
+                    }
+                    for (field, key) in [
+                        ("call", "approvalCall"),
+                        ("source", "source"),
+                        ("definition", "definition"),
+                    ] {
+                        q.extra[key] = d[field].clone();
+                    }
+                }
                 ("request.open", json!(q))
             }
             "inputAnswer"
@@ -961,9 +990,8 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                 )
             }
             "secretAnswerAccepted" => ("request.secretAccepted", d.clone()),
-            "inputAnswer" => (
-                "request.answer",
-                json!(Answer {
+            "inputAnswer" => {
+                let mut answer = json!(Answer {
                     request: string(d, "requestId")?.into(),
                     actor: string(d, "actorId")?.into(),
                     session: d["rust.answerSession"].as_str().unwrap_or(&id).into(),
@@ -972,8 +1000,12 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                         .unwrap_or_else(|| d["value"].clone()),
                     declined: d["declined"] == true,
                     reason: d["reason"].as_str().map(str::to_owned)
-                }),
-            ),
+                });
+                if let Some(v) = d.get("approvalView") {
+                    answer["approvalView"] = v.clone();
+                }
+                ("request.answer", answer)
+            }
             "position"
             | "erasure"
             | "tenant"

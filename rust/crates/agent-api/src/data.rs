@@ -204,6 +204,53 @@ pub fn erased_input_keys(data: &SessionData, targets: &[String]) -> Vec<Value> {
         .collect()
 }
 pub fn record_erasure(data: &mut SessionData, entry_ids: Vec<String>, input_keys: Vec<Value>) {
+    // Erasing approval evidence ends the unstarted call. Retain terminal
+    // identities only: a result derived from erased evidence is also erased.
+    let branch = data.branch();
+    for request in branch.iter().filter(|e| {
+        e.kind == "request.open"
+            && e.content
+                .as_ref()
+                .is_some_and(|v| v["extra"]["approvalWait"] == "untilDeadline")
+    }) {
+        if data
+            .entries
+            .iter()
+            .any(|r| r.kind == "tool.result" && r.scope.call == request.scope.call)
+        {
+            continue;
+        }
+        let affected = branch
+            .iter()
+            .any(|r| r.scope.call == request.scope.call && entry_ids.contains(&r.id))
+            || request.copies.iter().any(|s| entry_ids.contains(s));
+        if !affected {
+            continue;
+        }
+        for kind in ["request.closed", "tool.result"] {
+            if kind == "request.closed"
+                && branch.iter().any(|r| {
+                    matches!(r.kind.as_str(), "request.answer" | "request.closed")
+                        && r.scope.call == request.scope.call
+                })
+            {
+                continue;
+            }
+            let entry = Entry {
+                id: id(),
+                parent: data.position.clone(),
+                scope: request.scope.clone(),
+                writer: "harness".into(),
+                at: now(),
+                kind: kind.into(),
+                visible: false,
+                copies: vec![request.id.clone()],
+                content: None,
+            };
+            data.position = Some(entry.id.clone());
+            data.entries.push(entry);
+        }
+    }
     for checkpoint in data.branch().into_iter().filter(interface_handoff) {
         if !entry_ids.contains(&checkpoint.id)
             && !interface_start(data, &checkpoint).is_some_and(|e| entry_ids.contains(&e.id))

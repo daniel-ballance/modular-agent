@@ -423,6 +423,10 @@ impl Questions {
                 .into_iter()
                 .find(|q| q.id == request)
                 .ok_or_else(|| anyhow!("unknown request"))?;
+            ensure!(
+                !q.waits_for_approval(),
+                "waiting approval needs a delivered view"
+            );
             ensure!(q.answerable && q.answer.is_none(), "request is closed");
             ensure!(
                 may_answer(api.as_ref(), &q, session, actor),
