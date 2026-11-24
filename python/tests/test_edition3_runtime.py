@@ -55,6 +55,31 @@ async def test_runtime_acknowledges_transformed_refusal_without_dispatch():
     assert not any(name == "host/runtime/runToolCall" for name, _ in port.calls)
 
 
+@pytest.mark.parametrize(
+    "result", [None, {}, {"callId": "other", "status": "refused", "content": []}]
+)
+async def test_runtime_rejects_incomplete_refusal(result):
+    class Malformed(Port):
+        async def request(self, method, params):
+            if params.get("hook") == "tool.before":
+                return {"refused": "denied", **({"result": result} if result is not None else {})}
+            return await super().request(method, params)
+
+    peer = Malformed()
+    rt = turn(peer)
+    with pytest.raises(WireError, match="committed result"):
+        await rt.tools(rt.admit([{"id": "call", "name": "read", "input": {}}]))
+    assert [name for name, _ in peer.calls] == ["host/runtime/definition"]
+
+
+async def test_pending_call_does_not_echo_the_hosts_checkpoint():
+    peer = Port()
+    rt = turn(peer)
+    [call] = rt.admit([{"id": "call", "name": "read", "input": {}}])
+    await rt.publish(call, {"callId": "call", "pending": "Waiting for a reply"})
+    assert not peer.calls and rt.open == ["call"] and not rt.pending
+
+
 @pytest.mark.parametrize("decision", [ABSENT, None, {"refuse": "committed refusal"}])
 async def test_runtime_restores_gate_without_replaying_a_committed_decision(decision):
     scope = {"turnId": "turn", "stepId": "step"}

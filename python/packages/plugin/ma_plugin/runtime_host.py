@@ -1318,6 +1318,7 @@ class TurnHost:
             "inputRequest",
             "inputAnswer",
             "toolPending",
+            "tool_deferred",
             "model_started",
             "modelRequest",
             "resultFeedback",
@@ -1365,29 +1366,13 @@ class TurnHost:
             return await self.ensure_call(
                 {**data, "id": cid or data["id"], "stepId": step}, sources
             )
-        elif kind in {"tool_result", "tool_finished", "tool_deferred"}:
+        elif kind in {"tool_result", "tool_finished"}:
             cid = cid or message.get("toolCallId") or data.get("callId")
             entries = await self.entries()
             pending = self.calls(entries, [cid]) if cid in self.continuing else self.calls(entries)
             call = next((c for c in pending if c["id"] == cid), None)
             if cid in self.inflight:
                 raise WireError("Tool call has not settled", "invalid_request")
-            if kind == "tool_deferred":
-                # Older Python Runtimes echo the pending reply as a private record.
-                saved = next(
-                    (
-                        e
-                        for e in entries
-                        if e["kind"] in {"tool_deferred", HANDOFF}
-                        and e.get("call") == cid
-                        and e.get("turn") == self.turn
-                    ),
-                    None,
-                )
-                if saved:
-                    return saved
-                if "requestIds" in data or "toolStartedId" in data:
-                    raise WireError("Pending checkpoint is owned by the host", "invalid_request")
             if not call:
                 prior = next(
                     (
@@ -1402,7 +1387,7 @@ class TurnHost:
                 if kind == "tool_result" and prior:
                     return prior
                 raise WireError("Result does not belong to an open call", "invalid_request")
-            if self.unrepeated(cid) and kind in {"tool_result", "tool_deferred"}:
+            if self.unrepeated(cid) and kind == "tool_result":
                 receipt = next(
                     (
                         e["data"]

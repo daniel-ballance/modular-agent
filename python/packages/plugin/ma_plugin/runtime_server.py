@@ -87,32 +87,29 @@ class PublicTurn:
         cid = call["id"]
         step = call.get("stepId")
 
+        if "pending" in answer:
+            self.pending.pop(cid, None)
+            self.open.append(cid)
+            return
+
         def committed(entry_id):
             self.pending.pop(cid, None)
-            if "pending" in answer:
-                self.open.append(cid)
-            else:
-                self.sources.append(entry_id)
+            self.sources.append(entry_id)
 
-        if "pending" in answer:
-            await self.record(
-                "python.tool_deferred", step=step, call=cid, data=answer, committed=committed
-            )
-        else:
-            await self.record(
-                "toolResult",
-                step=step,
-                call=cid,
-                message={
-                    "role": "toolResult",
-                    "toolCallId": cid,
-                    "toolName": call["name"],
-                    "content": answer["content"],
-                    "isError": answer["status"] != "completed",
-                },
-                data={k: answer[k] for k in ("status", "value") if k in answer},
-                committed=committed,
-            )
+        await self.record(
+            "toolResult",
+            step=step,
+            call=cid,
+            message={
+                "role": "toolResult",
+                "toolCallId": cid,
+                "toolName": call["name"],
+                "content": answer["content"],
+                "isError": answer["status"] != "completed",
+            },
+            data={k: answer[k] for k in ("status", "value") if k in answer},
+            committed=committed,
+        )
 
     async def tools(self, calls):
         definitions = {
@@ -126,20 +123,38 @@ class PublicTurn:
             wire = {k: v for k, v in call.items() if k not in {"started", "safeToRepeat"}}
             before = await self.hook("tool.before", call=wire, definition=definition)
             if "refused" in before:
-                # Acknowledgement is optional. An older host may omit result;
-                # it still owns the settlement, so never guess its content.
-                return before.get("result")
+                result = before.get("result")
+                if (
+                    not isinstance(result, dict)
+                    or result.get("callId") != cid
+                    or "pending" in result
+                    or result.get("status")
+                    not in (
+                        "completed",
+                        "failed",
+                        "refused",
+                        "cancelled",
+                        "outcomeUnknown",
+                        "notStarted",
+                    )
+                    or not isinstance(result.get("content"), list)
+                    or not all(
+                        isinstance(p, dict)
+                        and isinstance(p.get("type"), str)
+                        and p["type"]
+                        and (p["type"] != "text" or isinstance(p.get("text"), str))
+                        for p in result["content"]
+                    )
+                ):
+                    raise WireError("Tool refusal lacks its committed result", "invalid_request")
+                return result
             if "pending" in before:
                 return {"callId": cid, "pending": before["pending"]}
             changed = {**wire, "input": before.get("value", {}).get("call", wire)["input"]}
             return await self.ask("runToolCall", call=changed)
 
         async def run(call):
-            result = await execute(call)
-            if result is not None:
-                await self.publish(call, result)
-            else:
-                self.pending.pop(call["id"], None)
+            await self.publish(call, await execute(call))
 
         if all((definitions[c["name"]] or {}).get("parallel") for c in calls):
             tasks = [asyncio.create_task(run(call)) for call in calls]
