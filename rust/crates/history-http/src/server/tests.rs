@@ -41,6 +41,24 @@ impl HistoryStore for Snapshots {
 }
 
 #[test]
+fn unverifiable_control_is_fenced_without_writing_it() -> agent_api::Result<()> {
+    for settings in [
+        json!({"historyTtlBound":1}),
+        json!({"historyTtlBound":1,"pendingErasure":{"intents":[]}}),
+        json!({"historyTtlBound":1,"pendingErasure":{"intents":[]},"pendingErasureV1":{"intents":[]}}),
+        json!({"historyTtlBound":1,"pendingErasureV1":{"intents":[{
+            "id":"intent","source":"source","targets":["target"],"plans":[]
+        }]}}),
+    ] {
+        let store = Snapshots::default();
+        store.save(&snapshot_data(CONTROL.into(), settings.clone(), vec![]))?;
+        assert_eq!(SnapshotStore::prepare_control(&store, 30)?, (false, None));
+        assert_eq!(store.load(CONTROL)?.settings, settings);
+    }
+    Ok(())
+}
+
+#[test]
 fn publication_keeps_unlisted_destinations_in_the_original_order() -> agent_api::Result<()> {
     let snapshots = Arc::new(Snapshots::default());
     let service = Arc::new(SnapshotStore::new(
