@@ -16,9 +16,9 @@ func testCompactionCanSummarizeEarlierStepsInsideOneTurn(t *testing.T) {
 	a, _, id := setup(t, 8000, fake.Script{Response: api.Response{Content: api.Text("Earlier tool facts and task summarized."), Stop: "finished"}})
 	entries := []api.Entry{{Kind: "input", Visible: true, Content: api.Text("one task")}}
 	for _, name := range []string{"older-call", "recent-call"} {
-		entries = append(entries, api.Entry{Kind: "model", Visible: true, Content: api.Content{{Type: "tool_call", Call: &api.Call{ID: name, Name: "read", Input: api.JSON(map[string]string{"path": "file"})}}}})
+		entries = append(entries, api.Entry{Kind: "model", Visible: true, Data: api.JSON(api.Response{Stop: "tools"}), Content: api.Content{{Type: "tool_call", Call: &api.Call{ID: name, Name: "read", Input: api.JSON(map[string]string{"path": "file"})}}}})
 		result := api.ToolResult{Call: name, Status: "completed", Content: api.Text(name + " result")}
-		entries = append(entries, api.Entry{Kind: "tool.result", Visible: true, Content: result.Content, Data: api.JSON(result)})
+		entries = append(entries, api.Entry{Kind: "tool.result", Call: name, Visible: true, Content: result.Content, Data: api.JSON(result)})
 	}
 	for _, entry := range entries {
 		if _, err := a.Record(context.Background(), id, entry); err != nil {
