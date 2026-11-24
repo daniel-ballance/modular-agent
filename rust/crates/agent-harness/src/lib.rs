@@ -1156,7 +1156,7 @@ impl Harness {
             open.lease = self.store().map(|s| s.acquire(&data.id)).transpose()?;
         }
         if let Ok(Some(id)) =
-            receipt::BIND_ENTRY.try_with(|b| (b.session == data.id).then(|| &b.entry_id).cloned())
+            receipt::BIND_ENTRY.try_with(|b| (b.session == data.id).then_some(&b.entry_id).cloned())
         {
             ensure!(
                 data.entries.iter().filter(|e| e.id == id).count() <= 1,

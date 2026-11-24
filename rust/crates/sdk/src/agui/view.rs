@@ -54,12 +54,9 @@ pub(super) fn interrupt(q: &base::Question, v: &Value, at: u64) -> Option<Value>
         _ => json!({"type":"string"}),
     };
     if v["kind"] == "link" {
-        let Some(uri) = v["details"]
+        let uri = v["details"]
             .as_str()
-            .filter(|s| reqwest::Url::parse(s).is_ok())
-        else {
-            return None;
-        };
+            .filter(|s| reqwest::Url::parse(s).is_ok())?;
         interrupt["metadata"] = json!({"modular-agent.link":uri});
     }
     if q.extra["whenTimeLimit"] == "decline"

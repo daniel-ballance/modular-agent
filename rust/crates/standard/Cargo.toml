@@ -31,6 +31,6 @@ monty-types = "=1.6.0"
 tempfile.workspace = true
 
 [dev-dependencies]
-transport-websocket={path="../transport-websocket"}
+tokio-tungstenite = "0.30"
 reqwest.workspace = true
 libc.workspace = true

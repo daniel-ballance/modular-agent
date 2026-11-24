@@ -4902,8 +4902,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "tools-code",
- "transport-websocket",
 ]
 
 [[package]]

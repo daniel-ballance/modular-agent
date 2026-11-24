@@ -288,6 +288,7 @@ impl Service {
             .iter()
             .position(|e| e.id == id && e.content.is_some())
             .ok_or(Fail::Missing)?;
+        let visible = |e: &base::Entry| branch.iter().any(|r| r.id == e.id) && e.content.is_some();
         let source = &branch[index];
         self.read_entry(a, d, source).await?;
         let mut work = "unsettled";
@@ -297,7 +298,7 @@ impl Service {
                 None
             }
             "input.accepted" => {
-                if let Some(r) = branch.iter().find(|e| {
+                if let Some(r) = d.entries.iter().find(|e| {
                     matches!(e.kind.as_str(), "input.returned" | "input.withdrawn")
                         && e.content.as_ref().is_some_and(|v| {
                             v["input"] == id
@@ -306,20 +307,30 @@ impl Service {
                                     .is_some_and(|l| l.iter().any(|s| s == id))
                         })
                 }) {
+                    if !visible(r) {
+                        return Err(Fail::Missing);
+                    }
                     self.read_entry(a, d, r).await?;
                     work = "handedBack";
                     None
                 } else {
-                    branch
-                        .iter()
-                        .find(|e| {
-                            e.content.as_ref().is_some_and(|v| {
-                                e.kind == "input"
-                                    && (v["inputId"] == id || e.copies.iter().any(|s| s == id))
-                                    || e.kind == "turn.start" && v["startedBy"]["id"] == id
-                            })
-                        })
-                        .and_then(|e| e.scope.turn.as_deref())
+                    let mut turn = None;
+                    for e in d.entries.iter().filter(|e| {
+                        e.kind == "input"
+                            && (e.copies.iter().any(|s| s == id)
+                                || e.content.as_ref().is_some_and(|v| v["inputId"] == id))
+                            || e.kind == "turn.start"
+                                && e.content
+                                    .as_ref()
+                                    .is_some_and(|v| v["startedBy"]["id"] == id)
+                    }) {
+                        if !visible(e) {
+                            return Err(Fail::Missing);
+                        }
+                        self.read_entry(a, d, e).await?;
+                        turn = e.scope.turn.as_deref();
+                    }
+                    turn
                 }
             }
             "request.answer" | "tool.result" => {
@@ -353,7 +364,7 @@ impl Service {
                     .iter()
                     .any(|e| e.kind == "turn.end" && e.scope.turn.as_deref() == Some(origin))
                 {
-                    branch
+                    d.entries
                         .iter()
                         .find(|e| {
                             e.kind == "turn.start"
@@ -374,10 +385,14 @@ impl Service {
                 .find(|e| e.kind == "turn.start" && e.scope.turn.as_deref() == Some(turn))
                 .ok_or(Fail::Missing)?;
             self.read_entry(a, d, start).await?;
-            if let Some(end) = branch
+            if let Some(end) = d
+                .entries
                 .iter()
                 .find(|e| e.kind == "turn.end" && e.scope.turn.as_deref() == Some(turn))
             {
+                if !visible(end) {
+                    return Err(Fail::Missing);
+                }
                 let row = self.read_entry(a, d, end).await?;
                 let mut settlement = row["data"].clone();
                 settlement["turnId"] = json!(turn);

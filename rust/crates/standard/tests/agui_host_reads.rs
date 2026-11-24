@@ -82,40 +82,44 @@ async fn ma_serves_read_only_status_and_shares_the_writer_with_acp() -> Result<(
         .text()
         .await?;
     assert!(events.contains("RUN_FINISHED"));
-    let ws = transport_websocket::connect(
-        &origin.replacen("http:", "ws:", 1),
-        &path,
-        transport_websocket::ACP,
-    )
-    .await?;
-    let project = dir.path();
-    transport_websocket::run(ws, Default::default(), |mut conn| async move {
-        for (n, method, params) in [
-            (
-                1,
-                "initialize",
-                json!({"protocolVersion":1,"clientCapabilities":{}}),
-            ),
-            (
-                2,
-                "session/resume",
-                json!({"sessionId":id,"cwd":project,"mcpServers":[]}),
-            ),
-        ] {
-            conn.outgoing
-                .send(json!({"jsonrpc":"2.0","id":n,"method":method,"params":params}).to_string())
-                .await
-                .unwrap();
-            loop {
-                let v: Value = serde_json::from_str(&conn.incoming.recv().await.unwrap()).unwrap();
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+    let mut upgrade = origin.replacen("http:", "ws:", 1).into_client_request()?;
+    upgrade
+        .headers_mut()
+        .insert("authorization", format!("Bearer {token}").parse()?);
+    upgrade
+        .headers_mut()
+        .insert("sec-websocket-protocol", "modular-agent-acp-1".parse()?);
+    let (mut ws, _) = tokio_tungstenite::connect_async(upgrade).await?;
+    for (n, method, params) in [
+        (
+            1,
+            "initialize",
+            json!({"protocolVersion":1,"clientCapabilities":{}}),
+        ),
+        (
+            2,
+            "session/resume",
+            json!({"sessionId":id,"cwd":dir.path(),"mcpServers":[]}),
+        ),
+    ] {
+        ws.send(Message::text(
+            json!({"jsonrpc":"2.0","id":n,"method":method,"params":params}).to_string(),
+        ))
+        .await?;
+        loop {
+            let next = ws.next().await.context("ACP disconnected")??;
+            if let Message::Text(text) = next {
+                let v: Value = serde_json::from_str(&text)?;
                 if v["id"] == n {
                     assert!(v["result"].is_object(), "{method}: {v}");
                     break;
                 }
             }
         }
-    })
-    .await;
+    }
+    ws.close(None).await?;
     let view: Value = client
         .get(format!("{thread}/run-receipt?runId=original"))
         .bearer_auth(token)

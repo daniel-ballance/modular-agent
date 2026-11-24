@@ -87,6 +87,8 @@ By default a restart leaves an interrupted turn alone. Add `--resume-open` to `-
 
 `ma --help` lists the rest. With no `--model` and none in settings, `ma` uses the first Provider that is signed in.
 
+The thread snapshot includes `waitCursor`. Use `GET /agui/v1/threads/{threadId}/wait-closures?after=…` for committed question decisions and Interface-call settlements without holding presence. In kept sessions, `runReceipts: 1` offers `GET /agui/v1/threads/{threadId}/run-receipt?runId=…` to the originating client. An interrupt can end an exchange while its work is still unsettled. Neither read admits work or authorizes execution. They use the existing listener, tokens and output gate. Neither adds a declaration key, command-line flag or ACP method.
+
 ### Approval
 
 Use `ma --approval ask` to review each `codemode` script. The terminal shows the whole script on stderr and asks `Allow? (y/n)`. Enter `y` to allow that run, including the nested calls it makes, or `n` to refuse it before it starts. Each nested call still needs its own rights and must pass its other gates. Print mode (`-p`) has no approver and refuses calls that need approval.
@@ -160,9 +162,10 @@ Build the other three fixture programs before running the full Rust telemetry ma
 
 - **Standard reference checks:** 28/28, including `approval-covers-script`, `trace-trust`, `resume-open` and `telemetry-export`. The startup check kills `ma` mid-call and observes recovery without connecting to the restarted writer.
 - **ACP with `--crash-checks --probe-checks --job-checks`:** `ma` passed 190/190 on stdio and 195/195 on its built-in loopback WebSocket listener. With approval configured, the updated ACP kit passed 193/193. With a wait maximum the public, crash and job checks passed 118/118, including a covered call on continuation. The base build passes 214/214 on stdio. The expanded run covers late answers and job report turns, including after a crash.
-- **Plugin binding:** The Rust conformance plugin passed 146/146 on stdio and 153/153 on WebSocket, including the transient and durable Runtime services. The separate-listener WebSocket isolation run passed 14/14. Neither WebSocket run used a bridge.
+- **Plugin binding:** The Rust conformance plugin passed 146/146 on stdio and 153/153 on WebSocket, including the transient and durable Runtime services. The separate-listener WebSocket isolation run passed 14/14. The named-caller SDK fixture passed 29/29 on one listener: build `cargo build -p sdk-scenarios --example named_callers`, then run `node conformance/plugin/run.mjs --named-callers -- "$PWD/rust/target/debug/examples/named_callers"` from the repository root. These WebSocket checks use no bridge.
 - **Standard and codemode:** `ma` includes the five alias checks. The six `tools-code` tests are separate. These cover startup validation, tool results, sandbox limits, OS policy, worker death and cancellation, crash recovery, and the dependency boundary.
-- **Workspace:** 484 Rust tests passed, with no failures. The ops-desk demo passed all six scripted cases. Project-notes passed its scripted and crash-and-reopen runs. Formatting and Clippy with `-D warnings` passed. See the [SDK verification matrix](crates/sdk/README.md#what-is-checked) for shared scenarios.
+- **AG-UI:** 48/48 cases passed, including closure replay, revocation, gated delivery and receipts across process loss.
+- **Workspace:** 488 Rust tests passed, with no failures. The ops-desk demo passed all six scripted cases. Project-notes passed its scripted and crash-and-reopen runs. Formatting and Clippy with `-D warnings` passed. See the [SDK verification matrix](crates/sdk/README.md#what-is-checked) for shared scenarios.
 - **Subscriptions:** Offline checks use loopback OAuth and Responses fixtures and a fake Claude process plugin. The Grok SDK checks cover device sign-in, locked refresh, request shape and encrypted reasoning replay. The alias checks cover sign-in routing, sign-out, both model configuration files, `--model`, and reopening an old session. Live checks compile and skip without opt-in.
 
 To try the terminal without a login:
