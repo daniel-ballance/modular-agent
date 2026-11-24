@@ -17,7 +17,7 @@ from starlette.responses import Response
 from starlette.types import Send
 from ._agui_http import Stream
 from ma_core import telemetry as ot
-from ma_core.wire import provider_projection
+from ma_core.wire import provider_projection, settings_in
 from ma_harness.authority import CONNECTION_AUTHORITY
 from ma_harness.interface_tools import branch_entries, same_json
 from opentelemetry.context import Context
@@ -207,6 +207,20 @@ class Binding:
                 response = Response(encode(reply), media_type="application/json", headers=headers)
                 view.remember(cursor)
                 return response
+            elif (
+                req.method == "POST"
+                and self.agent.declaration().get("approvalCoversNested")
+                and (match := re.fullmatch(r"/threads/([\w-]+)/settings", path))
+            ):
+                await view.attach(match[1])
+                await view.check("settings")
+                require(
+                    raw.keys() == {"approval"} and raw["approval"] in ("off", "ask", "all", "never")
+                )
+                await self.agent._session(
+                    "settings", session=view.sid, actor=view.actor, changes=settings_in(raw)
+                )
+                reply = await view.required("settings", raw, exact=True)
             elif req.method == "POST" and path == "/run":
                 d = parse_run(raw)
                 await view.attach(d["threadId"])

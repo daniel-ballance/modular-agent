@@ -102,6 +102,48 @@ async def test_thread_listing_only_returns_committed_kept_sessions(tmp_path, dur
             ]
 
 
+async def test_approval_setting_requires_current_session_and_connection_rights(tmp_path):
+    writer, token = principal(tmp_path, rights=("input", "watch", "settings", "tools"))
+    reader, limited = principal(tmp_path, client="inbox", rights=("input", "watch"))
+    script = [{"toolCalls": [{"name": "effect", "input": {}}]}, {"text": "done"}]
+
+    @tool
+    async def effect() -> str:
+        """A tool the new policy should refuse."""
+        return "ran the effect"
+
+    async with create_agent(
+        project=tmp_path,
+        providers=[scripted_provider(script)],
+        tools=[effect],
+        approval="off",
+        approval_covers_nested=True,
+    ) as agent:
+        listener = await agent.serve_agui(listen="127.0.0.1:0", actors=[writer, reader])
+        async with AsyncClient(
+            base_url=listener.url + "/agui/v1/",
+            headers={"Authorization": "Bearer " + token},
+            trust_env=False,
+        ) as client:
+            sid = await new(client)
+            path = f"threads/{sid}/settings"
+            response = await client.post(path, json={"approval": "never"})
+            assert response.status_code == 200 and response.json() == {"approval": "never"}
+            assert (
+                await client.post(path, json={"approval": "off", "extra": True})
+            ).status_code == 400
+            assert (
+                await client.post(
+                    path, json={"approval": "off"}, headers={"Authorization": "Bearer " + limited}
+                )
+            ).status_code == 403
+            await client.post("run", json=prompt(sid))
+            messages = (await client.get("threads/" + sid)).json()["messages"]
+            [result] = [m for m in messages if m["role"] == "tool"]
+            assert result["error"] and "ran the effect" not in result["content"]
+        await listener.close()
+
+
 async def test_waiting_approval_on_returning_presence(tmp_path):
     effects = []
 
