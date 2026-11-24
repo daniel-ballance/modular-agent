@@ -18,13 +18,13 @@ node run.mjs --only history --url http://127.0.0.1:39211 --token-file /path/to/d
 
 The first invocation of `run.mjs` with a command runs every case, with a fresh fixture per case. Use `--only case,case` to select cases. A URL selects one case and assumes the listener is already configured for it. The URL is the origin, not `/agui/v1/run`. Cleartext is allowed only on numeric loopback. The kit uses normal certificate and hostname verification for HTTPS. Use `NODE_EXTRA_CA_CERTS` when launching the runner to trust a test CA. Never disable verification. Supply token files, not token values. Use `--rotated-token-file`, `--sibling-token-file`, `--foreign-token-file`, `--watch-token-file`, `--tenant-token-file` and `--project-token-file` as required by the case.
 
-When a session declares `approvalCoversNested`, the approval cases check the marker in the interrupt metadata and in the recorded request. In `waiting-restart`, have `bump` increment the counter through a nested tool instead of incrementing it directly. The kit checks that the child's start names that parent and request. Without the declaration the coverage assertions are skipped with a reason.
+The approval fixtures must declare `approvalCoversNested`. The cases check the marker in the interrupt metadata and in the recorded request. In `waiting-restart`, have `bump` increment the counter through a nested tool instead of incrementing it directly. The kit checks that the child's start names that parent and request.
 
 The `approval-call` case checks the required `modular-agent.approvalCall` in the live interrupt and the thread snapshot. It expects the call after `tool.before` changes its input, not the model draft. The waiting cases check the parked call on each delivered interrupt. A missing field fails. The fixture's approval output gates withhold the whole interrupt if its exact view changes; they do not offer redacted arguments for approval.
 
 ## Waiting approval checks
 
-Eight `waiting-*` cases run by default; use `--list` or select cases with `--only`. Each case creates a thread, reads its declaration and skips with a reason unless `approvalsOutlastTurns` is true. The two mixed cases also require `interfaceTools`. In the SDK fixture set a finite `maxApprovalWaitMs`, keep history, load the approval gate and opt the session in with `approvalWait: "untilDeadline"` in trusted setup. Use the same composition but `live` for `waiting-live`. Never set the lifetime from a run POST.
+Eight `waiting-*` cases run by default; use `--list` or select cases with `--only`. Each case creates a thread, checks its declaration and fails unless `approvalsOutlastTurns` is true. The two mixed cases also require `interfaceTools`. In the SDK fixture set a finite `maxApprovalWaitMs`, keep history, load the approval gate and opt the session in with `approvalWait: "untilDeadline"` in trusted setup. Use the same composition but `live` for `waiting-live`. Never set the lifetime from a run POST.
 
 Register the server-side `bump` counter. Use a stopped test clock and a 5,000 ms approval limit. Ask about the exact name and complete input in the approval prompt. For mixed cases use `ask`, with a trusted read-only definition for the frontend fixture: only the server counter needs consent. The model calls `bump` before `pick_color`. For other waiting cases use `all`. Keep the ordinary `kit-primary` and sibling routes eligible on return; neither is present before it opens presence.
 
@@ -41,7 +41,7 @@ Use the [fixture control endpoint](#fixture-controls). For waiting cases `inspec
 
 ## Wait-closure checks
 
-Seven `closure-*` cases check [wait closures](../../docs/bindings/agui.md#wait-closures). The kit reads the thread snapshot first. If it omits `waitCursor`, the case skips and says why. An offered read is tested, not skipped for missing fixture controls. Use kept history, a stopped clock and the existing actor and client setup. ACP polls and answers on a second authenticated socket on the same listener. The kit does not use a control reply as the closure.
+Seven `closure-*` cases check [wait closures](../../docs/bindings/agui.md#wait-closures). The kit reads the thread snapshot first. The fixture must offer `waitCursor` and the controls needed for the case. Use kept history, a stopped clock and the existing actor and client setup. ACP polls and answers on a second authenticated socket on the same listener. The kit does not use a control reply as the closure.
 
 | Case | What the fixture supplies |
 |---|---|
@@ -62,7 +62,7 @@ Use the [fixture controls](#fixture-controls). All new operations are on the **c
 
 ## Run-receipt checks
 
-Seven `receipt-*` cases run only if the thread snapshot offers `runReceipts: 1`. Keep history in the fixture. Use the supplied scripted Provider, never a real model. These cases check the HTTP reply and actual admissions, decisions, turns, results and handoff releases from `inspect`. A terminal class is not a turn outcome. A stored outcome is not evidence of terminal delivery.
+Seven `receipt-*` cases require the thread snapshot to offer `runReceipts: 1`. Keep history in the fixture. Use the supplied scripted Provider, never a real model. These cases check the HTTP reply and actual admissions, decisions, turns, results and handoff releases from `inspect`. A terminal class is not a turn outcome. A stored outcome is not evidence of terminal delivery.
 
 | Case | Boundary and expected observation |
 |---|---|
