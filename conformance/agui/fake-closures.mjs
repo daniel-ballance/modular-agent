@@ -4,6 +4,7 @@ import { fakeFixture } from './fake-fixture.mjs';
 
 export function fakeClosures(name, fault, model) {
   const base = fakeFixture(name === 'closure-presence' ? 'approval' : 'report-cutoffs', undefined, model);
+  const approval = fakeFixture('approval', undefined, model);
   function inbox(s) {
     return s.inbox ??= { items: [], cursors: new Map(), followers: new Set(), latches: new Map() };
   }
@@ -21,6 +22,7 @@ export function fakeClosures(name, fault, model) {
   }
   function decide(s, data, reason) {
     const requestId = s.waitQ; s.waitQ = undefined;
+    if (s.question?.id === requestId) delete s.question;
     s.batches.push([{ kind: 'inputAnswer', id: randomUUID(), data: { requestId, ...data } }]);
     publish(s, { requestId, reason, ...(fault === 'answer-in-notice' && { value: 'yes' }) });
   }
@@ -38,14 +40,16 @@ export function fakeClosures(name, fault, model) {
         if (box.hold) {
           latch(s, 'beforeWaitDelivery').resolve(); await box.hold.promise;
         }
-        if (res.destroyed || res.writableEnded) return;
+        if (res.destroyed || res.writableEnded || item.toolCallId && client !== 'owner' && fault !== 'other-executor-notice') return;
         if (box.noWatch) {
           if (fault === 'comment-disclosure') res.write(`: ${item.requestId} ${item.reason}\n\n`);
+          if (fault === 'reset-on-watch-loss') return res.destroy();
           if (fault !== 'skip-watch-recheck') return res.end();
         }
         if (box.policy && box.policy.requestId === item.requestId && ({ opening: 'skip-source-gate', decision: 'skip-decision-gate', notice: 'changed-notice' })[box.policy.mode] !== fault) return;
         const data = { cursor: mark(s, client, index, true), ...item };
-        res.write(`data: ${JSON.stringify(data)}\n\n`);
+        if (fault === 'cursor-disclosure' && box.policy) data.cursor += ':' + box.policy.requestId;
+        res.write(`data: ${JSON.stringify(data)}\n${fault === 'wait-bad-framing' ? 'id: forbidden\n' : ''}\n`);
         if (box.noWatch) res.end();
       }); };
       box.followers.add(enqueue); res.once('close', () => box.followers.delete(enqueue));
@@ -61,13 +65,28 @@ export function fakeClosures(name, fault, model) {
         decide(s, { actorId: 'kit-owner', value: 'allow' }, 'answered'); args.emit(); args.finish({ type: 'success' }); return;
       }
       if (fault === 'feed-is-presence' && inbox(s).followers.size) s.presence.add(client);
+      if (name === 'closure-routes' && args.offered) {
+        const result = await approval.run(args); s.waitQ = s.question?.id; return result;
+      }
       const call = s.open, result = await base.run(args);
-      if (call && suffix[0]?.role === 'tool' && !result) publish(s, { toolCallId: call, reason: 'settled', status: fault === 'wrong-settlement' ? 'failed' : 'completed' });
+      if (call && suffix[0]?.role === 'tool' && !result) {
+        if (fault === 'settlement-without-result') s.batches = s.batches.filter(batch => !batch.some(e => e.kind === 'toolResult'));
+        publish(s, { toolCallId: call, reason: 'settled', status: fault === 'wrong-settlement' ? 'failed' : 'completed' });
+      }
       return result;
     },
     disconnect(s, client) {
-      base.disconnect(s, client);
-      if (fault === 'route-is-closure' && s.waitQ) publish(s, { requestId: s.waitQ, reason: 'revoked' });
+      if (name === 'closure-routes' && s.waitQ) {
+        if (fault === 'route-is-closure') publish(s, { requestId: s.waitQ, reason: 'revoked' });
+      } else {
+        const q = s.question?.id;
+        base.disconnect(s, client);
+        if (q && !s.question) {
+          if (fault === 'mark-loss-revoked') s.batches.flat().find(e => e.kind === 'inputAnswer' && e.data.requestId === q).data.cause = 'revoked';
+          publish(s, { requestId: q, reason: fault === 'guess-revocation' ? 'revoked' : 'refused' });
+        }
+      }
+      latch(s, 'presenceLost').resolve();
     },
     acp(ws, client, { method, params }, sessions) {
       if (method === 'initialize') return { protocolVersion: 1 };
@@ -87,11 +106,13 @@ export function fakeClosures(name, fault, model) {
         case 'inspect': return { ...await base.control(operation, s, args), project: '/fixture' };
         case 'openWait':
           s.waitKind = args.kind; s.waitQ = randomUUID();
+          s.batches.push([{ kind: 'inputRequest', id: randomUUID(), data: { request: { id: s.waitQ, whenTimeLimit: args.kind === 'leaveOpen' ? 'leaveOpen' : 'decline' } } }]);
           return { requestId: s.waitQ };
         case 'advance':
           if (s.waitKind === 'leaveOpen') {
+            if (fault !== 'no-pending-wait') s.batches.push([{ kind: 'toolPending', id: randomUUID(), data: { requestIds: [s.waitQ] } }]);
             if (fault === 'timeout-is-closure') publish(s, { requestId: s.waitQ, reason: 'expired' });
-          } else decide(s, { declined: true, reason: 'timeLimit' }, fault === 'deadline-is-decline' ? 'declined' : 'expired');
+          } else decide(s, { declined: true, reason: fault === 'invent-expiry' ? 'cancelled' : 'timeLimit' }, fault === 'deadline-is-decline' ? 'declined' : 'expired');
           break;
         case 'revokeRight':
           if (args.right === 'watch') box.noWatch = true;
@@ -101,7 +122,7 @@ export function fakeClosures(name, fault, model) {
         case 'hold': box.hold = Promise.withResolvers(); break;
         case 'release': box.hold.resolve(); delete box.hold; break;
         case 'expireWaitCursor': box.cursors.delete(args.cursor); box.expired = args.cursor; break;
-        case 'barrier': if (args.name === 'presenceLost') return base.control(operation, s, args); else await latch(s, args.name).promise; break;
+        case 'barrier': await latch(s, args.name).promise; break;
         default: throw new Error('unknown wait fixture operation');
       }
       return {};
