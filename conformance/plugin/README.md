@@ -37,6 +37,30 @@ This runs the isolation checks instead of the default transcript. Supply two dis
 
 For builds that provision several isolated hosts on one listener, omit `--second-connect` and use the same `--isolation-checks TOKEN_B PROJECT_A PROJECT_B HOME` arguments. The kit then uses both tokens on the first URL and does not check cross-listener upgrades.
 
+### Named callers on one listener
+
+[ADR 0035](../../docs/adr/0035-host-limits-from-the-ops-desk.md) adds a managed mode to the isolation checks. Ordinary runs skip it with a reason. To opt in, supply a launcher that serves the SDK's per-connection factory with a token table:
+
+```sh
+node conformance/plugin/run.mjs --named-callers -- /absolute/path/to/named-caller-fixture [args...]
+```
+
+The kit creates two owner-only token files, two disjoint projects and two private state directories. It starts the same command with valid and invalid configurations. The process receives a fresh `HOME`, `TMPDIR`, `PATH`, `LANG` and `MA_PLUGIN_FIXTURE`. The last is a path to JSON with these fields:
+
+| Field | Use |
+|---|---|
+| `listen`, `callers`, optional `tokenFile` | Pass the listener address and **unchanged** SDK options to `serve(factory, …)`. The SDK, not the launcher, must reject ambiguous options. `callers` has entries `{callerId,tokenFile}`. There are no token values in the command or config. |
+| `scopes` | Operator entries `{callerId,project,stateDir}`. In the factory select the matching entry using only the SDK's authenticated `callerId`. Never derive this scope from initialization, session or tool input. |
+| `auditFile` | Append one JSON line `{event:"factory",callerId}` on actual factory entry, and `{event:"setup",callerId}` on actual plugin setup, before returning. No token, host path, call input or request ID belongs here. |
+
+On success print one stdout line `{"url":"ws://127.0.0.1:PORT/"}` when the listener is ready. On the SDK's startup refusal print `{"error":"invalid_composition"}` and exit nonzero without listening. A crash or missing executable does not count as a refusal. Keep the launcher and any descendants in the kit's process group. Invalid tables have duplicate IDs, identical token values in different files, or both `tokenFile` and `callers`. On the valid table a wrong or missing token must get 401 before the factory or setup runs.
+
+Register the ordinary `bash` conformance tool (delegate to `host/env/exec` on this connection) and working environment. Enforce the authenticated project's bounds on every request. Also register **`caller_probe`**, a fixture-only tool. It takes `{callerId,write?}`. Ignore `input.callerId` and `config.callerId` for identity. Read one marker from the factory's selected state directory (`null` if absent), optionally replace it with the string `write`, and return a completed ToolResult whose `value` is `{callerId,previous}`. Use the ID captured by the factory. This is test data in a tool's value, not a caller field in a plugin message.
+
+The two hosts claim the same `home`, reuse request, call and session IDs, and claim each other's names. The kit checks both the factory's ID and the retained marker. Changing the tool claim on a live connection or the setup claim on reconnect must not change the state. While both `bash` calls are held in callbacks the kit cancels and closes the left connection. The right result must carry the right Harness's marker. It runs that check with distinct credentials and with each credential on two sockets. It rechecks the retained file and refused project reads on reconnect. Separate-listener tests still apply to plugins that need separate confinement.
+
+Run `npm ci --prefix conformance/plugin` and `npm test --prefix conformance/plugin` for the managed launcher's fake-service self-tests. The fake never executes a command.
+
 To serve a stdio plugin over WebSocket for the kit, use the bridge, `conformance/tools/ws-bridge.mjs`. It is a disposable, loopback-only test adapter that starts one plugin process per connection; it is not a service host.
 
 ```sh
