@@ -21,4 +21,4 @@ mise exec -- go test -race -count=1 ./...
 
 Commands need Linux with unprivileged user, PID and mount namespaces. The service sandbox also needs Bubblewrap.
 
-The Go conformance plugin passes 146/146 checks on stdio and 153/153 over WebSocket. Go `ma` passed the 27 reference checks run before the suite grew to 28, including unattended recovery and trace trust, and the ACP kit with crash, probe and job checks passes 188/188 on stdio and 193/193 over WebSocket. Run `scripts/websocket-kits.sh go` from the repository root after building `go/.bin/modular` and `go/.bin/ma`.
+From the repository root, run `scripts/websocket-kits.sh go` after building `go/.bin/modular` and `go/.bin/ma`. Run `go/scripts/check-named-callers.sh` for callers sharing one authenticated plugin listener. Run `go/scripts/check-agui.sh` for the AG-UI listener, wait closures and kept run receipts. The [SDK README](modular/README.md#ag-ui-on-http-and-sse) lists the Go host reads and their limits.

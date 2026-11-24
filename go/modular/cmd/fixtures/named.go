@@ -83,7 +83,10 @@ func serveNamedFixture(ctx context.Context) error {
 			}
 			if err = r.Tool(modular.NewTool("bash", "Call the connecting host's environment.", func(ctx context.Context, in struct {
 				Command string `json:"command"`
-			}, tc *modular.ToolContext) (string, error) { res, err := tc.Environment.Exec(ctx, in.Command, 0, nil); return res.Output, err })); err != nil {
+			}, tc *modular.ToolContext) (string, error) {
+				res, err := tc.Environment.Exec(ctx, in.Command, 0, nil)
+				return res.Output, err
+			})); err != nil {
 				return err
 			}
 			return r.Tool(modular.NewTool("caller_probe", "Read or replace this caller's fixture marker.", func(_ context.Context, in probeInput, _ *modular.ToolContext) (probeValue, error) {
