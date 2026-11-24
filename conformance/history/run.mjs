@@ -182,32 +182,33 @@ await run("session lifecycle", async () => {
 	check("erase: no lease is needed without a writer", ok(await erase(sid, undefined, [third.id]), { erased: [third.id] }));
 });
 
-// History HTTP: Erasure; Shared data: Legacy associations. Opaque rows isolate the projection.
-await run("legacy tombstones", async () => {
+// History HTTP: Erasure; Shared data: Entry fields and tombstones. Opaque rows isolate the projection.
+await run("envelope associations", async () => {
 	const sid = id(), meta = { project, created: Date.now() };
 	await put(sid, meta);
 	const { body: { lease } } = await acquire(sid, id());
 	const cases = [
-		[{ kind: "input", data: { inputId: "input-nested" } }, { inputId: "input-nested" }],
-		[{ kind: "inputAccepted", data: { inputId: "admission-nested", content: "removed" } }, { inputId: "admission-nested" }],
-		[{ kind: "inputHandedBack", data: { inputIds: ["first", "second"] } }, { inputIds: ["first", "second"] }],
-		[{ kind: "inputHandedBack", data: { inputId: "single", inputIds: ["ignored"] } }, { inputId: "single" }],
-		[{ kind: "inputHandedBack", data: { inputId: 7, inputIds: ["ignored"] } }, {}],
-		[{ kind: "inputHandedBack", data: { inputIds: ["valid", ""] } }, {}],
-		[{ kind: "inputRequest", data: { requestId: "first-id", request: { id: "second-id" } } }, { requestId: "first-id" }],
-		[{ kind: "inputRequest", data: { requestId: null, request: { id: "question-id" } } }, { requestId: "question-id" }],
-		[{ kind: "inputAnswer", data: { requestId: "answer-id", value: "removed" } }, { requestId: "answer-id" }],
-		[{ kind: "inputAnswer", requestId: null, data: { requestId: "ignored" } }, {}],
-		[{ kind: "inputAnswer", requestId: "envelope", data: { requestId: "ignored" } }, { requestId: "envelope" }],
-		[{ kind: "turnStart", data: { continuesTurnId: "old-turn" } }, { continuesTurnId: "old-turn" }],
-		[{ kind: "kit.private", data: { inputId: "ignored", requestId: "ignored", continuesTurnId: "ignored" } }, {}],
+		[{ kind: "input", inputId: "input" }, { inputId: "input" }],
+		[{ kind: "inputAccepted", data: { inputId: "nested" } }, {}],
+		[{ kind: "inputHandedBack", inputIds: ["plural"], data: { inputIds: ["nested"] } }, {}],
+		[{ kind: "inputHandedBack", inputId: "first" }, { inputId: "first" }],
+		[{ kind: "inputHandedBack", inputId: "second" }, { inputId: "second" }],
+		[{ kind: "inputRequest", data: { requestId: "nested", request: { id: "also-nested" } } }, {}],
+		[{ kind: "inputRequest", requestId: "asked", data: { request: { id: "asked" } } }, { requestId: "asked" }],
+		[{ kind: "inputAnswer", data: { requestId: "nested" } }, {}],
+		[{ kind: "inputAnswer", requestId: "answered", data: { requestId: "ignored" } }, { requestId: "answered" }],
+		[{ kind: "turnStart", data: { continuesTurnId: "nested" } }, {}],
+		[{ kind: "turnStart", continuesTurnId: "origin" }, { continuesTurnId: "origin" }],
 	];
 	const rows = cases.map(([entry]) => ({ id: id(), parentId: null, ...entry }));
 	const expected = cases.map(([, projected], i) => ({ id: rows[i].id, parentId: null, kind: rows[i].kind, erased: true, ...projected }));
 	const targets = rows.map((e) => e.id);
-	check("Erasure / Legacy associations: valid legacy IDs survive at the top level without overriding the envelope", ok(await append(sid, lease, rows), { kept: rows.length }) &&
+	check("Erasure: only envelope identities survive", ok(await append(sid, lease, rows), { kept: rows.length }) &&
 		ok(await erase(sid, lease, targets), { erased: targets }) && ok(await read(sid), { session: { id: sid, ...meta }, entries: expected }));
 	await release(sid, lease);
+	const next = (await acquire(sid, id())).body.lease;
+	check("Erasure: a new writer sees the same identities", !!next && ok(await read(sid), { session: { id: sid, ...meta }, entries: expected }));
+	await release(sid, next);
 });
 
 // History HTTP: The basics (path segments are validated before normalization).
