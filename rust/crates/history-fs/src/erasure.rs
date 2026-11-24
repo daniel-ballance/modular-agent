@@ -66,7 +66,8 @@ impl FileHistory {
                 && (targets.contains(entry.id.as_str())
                     || entry.copies.iter().any(|id| targets.contains(id.as_str())))
             {
-                return Err(unavailable("session contains content marked for erasure"));
+                return Err(unavailable("session contains content marked for erasure")
+                    .context(PendingErasure));
             }
         }
         Ok(())

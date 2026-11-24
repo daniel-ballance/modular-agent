@@ -13,6 +13,7 @@ mod interface_tools;
 mod output;
 pub use interface_tools::{InterfaceConnection, InterfaceReportDisposition, InterfaceToolSource};
 pub use output::{apply_redactions, encode as output_event};
+pub mod receipt;
 mod rewind;
 mod tenants;
 use std::{
@@ -27,6 +28,7 @@ struct OpenSession {
     lease: Option<Box<dyn Lease>>,
     provisional: bool,
     generation: CancellationToken,
+    commits: Option<tokio::sync::broadcast::Sender<()>>,
     interruption: CancellationToken,
     queue: VecDeque<Input>,
     input_contexts: BTreeMap<String, Context>,
@@ -90,6 +92,7 @@ impl std::fmt::Display for OutputOverflow {
 }
 impl std::error::Error for OutputOverflow {}
 
+type PrivateErasure = dyn Fn(&SessionData) -> Result<()> + Send + Sync;
 pub struct Harness {
     me: Weak<Harness>,
     agent_name: std::sync::OnceLock<String>,
@@ -110,6 +113,7 @@ pub struct Harness {
     admissions: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
     erasure: tokio::sync::RwLock<()>,
     reservations: RwLock<Arc<ReservationPool>>,
+    private_erasure: std::sync::OnceLock<Box<PrivateErasure>>,
 }
 impl Harness {
     pub fn new() -> Arc<Self> {
@@ -123,6 +127,7 @@ impl Harness {
         Arc::new_cyclic(|me| Self {
             me: me.clone(),
             agent_name: Default::default(),
+            private_erasure: Default::default(),
             project,
             approval_maximum: Default::default(),
             live_covers: Default::default(),
@@ -199,6 +204,12 @@ impl Harness {
         );
         *self.reservations.write().unwrap() = pool;
         Ok(())
+    }
+    pub fn on_reconciled_erasure(
+        &self,
+        remove: impl Fn(&SessionData) -> Result<()> + Send + Sync + 'static,
+    ) {
+        assert!(self.private_erasure.set(Box::new(remove)).is_ok());
     }
     pub fn reservations(&self) -> Arc<ReservationPool> {
         self.reservations.read().unwrap().clone()
@@ -429,6 +440,7 @@ impl Harness {
                         data,
                         lease,
                         provisional,
+                        commits: None,
                         generation: CancellationToken::new(),
                         interruption: CancellationToken::new(),
                         queue: VecDeque::new(),
@@ -551,6 +563,9 @@ impl Harness {
         let Some((lease, mut data, erased)) = loaded else {
             return Ok(None);
         };
+        if let Some(remove) = self.private_erasure.get() {
+            remove(&data)?;
+        }
         if erased {
             self.invalidate_providers(id)?;
         }
@@ -598,6 +613,7 @@ impl Harness {
                     data,
                     lease: Some(lease),
                     provisional: false,
+                    commits: None,
                     generation: CancellationToken::new(),
                     interruption: CancellationToken::new(),
                     queue: VecDeque::new(),
@@ -900,6 +916,9 @@ impl Harness {
         Ok(())
     }
     fn install_erased_data(&self, open: &mut OpenSession, data: SessionData) -> Result<()> {
+        if let Some(remove) = self.private_erasure.get() {
+            remove(&data)?;
+        }
         let session = data.id.clone();
         open.queue.retain(|q| {
             data.entries
@@ -908,6 +927,9 @@ impl Harness {
         });
         self.reservations().rebuild(&data);
         open.data = data;
+        if let Some(commits) = &open.commits {
+            let _ = commits.send(());
+        }
         self.pending_events
             .lock()
             .unwrap()
@@ -1088,6 +1110,18 @@ impl Harness {
         }
         Ok(())
     }
+    /// Subscribe before reading a catch-up watermark. Only the ledger contains facts;
+    /// the bounded channel carries wakes, never entry bodies.
+    pub fn follow_commits(&self, id: &str) -> Result<tokio::sync::broadcast::Receiver<()>> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let open = sessions
+            .get_mut(id)
+            .ok_or_else(|| OperationError::NotFound("session closed".into()))?;
+        Ok(open
+            .commits
+            .get_or_insert_with(|| tokio::sync::broadcast::channel(128).0)
+            .subscribe())
+    }
     fn commit(&self, open: &mut OpenSession, data: &SessionData) -> Result<()> {
         self.commit_reserved(open, data, None)
     }
@@ -1105,6 +1139,10 @@ impl Harness {
                 .skip(open.data.entries.len())
                 .any(|entry| {
                     entry.kind == "input.accepted"
+                        || (entry.kind == "command"
+                            && receipt::BIND_ENTRY
+                                .try_with(|b| b.entry_id == entry.id)
+                                .unwrap_or(false))
                         || (entry.kind == "actor.grant"
                             && entry.writer == "interface.acp"
                             && entry
@@ -1116,6 +1154,14 @@ impl Harness {
                 return Ok(());
             }
             open.lease = self.store().map(|s| s.acquire(&data.id)).transpose()?;
+        }
+        if let Ok(Some(id)) =
+            receipt::BIND_ENTRY.try_with(|b| (b.session == data.id).then_some(&b.entry_id).cloned())
+        {
+            ensure!(
+                data.entries.iter().filter(|e| e.id == id).count() <= 1,
+                OperationError::Conflict("run ID already accepted".into())
+            );
         }
         let pool = self.reservations();
         let mut write_failed = false;
@@ -1166,6 +1212,9 @@ impl Harness {
                     .is_some_and(|lease| lease.check().is_err());
             self.interrupt(open, if lost { "writerLost" } else { "commitFailed" });
             return Err(LostPart(format!("session commit failed: {error}")).into());
+        }
+        if let Some(commits) = &open.commits {
+            let _ = commits.send(());
         }
         if open.provisional {
             open.provisional = false;
@@ -2144,6 +2193,7 @@ fn push_setup(data: &mut SessionData, kind: &str, content: impl FnOnce(&SessionD
 fn make_entry(data: &SessionData, scope: &Scope, writer: &str, draft: Draft) -> Entry {
     // Imported calls are a view over a real response or start, not entries
     // that can be named in a persisted sources list.
+    let id = receipt::bound_id(scope, &draft).unwrap_or_else(id);
     let mut seen = std::collections::HashSet::new();
     let copies = draft
         .copies
@@ -2158,7 +2208,7 @@ fn make_entry(data: &SessionData, scope: &Scope, writer: &str, draft: Draft) -> 
         .filter(|id| seen.insert(id.clone()))
         .collect();
     Entry {
-        id: id(),
+        id,
         parent: data.position.clone(),
         scope: scope.clone(),
         writer: writer.into(),
@@ -2680,6 +2730,17 @@ impl AgentApi for Harness {
             self.finish_open_interface_turn(open, scope, &mut result)?;
             draft.content["open_calls"] = json!(result.open_calls);
         }
+        if draft.kind == "request.answer"
+            && let Some(q) = open.data.entries.iter().find(|e| {
+                e.kind == "request.open"
+                    && e.content
+                        .as_ref()
+                        .is_some_and(|v| v["id"] == draft.content["request"])
+            })
+            && !draft.copies.contains(&q.id)
+        {
+            draft.copies.push(q.id.clone());
+        }
         if draft.kind == "tool.result" {
             ensure!(
                 !open
@@ -2697,8 +2758,13 @@ impl AgentApi for Harness {
         let mut next = open.data.clone();
         next.position = Some(entry.id.clone());
         next.entries.push(entry.clone());
+        let revoked = matches!(entry.kind.as_str(), "actor.grant" | "actor.left")
+            && self.close_revoked_questions(&open.data, &mut next)?;
         self.commit(open, &next)?;
         open.data = next;
+        if revoked {
+            requests(self)?.decisions_changed();
+        }
         if let Some(content) = &entry.content {
             match entry.kind.as_str() {
                 "request.open" => {
@@ -3112,6 +3178,7 @@ impl AgentApi for Harness {
                 data: next,
                 lease,
                 provisional: false,
+                commits: None,
                 generation: CancellationToken::new(),
                 interruption: CancellationToken::new(),
                 queue: VecDeque::new(),
@@ -3200,9 +3267,16 @@ impl AgentApi for Harness {
                     }
                 } else {
                     store.acquire(session).and_then(|_lease| {
-                        store
-                            .reconcile_erasure(session)
-                            .map(|result| result.map(|(_, ids)| ids))
+                        store.reconcile_erasure(session).and_then(|result| {
+                            result
+                                .map(|(data, ids)| {
+                                    if let Some(remove) = self.private_erasure.get() {
+                                        remove(&data)?;
+                                    }
+                                    Ok(ids)
+                                })
+                                .transpose()
+                        })
                     })
                 };
                 let done = result
@@ -3273,14 +3347,26 @@ impl AgentApi for Harness {
         } else {
             &recipient
         };
+        let shared = matches!(
+            value["type"].as_str(),
+            Some("modular-agent.waitClosed" | "turnEnded" | "toolResult")
+        ) && value["data"].is_object();
+        let event = if shared {
+            value
+        } else {
+            json!({"type":kind,"data":value})
+        };
         let gated = self
-            .remote_output(scope, recipient, vec![json!({"type":kind,"data":value})])
+            .remote_output(scope, recipient, vec![event])
             .await
             .unwrap_or_default();
         if self.output_epoch(&scope.session)? != epoch {
             return Ok(None);
         }
-        Ok(gated.into_iter().next().map(|event| event["data"].clone()))
+        Ok(gated
+            .into_iter()
+            .next()
+            .map(|event| if shared { event } else { event["data"].clone() }))
     }
     async fn emit(&self, event: Event) -> Result<()> {
         let mut events =

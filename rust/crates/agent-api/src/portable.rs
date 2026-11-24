@@ -564,7 +564,11 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
         "request.closed" | "request.invalidated" => {
             v["requestId"] = c["request"].clone();
             v.as_object_mut().unwrap().remove("actorId");
-            json!({"requestId":c["request"],"declined":true,"reason":c["reason"].as_str().unwrap_or("noLongerAnswerable"),"rust.closure":e.kind})
+            let mut data = json!({"requestId":c["request"],"declined":true,"reason":c["reason"].as_str().unwrap_or("noLongerAnswerable"),"rust.closure":e.kind});
+            if c["cause"] == "revoked" {
+                data["cause"] = json!("revoked");
+            }
+            data
         }
         "request.secretAccepted" => {
             v["requestId"] = c["requestId"].clone();
@@ -1003,10 +1007,11 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                             Some("request.closed" | "request.invalidated")
                         )) =>
             {
-                (
-                    d["rust.closure"].as_str().unwrap_or("request.closed"),
-                    json!({"request":d["requestId"],"reason":d["reason"]}),
-                )
+                let mut data = json!({"request":d["requestId"],"reason":d["reason"]});
+                if d["cause"] == "revoked" {
+                    data["cause"] = json!("revoked");
+                }
+                (d["rust.closure"].as_str().unwrap_or("request.closed"), data)
             }
             "secretAnswerAccepted" => ("request.secretAccepted", d.clone()),
             "inputAnswer" => {

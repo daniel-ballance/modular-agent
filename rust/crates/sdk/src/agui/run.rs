@@ -37,6 +37,8 @@ struct Exchange {
     id: String,
     run: String,
     target: Target,
+    slot: Option<receipts::Slot>,
+    terminal: receipts::Terminal,
     events: broadcast::Receiver<Event>,
     executor: Option<InterfaceConnection>,
     steps: BTreeSet<String>,
@@ -74,6 +76,10 @@ impl Service {
             .get("ma-history-cursor")
             .map(|v| v.to_str().map_err(|_| Fail::Cursor))
             .transpose()?;
+        let receipt_id = receipts::identity(id, &a, &req.run);
+        if self.agent.inner.persistent && d.entries.iter().any(|e| e.id == receipt_id) {
+            return Err(Fail::Conflict);
+        }
         let n = self.reconcile(&a, &d, &c, token, &req.messages).await?;
         if c.runs.lock().unwrap().contains(&req.run) {
             return Err(Fail::Conflict);
@@ -228,110 +234,137 @@ impl Service {
         if self.watch(&a, id)?.position != d.position {
             return Err(Fail::Conflict);
         }
-        let target = if let Some(content) = user {
-            let key = format!("agui:{}:{}{}", a.client_id.len(), a.client_id, req.run);
-            let receipt = self
-                .h()
-                .submit_content_as(
-                    &scope(id, a.id()),
-                    None,
-                    content,
-                    base::Timing::Now,
-                    Some(key),
-                    None,
-                )
-                .await?;
-            if receipt.duplicate || receipt.erased {
-                return Err(Fail::Conflict);
-            }
-            if receipt.command.is_some() {
-                Target::Handled
-            } else {
-                Target::Input(receipt.input)
-            }
+        use agent_harness::receipt::ReceiptOperation;
+        let slot = self
+            .agent
+            .inner
+            .persistent
+            .then(|| self.agent.inner.receipts.reserve(id, receipt_id))
+            .transpose()?;
+        let operation = if user.is_some() {
+            ReceiptOperation::Input(format!(
+                "agui:{}:{}{}",
+                a.client_id.len(),
+                a.client_id,
+                req.run
+            ))
+        } else if let Some(q) = answers.keys().next() {
+            ReceiptOperation::Answer(q.clone())
         } else {
-            for (qid, value) in answers {
-                let service = base::requests(self.h())?;
-                let declined = value.is_none();
-                if questions
-                    .iter()
-                    .any(|(q, _)| q.id == qid && q.waits_for_approval())
-                {
-                    let seen = c
-                        .questions
-                        .lock()
-                        .unwrap()
-                        .get(&qid)
-                        .and_then(Clone::clone)
-                        .ok_or(Fail::Conflict)?;
-                    let route = self.waiting_route(&a, &c, &seen)?;
-                    if !self
-                        .h()
-                        .decide_approval(id, &qid, &route, !declined, None)
-                        .await?
+            ReceiptOperation::Report(input::string(&reports[0], "callId")?.into())
+        };
+        let decide = async {
+            let target = if let Some(content) = user {
+                let key = format!("agui:{}:{}{}", a.client_id.len(), a.client_id, req.run);
+                let receipt = self
+                    .h()
+                    .submit_content_as(
+                        &scope(id, a.id()),
+                        None,
+                        content,
+                        base::Timing::Now,
+                        Some(key),
+                        None,
+                    )
+                    .await?;
+                if receipt.duplicate || receipt.erased {
+                    return Err(Fail::Conflict);
+                }
+                if receipt.command.is_some() {
+                    Target::Handled
+                } else {
+                    Target::Input(receipt.input)
+                }
+            } else {
+                for (qid, value) in answers {
+                    let service = base::requests(self.h())?;
+                    let declined = value.is_none();
+                    if questions
+                        .iter()
+                        .any(|(q, _)| q.id == qid && q.waits_for_approval())
+                    {
+                        let seen = c
+                            .questions
+                            .lock()
+                            .unwrap()
+                            .get(&qid)
+                            .and_then(Clone::clone)
+                            .ok_or(Fail::Conflict)?;
+                        let route = self.waiting_route(&a, &c, &seen)?;
+                        if !self
+                            .h()
+                            .decide_approval(id, &qid, &route, !declined, None)
+                            .await?
+                        {
+                            return Err(Fail::Conflict);
+                        }
+                    } else if live.is_some() {
+                        let route = c
+                            .questions
+                            .lock()
+                            .unwrap()
+                            .get(&qid)
+                            .and_then(Clone::clone)
+                            .ok_or(Fail::Conflict)?;
+                        service
+                            .answer_on_route(
+                                self.agent.inner.harness.clone(),
+                                &route,
+                                base::Answer {
+                                    session: id.clone(),
+                                    request: qid,
+                                    actor: a.id().into(),
+                                    value: value.unwrap_or(Value::Null),
+                                    declined,
+                                    reason: None,
+                                },
+                            )
+                            .await
+                            .map_err(|_| Fail::Conflict)?;
+                    } else {
+                        service
+                            .answer(
+                                self.agent.inner.harness.clone(),
+                                id,
+                                a.id(),
+                                &qid,
+                                value.unwrap_or(Value::Null),
+                                declined,
+                            )
+                            .await
+                            .map_err(|_| Fail::Conflict)?;
+                    }
+                }
+                for report in reports {
+                    if executor
+                        .as_ref()
+                        .ok_or(Fail::Refused)?
+                        .report_tool_result(report)
+                        .await
+                        .map_err(|_| Fail::Lost)?
+                        != InterfaceReportDisposition::Accepted
                     {
                         return Err(Fail::Conflict);
                     }
-                } else if live.is_some() {
-                    let route = c
-                        .questions
-                        .lock()
-                        .unwrap()
-                        .get(&qid)
-                        .and_then(Clone::clone)
-                        .ok_or(Fail::Conflict)?;
-                    service
-                        .answer_on_route(
-                            self.agent.inner.harness.clone(),
-                            &route,
-                            base::Answer {
-                                session: id.clone(),
-                                request: qid,
-                                actor: a.id().into(),
-                                value: value.unwrap_or(Value::Null),
-                                declined,
-                                reason: None,
-                            },
-                        )
-                        .await
-                        .map_err(|_| Fail::Conflict)?;
+                }
+                if let Some(turn) = live {
+                    if let Some((_, previous)) =
+                        c.paused.lock().unwrap().take().filter(|(t, _)| *t == turn)
+                    {
+                        executor = Some(previous);
+                    }
+                    Target::Turn(turn)
                 } else {
-                    service
-                        .answer(
-                            self.agent.inner.harness.clone(),
-                            id,
-                            a.id(),
-                            &qid,
-                            value.unwrap_or(Value::Null),
-                            declined,
-                        )
-                        .await
-                        .map_err(|_| Fail::Conflict)?;
+                    Target::Continuation(origin.ok_or(Fail::Conflict)?)
                 }
-            }
-            for report in reports {
-                if executor
-                    .as_ref()
-                    .ok_or(Fail::Refused)?
-                    .report_tool_result(report)
-                    .await
-                    .map_err(|_| Fail::Lost)?
-                    != InterfaceReportDisposition::Accepted
-                {
-                    return Err(Fail::Conflict);
-                }
-            }
-            if let Some(turn) = live {
-                if let Some((_, previous)) =
-                    c.paused.lock().unwrap().take().filter(|(t, _)| *t == turn)
-                {
-                    executor = Some(previous);
-                }
-                Target::Turn(turn)
-            } else {
-                Target::Continuation(origin.ok_or(Fail::Conflict)?)
-            }
+            };
+            Ok(target)
         };
+        let target = if let Some(slot) = &slot {
+            slot.bind(id, a.id(), operation, decide).await
+        } else {
+            decide.await
+        }?;
         {
             let mut used = c.runs.lock().unwrap();
             if used.len() == 1024 {
@@ -356,6 +389,8 @@ impl Service {
             id: id.clone(),
             run: req.run,
             target,
+            slot,
+            terminal: receipts::Terminal::Unknown,
             executor,
             events,
             steps: BTreeSet::new(),
@@ -379,13 +414,15 @@ impl Service {
                     Ok((bytes,finished)) => {
                         if let Some(cursor)=ex.next_cursor.take(){*ex.c.cursor.lock().unwrap()=Some(cursor);}
                         if !bytes.is_empty() {yield Ok::<_,std::convert::Infallible>(bytes);}
-                        if finished {break;}
+                        if finished {if let Some(s)=&ex.slot {s.released(ex.terminal,&ex.id)} break;}
                     }
                     Err(err) => {
                         let error=json!({"type":"RUN_ERROR","code":err.code(),"message":"The run could not be delivered."});
                         // Even when the error is withheld the binding requires a content-free terminal.
                         let gated=ex.exact(error.clone()).await.unwrap_or_else(|_|json!({"type":"RUN_ERROR","code":"output_withheld","message":"Output withheld."}));
+                        let slot=ex.slot.as_ref().filter(|s|s.prepare(&receipts::Proof{error:Some(err.code().into()),withheld:gated!=error || err==Fail::Withheld,..Default::default()}).is_ok());
                         yield Ok(Bytes::from(format!("data: {gated}\n\n")));
+                        if let Some(s)=slot {s.released(receipts::Terminal::Error,&ex.id)}
                         break;
                     }
                 }
@@ -872,6 +909,48 @@ impl Exchange {
             }) {
                 self.exact(frame.clone()).await?;
             }
+        }
+        if let Some(slot) = &self.slot {
+            let calls = out
+                .iter()
+                .filter(|v| v["type"] == "TOOL_CALL_START")
+                .map(|v| {
+                    Ok((
+                        input::string(v, "toolCallId")?.into(),
+                        v["parentMessageId"].as_str().map(str::to_owned),
+                    ))
+                })
+                .collect::<R<Vec<_>>>()?;
+            let sources = d
+                .branch()
+                .into_iter()
+                .filter(|e| {
+                    (e.kind == "request.open"
+                        && questions
+                            .iter()
+                            .any(|q| e.content.as_ref().is_some_and(|v| v["id"] == q["id"])))
+                        || (matches!(e.kind.as_str(), "tool.started" | base::INTERFACE_HANDOFF)
+                            && calls
+                                .iter()
+                                .any(|(call, _)| Some(call) == e.scope.call.as_ref()))
+                })
+                .map(|e| e.id)
+                .collect();
+            slot.prepare(&receipts::Proof {
+                sources,
+                questions: questions
+                    .iter()
+                    .map(|q| input::string(q, "id").map(str::to_owned))
+                    .collect::<R<_>>()?,
+                calls,
+                ..Default::default()
+            })?;
+            self.terminal = match outcome {
+                "success" => receipts::Terminal::Success,
+                "interrupt" => receipts::Terminal::Interrupt,
+                "cancelled" => receipts::Terminal::Cancelled,
+                _ => return Err(Fail::Lost),
+            };
         }
         let bytes = frames(out)?;
         if let Some(conn) = &mut self.executor {

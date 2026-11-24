@@ -46,7 +46,8 @@ pub fn install(b: sdk::AgentBuilder, k: &Arc<Kit>) -> sdk::AgentBuilder {
             let mut scope = base::Scope::session(&input.session_id);
             scope.turn = Some(input.turn_id);
             scope.actor = input.context.actor_id;
-            if k.name == "questions" {
+            k.pause(&scope.session, "afterAdmission").await;
+            if matches!(k.name.as_str(), "questions" | "receipt-interrupt") {
                 choice(api.clone(), scope.clone()).await?;
             }
             if k.name == "crash-continuation"
@@ -96,6 +97,57 @@ pub fn install(b: sdk::AgentBuilder, k: &Arc<Kit>) -> sdk::AgentBuilder {
         let k = state.clone();
         async move {
             let mut v = out.value;
+            if v["type"] == "RUN_FINISHED" {
+                k.pause(&out.session_id, "beforeTerminal").await;
+            }
+            if out.recipient == "kit-primary"
+                && match k.receipt_gate.lock().unwrap().as_str() {
+                    "reply" => v["method"] == "agui.runReceipt",
+                    "settlement" => v["type"] == "turnEnded",
+                    _ => false,
+                }
+            {
+                return Ok(OutputDecision::Block);
+            }
+            if out.recipient == "kit-primary" && v["method"] == "agui.runReceipt" {
+                let mode = k.receipt_gate.lock().unwrap().clone();
+                if matches!(mode.as_str(), "terminal" | "work") {
+                    v["result"][mode] = json!("changed");
+                    return Ok(OutputDecision::Redact(v));
+                }
+            }
+            if matches!(k.name.as_str(), "closure-order" | "closure-buffered")
+                && out.recipient == "kit-primary"
+            {
+                if v["question"]["id"].is_string()
+                    && k.latches
+                        .lock()
+                        .unwrap()
+                        .contains(&(out.session_id.clone(), "hold:beforeWaitDelivery".into()))
+                {
+                    k.latch(&out.session_id, "beforeWaitDelivery");
+                    k.barrier(&out.session_id, "released").await;
+                }
+                let (q, mode) = k.wait_gate.lock().unwrap().clone();
+                if match mode.as_str() {
+                    "opening" => {
+                        v["entry"]["kind"] == "inputRequest" && v["entry"]["requestId"] == q
+                    }
+                    "decision" => {
+                        v["entry"]["kind"] == "inputAnswer" && v["entry"]["requestId"] == q
+                    }
+                    "notice" => {
+                        v["type"] == "modular-agent.waitClosed" && v["data"]["requestId"] == q
+                    }
+                    _ => false,
+                } {
+                    if mode == "notice" {
+                        v["data"]["reason"] = json!("changed");
+                        return Ok(OutputDecision::Redact(v));
+                    }
+                    return Ok(OutputDecision::Block);
+                }
+            }
             if k.name == "release-gate"
                 && v["type"] == "MESSAGES_SNAPSHOT"
                 && k.file(&out.session_id)
@@ -195,7 +247,16 @@ pub fn install(b: sdk::AgentBuilder, k: &Arc<Kit>) -> sdk::AgentBuilder {
             Ok(None)
         }
     });
-    b.plugin(start)
+    let state = k.clone();
+    let admission = Plugin::new("kit.admission").on_input(move |input| {
+        let k = state.clone();
+        async move {
+            k.pause(&input.session_id, "beforeAdmission").await;
+            Ok(sdk::InputChange::Pass)
+        }
+    });
+    b.plugin(admission)
+        .plugin(start)
         .plugin(transform)
         .plugin(plugin)
         .plugin(other)

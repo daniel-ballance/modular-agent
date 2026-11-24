@@ -101,7 +101,10 @@ pub use runtime::{
     InterruptedTurn, ResumedStep, RuntimeCall, RuntimeContext, RuntimeDeclaration, RuntimeOutcome,
     RuntimePart, RuntimeSupport, RuntimeTurn,
 };
-pub use serve::{ServeOptions, serve, serve_websocket, serve_websocket_factory};
+pub use serve::{
+    AuthenticatedCaller, NamedServeOptions, PluginCaller, ServeOptions, serve, serve_websocket,
+    serve_websocket_factory, serve_websocket_named,
+};
 pub use session::{
     Actor, Content, Disposition, EventStream, HandedBack, InputReceipt, MoveOptions, Outcome,
     PromptInput, PromptOptions, PromptResult, Proposal, ReleaseOptions, Rights, Session, Timing,

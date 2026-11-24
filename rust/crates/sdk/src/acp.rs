@@ -188,6 +188,7 @@ struct ProjectFactory(
     Arc<dyn AcpComposition>,
     Agent,
     Mutex<BTreeMap<usize, Agent>>,
+    Option<Factory>,
 );
 
 fn api_key(api: &dyn base::AgentApi) -> usize {
@@ -218,6 +219,18 @@ impl interface_acp::Factory for ProjectFactory {
         {
             return Err(interface_acp::request_error("forbidden", "project is not trusted").into());
         }
+        if let (Some(local), Some(id)) = (&self.3, reopening)
+            && project == self.1.inner.project
+            && self
+                .1
+                .inner
+                .harness
+                .open_session_ids()
+                .iter()
+                .any(|s| s == id)
+        {
+            return local.build_for(project, Some(id), sink).await;
+        }
         let agent = self.0.compose(project, reopening).await?;
         if !agent.inner.plugin_host {
             agent.close().await?;
@@ -246,6 +259,9 @@ impl interface_acp::Factory for ProjectFactory {
         Ok(harness)
     }
 
+    fn owns_session_agent(&self) -> bool {
+        self.3.is_none()
+    }
     async fn dispose(&self, api: base::Api) -> base::Result<()> {
         let agent = self.2.lock().unwrap().remove(&api_key(api.as_ref()));
         if let Some(agent) = agent {
@@ -288,14 +304,25 @@ impl interface_acp::Factory for ProjectFactory {
 
     async fn attach(
         &self,
-        _: base::Api,
+        api: base::Api,
         session: &str,
         project: &Path,
         servers: Value,
     ) -> base::Result<()> {
+        if let Some(local) = &self.3
+            && api_key(api.as_ref()) == api_key(self.1.inner.harness.as_ref())
+        {
+            return local.attach(api, session, project, servers).await;
+        }
         Ok(self.0.project_mcp(session, project, servers).await?)
     }
-    async fn detach(&self, _: base::Api, _: &str) {}
+    async fn detach(&self, api: base::Api, id: &str) {
+        if let Some(local) = &self.3
+            && api_key(api.as_ref()) == api_key(self.1.inner.harness.as_ref())
+        {
+            local.detach(api, id).await;
+        }
+    }
 }
 
 #[derive(Default)]
@@ -392,7 +419,8 @@ impl Agent {
             transport_websocket::ACP,
             entries,
             move |identity, conn| {
-                let factory = agent.connection_factory(options.compose.clone(), routes.clone());
+                let factory =
+                    agent.connection_factory(options.compose.clone(), routes.clone(), false);
                 let open_routes = open_routes.clone();
                 async move {
                     let _ =
@@ -486,15 +514,23 @@ impl Agent {
         &self,
         compose: Option<Arc<dyn AcpComposition>>,
         routes: Arc<Routes>,
+        shared_writer: bool,
     ) -> Arc<dyn interface_acp::Factory> {
+        let local = Factory(
+            self.clone(),
+            routes,
+            Mutex::default(),
+            Mutex::default(),
+            shared_writer,
+        );
         match compose {
-            Some(compose) => Arc::new(ProjectFactory(compose, self.clone(), Mutex::default())),
-            None => Arc::new(Factory(
+            Some(compose) => Arc::new(ProjectFactory(
+                compose,
                 self.clone(),
-                routes,
                 Mutex::default(),
-                Mutex::default(),
+                shared_writer.then_some(local),
             )),
+            None => Arc::new(local),
         }
     }
 
@@ -526,7 +562,7 @@ impl Agent {
                     })?;
             }
         }
-        Ok(self.connection_factory(compose, routes))
+        Ok(self.connection_factory(compose, routes, false))
     }
 }
 
@@ -535,6 +571,7 @@ struct Factory(
     Arc<Routes>,
     Mutex<Option<Sink>>,
     Mutex<BTreeMap<String, Sink>>,
+    bool,
 );
 #[async_trait::async_trait]
 impl interface_acp::Factory for Factory {
@@ -567,7 +604,8 @@ impl interface_acp::Factory for Factory {
             let mut routes = self.1.attached.lock().unwrap();
             base::ensure!(
                 !routes.contains_key(id)
-                    && (self.0.inner.harness.max_approval_wait_ms().is_some()
+                    && (self.4
+                        || self.0.inner.harness.max_approval_wait_ms().is_some()
                         || base::AgentApi::snapshot(self.0.inner.harness.as_ref(), id).is_err()),
                 interface_acp::request_error("busy", "session is already open by another writer")
             );

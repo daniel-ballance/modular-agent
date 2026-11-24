@@ -215,6 +215,14 @@ fn refuse(status: StatusCode) -> ErrorResponse {
 
 type Tokens<T> = Vec<(sha2::digest::Output<Sha256>, T)>;
 
+#[derive(Debug)]
+pub struct InvalidTokenTable;
+impl std::fmt::Display for InvalidTokenTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid WebSocket token table")
+    }
+}
+impl std::error::Error for InvalidTokenTable {}
 async fn read_tokens<T>(entries: Vec<(PathBuf, T)>) -> Result<Tokens<T>> {
     ensure!(!entries.is_empty(), "no WebSocket tokens configured");
     let mut tokens = Vec::new();
@@ -308,7 +316,7 @@ where
     F: Fn(T, Connection) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    let tokens = read_tokens(entries).await?;
+    let tokens = read_tokens(entries).await.context(InvalidTokenTable)?;
     let tls = acceptor(tls, None)?;
     let (listener, url) = bind(listen, tls.is_some()).await?;
     let stop = CancellationToken::new();

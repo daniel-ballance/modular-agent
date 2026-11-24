@@ -1,3 +1,5 @@
+#[path = "agui/crash.rs"]
+mod crash;
 #[path = "agui/listing.rs"]
 mod listing;
 
@@ -366,8 +368,51 @@ async fn left_open_exchange(
         .json()
         .await?;
     assert_eq!(snapshot["waiting"]["questions"][0], *interrupt);
+    let after = snapshot["waitCursor"].as_str().expect("wait cursor");
+    assert_ne!(snapshot["cursor"], after);
     let next=exchange(&server,json!({"protocolVersion":"1.0","threadId":id,"runId":"answer","messages":snapshot["messages"],"resume":[{"interruptId":interrupt["id"],"status":"resolved","payload":"second"}]})).await?;
     assert_eq!(next.last().unwrap()["outcome"]["type"], "success");
+    let feed = url(&server, &format!("/threads/{id}/wait-closures"));
+    let http = reqwest::Client::new();
+    assert_eq!(
+        http.get(&feed).bearer_auth(TOKEN).send().await?.status(),
+        400
+    );
+    assert_eq!(
+        http.get(format!(
+            "{feed}?after={}",
+            snapshot["cursor"].as_str().unwrap()
+        ))
+        .bearer_auth(TOKEN)
+        .send()
+        .await?
+        .status(),
+        409
+    );
+    let mut reader = http
+        .get(format!("{feed}?after={after}"))
+        .bearer_auth(TOKEN)
+        .send()
+        .await?
+        .error_for_status()?;
+    let mut received = String::new();
+    let item: Value = loop {
+        received.push_str(std::str::from_utf8(
+            &reader.chunk().await?.expect("closure"),
+        )?);
+        if let Some(line) = received
+            .rsplit_once("\n\n")
+            .and_then(|(frames, _)| frames.lines().find_map(|s| s.strip_prefix("data: ")))
+        {
+            break serde_json::from_str(line)?;
+        }
+    };
+    assert!(item["cursor"].is_string());
+    assert_eq!(
+        item,
+        json!({"cursor":item["cursor"],"requestId":interrupt["id"],"reason":"answered"})
+    );
+    drop(reader);
     let page = listing::list_ok(&server, TOKEN, "").await?;
     assert_eq!(page["threads"][0]["waiting"]["questions"], 0);
     assert!(

@@ -79,6 +79,79 @@ pub async fn serve_websocket_factory(
     .await?)
 }
 
+/// A credential and its operator-assigned identity and exact environment roots.
+#[derive(Clone, Debug)]
+pub struct PluginCaller {
+    pub caller_id: String,
+    pub token_file: std::path::PathBuf,
+    pub projects: Vec<std::path::PathBuf>,
+}
+impl PluginCaller {
+    pub fn new(caller_id: impl Into<String>, token_file: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            caller_id: caller_id.into(),
+            token_file: token_file.into(),
+            projects: vec![],
+        }
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct NamedServeOptions {
+    pub listen: String,
+    pub callers: Vec<PluginCaller>,
+    pub tls: Option<crate::TlsOptions>,
+    /// For options read from configuration. Cannot be combined with callers.
+    pub token_file: Option<std::path::PathBuf>,
+}
+/// Selected at upgrade. The token and host-supplied handshake are not factory inputs.
+#[derive(Clone, Debug)]
+pub struct AuthenticatedCaller {
+    pub caller_id: String,
+}
+
+/// Serve independent instances on one plugin listener. Connections for the same
+/// caller share an identity, not an instance, RPC IDs, cancellation or callbacks.
+pub async fn serve_websocket_named(
+    factory: impl Fn(AuthenticatedCaller) -> Plugin + Send + Sync + 'static,
+    options: NamedServeOptions,
+) -> Result<crate::WebSocketServer> {
+    let invalid = |msg| Error::new(Code::InvalidComposition, msg);
+    if options.token_file.is_some() || options.callers.is_empty() {
+        return Err(invalid(
+            "supply a nonempty caller table instead of token_file",
+        ));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    let mut entries = vec![];
+    for caller in options.callers {
+        if caller.caller_id.is_empty() || !ids.insert(caller.caller_id.clone()) {
+            return Err(invalid("empty or duplicate plugin caller ID"));
+        }
+        entries.push((
+            caller.token_file,
+            (
+                AuthenticatedCaller {
+                    caller_id: caller.caller_id,
+                },
+                service_projects(caller.projects)?,
+            ),
+        ));
+    }
+    plugin_stdio::server::serve_websocket_hosts(
+        &options.listen,
+        options.tls,
+        entries,
+        move |(caller, projects)| Served::with_scope(factory(caller), Some(projects), true, true),
+    )
+    .await
+    .map_err(|e| {
+        if e.is::<transport_websocket::InvalidTokenTable>() {
+            invalid("invalid plugin caller credentials")
+        } else {
+            e.into()
+        }
+    })
+}
 fn service_projects(projects: Vec<std::path::PathBuf>) -> Result<Arc<[std::path::PathBuf]>> {
     projects
         .into_iter()
@@ -355,7 +428,7 @@ impl Endpoint for Served {
                         ));
                     }
                 }
-                if r.portable_environment.is_some() {
+                if r.portable_environment.is_some() || environment && self.projects.is_some() {
                     let project = std::path::PathBuf::from(base::wire::string(&p, "project")?);
                     if !project.is_absolute() {
                         return Err(Fault::new(
@@ -388,6 +461,21 @@ impl Endpoint for Served {
             "env/read" | "env/exists" | "env/write" | "env/list" | "env/exec" | "env/save"
             | "env/checkPoint" | "env/restore" | "env/sessionEnded" => {
                 let r = self.registered()?;
+                if self.projects.is_some()
+                    && let Some(name) = p["path"].as_str()
+                {
+                    let guard = self.environment_project.lock().unwrap();
+                    let root = guard.as_ref().ok_or_else(|| {
+                        Fault::new("invalid_request", "environment not initialized")
+                    })?;
+                    let path = std::path::Path::new(base::wire::string(&p, "cwd")?).join(name);
+                    if !plugin_stdio::server::service_path_in_project(root, &path) {
+                        return Err(Fault::new(
+                            "invalid_request",
+                            "path outside the service project",
+                        ));
+                    }
+                }
                 if let Some(env) = &r.portable_environment {
                     let project = self
                         .environment_project

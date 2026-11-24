@@ -344,6 +344,8 @@ pub fn expired_leave_open(branch: &[Entry], scope: &Scope) -> bool {
 
 #[async_trait]
 pub trait InputRequests: Send + Sync {
+    /// Wake a live question after a writer committed a system decision.
+    fn decisions_changed(&self) {}
     async fn ask(
         &self,
         api: Api,

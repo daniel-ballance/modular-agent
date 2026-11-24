@@ -40,7 +40,10 @@ fn right(q: &Question) -> &str {
     }
 }
 fn may_answer(api: &dyn AgentApi, q: &Question, session: &str, actor: &str) -> bool {
-    q.route.iter().any(|s| s == session)
+    q.extra["answerers"]
+        .as_array()
+        .is_none_or(|ids| ids.iter().any(|id| id == actor))
+        && q.route.iter().any(|s| s == session)
         && (session == q.scope.session
             || q.responders.iter().any(|a| a == actor)
             || (actor == ACP_HOST_ACTOR && q.responders.as_slice() == ["user"]))
@@ -110,6 +113,9 @@ impl Questions {
 }
 #[async_trait]
 impl InputRequests for Questions {
+    fn decisions_changed(&self) {
+        self.notify.notify_waiters();
+    }
     async fn ask(&self, api: Api, q: Question, cancel: CancellationToken) -> Result<RequestReply> {
         if q.kind == RequestKind::Secret
             && (q
@@ -187,25 +193,13 @@ impl InputRequests for Questions {
             if !current.answerable {
                 return Ok(RequestReply::Declined);
             }
+            let present = self.present.lock().unwrap().clone();
             if q.kind == RequestKind::Approval
-                && !self
-                    .present
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|((session, actor, _), allowed)| {
-                        *allowed && may_answer(api.as_ref(), &q, session, actor)
-                    })
+                && !present.iter().any(|((session, actor, _), allowed)| {
+                    *allowed && may_answer(api.as_ref(), &q, session, actor)
+                })
             {
-                api.append(
-                    &q.scope,
-                    "feature.questions",
-                    Draft::new(
-                        "request.closed",
-                        false,
-                        json!({"request":q.id,"reason":"noLongerAnswerable"}),
-                    ),
-                )?;
+                self.close_if_open(api.as_ref(), &q, "refused")?;
                 return Ok(RequestReply::Declined);
             }
             tokio::select! {

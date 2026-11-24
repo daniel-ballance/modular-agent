@@ -4531,6 +4531,7 @@ dependencies = [
  "opentelemetry_sdk",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "standard",
  "tempfile",
  "tokio",
@@ -4901,6 +4902,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "tools-code",
 ]
 

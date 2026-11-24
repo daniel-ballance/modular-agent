@@ -887,6 +887,7 @@ fn check_plans(data: &SessionData, plans: &[pending::Plan]) -> Result<()> {
             .flat_map(|plan| &plan.copies)
             .all(|copy| copy.complete && tombstones.contains(&copy.entry_id)),
         registry_unavailable("session has pending erasure or lacks its tombstones")
+            .context(PendingErasure)
     );
     Ok(())
 }

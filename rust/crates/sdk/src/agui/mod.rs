@@ -2,6 +2,9 @@
 //! metadata. The Harness owns every admission, decision and settlement.
 mod input;
 mod listing;
+mod reads;
+mod receipts;
+pub(crate) use receipts::ReceiptFiles;
 mod run;
 mod view;
 use crate::{AcpActor, Agent, Code, Error, InterfaceConnection, Rights, Session};
@@ -164,6 +167,7 @@ struct Routes {
 struct Client {
     run: Arc<tokio::sync::Mutex<()>>,
     cursor: Mutex<Option<Cursor>>,
+    wait_cursors: Mutex<reads::WaitCursors>,
     presence: Mutex<Option<String>>,
     presence_token: Mutex<base::CancellationToken>,
     questions: Mutex<BTreeMap<String, Option<String>>>,
@@ -247,8 +251,7 @@ impl Agent {
         }
         let routes = self.acp_routes();
         if options.acp {
-            self.acp_factory(options.acp_composition.clone(), routes.clone())
-                .await?;
+            self.acp_factory(None, routes.clone()).await?;
         }
         let open_routes = Arc::new(interface_acp::OpenRoutes::default());
         let origins = options.origins;
@@ -273,7 +276,7 @@ impl Agent {
                 let mut response=if req.method()==Method::OPTIONS && origin.is_some() {reply(204,"text/plain",Body::empty())} else if let Some(actor)=actor {
                     if req.uri().path()=="/" && let Some((compose,routes,open))=acp {
                         let identity=actor.acp_identity();
-                        let factory=service.agent.connection_factory(compose,routes);
+                        let factory=service.agent.connection_factory(compose,routes,true);
                         return upgrade.acp(req,move |conn| async move { let _=interface_acp::run_websocket(factory,identity,conn,open).await; }).unwrap_or_else(||Fail::Invalid.response());
                     }
                     let ceiling=Arc::new(base::ConnectionCeiling::new(actor.principal.actor.id.clone(),actor.principal.actor.rights.clone()));
@@ -456,6 +459,18 @@ impl Service {
         let prefix = "/agui/v1";
         if req.method() == Method::GET && path == "/agui/v1/threads" {
             return self.list_threads(&a, req.uri().query()).await;
+        }
+        if req.method() == Method::GET
+            && let Some(path) = path.strip_prefix("/agui/v1/threads/")
+            && let Some(id) = path.strip_suffix("/wait-closures")
+        {
+            return self.wait_closures(a, id, req.uri().query());
+        }
+        if req.method() == Method::GET
+            && let Some(path) = path.strip_prefix("/agui/v1/threads/")
+            && let Some(id) = path.strip_suffix("/run-receipt")
+        {
+            return self.run_receipt(&a, id, req.uri().query()).await;
         }
         if req.uri().query().is_some() {
             return Err(Fail::Invalid);

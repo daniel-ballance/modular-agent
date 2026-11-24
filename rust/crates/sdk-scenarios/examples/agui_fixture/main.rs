@@ -32,6 +32,8 @@ struct Kit {
     dir: PathBuf,
     restarted: bool,
     redacted_client: Mutex<String>,
+    wait_gate: Mutex<(String, String)>,
+    receipt_gate: Mutex<String>,
     api: OnceLock<base::Api>,
     changed: Notify,
     latches: Mutex<BTreeSet<(String, String)>>,
@@ -83,6 +85,18 @@ impl Kit {
         })
         .await;
     }
+    fn held(&self, id: &str, name: &str) -> bool {
+        self.latches
+            .lock()
+            .unwrap()
+            .contains(&(id.into(), format!("hold:{name}")))
+    }
+    async fn pause(&self, id: &str, name: &str) {
+        if self.held(id, name) {
+            self.latch(id, name);
+            self.barrier(id, "released").await;
+        }
+    }
     fn inspect(&self, id: &str) -> Result<Value> {
         let d = self.file(id)?;
         let journal = lines(self.dir.join(format!("{id}.batches")))?;
@@ -117,12 +131,127 @@ impl Kit {
         let scope = base::Scope::session(id);
         match v["operation"].as_str() {
             Some("inspect") => return self.inspect(id),
+            Some("openWait") if v["kind"] == "leaveOpen" => {
+                let api = self.api()?.clone();
+                api.submit(
+                    id,
+                    "kit-owner",
+                    "Ask inside the pending call.",
+                    base::Timing::Now,
+                    None,
+                )
+                .await?;
+                let thread = id.to_owned();
+                tokio::spawn(async move { api.next_turn(&thread).await });
+                let question = |d: base::SessionData| {
+                    base::questions(&d)
+                        .ok()?
+                        .into_iter()
+                        .find(|q| q.extra["whenTimeLimit"] == "leaveOpen")
+                };
+                self.until(|| self.file(id).ok().and_then(question).is_some())
+                    .await;
+                return Ok(
+                    json!({"requestId":question(self.file(id)?).context("leaveOpen question")?.id}),
+                );
+            }
+            Some("openWait") => {
+                let kind = v["kind"].as_str().context("kind")?;
+                let mut scope = scope;
+                scope.actor = "kit-owner".into();
+                let mut q = base::Question::new(
+                    scope,
+                    if kind == "approval" {
+                        base::RequestKind::Approval
+                    } else {
+                        base::RequestKind::Choice
+                    },
+                    "Choose a label.",
+                );
+                q.options = vec!["yes".into(), "no".into()];
+                if kind == "revocable" {
+                    q.extra = json!({"answerers":["kit-owner"]});
+                }
+                if matches!(kind, "deadline" | "leaveOpen") {
+                    q.timeout_ms = Some(5000);
+                    q.extra =
+                        json!({"whenTimeLimit":if kind=="deadline"{"decline"}else{"leaveOpen"}});
+                }
+                let request = q.id.clone();
+                let api = self.api()?.clone();
+                let service = base::requests(api.as_ref())?;
+                tokio::spawn(
+                    async move { service.ask(api, q, base::CancellationToken::new()).await },
+                );
+                self.until(|| {
+                    self.file(id).is_ok_and(|s| {
+                        s.entries.iter().any(|e| {
+                            e.kind == "request.open"
+                                && e.content.as_ref().is_some_and(|v| v["id"] == request)
+                        })
+                    })
+                })
+                .await;
+                return Ok(json!({"requestId":request}));
+            }
+            Some("hold") => {
+                self.latch(id, &format!("hold:{}", v["name"].as_str().context("name")?))
+            }
+            Some("waitGate") => {
+                *self.wait_gate.lock().unwrap() = (
+                    v["requestId"].as_str().context("request")?.into(),
+                    v["mode"].as_str().context("mode")?.into(),
+                )
+            }
+            Some("revokeRight") => {
+                let right = v["right"].as_str().context("right")?;
+                let rights = Rights::full()
+                    .0
+                    .into_iter()
+                    .filter(|r| r != right)
+                    .collect();
+                self.api()?.grant(&scope, "kit-owner", Rights(rights))?;
+            }
+            Some("expireWaitCursor") => base::advance_clock_for_test(300_001),
+            Some("receiptGate") => {
+                *self.receipt_gate.lock().unwrap() = v["mode"].as_str().context("gate mode")?.into()
+            }
+            Some("barrier") if v["name"] == "terminalRecorded" => {
+                use sha2::{Digest, Sha256};
+                let key = format!(
+                    "{:x}",
+                    Sha256::digest(
+                        json!(["agui:receipt:1", id, "kit-owner", "kit-primary", v["runId"]])
+                            .to_string()
+                    )
+                );
+                self.barrier(id, &format!("terminal:{key}")).await;
+            }
+            Some("barrier") if v["name"] == "recoveryEnded" => {
+                self.until(|| {
+                    self.file(id).is_ok_and(|d| {
+                        d.entries.iter().filter(|e| e.kind == "turn.end").count() >= 2
+                    })
+                })
+                .await
+            }
             Some("tls") => return read(self.dir.join("tls-client.json")),
             Some("approvalGate") if v["mode"] == "redact" => {
                 *self.redacted_client.lock().unwrap() =
                     v["client"].as_str().context("client")?.into();
             }
-            Some("barrier") if self.name.starts_with("waiting-") && v["name"] == "presenceLost" => {
+            Some("barrier") if self.name == "closure-presence" && v["name"] == "presenceLost" => {
+                self.barrier(id, "presenceLost").await;
+                self.until(|| {
+                    self.file(id)
+                        .is_ok_and(|d| d.entries.iter().any(|e| e.kind == "request.closed"))
+                })
+                .await;
+            }
+            Some("barrier")
+                if (self.name.starts_with("waiting-") || self.name.starts_with("closure-"))
+                    && v["name"] == "presenceLost" =>
+            {
                 self.barrier(id, "presenceLost").await
             }
             Some("barrier") if v["name"] == "presenceLost" => {
@@ -160,6 +289,23 @@ impl Kit {
             Some("advance") => {
                 let ms = v["milliseconds"].as_u64().context("time")?;
                 base::advance_clock_for_test(ms);
+                if self.name.starts_with("closure-") {
+                    self.until(|| {
+                        self.file(id).is_ok_and(|d| {
+                            d.entries.iter().any(|e| {
+                                if self.name == "closure-left-open" {
+                                    e.kind == "tool.pending"
+                                } else {
+                                    e.kind == "request.closed"
+                                        && e.content
+                                            .as_ref()
+                                            .is_some_and(|v| v["reason"] == "timeLimit")
+                                }
+                            })
+                        })
+                    })
+                    .await;
+                }
                 if self.name.starts_with("waiting-") {
                     fs::write(self.dir.join("clock"), base::now().to_string())?;
                 }
@@ -212,8 +358,27 @@ impl log::Log for Logger {
     }
     fn log(&self, r: &log::Record<'_>) {
         match r.target() {
+            "modular_agent::agui::terminal_recorded" => {
+                if let Some((id, key)) = r.args().to_string().split_once(' ') {
+                    self.0.latch(id, &format!("terminal:{key}"));
+                }
+            }
+            "modular_agent::agui::report_committed" if self.0.name == "receipt-result" => {
+                let id = r.args().to_string();
+                if self.0.held(&id, "afterResult") {
+                    tokio::task::block_in_place(|| {
+                        self.0.latch(&id, "afterResult");
+                        loop {
+                            std::thread::park();
+                        }
+                    });
+                }
+            }
             "modular_agent::agui::warning" => {
                 let _ = self.0.append("warnings", json!(r.args().to_string()));
+            }
+            "modular_agent::agui::wait_following" => {
+                self.0.latch(&r.args().to_string(), "waitFollowing")
             }
             "modular_agent::agui::presence_lost" => {
                 self.0.latch(&r.args().to_string(), "presenceLost")
@@ -253,7 +418,7 @@ async fn serve(config: Value) -> Result<()> {
     let dir = PathBuf::from(std::env::var("MODULAR_AGENT_DATA_DIR")?);
     if config["name"]
         .as_str()
-        .is_some_and(|s| s.starts_with("waiting-"))
+        .is_some_and(|s| s.starts_with("waiting-") || s.starts_with("closure-"))
     {
         let clock = dir.join("clock");
         let at = if clock.exists() {
@@ -283,6 +448,8 @@ async fn serve(config: Value) -> Result<()> {
         dir: dir.clone(),
         restarted,
         redacted_client: Default::default(),
+        wait_gate: Default::default(),
+        receipt_gate: Default::default(),
         api: Default::default(),
         changed: Default::default(),
         latches: Default::default(),
@@ -302,11 +469,21 @@ async fn serve(config: Value) -> Result<()> {
         inner: history_fs::FileHistory::new(&dir.join("ledger"))?,
         state: k.clone(),
     };
+    let mut steps = read(std::env::var("MODULAR_AGENT_SCRIPT")?)?;
+    if k.name == "closure-left-open" {
+        steps
+            .as_array_mut()
+            .context("fixture script")?
+            .insert(1, json!({"toolCalls":[{"name":"kit_choose","input":{}}]}));
+    }
     let script = standard::script::Script::new(
-        read(std::env::var("MODULAR_AGENT_SCRIPT")?)?,
+        steps,
         Some(std::env::var("MODULAR_AGENT_SCRIPT_LOG")?.into()),
     );
-    let durable = k.name != "crash-before-handoff";
+    let durable = !matches!(
+        k.name.as_str(),
+        "crash-before-handoff" | "receipt-after-admission"
+    );
     let mut builder = Agent::builder()
         .project(&project)
         .plugin_host(true)
@@ -326,11 +503,15 @@ async fn serve(config: Value) -> Result<()> {
         ))
         .model("scripted/script")
         .approval_covers_nested(k.name.starts_with("approval") || k.name.starts_with("waiting-"))
-        .approval(if k.name.starts_with("approval") {
-            sdk::Approval::All
-        } else {
-            sdk::Approval::Off
-        })
+        .approval(
+            if k.name.starts_with("approval")
+                || matches!(k.name.as_str(), "closure-presence" | "closure-routes")
+            {
+                sdk::Approval::All
+            } else {
+                sdk::Approval::Off
+            },
+        )
         .setting("approval_timeout_ms", json!(5000))
         .interface_tools([sdk::InterfaceToolSource {
             source_id: "kit.palette".into(),
@@ -378,6 +559,20 @@ async fn serve(config: Value) -> Result<()> {
         } else {
             builder = builder.tool(sdk::testing::fixtures::counter(counter));
         }
+    }
+    if k.name == "closure-left-open" {
+        builder = builder.tool(sdk::Tool::new("kit_choose", "Choose a label").run(
+            |_: Value, cx| async move {
+                cx.ask_with(
+                    sdk::Ask::choice("Choose a label.", &["yes", "no"]),
+                    sdk::AskWait {
+                        wait: std::time::Duration::from_secs(5),
+                    },
+                )
+                .await?;
+                Ok("Answered.".to_owned())
+            },
+        ));
     }
     builder = hooks::install(builder, &k);
     let agent = builder.build().await?;
