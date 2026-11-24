@@ -127,8 +127,8 @@ function checkCommits(spans, report) {
   }
 }
 
-function checkPlugin({ connections, handshake, scenario }, spans, tools, calls) {
-  const wire = inspectWire(connections, handshake);
+function checkPlugin({ connections, scenario }, spans, tools, calls) {
+  const wire = inspectWire(connections);
   const nested = scenario === "nested-call";
   assert.equal(connections.length, nested ? 2 : 1, "Plugin connection count");
   assert.equal(wire.calls.length, calls.length, "Wire tools/call count");
@@ -144,11 +144,9 @@ function checkPlugin({ connections, handshake, scenario }, spans, tools, calls) 
     const client = one(findRpc("tools/call", rpc.plugin, "CLIENT"), "Plugin client span");
     attrs(client, { [conversation]: tool.a[conversation], [turn]: tool.a[turn], [step]: tool.a[step] });
     parent(client, tool);
-    if (handshake === "agreed") {
-      assert(same(client, rpc.context), "Injected context does not identify plugin client span");
-      const server = one(findRpc("tools/call", rpc.plugin, "SERVER"), "Plugin server span");
-      parent(server, client);
-    }
+    assert(same(client, rpc.context), "Injected context does not identify plugin client span");
+    const server = one(findRpc("tools/call", rpc.plugin, "SERVER"), "Plugin server span");
+    parent(server, client);
   }
   if (nested) {
     const inner = one(calls.filter(c => c.parentCallId), "Nested call observation");
@@ -159,13 +157,11 @@ function checkPlugin({ connections, handshake, scenario }, spans, tools, calls) 
     assert.equal(callback.response?.result?.callId, inner.id, "Callback did not return the nested call ID");
     assert.equal(callback.response?.result?.status, inner.status, "Nested callback did not settle");
     assert.equal(tools.get(inner.id).traceId, outer.traceId, "Nested tool is not in the parent tool trace");
-    if (handshake === "agreed") {
-      assert.equal(callback.context.traceId, outer.traceId, "Callback is not in the parent tool trace");
-      const client = one(findRpc("host/tools/call", callback.plugin, "CLIENT"), "Callback client span");
-      assert(same(callback.context, client), "Injected callback context does not identify the client span");
-      const server = one(findRpc("tools/call", callback.plugin, "SERVER"), "Parent plugin server span");
-      parent(client, server);
-    }
+    assert.equal(callback.context.traceId, outer.traceId, "Callback is not in the parent tool trace");
+    const client = one(findRpc("host/tools/call", callback.plugin, "CLIENT"), "Callback client span");
+    assert(same(callback.context, client), "Injected callback context does not identify the client span");
+    const server = one(findRpc("tools/call", callback.plugin, "SERVER"), "Parent plugin server span");
+    parent(client, server);
   }
 }
 
@@ -176,7 +172,7 @@ const counts = {
 };
 
 export function compareTrace({ testCase, report, received, atPark, connections = [], scriptedReplies = [], sentinels }) {
-  const { scenario, placement, handshake, sdk } = testCase;
+  const { scenario, placement, sdk } = testCase;
   const { sessionId, turnId } = report;
   assert.equal(report.scenario, scenario, "Runner reported the wrong scenario");
   assert.equal(report.placement, placement, "Runner reported the wrong placement");
@@ -307,7 +303,7 @@ export function compareTrace({ testCase, report, received, atPark, connections =
   if (scenario === "question-answered") checkQuestion(report, spans, toolResults);
   if (scenario === "first-turn") checkCommits(spans, report);
   if (crashing) rejectBaggage(report.crash);
-  if (placement.startsWith("process:")) checkPlugin({ connections, handshake, scenario }, spans, toolResults, calls);
+  if (placement.startsWith("process:")) checkPlugin({ connections, scenario }, spans, toolResults, calls);
 }
 
 function findEvents(spans, name) {
