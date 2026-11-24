@@ -31,7 +31,7 @@ This is the first attempt at the [acceptance test](../architecture.md#how-we-wil
 
 | Our part | Pi | DeepSeek Harness | Pydantic AI | T3 Code |
 |---|---|---|---|---|
-| Harness | `pi-coding-agent`, with most features built in | its plugin host and core packages | the `Agent`, which combines plugins; the application owns sessions | sits above whole agents ([open](../open-questions.md#a-layer-above-the-agent)) |
+| Harness | `pi-coding-agent`, with most features built in | its plugin host and core packages | the `Agent`, which combines plugins; the application owns sessions | sits above whole agents ([open](../contracts.md#interface-and-harness)) |
 | Plugin | extension | plugin | capability | the extension it injects into Pi |
 | Runtime | `pi-agent-core` | the agent-loop plugin | the agent graph | each agent it drives |
 | Provider | `pi-ai` | model adapters | models and providers | none: each agent brings its own |

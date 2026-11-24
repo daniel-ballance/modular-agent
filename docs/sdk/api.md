@@ -177,7 +177,7 @@ A structured result is requested with `options.result`, a JSON Schema 2020-12 sc
 | Input | `inputAccepted`, `inputWithdrawn`, `inputHandedBack` |
 | Turns and steps | `turnStarted`, `turnEnded`, `stepStarted`, `stepEnded` |
 | Model output | `text`, `reasoning`, `toolInput`, `audio` |
-| Tools | `toolCall` (requested), `toolStarted`, `toolOutput` (progress), `toolResult` (ended) |
+| Tools | `toolCall` (requested), `toolStarted`, `toolOutput` (progress as `content`, including plain text), `toolResult` (ended) |
 | Questions | `questionOpened`, `questionAnswered`, `questionClosed`, `questionNoLongerAnswerable` |
 | Jobs | `jobStarted`, `jobProgress`, `jobEnded` |
 | History | `entry`, `positionMoved`, `entriesErased` |
