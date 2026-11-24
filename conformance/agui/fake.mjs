@@ -9,6 +9,7 @@ import { dispatch, offer, simple, transformed } from './cases.mjs';
 import { MAX, PATH, parse } from './wire.mjs';
 import { fakeFixture, makeSession } from './fake-fixture.mjs';
 import { fakeWaiting } from './fake-waiting.mjs';
+import { fakeClosures } from './fake-closures.mjs';
 
 export const fixtureTokens = () => Object.fromEntries(['owner', 'rotated', 'watch', 'sibling', 'foreign', 'tenant', 'project'].map(key => [key, randomUUID()]));
 
@@ -29,7 +30,7 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault, sc
   let clock = Date.now();
   const waits = scenario?.startsWith('waiting-');
   const covers = (waits || scenario?.startsWith('approval')) && fault !== 'no-covered-approvals';
-  const fixture = waits ? fakeWaiting(scenario, fault, model, covers) : scenario && fakeFixture(scenario, fault, model, covers);
+  const fixture = scenario?.startsWith('closure-') ? fakeClosures(scenario, fault, model) : waits ? fakeWaiting(scenario, fault, model, covers) : scenario && fakeFixture(scenario, fault, model, covers);
   const declaration = { interfaceTools: true, telemetry: 1, ...(covers && { approvalCoversNested: true }), ...(waits && { approvalsOutlastTurns: true, portableSessions: true, questionsOutlastTurns: true, lateAnswersStartTurns: true }) };
   const sockets = new WebSocketServer({ noServer: true, handleProtocols: protocols => protocols.has('modular-agent-acp-1') ? 'modular-agent-acp-1' : false });
   const peer = request => Object.keys(tokens).find(key => request.headers.authorization === `Bearer ${tokens[key]}`);
@@ -87,7 +88,7 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault, sc
         sessions.set(threadId, { ...makeSession(), threadId, messages: [], views: new Map(), runs: new Set(), presence: new Set() });
         return json(res, 201, { threadId, declaration });
       }
-      const threadId = path === '/run' ? data?.threadId : /^\/threads\/([^/]+)(?:\/presence)?$/.exec(path)?.[1];
+      const threadId = path === '/run' ? data?.threadId : /^\/threads\/([^/]+)(?:\/(?:presence|wait-closures|run-receipt))?$/.exec(path)?.[1];
       const session = sessions.get(threadId);
       if (!session || (['tenant', 'project'].includes(client) && fault !== 'outside-scope')) return missing(res);
       fixture?.reopen(session);
@@ -99,6 +100,7 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault, sc
         return { messages, cursor, lastMessageId };
       };
       const sseHeaders = () => res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store' });
+      if (req.method === 'GET' && path.endsWith('/wait-closures')) return fixture?.feed ? fixture.feed(session, client, url, res, error) : missing(res);
       if (req.method === 'GET' && path.endsWith('/presence')) {
         if (session.presence.has(client)) return conflict(res);
         session.presence.add(client); sseHeaders(); res.write(': presence\n\n');
@@ -114,7 +116,7 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault, sc
         if (fault === 'keep-presence' && scenario === 'approval-lost' && client === 'owner') return json(res, 200, { threadId, declaration, ...snapshot(), waiting: { questions: [session.question], toolCalls } });
         if (fault === 'wait-snapshot-tool' && session.question) toolCalls.push({ toolCallId: session.question.toolCallId, expiresAt: session.question.expiresAt });
         const questions = fixture?.questions?.(session, client) ?? (fixture?.eligible(session, client) ? [session.question] : []);
-        return json(res, 200, { threadId, declaration, ...snapshot(), waiting: { questions, toolCalls } });
+        return json(res, 200, { threadId, declaration, ...snapshot(), ...fixture?.snapshot?.(session, client), waiting: { questions, toolCalls } });
       }
       if (req.method !== 'POST' || path !== '/run') return missing(res);
       const { protocolVersion, runId, messages, tools = [], context = [], resume = [] } = data;
