@@ -2,6 +2,12 @@
 
 The four SDKs and `ma` share one project version. The [SDK specification](docs/sdk/README.md) has its own revision. Nothing is published to a registry; a version names a commit on `main`.
 
+## Unreleased
+
+- **Approvals that wait past their turn ([ADR 0034](docs/adr/0034-approvals-that-wait.md)), in all four SDKs.** With an operator maximum (`maxApprovalWaitMs`) and a session that opts in (`approvalWait: "untilDeadline"`), a model's call to a server tool that needs approval ends the turn unstarted, so the agent's process can stop. An approver who returns later is shown the exact call and answers on that route; one continuation then rechecks consent, rights, registration, input and the deadline before the call runs, and refuses a call that changed. The ACP and AG-UI kits, the shared scenarios (28 more, run only for agents that declare the feature) and the telemetry check cover it. `ma` does not use it yet.
+- **Specified, not yet implemented:** [approvals that cover nested calls](docs/contracts.md#approvals-that-cover-nested-calls), `ma`'s approval setting, and [ADR 0035](docs/adr/0035-host-limits-from-the-ops-desk.md) (wait-closure feed, run receipts, named plugin callers).
+- **Fixed:** in TypeScript, a shell command could start before its cleanup watcher was registered, so a `kill -9` at that moment could leave it running.
+
 ## 0.2.0
 
 The second release, on Linux and macOS. It serves agents to web apps over AG-UI, lets a client run tools, traces every agent with OpenTelemetry, and adds a demonstration host that drives three agents.
