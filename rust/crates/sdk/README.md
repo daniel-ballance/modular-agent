@@ -189,7 +189,6 @@ The Harness declares `telemetry: 1`, whether export is installed or not. Set `Ag
 
 ## Findings for the SDK specification
 
-- **[Languages, Rust](../../../docs/sdk/languages.md#rust):** Proposed insertion: “Set the operator bound with `AgentBuilder::max_approval_wait_ms(u64)`. Opt in separately through `SessionOptions::settings` or `Session::set_setting("approvalWait", json!("untilDeadline"))`. Use `Session::questions_present().await?` for an answerable delivery on that handle. `Session::questions()` is a listing, not a delivery.”
 
 
 - **[Placement, plugin environment scope](../../../docs/sdk/placement.md):** Add “In Rust a WebSocket plugin listener serves one operator-assigned host trust scope. Use `serve_websocket_factory` for a working environment and set `ServeOptions.projects` to its exact canonical roots. Use independent factories, retained state, credentials and confinement for isolated hosts. A callback invoked by two connections may share captured state only if the operator intentionally provided shared trusted code.” The base conformance plugin also accepts `--serve-plugin --listen ADDR --host-policy FILE`. Give it a JSON list of `{ "tokenFile": "…", "project": "…", "state": "…" }` entries with distinct credentials and nonoverlapping existing project and state directories. Relative paths resolve beside the policy. The host's `home` does not choose retained state.

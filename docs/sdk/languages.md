@@ -62,6 +62,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - Minimum Rust version: the one pinned in `rust/mise.toml`. Edition 2024.
 - Subscription Providers: `chatgpt(ChatGptOptions::new(subscription_logins(path)))` and `grok(GrokOptions::new(subscription_logins(path)))`, given to `AgentBuilder::provider`. `sign_in` and `sign_out` are async and take `"chatgpt"` or `"grok"`. `SignInOptions::paste` is an optional Tokio receiver of pasted lines, ignored for Grok. `AgentBuilder::claude_provider(claude(ClaudeOptions::default())?)` starts the Claude program as a process plugin; it needs Node.js 22 or later.
 - Interface-run tools: `AgentBuilder::interface_tools` registers them. A binding attaches an executor with `Session::connect_interface_tools(route_id, actor_id, rights)`, takes calls with `next_call().await` and reports with `report_tool_result(report).await`.
+- Approvals that wait: set the operator bound with `AgentBuilder::max_approval_wait_ms(u64)`; a session opts in through `SessionOptions::settings` or `Session::set_setting("approvalWait", json!("untilDeadline"))`. `Session::questions_present().await?` is an answerable delivery on that handle; `Session::questions()` is a listing, not a delivery.
 
 ## TypeScript
 
@@ -77,6 +78,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - ACP's `compose(project, saved?)` takes an optional `SessionInfo`. `projectSettings(project)` and `projectMcp(project)` may be async. The stdio actor id comes from `actorId`, then `MODULAR_AGENT_ACTOR`, then `acp-user`.
 - No default exports.
 - Subscription Providers come from `@modular-agent/subscription` (`subscriptionLogins(path)`, `chatgpt({ logins, … })`, `grok({ logins, … })`, `signIn(provider, logins, options)` and `signOut(provider, logins)`, with `provider` `"chatgpt"` or `"grok"`) and `@modular-agent/claude` (`claude(options)`, in process on Anthropic's Agent SDK). The Claude package also has the program the Rust and Go SDKs start.
+- Approvals that wait: set `maxApprovalWaitMs` in `createAgent`; a session opts in with `approvalWait: "untilDeadline"` at creation or through `session.setSetting`. `session.questions({ present: true })` is an answerable delivery on that handle; a plain listing is not.
 
 ## Go
 
@@ -94,6 +96,7 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - Minimum Go version: the one pinned in `go/mise.toml`.
 - Subscription Providers are in package `subscription`: `SubscriptionLogins(path)`, `SignIn`, `SignOut`, `ChatGPT`, `Grok` and `Claude`. `Grok(subscription.GrokOptions{Logins: logins})` returns a Provider; `SignIn(ctx, "grok", logins, options)` runs its device sign-in. `Claude` starts the TypeScript Claude program as a process plugin; it needs Node.js 22 or later.
 - Interface-run tools: `modular.WithInterfaceTools(...)` registers them. A binding attaches an executor with `Agent.ConnectInterfaceTools`, then pulls handoffs with `NextHandoff` (Go's form of `onHandoff`) and reports with `ReportToolResult`.
+- Approvals that wait: `WithMaxApprovalWaitMs(ms)` sets the operator bound; a session opts in with `SessionOptions.Settings["approvalWait"]` or `SetSetting(ctx, "approvalWait", "untilDeadline")`. `Questions(ctx, modular.QuestionsOptions{Present: true})` is an answerable delivery on that handle; a plain listing is not.
 
 ## Python
 
