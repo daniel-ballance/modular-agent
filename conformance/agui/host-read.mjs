@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 
 // Check the offered read on the actual thread snapshot.
 export function hostRead(field, model, run, { restart, roles = [], control = true } = {}) {
-  return { model, control, restart, async run(peer) {
+  return { model, control, restart, roles, async run(peer) {
     const { threadId } = await peer.api.create();
     const view = await peer.api.view(threadId);
     assert.ok(Object.hasOwn(view, field), `thread snapshot does not offer ${field}`);

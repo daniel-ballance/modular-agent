@@ -26,11 +26,12 @@ const registration = (d) => id(d.source?.plugin) && id(d.source?.toolSource) && 
 const status = ["completed", "failed", "refused", "cancelled", "notStarted", "outcomeUnknown"];
 
 const valid = {
-	inputAccepted: (e, d) => authority(d) && (e.jobId ? (id(d.releasedBy) || typeof d.parked === "boolean") : taken(d.taken)) && id(e.actorId) && id(e.inputId) && content(d.content) && opt(d, "key", id) && opt(d, "parked", (p) => typeof p === "boolean") && ["now", "steer", "after", "propose"].includes(d.when),
+	inputAccepted: (e, d) => authority(d) && opt(d, "releasedBy", id) && opt(d, "taken", taken) && (id(d.releasedBy) || (e.jobId ? typeof d.parked === "boolean" : taken(d.taken))) && id(e.actorId) && id(e.inputId) && content(d.content) && opt(d, "key", id) && opt(d, "parked", (p) => typeof p === "boolean") && ["now", "steer", "after", "propose"].includes(d.when),
 	inputHandedBack: (e, d) => id(e.inputId) && ["withdrawn", "declined", "cancelled", "restart", "conflict", "handled", "turnEnded"].includes(d.reason),
 	input: (e) => id(e.actorId) && id(e.turnId) && id(e.inputId) && e.message?.role === "user" && content(e.message.content),
-	turnStart: (e, d) => authority(d) && id(e.turnId) && id(d.startedBy?.id) && ["actor", "job", "plugin", "answer", "toolResult"].includes(d.startedBy.kind) && (d.model === null || model(d.model)) && typeof d.system === "string" && Array.isArray(d.tools) && obj(d.settings) && opt(d, "context", content) && opt(d, "point", id),
+	turnStart: (e, d) => authority(d) && id(e.turnId) && id(d.startedBy?.id) && ["actor", "job", "plugin", "answer", "toolResult"].includes(d.startedBy.kind) && (!["answer", "toolResult"].includes(d.startedBy.kind) || id(e.continuesTurnId)) && (d.model === null || model(d.model)) && typeof d.system === "string" && Array.isArray(d.tools) && obj(d.settings) && opt(d, "context", content) && opt(d, "point", id),
 	modelRequest: (e, d) => id(e.stepId) && model(d.model) && typeof d.safeToRepeat === "boolean" && ids(d.tools) && Object.hasOwn(d, "request") === d.safeToRepeat && opt(d, "request", (r) => obj(r) && typeof r.systemPrompt === "string" && Array.isArray(r.messages) && obj(r.settings) && Array.isArray(r.tools) && r.tools.length === d.tools.length && r.tools.every((t, i) => t?.name === d.tools[i])),
+	"modular-agent.stepAfter": (e, d) => id(e.stepId) && id(e.turnId) && !e.modelVisible && (d.decision === null || typeof d.decision?.refuse === "string"),
 	response: (e) => id(e.stepId) && e.message?.role === "assistant" && content(e.message.content) && id(e.message.stop) && opt(e.message, "usage", usage),
 	toolStarted: (e, d) => authority(d) && registration(d) && d.definition.name === d.call?.name && id(e.toolCallId) && id(e.actorId) && d.call?.actorId === e.actorId && d.call?.id === e.toolCallId && id(d.call.name) && obj(d.call.input) && typeof d.safeToRepeat === "boolean",
 	toolPending: (e, d) => id(e.toolCallId) && id(e.turnId) && e.modelVisible === false && someIds(d.requestIds) && opt(d, "toolStartedId", id),
@@ -61,7 +62,7 @@ export function portableProblems(sessionId, entries) {
 	const say = (e, message) => out.push(`${e.kind ?? "?"} ${String(e.id).slice(0, 8)}: ${message}`);
 	const byId = new Map(), turns = new Set(), attempts = new Map(), replies = new Set(), tools = new Set(), jobs = new Set(), admitted = new Map();
 	const terminals = new Map([["turnEnd", new Set()], ["toolResult", new Set()], ["jobEnded", new Set()]]);
-	const questions = new Map(), pending = new Map();
+	const questions = new Map(), pending = new Map(), decisions = new Set();
 	const sameScope = (a, b) => a && b && ["turnId", "stepId", "toolCallId"].every((k) => a[k] === b[k]);
 	const members = new Map();
 	let head = null, tenant, limit = null;
@@ -110,7 +111,10 @@ export function portableProblems(sessionId, entries) {
 				if (Array.isArray(d.requestIds) && d.requestIds.some((i) => questions.has(i) && !sameScope(questions.get(i), e))) say(e, "pending checkpoint changes the question scope");
 			}
 		}
-		if (e.kind === "inputAccepted") admitted.set(e.inputId, e);
+		if (e.kind === "inputAccepted") {
+			if (d.releasedBy && !admitted.has(e.inputId)) say(e, "release without an earlier admission");
+			admitted.set(e.inputId, e);
+		}
 		if (["input", "inputHandedBack"].includes(e.kind) && !admitted.has(e.inputId)) say(e, "no earlier admission");
 		if (e.continuesTurnId !== undefined && e.kind === "turnStart" && !turns.has(e.continuesTurnId)) say(e, "unknown continuation origin");
 		if (e.kind === "turnStart") {
@@ -122,8 +126,13 @@ export function portableProblems(sessionId, entries) {
 			attempts.set(e.stepId, e);
 		} else if (e.kind === "response") {
 			const intent = attempts.get(e.stepId);
-			if (!intent || intent.turnId !== e.turnId || !e.sources?.includes(intent.id) || replies.has(e.stepId)) say(e, "unknown, mismatched or repeated model attempt");
+			if (!intent || intent.turnId !== e.turnId || (!Array.isArray(e.sources) || !e.sources.includes(intent.id)) || replies.has(e.stepId)) say(e, "unknown, mismatched or repeated model attempt");
 			replies.add(e.stepId);
+		} else if (e.kind === "modular-agent.stepAfter") {
+			const intent = attempts.get(e.stepId);
+			if (!replies.has(e.stepId) || intent?.turnId !== e.turnId || intent?.data?.auxiliary || decisions.has(e.stepId))
+				say(e, "step decision needs one answered step attempt");
+			decisions.add(e.stepId);
 		}
 		if (e.kind === "toolStarted") {
 			if (terminals.get("toolResult").has(e.toolCallId)) say(e, "tool started after terminal result");

@@ -5,10 +5,11 @@ repo="$(cd "$(dirname "$0")/.." && pwd)"
 language="${1:?language required}"
 case "$language" in rust|typescript|go|python) ;; *) echo "unknown language: $language" >&2; exit 2 ;; esac
 group="${2:?ACP group required}"
+flags=(--group "$group")
 case "$group" in
-  core) registry=reference/agents; flags=(--crash-checks --probe-checks --job-checks); args=(--acp --approval off) ;;
-  covered) registry=reference/agents; flags=(); args=(--acp --approval off) ;;
-  waiting) registry=sdk/fixtures; flags=(); args=(acp-waiting) ;;
+  core) registry=reference/agents; flags+=(--crash-checks --probe-checks --job-checks); args=(--acp --approval off) ;;
+  covered) registry=reference/agents; args=(--acp --approval off) ;;
+  waiting) registry=sdk/fixtures; args=(acp-waiting) ;;
   *) echo "use core, covered or waiting; production groups need production-kits.sh" >&2; exit 2 ;;
 esac
 command=()
@@ -19,4 +20,4 @@ while IFS= read -r arg; do command+=("$arg"); done < <(
 [[ ${#command[@]} -gt 0 ]] || { echo "missing $language $registry launcher" >&2; exit 1; }
 cd "$repo/conformance/acp"
 export MODULAR_AGENT_CONFORMANCE=1
-exec node run.mjs --group "$group" ${flags[@]+"${flags[@]}"} -- "${command[@]}" "${args[@]}"
+exec node run.mjs "${flags[@]}" -- "${command[@]}" "${args[@]}"
