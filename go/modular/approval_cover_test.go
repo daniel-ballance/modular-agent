@@ -2,6 +2,7 @@ package modular_test
 
 import (
 	"context"
+	"encoding/json"
 	"sync/atomic"
 	"testing"
 
@@ -50,6 +51,43 @@ func TestApprovalCoversNestedDispatch(t *testing.T) {
 		t.Fatal("approval did not disclose coverage")
 	}
 	checkCoverage(t, s, q, 2)
+}
+
+func TestCoveredApprovalSurvivesGateRecheckNotChangedInput(t *testing.T) {
+	var questions atomic.Int32
+	parent := modular.NewTool("parent", "parent", func(ctx context.Context, in bumpInput, tc *modular.ToolContext) (string, error) {
+		r, err := tc.Tools.Call(ctx, "leaf", in)
+		return r.Text(), err
+	})
+	leaf := modular.NewTool("leaf", "leaf", func(_ context.Context, in bumpInput, _ *modular.ToolContext) (string, error) {
+		if in.N != 2 {
+			t.Errorf("leaf input %d", in.N)
+		}
+		return "done", nil
+	})
+	gate := modular.Plugin{Name: "fix-input", Setup: func(r *modular.Registrar) error {
+		return r.OnToolBefore(func(_ context.Context, v modular.ToolBefore) (modular.Gate, error) {
+			if v.Call.Name == "parent" {
+				return modular.Gate{Input: json.RawMessage(`{"n":2}`)}, nil
+			}
+			return modular.Gate{}, nil
+		})
+	}}
+	a := modulartest.Agent(t, modular.WithApproval(modular.All), modular.WithApprovalCoversNested(true), modular.WithTool(parent), modular.WithTool(leaf), modular.WithPlugin(gate), modular.WithOnQuestion(func(_ context.Context, q modular.Question) (modular.Answer, error) {
+		if !q.CoversNested || q.Call.Name != "parent" || string(q.Call.Input) != `{"n":2}` {
+			t.Errorf("wrong approval view: %+v", q)
+		}
+		questions.Add(1)
+		return modular.Allow(), nil
+	}))
+	s, err := a.Session(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := s.CallTool(t.Context(), "parent", bumpInput{1})
+	if err != nil || r.Text() != "done" || questions.Load() != 1 {
+		t.Fatalf("result %+v (%v), %d questions for the same dispatch", r, err, questions.Load())
+	}
 }
 
 func TestCoveredApprovalBoundaries(t *testing.T) {

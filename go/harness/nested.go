@@ -17,7 +17,8 @@ const MaxNestedDepth = 8
 
 // ConfigureCoveredApprovals is set at composition, only with the approval plugin.
 func (h *Harness) ConfigureCoveredApprovals(on bool) { h.approvalCoversNested = on }
-func (c *client) SupportsCoveredApprovals() bool     { return c.h.approvalCoversNested }
+func (h *Harness) SupportsCoveredApprovals() bool    { return h.approvalCoversNested }
+func (c *client) SupportsCoveredApprovals() bool     { return c.h.SupportsCoveredApprovals() }
 
 type approvalCover struct {
 	ToolCallID string `json:"toolCallId"`

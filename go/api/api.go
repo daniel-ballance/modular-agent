@@ -527,6 +527,7 @@ type Failure struct {
 	Retry   bool
 }
 type ToolCheck struct {
+	ApprovalAttempt string    `json:"-"` // Host ID for the two gate passes of one covered attempt.
 	ApprovalCovered bool      `json:"-"` // Set by the active parent invocation, not a tool argument.
 	LiveApproval    *Question `json:"-"` // Explicit live allow whose view covered nested calls.
 	InputChanged    bool

@@ -509,7 +509,7 @@ func (q *agRequest) serve(r *http.Request) error {
 			return denied
 		}
 		return q.jsonReply(201, "agui.create", agObject{"threadId": id, "declaration": q.a.Declaration()})
-	case r.Method == "POST" && q.a.Declaration()["approvalCoversNested"] == true && strings.HasPrefix(path, base+"/threads/") && strings.HasSuffix(path, "/settings"):
+	case r.Method == "POST" && strings.HasPrefix(path, base+"/threads/") && strings.HasSuffix(path, "/settings") && q.a.h.SupportsCoveredApprovals():
 		id := strings.TrimSuffix(strings.TrimPrefix(path, base+"/threads/"), "/settings")
 		if id == "" || strings.ContainsAny(id, "/%") {
 			return missing

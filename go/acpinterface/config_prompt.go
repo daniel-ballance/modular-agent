@@ -105,7 +105,11 @@ func (s *server) SetSessionConfigOption(ctx context.Context, p acp.SetSessionCon
 	if err != nil {
 		return acp.SetSessionConfigOptionResponse{}, err
 	}
-	gated, err := s.gateAnswer(s.acting(ctx, id, st.actor), id, "session/set_config_option", acp.SetSessionConfigOptionResponse{ConfigOptions: opts})
+	reply := acp.SetSessionConfigOptionResponse{ConfigOptions: opts}
+	if h, ok := s.a.(interface{ SupportsCoveredApprovals() bool }); ok && h.SupportsCoveredApprovals() {
+		reply.Meta = s.sessionMeta(ctx, id)
+	}
+	gated, err := s.gateAnswer(s.acting(ctx, id, st.actor), id, "session/set_config_option", reply)
 	if err != nil {
 		return acp.SetSessionConfigOptionResponse{}, outputReplyError(err)
 	}

@@ -1609,6 +1609,11 @@ func (p *turnPorts) Hook(ctx context.Context, name string, v any) (any, error) {
 	ctx = api.WithExecution(api.AsActor(ctx, p.actor), api.Execution{Session: p.s.id, Turn: p.id})
 	if name == "runtime.tool.before" {
 		check := v.(api.ToolCheck)
+		if p.c.h.approvalCoversNested && check.Call.ParentCall == "" {
+			// Both gate passes belong to one attempt; a repeat enters Hook anew.
+			check.ApprovalAttempt = api.ID()
+			v = check
+		}
 		if !p.canRunTools(check.Call.Actor) {
 			return nil, errors.New("tool authority refused")
 		}
