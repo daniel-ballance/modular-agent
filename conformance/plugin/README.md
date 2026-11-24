@@ -59,7 +59,7 @@ Register the ordinary `bash` conformance tool (delegate to `host/env/exec` on th
 
 The two hosts claim the same `home`, reuse request, call and session IDs, and claim each other's names. The kit checks both the factory's ID and the retained marker. Changing the tool claim on a live connection or the setup claim on reconnect must not change the state. While both `bash` calls are held in callbacks the kit cancels and closes the left connection. The right result must carry the right Harness's marker. It runs that check with distinct credentials and with each credential on two sockets. It rechecks the retained file and refused project reads on reconnect. Separate-listener tests still apply to plugins that need separate confinement.
 
-Run `npm ci --prefix conformance/plugin` and `npm test --prefix conformance/plugin` for the managed launcher's fake-service self-tests. The fake never executes a command.
+The named-caller transcript has 29 checks, or 31 if both environments offer saved points. Run `npm ci --prefix conformance/plugin` and `npm test --prefix conformance/plugin` for its 19 fake-service self-tests. The fake never executes a command.
 
 To serve a stdio plugin over WebSocket for the kit, use the bridge, `conformance/tools/ws-bridge.mjs`. It is a disposable, loopback-only test adapter that starts one plugin process per connection; it is not a service host.
 
@@ -93,3 +93,9 @@ The [ACP kit](../acp/README.md) checks the host side:
 Use the ACP kit's `--plugin-checks` with the `hooks` part from another build for an interoperability run. The probe, recovery and jobs programs are test fixtures, not production plugins.
 
 The kit tests selected transcripts, not arbitrary schemas, credential handling, credential-bearing Providers, tenant separation, or reliable cleanup of unconfirmed external effects. Use separate acceptance tests for these. A pass is not proof of [conformance](../../docs/conformance.md#what-conforms).
+
+## Findings
+
+In [Named callers](../../docs/bindings/websocket.md#named-callers), “No ID or token is added to plugin messages” can be read as a ban on application data such as the desk's tool result. Replace that sentence with:
+
+> The binding adds no caller ID or token field to `plugin/initialize`, `tools/call` or callbacks. A caller name in configuration or tool input is application data, not the listener's authenticated identity.
