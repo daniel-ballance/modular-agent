@@ -138,7 +138,7 @@ func run() error {
 		return err
 	}
 	c.record("session/list", list)
-	raw, err := conn.CallExtension(ctx, "_modular/follow", map[string]any{"sessionId": start.SessionId})
+	raw, err := conn.CallExtension(ctx, "_modular-agent/history", map[string]any{"sessionId": start.SessionId})
 	if err != nil {
 		return err
 	}
@@ -152,11 +152,11 @@ func run() error {
 	models, turns, reads := 0, 0, 0
 	for _, e := range view.Entries {
 		switch e.Kind {
-		case "model":
+		case "response":
 			models++
-		case "turn.start":
+		case "turnStart":
 			turns++
-		case "tool.result":
+		case "toolResult":
 			if api.Decode[api.ToolResult](e.Data).Status == "completed" {
 				reads++
 			}

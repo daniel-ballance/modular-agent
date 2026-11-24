@@ -36,11 +36,11 @@ func FindClaudeProgram(opts ClaudeOptions) (string, error) {
 	} else {
 		if exe, err := os.Executable(); err == nil {
 			for p, i := filepath.Dir(exe), 0; i < 4; i, p = i+1, filepath.Dir(p) {
-				paths = append(paths, filepath.Join(p, "typescript/sidecars/claude/dist/main.js"))
+				paths = append(paths, filepath.Join(p, "typescript/packages/claude/dist/src/main.js"))
 			}
 		}
 		if home, err := os.UserHomeDir(); err == nil {
-			paths = append(paths, filepath.Join(home, ".local/share/modular-agent/sidecars/claude/dist/main.js"))
+			paths = append(paths, filepath.Join(home, ".local/share/modular-agent/sidecars/claude/dist/src/main.js"))
 		}
 	}
 	for _, path := range paths {

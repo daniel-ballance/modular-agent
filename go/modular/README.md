@@ -37,8 +37,8 @@ Import `github.com/daniel-ballance/modular-agent/go/modular/subscription`.
 - `subscription.ChatGPT(subscription.ChatGPTOptions{Logins: logins})` and `subscription.Grok(subscription.GrokOptions{Logins: logins})` each return a `modular.Provider` and an error. Use `modular.WithProvider` to register them. Set `Models` to enroll unlisted ids.
 - `ClientIdentity` is a pointer to a string on both constructors and on sign-in. Nil uses `modular-agent`. An explicit label must be 1 to 64 ASCII letters, digits, dots, underscores or hyphens. `subscription.ValidateClientIdentity(label)` checks an explicit label. Grok sends the label as `referrer` only when starting sign-in.
 - `subscription.Claude(ctx, subscription.ClaudeOptions{Program: path})` starts the TypeScript Claude program with Node.js 22 or later. Register `modular.WithPlugin(claude.Plugin())` to close the child with the agent, or use `claude.Provider()` and call `claude.Close()` yourself. `claude.Status(ctx)` reports readiness and the reason when unavailable. Go does not sign in or touch Claude credentials; use `claude auth login`.
-- For an API-key account, the current Claude program reports the source of the key through `provider/available`. A legacy program that reports only the boolean cannot give that detail.
-- Claude resolves `Program` first, then `MODULAR_AGENT_CLAUDE_SIDECAR`. If both are unset it looks for `typescript/sidecars/claude/dist/main.js` relative to the executable or up to three directories above it, then `~/.local/share/modular-agent/sidecars/claude/dist/main.js`. Set the path explicitly if using the TypeScript SDK's program from another install location.
+- For an API-key account, the Claude program reports the source of the key through `provider/available`.
+- Claude resolves `Program` first, then `MODULAR_AGENT_CLAUDE_SIDECAR`. If both are unset it looks for `typescript/packages/claude/dist/src/main.js` relative to the executable or up to three directories above it, then `~/.local/share/modular-agent/sidecars/claude/dist/src/main.js`. Set the path explicitly if using the TypeScript SDK's program from another install location.
 
 ## Checks
 
@@ -145,7 +145,7 @@ Set `modular.HistoryOptions.LeaseTTL` when calling `modular.ServeHistory` to cho
 
 The dedicated file history service declares `pendingErasure: 1`. It keeps both pending and completed plans in `.history-erasure-v1`. Leases end on restart; the new writer reads the plans, reuses the reserved bookkeeping ID and verifies physical tombstones before completing a plan. A missing or unreadable registry makes coordinated requests unavailable. Restore history and registry together and prove freshness against an independent authority before serving either.
 
-The old `/go/pending-erasure` route and `goErasureGuard` append member are removed. No in-repository client still needs them. Do not replace a legacy registry with an empty one. Existing deployments must fence old writers, settle their pending work, and migrate offline before enabling the new profile. A native snapshot-store listener does not declare the profile because native writers do not share its HTTP transaction lock. An authenticated HTTP relay preserves the upstream declaration and revision header.
+An existing store without a verifiable erasure registry stays unavailable. Fence its writers and use a fresh, isolated store. A native snapshot-store listener does not declare the profile because native writers do not share its HTTP transaction lock. An authenticated HTTP relay preserves the upstream declaration and revision header.
 
 A repeated publication returns the original intent ID and destinations in published order. The source has its own plan and is not in the destination list. The client uses that list to find plans even when a peer expires a destination. Expiry is not proof of erasure. The report marks copies in expired sessions as out of reach without exposing their IDs.
 

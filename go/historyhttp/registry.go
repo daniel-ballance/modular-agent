@@ -72,8 +72,7 @@ func (s *Server) startupRegistry() error {
 	s.revision = api.ID()
 	for _, name := range []string{".lease-ttl-ms", ".erasure-registry", ".erasure-required"} {
 		if _, err := os.Stat(filepath.Join(s.dir, name)); !errors.Is(err, os.ErrNotExist) {
-			// Never initialize an empty authority in an existing store. Older
-			// stores need an operator-led migration to a new namespace.
+			// Never initialize an empty authority in an existing store.
 			return nil
 		}
 	}
