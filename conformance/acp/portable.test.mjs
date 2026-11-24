@@ -38,6 +38,19 @@ test('question identity, asker and time limit come from recorded evidence', () =
     assert.ok(check({ ...request, ...change }).length);
   assert.ok(check(request, {}).length);
 });
+test('a step decision belongs to one answered step attempt', () => {
+  const model = { provider: 'test', id: 'script' }, turnId = 'turn', stepId = 'step';
+  const start = entry('turnStart', { turnId }, { ...auth, startedBy: { kind: 'plugin', id: 'test' }, model, system: '', tools: [], settings: {} });
+  const attempt = entry('modelRequest', { turnId, stepId }, { model, tools: [], safeToRepeat: false });
+  const response = { kind: 'response', turnId, stepId, sources: ['1'], message: { role: 'assistant', content: [], stop: 'finished' } };
+  const decision = entry('modular-agent.stepAfter', { turnId, stepId }, { decision: null });
+  assert.deepEqual(problems(start, attempt, response, decision), []);
+  assert.ok(problems(start, response).length);
+  assert.ok(problems(start, attempt, { ...response, sources: [] }).length);
+  assert.ok(problems(start, attempt, response, decision, decision).length);
+  assert.ok(problems(start, { ...attempt, data: { ...attempt.data, auxiliary: true } }, response, decision).length);
+  assert.ok(problems(start, { ...attempt, data: { ...attempt.data, safeToRepeat: true } }).length);
+});
 test('check the configured actor and reject failed rewind records', () => {
   assert.equal(validActor({ id: actorId, kind: 'program', rights: [] }), true);
   assert.equal(validActor({ id: actorId, kind: 'program' }), false);
