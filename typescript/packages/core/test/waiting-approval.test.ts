@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { amount, reviewer, waitingAgent } from "./fixtures/waiting-approval.js";
 import { definePlugin, tool, transientRuntime, type AgentOptions } from "../src/index.js";
-import { testAgent } from "../src/testing.js";
+import { restart, testAgent } from "../src/testing.js";
 
 async function directory(t: TestContext) {
   const dir = await mkdtemp(join(tmpdir(), "waiting-")); t.after(() => rm(dir, { recursive: true, force: true })); return dir;
@@ -51,6 +51,46 @@ test("only a handle that received the waiting approval can allow the unstarted c
     assert.equal(history.filter(e => e.kind === "inputAccepted").length, 1);
   } finally { await agent.close(); await rm(dataDir, { recursive: true, force: true }); }
 });
+
+for (const [decision, status] of [["decline", "refused"], ["switch to live", "refused"], ["expire", "notStarted"], ["allow", "completed"]] as const) {
+  test(`a parked call frees its slot after restart: ${decision}`, async t => {
+    const dir = await directory(t);
+    let now = Date.now();
+    if (decision === "expire") t.mock.method(Date, "now", () => now);
+    const input = `tool:bump ${JSON.stringify(amount)}`;
+    let agent = await waitingAgent(dir, false, { conformance: true, model: "conformance/echo", resourceReservations: { session: { calls: 1 } } });
+    try {
+      const origin = await agent.session();
+      const parked = await origin.prompt(input);
+      assert.equal(parked.openToolCalls.length, 1);
+      const [callId] = parked.openToolCalls;
+
+      agent = await restart(agent);
+      const session = await agent.openSession(origin.id);
+      // This input stays in the model view. A tool directive here would park another call in the continuation.
+      const probe = await session.prompt("Check capacity");
+      assert.deepEqual(probe.outcome, { kind: "limit", limit: "capacity" });
+      const [q] = await session.questions({ present: true });
+      assert.equal(q.call?.id, callId);
+      if (decision === "expire") {
+        now = q.deadline!;
+        assert.deepEqual(await session.questions(), []);
+      } else if (decision === "switch to live") {
+        await session.setSetting("approvalWait", "live");
+      } else await session.answer(q.id, decision);
+      await session.waitIdle();
+      const results = (await session.history()).filter(e => e.kind === "toolResult" && e.toolCallId === callId);
+      assert.deepEqual(results.map(e => (e.data as { status: string }).status), [status]);
+      assert.equal(await count(dir), decision === "allow" ? 1 : 0);
+
+      if (decision === "switch to live") await session.setSetting("approvalWait", "untilDeadline");
+      const next = await session.prompt(input);
+      assert.equal(next.outcome?.kind, "completed");
+      assert.equal(next.openToolCalls.length, 1);
+      assert.notEqual(next.openToolCalls[0], callId);
+    } finally { await agent.close(); }
+  });
+}
 
 test("the operator maximum needs compatible history, approval and continuation support", async t => {
   const dir = await directory(t);
