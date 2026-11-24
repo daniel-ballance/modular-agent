@@ -5,7 +5,6 @@
  */
 
 export const PLUGIN_BINDING = "modular-agent-plugin/1";
-export const DATA_BINDING = "modular-agent-data/1";
 /** The largest message either side sends or accepts. */
 export const MAX_MESSAGE = 64 * 1024 * 1024;
 

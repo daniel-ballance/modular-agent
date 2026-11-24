@@ -134,11 +134,12 @@ export class TuiInterface implements InterfaceCapability {
 		this.tui.requestRender();
 	}
 
-	private answer(request: InputRequest, value: string): void {
+	private async answer(request: InputRequest, value: string): Promise<void> {
 		const declined = !value || (request.kind === "approval" && value !== "allow");
-		const result = this.api.answer(request.sessionId, { requestId: request.id, actorId: this.actorId, value: declined ? undefined : value, declined });
+		const result = await this.api.submitAnswer(request.sessionId, { requestId: request.id, actorId: this.actorId, value: declined ? undefined : value, declined })
+			.catch(() => ({ accepted: false, reason: "Could not submit the answer" }));
 		this.note(result.accepted ? dim(`  answered: ${declined ? "declined" : request.kind === "secret" ? "(secret)" : value}`) : red(result.reason ?? "Not accepted"));
-		this.onInputRequestClosed(request.id);
+		if (result.accepted) this.onInputRequestClosed(request.id);
 	}
 
 	// ---------- following the session ----------
@@ -338,7 +339,7 @@ export class TuiInterface implements InterfaceCapability {
 			case "/answer": {
 				const request = this.questions[0];
 				if (!request) return this.note("No question is open."), true;
-				this.answer(request, arg);
+				await this.answer(request, arg);
 				return true;
 			}
 			case "/jobs": {

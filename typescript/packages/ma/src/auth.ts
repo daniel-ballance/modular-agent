@@ -1,7 +1,6 @@
 import { advanceSecretSlot, secretStaging, type SecretFile, type CredentialStore } from "@modular-agent/core";
 import { SubscriptionLogins, type LoginContents } from "@modular-agent/subscription";
 import { join } from "node:path";
-import { formerProviderIds } from "./provider-ids.js";
 
 export { expired, type Login, type OAuth } from "@modular-agent/subscription";
 type Contents = LoginContents & SecretFile & { answers: Record<string, string> };
@@ -16,7 +15,7 @@ function answersFile(data: LoginContents): Contents {
 }
 
 export class AuthFile extends SubscriptionLogins {
-  constructor(readonly directory: string) { super(join(directory, "auth.json"), formerProviderIds); }
+  constructor(readonly directory: string) { super(join(directory, "auth.json")); }
   credentials(): CredentialStore {
     const read = () => this.read();
     const update = async <T>(change: (file: Contents) => Promise<T>) => {

@@ -24,20 +24,20 @@ npm test --workspace=@modular-agent/claude
 
 `@anthropic-ai/claude-agent-sdk` is pinned to `0.3.323`, the version the reference package has installed. The SDK ships the Claude Code binary as an optional platform package (`@anthropic-ai/claude-agent-sdk-linux-x64` here, about 250 MB). `npm install --ignore-scripts` installs it; no postinstall step is needed. Do not install with `--omit=optional`.
 
-The entry point is `node typescript/packages/claude/dist/src/main.js`. The old `typescript/sidecars/claude/dist/main.js` path still works as a thin entry for the Rust installer and existing Go and Rust configurations. It speaks the binding on stdin and stdout. Only protocol frames go to stdout. Diagnostics go to stderr. Per-request detail is logged only when `CLAUDE_SIDECAR_DEBUG` is set.
+The entry point is `node typescript/packages/claude/dist/src/main.js`. It speaks the binding on stdin and stdout. Only protocol frames go to stdout. Diagnostics go to stderr. Per-request detail is logged only when `CLAUDE_SIDECAR_DEBUG` is set.
 
 ## Launch configuration
 
 The Rust host reads `MODULAR_AGENT_PLUGINS`. Use absolute paths. The value that launches this sidecar from this checkout:
 
 ```sh
-export MODULAR_AGENT_PLUGINS='[{"command":["/ABSOLUTE/PATH/TO/node","/ABSOLUTE/PATH/TO/REPO/typescript/sidecars/claude/dist/main.js"],"env":{"HOME":"/home/YOUR_USER"}}]'
+export MODULAR_AGENT_PLUGINS='[{"command":["/ABSOLUTE/PATH/TO/node","/ABSOLUTE/PATH/TO/REPO/typescript/packages/claude/dist/src/main.js"],"env":{"HOME":"/home/YOUR_USER"}}]'
 ```
 
 For example, built in the shell:
 
 ```sh
-export MODULAR_AGENT_PLUGINS="$(printf '[{"command":["%s","%s"],"env":{"HOME":"%s"}}]' "$(command -v node)" "$PWD/typescript/sidecars/claude/dist/main.js" "$HOME")"
+export MODULAR_AGENT_PLUGINS="$(printf '[{"command":["%s","%s"],"env":{"HOME":"%s"}}]' "$(command -v node)" "$PWD/typescript/packages/claude/dist/src/main.js" "$HOME")"
 ```
 
 ### Environment the launch must pass
@@ -123,7 +123,7 @@ The fake is selected in the built program with `CLAUDE_SIDECAR_TEST_FAKE_SDK` (t
 `conformance/plugin/run.mjs` checks a build's conformance plugin: Provider `conformance` with the scripted model `echo`, the fixture tools, environment and hooks, and `MODULAR_AGENT_PLUGIN_PARTS`. This sidecar is a real Provider and serves none of those, so the kit's Provider checks cannot apply; `stdio.test.ts` covers that ground instead. Run anyway with the fake and `--no-runtime`, the checks that do not depend on the fixture all pass: 18 of 31, covering ping, 64 and 65 JSON levels, CRLF, batch and malformed frames, id handling, a reused id closing the connection, the `method_not_found` envelope, shutdown, exit on EOF and `not_supported` for an unknown binding version. The 13 failures are all for fixture parts this plugin does not register.
 
 ```sh
-CLAUDE_SIDECAR_TEST_FAKE_SDK=1 node conformance/plugin/run.mjs --no-runtime -- "$(command -v node)" "$PWD/typescript/sidecars/claude/dist/main.js"
+CLAUDE_SIDECAR_TEST_FAKE_SDK=1 node conformance/plugin/run.mjs --no-runtime -- "$(command -v node)" "$PWD/typescript/packages/claude/dist/src/main.js"
 ```
 
 ### Real run (2026-11-19)

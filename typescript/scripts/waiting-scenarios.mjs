@@ -4,17 +4,16 @@ import { once } from 'node:events';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { checkWaitingDeclaration, waitingRecords, waitingStep } from '../../conformance/sdk/waiting.mjs';
 import { count } from '../packages/fixtures/dist/src/index.js';
 import { servicesFor, waitGroup } from '../packages/fixtures/dist/src/scenarios.js';
 
 export async function runWaitingScenario(path, placement, run) {
   const scenario = JSON.parse(await readFile(path,'utf8'));
-  const { waitingRecords, waitingStep, skipReason } = await import(run ? pathToFileURL(join(process.cwd(),'conformance/sdk/waiting.mjs')) : new URL('../../waiting.mjs',pathToFileURL(path)));
   const dir = await mkdtemp(join(tmpdir(),'waiting-scenario-')), state = {};
   let spec, child, rpc, exited, sessionId;
   const waiting = {};
-  const start = async probe => {
+  const start = async () => {
     spec = await servicesFor(scenario,dir,placement);
     child = fork(new URL('waiting-writer.mjs',import.meta.url),[path,dir],{detached:true,execArgv:[],stdio:['ignore','ignore','inherit','ipc']});
     exited = once(child,'exit');
@@ -23,8 +22,8 @@ export async function runWaitingScenario(path, placement, run) {
       if(error) task.reject(Object.assign(new Error(error.message),{code:error.code})); else task.resolve(result); });
     void exited.then(()=>{ for(const task of requests.values()) task.reject(Error('Scenario writer exited')); });
     rpc = (op,arg)=>{ const id=++seq, task=Promise.withResolvers(); requests.set(id,task); child.send({id,op,arg}); return task.promise; };
-    const opened = await rpc('start',{placement:spec.placement, id:sessionId,probe,run:probe?undefined:run});
-    if(!probe) sessionId=opened.id;
+    const opened = await rpc('start',{placement:spec.placement, id:sessionId,run});
+    sessionId=opened.id;
     return opened.declaration;
   };
   const stop = async how => {
@@ -38,13 +37,11 @@ export async function runWaitingScenario(path, placement, run) {
   };
   try {
     await writeFile(join(dir,'clock'),'1800000000000');
-    const probe=await start(true); await stop('close');
-    const skip=skipReason(scenario,probe); if(skip) { console.warn(`${scenario.scenario} (${placement.name}): skipped: ${skip}`); return []; }
     if(scenario.expectCreateError) {
-      await assert.rejects(start(false),err=>err.code===scenario.expectCreateError.code && err.message.includes(scenario.expectCreateError.messageContains??'')); return [];
+      await assert.rejects(start(),err=>err.code===scenario.expectCreateError.code && err.message.includes(scenario.expectCreateError.messageContains??'')); return [];
     }
-    const declaration=await start(false);
-    for(const [k,v] of Object.entries(scenario.expectDeclaration??{})) assert.equal(declaration[k]??false,v);
+    const declaration=await start();
+    checkWaitingDeclaration(scenario,declaration);
     for(const step of scenario.steps) {
       const expect=step.expect??{}; let result, error;
       const io={questions:(as,present)=>rpc('questions',{as,present}), answer:(as,id,answer)=>rpc('answer',{as,id,answer:run && answer==='decline'?{declined:true,reason:run.values.answer}:answer}),
@@ -53,7 +50,7 @@ export async function runWaitingScenario(path, placement, run) {
       try {
         if('prompt' in step) result=await rpc('prompt',step);
         else if('wait' in step) result=await rpc('wait');
-        else if('reopen' in step) { if(child) await stop('close'); await start(false); result=await rpc('last'); }
+        else if('reopen' in step) { if(child) await stop('close'); checkWaitingDeclaration(scenario,await start()); result=await rpc('last'); }
         else assert.ok(await waitingStep(step,state,io),'unknown waiting scenario step');
       } catch(e) { if(!expect.error)throw e; error=e.code; }
       assert.equal(error,expect.error);

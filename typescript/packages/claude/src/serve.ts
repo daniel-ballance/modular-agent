@@ -1,6 +1,6 @@
 import { PROVIDER_ID, type AssistantMessage, type ModelRequest } from "./data.js";
 import { Cancelled, type ClaudeProvider } from "./provider.js";
-import { DATA_BINDING, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
+import { PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
 
 export interface ServeOptions {
 	provider: ClaudeProvider;
@@ -50,7 +50,6 @@ export function serve(options: ServeOptions): Promise<void> {
 
 	peer.handle("plugin/initialize", async (p) => {
 		if (p.binding !== PLUGIN_BINDING) throw new WireError("not_supported", `This plugin speaks ${PLUGIN_BINDING}, not ${String(p.binding)}`);
-		if (p.data !== undefined && p.data !== DATA_BINDING) throw new WireError("not_supported", `This plugin speaks ${DATA_BINDING}, not ${String(p.data)}`);
 		if (initialized) throw new WireError("invalid_request", "Already initialized");
 		if (typeof p.project !== "string" || typeof p.home !== "string") throw new WireError("invalid_request", "project and home must be paths");
 		initialized = true;

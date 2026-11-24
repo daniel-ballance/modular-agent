@@ -16,7 +16,6 @@ import {
 	type Plugin,
 	type PluginApi,
 	type Provider,
-	inputHandedBackIds,
 	inputIdOf,
 	untilAborted,
 	isToolCall,
@@ -783,7 +782,7 @@ export class AcpInterface implements InterfaceCapability {
 			const end = taken?.turnId ? all.find((e) => e.kind === "turnEnd" && e.turnId === taken.turnId) : undefined;
 			const latest = all.findLast((e) => e.kind === "inputAccepted" && inputIdOf(e) === receipt.inputId);
 			if (receipt.duplicate && !taken && ((latest?.data as { when?: string } | undefined)?.when === "propose" ||
-				all.some((e) => e.kind === "inputHandedBack" && inputHandedBackIds(e).includes(receipt.inputId)))) {
+				all.some((e) => e.kind === "inputHandedBack" && e.inputId === receipt.inputId))) {
 				throw RequestError.invalidParams(undefined, "The input was not taken by a turn");
 			}
 			if (end) {

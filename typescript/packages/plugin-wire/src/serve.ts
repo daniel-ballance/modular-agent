@@ -30,11 +30,9 @@ import type {
 	WorkingEnvironment,
 } from "@modular-agent/harness";
 import { fromWire, toWire } from "./translate.js";
-import { DATA_BINDING, listDirectory, notFoundAsEnoent, optionalMethod, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
+import { execTimeout, listDirectory, notFoundAsEnoent, optionalMethod, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
 
 export interface ServeOptions {
-	/** For hosts that need to test a peer without context support. */
-	acceptTraceContext?: boolean;
 	/** The plugin's name in its registration. */
 	name: string;
 	/** Pass the whole initialize config to a single plugin. */
@@ -204,7 +202,7 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 		list: async path => (await peer.request<{ entries: DirEntry[] }>("host/env/list", { parentRequestId, cwd, sessionId, path }).catch(optionalMethod)).entries,
 		exists: async (path) => (await peer.request<{ exists: boolean }>("host/env/exists", { parentRequestId, cwd, sessionId, path })).exists,
 		exec: async (command, o) => {
-			const req = peer.request<ExecResult>("host/env/exec", { parentRequestId, cwd, sessionId, command, ...(o.timeoutMs ? { timeoutMs: o.timeoutMs } : {}) }, o.signal);
+			const req = peer.request<ExecResult>("host/env/exec", { parentRequestId, cwd, sessionId, command, timeoutMs: execTimeout(o.timeoutMs) }, o.signal);
 			outputs.set(req.id, (chunk) => o.onOutput?.(chunk));
 			try {
 				return await req;
@@ -280,7 +278,7 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 			},
 			registerCommand: (name: string, command: { description: string; run: (args: string, ctx: any) => unknown }) => commands.set(name, command),
 		};
-		for (const name of ["presentActors", "releaseInput", "recoveredInput", "commands", "runCommand", "startSession", "openSession", "join", "leave", "listSessions", "forkSession", "closeSession", "session", "input", "withdraw", "cancel", "waitForIdle", "moveTo", "setSetting", "history", "gatedHistory", "append", "transaction", "erase", "tools", "callTool", "ask", "answer", "openRequests", "startJob", "jobs", "cancelJob", "follow", "declaration", "modelAccess"]) {
+		for (const name of ["presentActors", "releaseInput", "recoveredInput", "commands", "runCommand", "startSession", "openSession", "join", "leave", "listSessions", "forkSession", "closeSession", "session", "input", "withdraw", "cancel", "waitForIdle", "moveTo", "setSetting", "history", "gatedHistory", "append", "transaction", "erase", "tools", "callTool", "ask", "submitAnswer", "openRequests", "startJob", "jobs", "cancelJob", "follow", "declaration", "modelAccess"]) {
 			api[name] = unavailable(`${name}()`);
 		}
 		return api as unknown as PluginApi;
@@ -290,7 +288,6 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 
 	peer.handle("plugin/initialize", async (p, ctx) => {
 		if (p.binding !== PLUGIN_BINDING) throw new WireError("not_supported", `This plugin speaks ${PLUGIN_BINDING}, not ${p.binding}`);
-		if (service && p.data !== DATA_BINDING) throw new WireError("not_supported", `This plugin speaks ${DATA_BINDING}`);
 		if (initialized) throw new WireError("invalid_request", "Already initialized");
 		initialized = true;
 		const init = { project: String(p.project), home: String(p.home), config: (p.config ?? {}) as Record<string, unknown> };
@@ -320,13 +317,11 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 			}
 		})();
 		await setup;
-		const agreed = p.traceContext === 1 && options.acceptTraceContext !== false;
-		peer.configureTracing(options.name, agreed);
+		peer.configureTracing(options.name);
 		const { inputDuringTurn, waitingThroughRestart, continuesAfterRestart, interfaceTools } = runtime?.supports ?? {};
 		return {
 			binding: PLUGIN_BINDING,
 			name: options.name,
-			...(agreed ? { traceContext: 1 } : {}),
 			...(providers.length ? { providers: providers.map((x) => ({ id: x.id, supports: x.supports, models: toWire(x.models()) })) } : {}),
 			...(toolSources.length ? { toolSources: toolSources.map((t) => ({ id: t.id, tools: toWire(t.tools()) })) } : {}),
 			...(environment ? { workingEnvironment: { containment: environment.containment ?? options.containment ?? "none", platforms: [process.platform], ...(environment.points && environment.save && environment.hasPoint && environment.restore ? { points: true } : {}), ...(environment.confinesFiles === true ? { confinesFiles: true } : {}) } } : {}),
@@ -505,7 +500,7 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 	peer.handle("env/exec", async (p, ctx) => {
 		const env = await envAt(p);
 		ctx.signal.throwIfAborted();
-		const running = env.exec(String(p.command), { signal: ctx.signal, timeoutMs: p.timeoutMs,
+		const running = env.exec(String(p.command), { signal: ctx.signal, timeoutMs: execTimeout(p.timeoutMs),
 			onOutput: (chunk) => { if (!ctx.signal.aborted) peer.notify("env/output", { parentRequestId: ctx.id, chunk }); } });
 		executions.add(running);
 		try {
@@ -544,11 +539,12 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 	peer.handle("command/run", async (p, ctx) => {
 		const c = commands.get(String(p.name));
 		if (!c) throw new WireError("invalid_request", `No command ${p.name}`);
+		if (typeof p.args !== "string") throw new WireError("invalid_request", "Command arguments must be text");
 		// command/run carries only the session and actor ids; the session's project, which its
 		// environment calls use, comes from host/session (docs/sdk/api.md, Commands).
 		let project: Promise<string> | undefined;
 		const sessionProject = () => project ??= peer.request<{ project: string }>("host/session", { sessionId: p.sessionId }).then((s) => s.project);
-		const output = await currentParent.run(ctx.id, () => c.run(String(p.args ?? ""), { sessionId: p.sessionId, actorId: p.actorId, ...work(ctx, p.sessionId),
+		const output = await currentParent.run(ctx.id, () => c.run(p.args, { sessionId: p.sessionId, actorId: p.actorId, ...work(ctx, p.sessionId),
 			environment: async () => hostEnvironment(ctx.id, await sessionProject(), p.sessionId), startJob: startJob(ctx.id, ctx.signal, p.sessionId, p.actorId) }));
 		return typeof output === "string" ? { output } : {};
 	});

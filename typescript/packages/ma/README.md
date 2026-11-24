@@ -37,8 +37,6 @@ The WebSocket listener requires a loopback address and an owner-only bearer toke
 
 `ma` uses `chatgpt({ logins })` and `grok({ logins })` from `@modular-agent/subscription`. Subscription login writes and refreshes use `auth.lock` next to the private `auth.json`. The lock is shared with the other SDKs. Linux needs util-linux `flock`; macOS uses `/usr/bin/perl` to call `flock(2)`. `ma login claude` runs `claude auth login`. The TypeScript `ma` uses the Claude Agent SDK in process and does not need a sidecar.
 
-`openai-codex` and `xai` still work in `--model`, `ma login`, `ma logout`, `settings.json`, `models.json`, and saved sessions. `ma` moves old login keys to `chatgpt` and `grok` on the next write. If old and new keys coexist, the new key wins. `ma models` prints only the new ids.
-
 Configuration is shared in `$XDG_CONFIG_HOME/modular-agent`, or `~/.config/modular-agent`. State is kept in `$XDG_STATE_HOME/modular-agent/typescript`, or `~/.local/state/modular-agent/typescript`. `MODULAR_AGENT_DATA_DIR` sets the configuration directory and puts state under its `state/` subdirectory. Use `--runtime transient` to keep history without resuming a turn cut off by a crash.
 
 ### Approval
@@ -96,24 +94,25 @@ npm ci --prefix conformance/tools
 npm ci --prefix conformance/telemetry
 (cd typescript && npm ci && npm run build && npm test)
 (cd typescript && MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test)
-(cd typescript/sidecars/claude && npm ci && npm test)
 node conformance/reference/run.mjs --agent typescript
-MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- node "$PWD/typescript/packages/ma/dist/src/main.js" --acp
+scripts/acp-kit.sh typescript core
+scripts/acp-kit.sh typescript covered
+scripts/acp-kit.sh typescript waiting
 scripts/websocket-kits.sh typescript
 typescript/scripts/check-agui.sh
 git diff --check
 ```
 
 - Reference checks: **28/28**, including `approval-covers-script`, `trace-trust`, `resume-open`, `telemetry-export`, `client-identity`, all four codemode profile checks, `sandbox-memory` and both crash-recovery modes.
-- ACP with crash, probe and job checks: **190/190** on stdio. With live approval configured, the covered call and both binding versions’ waiting-declaration checks also passed (**193/193**). With an operator wait maximum, the public, crash and job checks passed **118/118**, including the waiting continuation. Over WebSocket, ACP passed **195/195**, the plugin kit passed **153/153**, and listener isolation passed **14/14**. The named-caller plugin kit passed **29/29**.
-- TypeScript workspace: **647 offline tests passed** in both normal and `MA_REMOTE` configurations. Five live tests skipped in each run. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
-- Binding kits: **23/23** ACP and **111/111** AG-UI self-tests. AG-UI passed **48/48** adapter cases, including wait-closure visibility, receipt recovery and the waiting script’s covered child.
-- Claude sidecar: **51 offline tests passed** and one live check skipped. No real sign-ins or model requests ran, and no real credentials were read.
+- Stdio ACP: **190/190** core checks. The covered group runs both bindings against `ma`. The waiting group uses the disposable SDK fixture instead of enabling test controls in `ma`. Over WebSocket, ACP passed **195/195**, the plugin kit **157/157**, listener isolation **14/14**, and named callers **29/29**.
+- The workspace passed **918 offline tests** both with in-process and remote base parts, with all four fixture programs built. Five live tests are opt-in. The TypeScript runner passed **405/405** shared scenarios across all four SDKs. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
+- AG-UI passed **49/49** adapter cases, including the structured approval call, wait closures and run receipts.
+- Claude workspace package: **51 offline tests passed** and one live check skipped. No real sign-ins or model requests ran, and no real credentials were read.
 - `tsc -b` and `git diff --check` pass. The workspace has no separate lint or formatting command.
 
 ## Known gaps
 
-- The public ACP waiting-continuation check runs against `ma`. The separate `--waiting-approval-only` group needs a controlled clock, a second listener and an offline approver from the `MA_ACP_WAIT_FIXTURE` launcher. Stock `ma` has no such launcher. With an operator maximum, only its two declaration checks passed (2/44). Also, four `--probe-checks` cases substitute Runtimes that cannot continue a waiting approval. With the maximum configured, the SDK refuses those compositions at startup (165/169 in that combination). The same probes pass with live approval.
+- The waiting ACP fixture passed 44/50 checks at kit revision `2dc41493`. In each binding, two checks require erasure during a running turn; the SDK refuses it. The capacity check compares `resourceReservations` to `true` rather than inspecting its session, tenant and agent limits.
 
 - macOS local commands use process-group containment, not strong containment. A process that leaves its group is outside that guarantee.
 - HTTP history on macOS needs no clock setting: the writer derives a sleep-aware clock ([SDK history configuration](../core/README.md#registering-or-serving-a-custom-history-store)).

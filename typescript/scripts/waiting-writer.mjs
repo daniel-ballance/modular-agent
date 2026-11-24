@@ -50,11 +50,11 @@ async function execute(op, arg) {
     case 'start': {
       const {plugins,actors,settings,...options} = scenario.agent;
       let parts = placed(arg.placement);
-      if (!arg.probe && scenario.steps.some(s=>s.change?.registration)) parts=await catalogs(parts);
+      if (scenario.steps.some(s=>s.change?.registration)) parts=await catalogs(parts);
       if(arg.run?.sdk) { const {startTelemetry}=await import('../packages/fixtures/dist/src/telemetry.js'); telemetry=startTelemetry(process.env.MODULAR_AGENT_TELEMETRY_OTLP); }
       Date.now = () => now;
       try { agent = await createAgent({...options,...parts,agentName:arg.run?.agentName, dataDir:dir,project:dir,environment:memoryEnvironment(),questionsOutlastTurns:true,
-        ...(arg.probe?{durability:'kept',approval:'all',maxApprovalWaitMs:100}:{}), providers:[scriptedProvider(scenario.model)],
+        providers:[scriptedProvider(scenario.model)],
         plugins:[...parts.plugins??[],controls]}); } finally { Date.now=realNow; }
       session = arg.id ? await agent.openSession(arg.id) : await agent.session({actors,settings:{...settings,
         ...(scenario.fixture?.requestedApprovalMs!==undefined ? {approvalWaitMs:scenario.fixture.requestedApprovalMs}:{})}});

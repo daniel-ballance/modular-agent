@@ -94,8 +94,8 @@ test("an Interface answers an approval; a second answer is refused", async () =>
 	const s = await api.startSession();
 	await api.input(s, { content: "make a file", actorId: "user" });
 	while (!requests.length) await new Promise((r) => setTimeout(r, 5));
-	assert.deepEqual(harnessApi!.answer(s, { requestId: requests[0].id, actorId: "user", value: "allow" }), { accepted: true });
-	assert.equal(harnessApi!.answer(s, { requestId: requests[0].id, actorId: "user", value: "allow" }).accepted, false);
+	assert.deepEqual(await harnessApi!.submitAnswer(s, { requestId: requests[0].id, actorId: "user", value: "allow" }), { accepted: true });
+	assert.equal((await harnessApi!.submitAnswer(s, { requestId: requests[0].id, actorId: "user", value: "allow" })).accepted, false);
 	await api.waitForIdle(s);
 	assert.equal(readFileSync(join(project, "made.txt"), "utf8").trim(), "hi");
 	await h.stop();
@@ -246,7 +246,8 @@ test("history survives a restart; moving the position is kept; an interrupted tu
 	await api.waitForIdle(s);
 	await api.moveTo(s, afterA);
 	// Simulate a crash in a later turn: a tool call started but never answered.
-	await api.append(s, { kind: "turnStart", writer: "test", modelVisible: false, turnId: "t-crash" });
+	await api.append(s, { kind: "turnStart", writer: "test", modelVisible: false, turnId: "t-crash", actorId: "user",
+		data: api.history(s).find(e => e.kind === "turnStart")!.data });
 	const call = fauxToolCall("bash", { command: "sleep 100" });
 	await api.append(s, { kind: "response", writer: "test", modelVisible: true, turnId: "t-crash", message: { role: "assistant", content: [call as never], stop: "toolUse" } });
 	await api.append(s, { kind: "toolStarted", writer: "test", modelVisible: false, turnId: "t-crash", toolCallId: call.id });
@@ -263,6 +264,24 @@ test("history survives a restart; moving the position is kept; an interrupted tu
 	// the move back was recorded, so the B turn is off the current branch
 	assert.ok(!branch.some((e) => e.message?.role === "user" && textOf(e.message.content) === "b"));
 	await h.stop();
+});
+
+test("reopen refuses an interrupted turn without its starter or tool offer", async () => {
+	const env = setup([]);
+	const h = await env.make(), api = h.api("test");
+	const ids = [];
+	for (const key of ["startedBy", "tools"]) {
+		const s = await api.startSession();
+		await api.input(s, { actorId: "user", content: "publish", when: "propose" });
+		const data: Record<string, unknown> = { model: null, tools: [], settings: {}, system: "", startedBy: { kind: "actor", id: "user" } };
+		delete data[key];
+		await api.append(s, { kind: "turnStart", writer: "test", modelVisible: false, turnId: "incomplete", actorId: "user", data });
+		ids.push(s);
+	}
+	await h.stop();
+	const reopened = await env.make();
+	try { for (const s of ids) await assert.rejects(reopened.api("test").openSession(s), /incomplete turn snapshot/); }
+	finally { await reopened.stop(); }
 });
 
 test("erasure removes content from the record and leaves an erasure entry", async () => {

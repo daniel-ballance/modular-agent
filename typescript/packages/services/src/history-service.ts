@@ -48,15 +48,7 @@ export function historyTombstone(e: JsonObject): JsonObject {
 		if (typeof e[k] === "string") t[k] = e[k];
 	}
 	const d = object(e.data) ? e.data : undefined;
-	if (kind === "inputAccepted" || kind === "input" || kind === "inputHandedBack") {
-		if (!Object.hasOwn(e, "inputId") && id(d?.inputId)) t.inputId = d.inputId;
-		if (kind === "inputHandedBack" && !Object.hasOwn(e, "inputId") && !(d && Object.hasOwn(d, "inputId")) && ids(d?.inputIds) && d.inputIds.length) t.inputIds = d.inputIds;
-	}
-	if ((kind === "inputRequest" || kind === "inputAnswer") && !Object.hasOwn(e, "requestId")) {
-		if (id(d?.requestId)) t.requestId = d.requestId;
-		else if (kind === "inputRequest" && object(d?.request) && id(d.request.id)) t.requestId = d.request.id;
-	}
-	if (kind === "turnStart" && !Object.hasOwn(e, "continuesTurnId") && id(d?.continuesTurnId)) t.continuesTurnId = d.continuesTurnId;
+
 	if (ids(e.sources)) t.sources = e.sources;
 	const usage = kind === "response" && object(e.message) ? e.message.usage : kind === "jobEnded" || kind === "turnEnd" ? d?.usage : undefined;
 	if (object(usage) && ["input", "output", "cacheRead", "cacheWrite"].every((k) => count(usage[k]) !== undefined) && nonnegativeNumber(usage.cost)) {
@@ -97,7 +89,6 @@ function page(prefix: string, rows: Iterable<Row>, limit: number): string {
 class Records {
 	private db: DatabaseSync;
 	private failed = false;
-	private registryFailed = false;
 	private disk?: { path: string; dev: bigint; ino: bigint };
 	holdUntil = 0;
 	ttlEpoch = 0;
@@ -105,16 +96,21 @@ class Records {
 	constructor(dir: string | undefined, ttl: number, readonly retention: number | null, private quota: number) {
 		if (dir !== undefined) {
 			mkdirSync(dir, { recursive: true, mode: 0o700 });
-			if (readdirSync(dir).some((name) => name.endsWith(".jsonl"))) throw new Error("Legacy history directory has no verifiable lease bound; use a fresh directory");
+			if (readdirSync(dir).some((name) => name.endsWith(".jsonl"))) throw new Error("History directory has no verifiable lease bound; use a fresh directory");
 		}
 		const path = dir === undefined ? undefined : join(dir, "history.sqlite");
 		const marker = dir === undefined ? undefined : join(dir, "pending-erasure.profile");
 		const declared = marker !== undefined && existsSync(marker);
-		if (declared && !existsSync(path!)) {
+		const existing = path !== undefined && existsSync(path);
+		if (declared !== existing) {
 			// Do not create an empty archive in the place of an existing store.
 			this.db = new DatabaseSync(":memory:");
 			this.failed = true;
 			return;
+		}
+		if (path && !existing) {
+			if (readdirSync(dir!).length) throw new Error("A new history store requires an empty directory");
+			closeSync(openSync(path, "wx", 0o600));
 		}
 		this.db = new DatabaseSync(path ?? ":memory:");
 		try {
@@ -125,45 +121,36 @@ class Records {
 			// The retained exclusive lock prevents two service processes from
 			// managing independent lease maps over the same store. FULL sync
 			// and a rollback journal make a whole batch the durable unit.
-			this.db.exec(`PRAGMA locking_mode=EXCLUSIVE; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;
-				BEGIN EXCLUSIVE;
-				CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
-				CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, json TEXT NOT NULL, created INTEGER NOT NULL, project TEXT NOT NULL, changed INTEGER NOT NULL, expired INTEGER NOT NULL DEFAULT 0);
-				CREATE INDEX IF NOT EXISTS session_order ON sessions (created DESC, id);
-				CREATE TABLE IF NOT EXISTS entries (seq INTEGER PRIMARY KEY, session TEXT NOT NULL, id TEXT NOT NULL, json TEXT NOT NULL, UNIQUE (session,id));
-				CREATE INDEX IF NOT EXISTS entry_order ON entries (session,seq);`);
-			const profile = this.db.prepare("SELECT value FROM settings WHERE key='pending-erasure-profile'").get();
-			if ((declared || profile) && profile?.value !== 1) this.registryFailed = true;
-			if (!declared && !profile) {
-				this.db.exec(`CREATE TABLE registry_revision (revision TEXT NOT NULL);
+			this.db.exec("PRAGMA locking_mode=EXCLUSIVE; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; BEGIN EXCLUSIVE");
+			if (!existing) {
+				this.db.exec(`CREATE TABLE settings (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+					CREATE TABLE sessions (id TEXT PRIMARY KEY, json TEXT NOT NULL, created INTEGER NOT NULL, project TEXT NOT NULL, changed INTEGER NOT NULL, expired INTEGER NOT NULL DEFAULT 0);
+					CREATE INDEX session_order ON sessions (created DESC, id);
+					CREATE TABLE entries (seq INTEGER PRIMARY KEY, session TEXT NOT NULL, id TEXT NOT NULL, json TEXT NOT NULL, UNIQUE (session,id));
+					CREATE INDEX entry_order ON entries (session,seq);
+					CREATE TABLE registry_revision (revision TEXT NOT NULL);
 					CREATE TABLE registry_intents (seq INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, operation TEXT UNIQUE NOT NULL, copies TEXT NOT NULL, session_ids TEXT NOT NULL);
 					CREATE TABLE registry_plans (session TEXT NOT NULL, intent INTEGER NOT NULL, record TEXT NOT NULL, json TEXT NOT NULL,
 						PRIMARY KEY (session,intent), UNIQUE (session,record));
 					INSERT INTO settings VALUES ('pending-erasure-profile',1);`);
 				this.db.prepare("INSERT INTO registry_revision VALUES (?)").run(randomBytes(32).toString("hex"));
-			}
-			try {
+			} else {
+				const profile = this.db.prepare("SELECT value FROM settings WHERE key='pending-erasure-profile'").get();
+				const column = this.db.prepare("SELECT type, [notnull] FROM pragma_table_info('registry_intents') WHERE name='session_ids'").get();
+				if (profile?.value !== 1 || column?.type !== "TEXT" || column.notnull !== 1) throw unavailable();
 				this.revision();
-				this.db.prepare("SELECT seq,id,operation,copies FROM registry_intents LIMIT 1").get();
-				this.db.prepare("SELECT session,intent,record,json FROM registry_plans LIMIT 1").get();
-				if (!this.db.prepare("SELECT 1 FROM pragma_table_info('registry_intents') WHERE name='session_ids'").get()) {
-					// Older stores inserted plans in publication order, which their rowids preserve.
-					this.db.exec(`ALTER TABLE registry_intents ADD COLUMN session_ids TEXT;
-						WITH published AS (
-							SELECT intent, json_group_array(session ORDER BY rowid) AS session_ids FROM registry_plans GROUP BY intent
-						)
-						UPDATE registry_intents SET session_ids=published.session_ids FROM published WHERE seq=published.intent;`);
-				}
-			} catch { this.registryFailed = true; }
+				this.db.prepare("SELECT seq,id,operation,copies,session_ids FROM registry_intents LIMIT 0");
+				this.db.prepare("SELECT session,intent,record,json FROM registry_plans LIMIT 0");
+			}
 			const prior = this.db.prepare("SELECT value FROM settings WHERE key='ttl-bound'").get()?.value;
-			if (prior === undefined && this.db.prepare("SELECT 1 FROM sessions LIMIT 1").get()) throw new Error("Stored TTL bound is missing");
+			if (existing && prior === undefined) throw new Error("Stored TTL bound is missing");
 			if (prior !== undefined && (typeof prior !== "number" || !Number.isSafeInteger(prior) || prior < 0)) throw new Error("Stored TTL bound is invalid");
 			const bound = Math.max(prior ?? 0, ttl);
 			this.db.prepare("INSERT OR REPLACE INTO settings VALUES ('ttl-bound',?)").run(bound);
 			if (ttl > 0) this.bumpTtlEpoch();
 			else this.ttlEpoch = Number(this.db.prepare("SELECT value FROM settings WHERE key='ttl-epoch'").get()?.value ?? 0);
 			this.db.exec("COMMIT");
-			if (marker !== undefined && !declared && !this.registryFailed) {
+			if (marker !== undefined && !declared) {
 				// The marker detects an absent database, not two matching, stale backups.
 				writeFileSync(marker, "1\n", { mode: 0o600, flag: "wx", flush: true });
 				const directory = openSync(dir!, "r");
@@ -285,7 +272,6 @@ class Records {
 		this.advanceRevision();
 	}
 	private revision() {
-		if (this.registryFailed) throw unavailable();
 		if (this.disk) {
 			const where = statSync(this.disk.path, { bigint: true, throwIfNoEntry: false });
 			if (where?.dev !== this.disk.dev || where.ino !== this.disk.ino) throw unavailable();
@@ -473,6 +459,8 @@ export class HistoryArchive {
 		};
 	}
 	store(): HistoryStore {
+		// Establish the archive before creating any other files in its namespace.
+		if (this.dir) { this.db().check(); this.idle(); }
 		const owner = Symbol();
 		const expires = () => false;
 		const read = <T>(operation: (db: Records) => T): T => {

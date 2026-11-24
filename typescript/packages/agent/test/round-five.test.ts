@@ -39,11 +39,11 @@ test("portable receipts survive reopening even when input is handed back, and an
 	const missing = { provider: "missing", id: "chosen" };
 	const sid = await seed(store, dirs.project, [
 		joined(), setting("model", missing),
-		draft("inputAccepted", { actorId: "user", data: { inputId: "receipt", key: "retry", when: "after", content: [text("not run")] } }),
+		draft("inputAccepted", { actorId: "user", inputId: "receipt", data: { key: "retry", when: "after", taken: "after", content: [text("not run")] } }),
 	]);
 	await api.openSession(sid);
 	assert.deepEqual(api.recoveredInput(sid).map((q) => q.id), ["receipt"]);
-	assert.deepEqual(api.history(sid).find((e) => e.kind === "inputHandedBack")?.data, { inputId: "receipt", reason: "restart" });
+	assert.deepEqual(api.history(sid).find((e) => e.kind === "inputHandedBack")?.data, { reason: "restart" });
 	assert.deepEqual(await api.input(sid, { actorId: "user", key: "retry", content: "wrong" }), { inputId: "receipt", taken: "after", duplicate: true });
 	assert.equal(api.session(sid).settings.approval, "all");
 	assert.deepEqual(api.session(sid).settings.model, missing);
@@ -65,7 +65,7 @@ test("portable input reservations keep submitter and attributed actor distinct",
 	const sid = await seed(store, dirs.project, [
 		joined(),
 		draft("actorJoined", { data: { actor: { id: "delegate", kind: "program", rights: ALL_AUTHORITY } } }),
-		draft("inputAccepted", { actorId: "user", inputId: "erased", data: { key: "same", when: "propose", content: [text("old")], submittedBy: "delegate" } }),
+		draft("inputAccepted", { actorId: "user", inputId: "erased", data: { key: "same", when: "propose", taken: "proposed", content: [text("old")], submittedBy: "delegate" } }),
 		draft("erasure", { data: { entryIds: ["e2"], inputKeys: [{ inputId: "erased", key: "same", actorId: "user", submittedBy: "delegate" }] } }),
 	]);
 	await api.openSession(sid);
@@ -85,15 +85,15 @@ for (const scenario of ["due", "allow", "refuse", "unknown"] as const) {
 		const ids = { turnId: "turn", stepId: "step" };
 		const sid = await seed(store, dirs.project, [joined(), setting("model", model),
 			draft("turnStart", { turnId: ids.turnId, actorId: "user", data: { model, startedBy: { kind: "actor", id: "user" }, tools: [], settings: {}, system: "", rights: ALL_AUTHORITY } }),
-			draft("modelRequest", { ...ids, data: { model, safeToRepeat: false, tools: [], ...(scenario === "unknown" ? {} : { tracksStepAfter: true }) } }),
+			draft("modelRequest", { ...ids, data: { model, safeToRepeat: false, tools: [] } }),
 			draft("response", { ...ids, modelVisible: true, message: { role: "assistant", stop: "finished", content: [text("answer")] } }),
-			...(scenario === "allow" || scenario === "refuse" ? [draft("modular-agent.stepAfter", { ...ids, data: { decision: scenario === "allow" ? null : { refuse: "committed denial" } } })] : []),
+			...(scenario === "unknown" ? [draft("modular-agent.stepAfter", { ...ids, erased: true })] : scenario === "allow" || scenario === "refuse" ? [draft("modular-agent.stepAfter", { ...ids, data: { decision: scenario === "allow" ? null : { refuse: "committed denial" } } })] : []),
 		]);
 		await api.openSession(sid);
 		await api.waitForIdle(sid);
 		const history = api.history(sid);
 		assert.equal(gates, Number(scenario === "due"));
-		assert.equal(history.filter((e) => e.kind === "modular-agent.stepAfter").length, Number(scenario !== "unknown"));
+		assert.equal(history.filter((e) => e.kind === "modular-agent.stepAfter").length, 1);
 		const end = history.findLast((e) => e.kind === "turnEnd");
 		assert.deepEqual((end?.data as { outcome: unknown })?.outcome, scenario === "due" || scenario === "allow" ? { kind: "completed" } :
 			{ kind: "failed", error: scenario === "refuse" ? "committed denial" : "Cannot establish the last step's gate decision" });
@@ -176,7 +176,7 @@ test("durable reopen sends committed result feedback in its next request", async
 		draft("inputAccepted", { inputId: "admission", actorId: "user", data: { when: "now", taken: "now", content: [text("Question")] } }),
 		draft("turnStart", { turnId, actorId: "user", data: { model, tools: [], system: "", settings: {}, startedBy: { kind: "actor", id: "user" }, rights: ALL_AUTHORITY } }),
 		draft("input", { turnId, inputId: "admission", actorId: "user", modelVisible: true, message: { role: "user", content: [text("Question")] } }),
-		draft("modelRequest", { turnId, stepId: "first", data: { model, tools: [], safeToRepeat: false, tracksStepAfter: true } }),
+		draft("modelRequest", { turnId, stepId: "first", data: { model, tools: [], safeToRepeat: false } }),
 		draft("response", { turnId, stepId: "first", modelVisible: true, message: { role: "assistant", content: [text("An answer")], stop: "finished" } }),
 		draft("resultFeedback", { turnId, modelVisible: true, data: { reason } }),
 	]);
@@ -194,7 +194,7 @@ test("a refused repeat of a started tool settles it as outcomeUnknown, without a
 	const call = { id: "call", name: "read", input: { path: "note" }, startedBy: "model", stepId: "step" };
 	const sid = await seed(store, dirs.project, [joined(["watch", "input"]), setting("model", model), setting("approval", "off"),
 		draft("turnStart", { turnId: "turn", data: { model, startedBy: { kind: "actor", id: "user" }, system: "", tools: api.tools(), settings: {} } }),
-		draft("input", { turnId: "turn", actorId: "user", modelVisible: true, data: { inputId: "input" }, message: { role: "user", content: [text('tool:read {"path":"note"}')] } }),
+		draft("input", { turnId: "turn", actorId: "user", modelVisible: true, inputId: "input", message: { role: "user", content: [text('tool:read {"path":"note"}')] } }),
 		draft("response", { turnId: "turn", stepId: "step", modelVisible: true, message: { role: "assistant", stop: "toolUse", content: [{ type: "toolCall", id: call.id, name: call.name, arguments: call.input }] } }),
 		draft("toolStarted", { turnId: "turn", stepId: "step", toolCallId: call.id, data: { call, safeToRepeat: true } }),
 	]);

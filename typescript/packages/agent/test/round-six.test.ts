@@ -116,7 +116,7 @@ test("ACP proposals list oldest first, allow a proposer to withdraw, and report 
 	await ext("withdraw", { inputId: one });
 	assert.deepEqual(await ext("release", { inputId: two, when: "now", declined: true }), { inputId: two, taken: "handedBack" });
 	assert.deepEqual(await ext("proposals"), { proposals: [] });
-	assert.deepEqual(api.history(sessionId).filter((e) => e.kind === "inputHandedBack").map((e) => e.data), [{ inputId: one, reason: "withdrawn" }, { inputId: two, reason: "declined" }]);
+	assert.deepEqual(api.history(sessionId).filter((e) => e.kind === "inputHandedBack").map(e => ({ inputId: e.inputId, ...e.data as object })), [{ inputId: one, reason: "withdrawn" }, { inputId: two, reason: "declined" }]);
 });
 
 test("ACP replies withheld by a blocking or failing gate return an error without reversing the effect", async (t) => {

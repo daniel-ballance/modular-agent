@@ -23,7 +23,7 @@ function fakeUi(actorId = "user") {
 	return {
 		plugin,
 		requests,
-		answer: (r: InputRequest, value: string, as = actorId) => api.answer(r.sessionId, { requestId: r.id, actorId: as, value, declined: value !== "allow" }),
+		answer: (r: InputRequest, value: string, as = actorId) => api.submitAnswer(r.sessionId, { requestId: r.id, actorId: as, value, declined: value !== "allow" }),
 		next: async () => {
 			for (let i = 0; i < 400 && !requests.length; i++) await new Promise((r) => setTimeout(r, 5));
 			assert.ok(requests.length, "no question was asked");
@@ -76,7 +76,7 @@ test("durable: a question open when the process stopped is reopened, and the ans
 	const again = await ui.next();
 	assert.equal(again.id, asked.id, "the same question, not a new one");
 	assert.equal(kinds(h, s, "inputRequest").length, 1);
-	assert.deepEqual(ui.answer(again, "allow"), { accepted: true });
+	assert.deepEqual(await ui.answer(again, "allow"), { accepted: true });
 	await api.waitForIdle(s);
 	assert.equal(outcome(h, s), "completed");
 	assert.equal(status(h, s), "completed");
@@ -90,7 +90,7 @@ test("durable: an answer given before the process stopped is not asked again", a
 	const { s, asked, abandoned } = await crashWhileAsking(d);
 	// Record the answer as the first process would have, then "crash" before the tool started.
 	const a = abandoned.api("t");
-	await a.append(s, { kind: "inputAnswer", writer: "harness", modelVisible: false, actorId: "user", data: { requestId: asked.id, actorId: "user", value: "allow" } });
+	await a.append(s, { kind: "inputAnswer", writer: "harness", modelVisible: false, actorId: "user", requestId: asked.id, turnId: asked.turnId, toolCallId: asked.toolCallId, data: { requestId: asked.id, actorId: "user", value: "allow" } });
 	await abandoned.stop();
 	const ui = fakeUi();
 	const h = await agent(d, [fauxAssistantMessage([fauxText("Paid.")])], [durableRuntime(), ui.plugin]);
@@ -109,14 +109,14 @@ test("durable: an answer given before the process stopped is not asked again", a
 test("durable: a recorded allow from someone who may no longer answer is not reused", async () => {
 	const d = dirs();
 	const { s, asked, abandoned } = await crashWhileAsking(d);
-	await abandoned.api("t").append(s, { kind: "inputAnswer", writer: "harness", modelVisible: false, actorId: "alice", data: { requestId: asked.id, actorId: "alice", value: "allow" } });
+	await abandoned.api("t").append(s, { kind: "inputAnswer", writer: "harness", modelVisible: false, actorId: "alice", requestId: asked.id, turnId: asked.turnId, toolCallId: asked.toolCallId, data: { requestId: asked.id, actorId: "alice", value: "allow" } });
 	await abandoned.stop();
 	const ui = fakeUi();
 	const h = await agent(d, [fauxAssistantMessage([fauxText("Not paid.")])], [durableRuntime(), ui.plugin]);
 	const api = h.api("t");
 	await api.openSession(s); // alice is not part of the reopened session
 	const again = await ui.next();
-	ui.answer(again, "refuse");
+	await ui.answer(again, "refuse");
 	await api.waitForIdle(s);
 	assert.equal(status(h, s), "refused");
 	assert.equal(existsSync(join(d.project, "paid.txt")), false);
@@ -172,10 +172,10 @@ test("a viewer can see a question but only an actor with authority can answer it
 	await assert.rejects(api.join(s, { id: "guest", kind: "user", authority: ["erase"] }, "viewer"), /may not grant/);
 	await api.input(s, { content: "pay", actorId: "user" });
 	const seen = await viewer.next();
-	assert.equal(viewer.answer(seen, "allow", "viewer").accepted, false);
+	assert.equal((await viewer.answer(seen, "allow", "viewer")).accepted, false);
 	const asked = await owner.next();
-	assert.equal(owner.answer(asked, "allow").accepted, true);
-	assert.equal(owner.answer(asked, "allow").accepted, false, "one answer closes the request");
+	assert.equal((await owner.answer(asked, "allow")).accepted, true);
+	assert.equal((await owner.answer(asked, "allow")).accepted, false, "one answer closes the request");
 	await api.waitForIdle(s);
 	assert.equal(status(h, s), "completed");
 	void ALL_AUTHORITY;

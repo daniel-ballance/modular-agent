@@ -46,7 +46,6 @@ export interface HistoryEntry {
   toolCallId?: string;
   jobId?: string;
   inputId?: string;
-  inputIds?: string[];
   requestId?: string;
   continuesTurnId?: string;
   usage?: Usage;

@@ -12,7 +12,7 @@ export function restoreAnsweredStep(branch: HistoryEntry[], turnId: string, kept
 	const intent = attempts.get(stepId);
 	if (!stepId || response.erased || response.message?.role !== "assistant" || !intent || intent.erased) throw new Error("Cannot restore the last answered step");
 	const records = kept.filter((e) => e.kind === "modular-agent.stepAfter" && e.turnId === turnId && e.stepId === stepId);
-	if (!records.length && (intent.data as { tracksStepAfter?: boolean } | undefined)?.tracksStepAfter === true) return { lastStep: { stepId }, response };
+	if (!records.length) return { lastStep: { stepId }, response };
 	const record = records[0];
 	const decision = (record?.data as { decision?: unknown } | undefined)?.decision;
 	if (records.length !== 1 || record.erased || !branch.some((e) => e.id === record.id) ||

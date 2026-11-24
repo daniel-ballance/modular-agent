@@ -185,8 +185,8 @@ export class Subagents implements ToolSource, InterfaceCapability {
 			})
 			.then((answer) => {
 				if (answer.pending) return; // left open in the parent; the child's own time limit decides for the child
-				this.api.answer(request.sessionId, { requestId: request.id, actorId: PARENT, value: answer.value, declined: answer.declined, reason: answer.reason });
-			});
+				return this.api.submitAnswer(request.sessionId, { requestId: request.id, actorId: PARENT, value: answer.value, declined: answer.declined, reason: answer.reason });
+			}).catch(() => this.api.reportProblem("relay answer", new Error("Could not relay the answer to the child")));
 	}
 
 	// ---------- after a restart ----------

@@ -94,7 +94,7 @@ test("a subagent's approval goes to the parent, which passes it to its user", as
 	assert.equal(requests.length, 1);
 	assert.equal(requests[0].sessionId, s, "the question was asked in the parent's session");
 	assert.match(requests[0].question, /\[subagent .*\] Allow bash\?/);
-	uiApi.answer(s, { requestId: requests[0].id, actorId: "user", value: "allow" });
+	await uiApi.submitAnswer(s, { requestId: requests[0].id, actorId: "user", value: "allow" });
 	await settle(h, s);
 	assert.ok(existsSync(join(d.project, "child.txt")));
 	assert.equal(lastText(h, s), "Parent saw: made it");
@@ -164,7 +164,7 @@ test("a subagent's subagent asks for approval: the question climbs to the top us
 	assert.equal(requests.length, 1, "the top user is asked once");
 	assert.equal(requests[0].sessionId, s);
 	assert.match(requests[0].question, /^\[subagent "child"\] \[subagent "grandchild"\] Allow bash\?/);
-	uiApi.answer(s, { requestId: requests[0].id, actorId: "user", value: "allow" });
+	await uiApi.submitAnswer(s, { requestId: requests[0].id, actorId: "user", value: "allow" });
 	await settle(h, s);
 	assert.ok(existsSync(join(d.project, "deep.txt")));
 	assert.equal(lastText(h, s), "top relays: child relays: grandchild wrote it");

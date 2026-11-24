@@ -1,4 +1,4 @@
-import { untilAborted, inputHandedBackIds, inputIdOf, isToolCall, textOf, type AgentEvent, type InputRequest, type PluginApi, type TurnOutcome } from "@modular-agent/harness";
+import { untilAborted, inputIdOf, isToolCall, textOf, type AgentEvent, type InputRequest, type PluginApi, type TurnOutcome } from "@modular-agent/harness";
 import { isDeepStrictEqual } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Actor, Answer, Content, Declaration, Question, Right, ToolCall, HistoryEntry, InputTiming, InputReceipt, Input, Outcome, QuestionHandler, Settings, ToolStatus, TurnResult, Usage } from "./data.js";
@@ -257,7 +257,7 @@ export class Session {
         if (rawTurn && raw.some(e => e.kind === "turnEnd" && e.turnId === rawTurn && !e.erased)) {
           throw new AgentError("withheld", "Turn result was withheld");
         }
-        if (entries.some(e => e.kind === "inputHandedBack" && inputHandedBackIds(e).includes(id))) return noTurn(id, "handedBack");
+        if (entries.some(e => e.kind === "inputHandedBack" && e.inputId === id)) return noTurn(id, "handedBack");
         if (!this.#api.session(this.id).busy && (await this.#api.readHistory(this.id, { all: true })).length === entries.length) {
           throw new AgentError("lost", "Input did not settle");
         }

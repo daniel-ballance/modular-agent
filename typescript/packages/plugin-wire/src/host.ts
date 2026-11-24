@@ -34,7 +34,7 @@ import type {
 import { checkOutputSize, mapOutput } from "@modular-agent/harness";
 import { fromWire, toWire } from "./translate.js";
 import { connectWebSocket, PLUGIN_PROTOCOL, receiveMessages } from "./websocket.js";
-import { DATA_BINDING, listDirectory, notFoundAsEnoent, optionalMethod, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
+import { execTimeout, listDirectory, notFoundAsEnoent, optionalMethod, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
 
 const { version } = createRequire(import.meta.url)("../../package.json") as { version: string };
 
@@ -43,8 +43,6 @@ export interface ExternalPluginSpec {
 	command: string[];
 	env?: Record<string, string>;
 	config?: Record<string, unknown>;
-	/** Omit the context offer when testing a peer without context support. */
-	offerTraceContext?: boolean;
 }
 
 /** A network plugin and optional operator-configured liveness deadlines (milliseconds). */
@@ -61,7 +59,6 @@ export type PluginSpec = ExternalPluginSpec | ServicePluginSpec;
 import { historyForPeer, TURN_TRACE } from "@modular-agent/harness/telemetry";
 
 export interface Registration {
-	traceContext?: 1;
 	binding: string;
 	name: string;
 	providers?: { id: string; supports?: Record<string, boolean | string>; models: unknown[] }[];
@@ -120,7 +117,7 @@ export async function startExternalPlugin(spec: ExternalPluginSpec, info: { proj
 		await exited;
 		clearTimeout(timer);
 	};
-	return registerExternalPlugin(peer, info, spec.config ?? {}, stop, undefined, spec.offerTraceContext);
+	return registerExternalPlugin(peer, info, spec.config ?? {}, stop);
 }
 
 /** Connect a service and register it through the same host as a child process. */
@@ -169,15 +166,13 @@ async function controlWait<T>(peer: WirePeer, reply: Promise<T>, ms: number, ope
 	try { return await reply; } finally { clearTimeout(timer); }
 }
 
-export async function registerExternalPlugin(peer: WirePeer, info: { project: string; home: string }, config: Record<string, unknown>, stop: ExternalPlugin["stop"], controlMs = 5_000, offerTraceContext = true): Promise<ExternalPlugin> {
+export async function registerExternalPlugin(peer: WirePeer, info: { project: string; home: string }, config: Record<string, unknown>, stop: ExternalPlugin["stop"], controlMs = 5_000): Promise<ExternalPlugin> {
 	const registration = await controlWait(peer, peer.request<Registration>("plugin/initialize", {
 		binding: PLUGIN_BINDING,
-		data: DATA_BINDING,
 		host: { name: "modular-agent (TypeScript)", version },
 		project: info.project,
 		home: info.home,
 		config,
-		...(offerTraceContext ? { traceContext: 1 } : {}),
 	}), controlMs, "initialization").catch(async (error) => { await stop("refused", "Initialization failed"); throw error; });
 	try {
 		const reg = registration;
@@ -191,7 +186,7 @@ export async function registerExternalPlugin(peer: WirePeer, info: { project: st
 		];
 		const replacements = [...new Set([...(reg.replaces ?? []), ...(reg.runtime ? ["runtime"] : [])])];
 		return {
-			registration, plugin: hostPlugin(peer, reg, stop, offerTraceContext && reg.traceContext === 1), stop, items, replacements,
+			registration, plugin: hostPlugin(peer, reg, stop), stop, items, replacements,
 			refusal(harness, externalItems) {
 				if (peer.closed) return "Plugin connection was lost during registration";
 				if (harness.plugins().includes(reg.name)) return `Plugin ${reg.name} is already loaded`;
@@ -242,7 +237,7 @@ interface ProviderAttempt {
 	failure?: unknown;
 }
 
-function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>, agreed: boolean): Plugin {
+function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>): Plugin {
 	const parents = new Map<number | string, Parent>();
 	let workActors: PluginApi["workActors"];
 	let workJobs: PluginApi["workJobs"];
@@ -329,7 +324,7 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				const env = await environment(p);
 				const signal = signalOf(p.parentRequestId, ctx.signal);
 				if (signal.aborted) throw new WireError("cancelled", "Parent or callback was cancelled");
-				const result = await env.exec(String(p.command), { signal, timeoutMs: p.timeoutMs,
+				const result = await env.exec(String(p.command), { signal, timeoutMs: execTimeout(p.timeoutMs),
 					onOutput: (chunk) => { if (!signal.aborted) peer.notify("host/env/output", { parentRequestId: ctx.id, chunk }); },
 				});
 				if (signal.aborted) throw new WireError("cancelled", "Parent or callback was cancelled");
@@ -428,7 +423,7 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 			});
 
 			const activeJobs = new Set<string>();
-			peer.configureTracing(reg.name, agreed, p => {
+			peer.configureTracing(reg.name, p => {
 				if (p?.parentRequestId !== undefined) {
 					try { parentOf(p); } catch { return undefined; }
 					return peer.requestTrace(p.parentRequestId);
@@ -1066,7 +1061,7 @@ class WireEnvironment implements WorkingEnvironment {
 		return (await this.peer.request<{ exists: boolean }>("env/exists", { cwd: this.cwd, sessionId: this.sessionId, path })).exists;
 	}
 	async exec(command: string, options: { signal: AbortSignal; timeoutMs?: number; onOutput?(chunk: string): void }): Promise<ExecResult> {
-		const req = this.peer.request<ExecResult>("env/exec", { cwd: this.cwd, sessionId: this.sessionId, command, ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}) }, options.signal);
+		const req = this.peer.request<ExecResult>("env/exec", { cwd: this.cwd, sessionId: this.sessionId, command, timeoutMs: execTimeout(options.timeoutMs) }, options.signal);
 		const listen = (p: { parentRequestId: number; chunk: string }) => {
 			if (p.parentRequestId === req.id) options.onOutput?.(p.chunk);
 		};

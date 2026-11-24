@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { cp, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createAgent, definePlugin, fileHistory, httpHistory, serveHistory } from "@modular-agent/core";
@@ -76,7 +77,7 @@ test("HTTP erasure refuses a history delivery waiting at its output gate", async
   for (const [path, id] of [[source, "source-target"], [dest, "dest-target"]]) {
     await request(path, "PUT", { created: Date.now(), project: dir });
     const { lease } = await request<{ lease: string }>(path + "/lease", "POST", { owner: "wire-writer" });
-    await request(path + "/entries", "POST", { lease, entries: [{ id, parentId: null, kind: "input", content: [{ type: "text", text: "private input" }] }] });
+    await request(path + "/entries", "POST", { lease, entries: [{ id, parentId: null, kind: "fixture.note", data: { text: "private input" } }] });
     await request(`${path}/lease/${lease}`, "DELETE");
   }
   // This checks the history delivery fence, not a model turn. Seed before opening the writer.
@@ -189,6 +190,29 @@ test("a previously declared HTTP registry does not recreate missing storage", as
   const registry = await fetch(`${restarted.url}/v1/sessions/previous/pending-erasure`, { headers });
   assert.equal(registry.status, 503);
   assert.equal((await registry.json() as { code: string }).code, "unavailable");
+});
+
+test("a new HTTP registry is not created over an unidentified store", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "sdk-http-nonempty-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, "obligations"), "unverified");
+  await assert.rejects(historyService({ dir, token: "fixture" }), /empty directory/);
+  assert.deepEqual(await readdir(dir), ["obligations"]);
+});
+
+test("a registry without publication order stays unavailable and unmodified", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "sdk-http-schema-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const options = { dir, token: randomBytes(32).toString("hex") };
+  const first = await historyService(options);
+  await new Promise<void>((resolve, reject) => first.server.close(error => error ? reject(error) : resolve()));
+  const path = join(dir, "history.sqlite");
+  const db = new DatabaseSync(path);
+  try { db.exec("ALTER TABLE registry_intents DROP COLUMN session_ids"); } finally { db.close(); }
+  await assert.rejects(historyService(options), /unavailable/i);
+  const check = new DatabaseSync(path, { readOnly: true });
+  try { assert.equal(check.prepare("SELECT 1 FROM pragma_table_info('registry_intents') WHERE name='session_ids'").get(), undefined); }
+  finally { check.close(); }
 });
 
 test("an independent erasure registry fences a restored history backup", async t => {

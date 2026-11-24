@@ -29,7 +29,7 @@ async function until(check: () => boolean) {
 
 const fullRights = ["watch", "input", "answer", "approve", "tools", "settings", "erase"] as const;
 
-test("the agent reopens standard history with session settings, actors, keys and late questions", async (t) => {
+test("the agent reopens settings and receipts but does not continue a question without a checkpoint", async (t) => {
 	const { h, api, home } = await start(t, { plugins: [durableRuntime(), approval({ policy: "all", waitMs: 5 })] });
 	const store = h.use<HistoryStore>("history-store")!;
 	const sid = "portable-session";
@@ -39,12 +39,13 @@ test("the agent reopens standard history with session settings, actors, keys and
 	const drafts: Partial<HistoryEntry>[] = [
 		{ kind: "actorJoined", data: { actor: { id: "friend", kind: "user", rights: fullRights } } },
 		{ kind: "setting", data: { key: "settings", value: { model: { provider: "conformance", id: "echo" }, reasoning: "low", maxSteps: 7 } } },
+		{ kind: "inputAccepted", inputId: "original", actorId: "friend", data: { key: "one", when: "now", taken: "now", content: [{ type: "text", text: "read" }], rights: fullRights, authorizers: [{ sessionId: sid, actorId: "friend" }] } },
 		{ kind: "turnStart", turnId: "foreign-turn", actorId: "friend", data: { startedBy: { kind: "actor", id: "friend" }, model: { provider: "conformance", id: "echo" }, system: "retained", tools: [], settings: {}, rights: fullRights, authorizers: [{ sessionId: sid, actorId: "friend" }] } },
-		{ kind: "input", turnId: "foreign-turn", actorId: "friend", data: { inputId: "original", key: "one" }, modelVisible: true, message: { role: "user", content: [{ type: "text", text: 'tool:read {"path":"note"}' }] } },
+		{ kind: "input", inputId: "original", turnId: "foreign-turn", actorId: "friend", data: { key: "one" }, modelVisible: true, message: { role: "user", content: [{ type: "text", text: 'tool:read {"path":"note"}' }] } },
 		{ kind: "response", turnId: "foreign-turn", stepId: "foreign-step", modelVisible: true, message: { role: "assistant", stop: "toolUse", content: [call] } },
-		{ kind: "inputRequest", turnId: "foreign-turn", toolCallId: call.id, data: { request: { id: "foreign-question", sessionId: sid, kind: "approval", question: "Allow read?", details: '{\n  "path": "note"\n}', key: `approval:${call.id}`, toolCallId: call.id, answerable: true } } },
+		{ kind: "inputRequest", requestId: "foreign-question", turnId: "foreign-turn", stepId: "foreign-step", toolCallId: call.id, data: { request: { id: "foreign-question", sessionId: sid, kind: "approval", question: "Allow read?", details: '{\n  "path": "note"\n}', key: `approval:${call.id}`, toolCallId: call.id, answerable: true } } },
 		{ kind: "turnEnd", turnId: "foreign-turn", data: { outcome: { kind: "completed" }, result: { openToolCalls: [call.id] }, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } } },
-		{ kind: "position", data: { to: "e6" } },
+		{ kind: "position", data: { to: "e7" } },
 	];
 	await store.append(sid, drafts.map((e, i) => ({ writer: "foreign", sessionId: sid, modelVisible: false, time: 10 + i, ...e, id: `e${i}`, parentId: i ? `e${i - 1}` : null }) as HistoryEntry));
 	await store.close(sid);
@@ -53,14 +54,14 @@ test("the agent reopens standard history with session settings, actors, keys and
 	assert.deepEqual(api.session(sid).settings.model, { provider: "conformance", id: "echo" });
 	assert.equal(api.session(sid).settings.reasoning, "low");
 	assert.deepEqual(api.history(sid).slice(-2).map((e) => e.kind), ["turnEnd", "plugins"]);
-	assert.equal(api.history(sid).at(-1)?.parentId, "e6");
+	assert.equal(api.history(sid).at(-1)?.parentId, "e7");
 	assert.deepEqual(await api.input(sid, { content: "ignored", key: "one", actorId: "friend" }), { duplicate: true, inputId: "original", taken: "now" });
 	assert.equal(api.openRequests(sid)[0]?.id, "foreign-question");
-	assert.equal(api.answer(sid, { requestId: "foreign-question", actorId: "friend", value: "allow" }).accepted, true);
+	assert.equal((await api.submitAnswer(sid, { requestId: "foreign-question", actorId: "friend", value: "allow" })).accepted, true);
 	await api.waitForIdle(sid);
 	const history = api.history(sid);
-	assert.equal(history.filter((e) => e.kind === "toolResult" && e.toolCallId === call.id).length, 1);
-	assert.match(JSON.stringify(history.at(-1)?.data), /portable note/);
+	assert.ok(!history.some(e => e.continuesTurnId || e.kind === "toolStarted" || e.kind === "toolResult"));
+	assert.doesNotMatch(JSON.stringify(history), /portable note/);
 	assert.equal(api.openRequests(sid).length, 0);
 });
 
@@ -181,7 +182,7 @@ test("changing any part of a keyed question does not reuse its answer", async (t
 		const result = api.ask(sid, draft);
 		await until(() => seen.length > index);
 		const r = seen[index++];
-		assert.equal(api.answer(sid, { requestId: r.id, actorId: "user", declined: true }).accepted, true);
+		assert.equal((await api.submitAnswer(sid, { requestId: r.id, actorId: "user", declined: true })).accepted, true);
 		assert.equal((await result).requestId, r.id);
 		return r.id;
 	};

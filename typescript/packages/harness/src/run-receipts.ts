@@ -16,7 +16,7 @@ export function receiptId(thread: string, actor: string, client: string, run: st
 }
 export function linkedWork(branch: HistoryEntry[], op: HistoryEntry) {
   if (op.kind === "inputAccepted") {
-    const handback = branch.find(e => e.kind === "inputHandedBack" && (e.inputId === op.inputId || e.inputIds?.includes(op.inputId!)));
+    const handback = branch.find(e => e.kind === "inputHandedBack" && e.inputId === op.inputId);
     const taken = branch.find(e => e.kind === "input" && e.inputId === op.inputId);
     return { turn:taken?.turnId, taken, handback };
   }

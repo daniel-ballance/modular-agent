@@ -95,7 +95,6 @@ export interface HistoryEntry {
 	toolCallId?: string;
 	jobId?: string;
 	inputId?: string;
-	inputIds?: string[];
 	requestId?: string;
 	continuesTurnId?: string;
 	usage?: Usage;
@@ -118,20 +117,14 @@ export function erasedEntry(entry: HistoryEntry): HistoryEntry {
 	if (entry.erased) return entry;
 	const { id, parentId, kind } = entry;
 	const tomb = { id, parentId, kind, erased: true } as HistoryEntry;
-	const d = entry.data as { inputId?: string; inputIds?: string[]; requestId?: string; request?: { id?: string }; continuesTurnId?: string; key?: string; usage?: Usage } | undefined;
+	const d = entry.data as { key?: string; usage?: Usage } | undefined;
 	const valid = (v: unknown): v is string => typeof v === "string" && v !== "";
 	for (const key of ["turnId", "stepId", "toolCallId", "jobId", "inputId", "requestId", "continuesTurnId"] as const) {
 		const value = entry[key];
 		if (valid(value)) tomb[key] = value;
 	}
 	if (entry.sources?.every(valid)) tomb.sources = entry.sources;
-	if (["input", "inputAccepted", "inputHandedBack"].includes(kind) && !Object.hasOwn(entry, "inputId") && valid(d?.inputId)) tomb.inputId = d.inputId;
-	if (kind === "inputHandedBack" && !Object.hasOwn(entry, "inputId") && !(d && Object.hasOwn(d, "inputId")) && d?.inputIds?.length && d.inputIds.every(valid)) tomb.inputIds = d.inputIds;
-	if (["inputRequest", "inputAnswer"].includes(kind) && !Object.hasOwn(entry, "requestId")) {
-		const requestId = valid(d?.requestId) ? d.requestId : kind === "inputRequest" ? d?.request?.id : undefined;
-		if (valid(requestId)) tomb.requestId = requestId;
-	}
-	if (kind === "turnStart" && !Object.hasOwn(entry, "continuesTurnId") && valid(d?.continuesTurnId)) tomb.continuesTurnId = d.continuesTurnId;
+
 	if (kind === "jobStarted" && valid(entry.writer) && valid(d?.key)) { tomb.writer = entry.writer; tomb.jobKey = d.key; }
 	const usage = kind === "response" && entry.message?.role === "assistant" ? entry.message.usage : kind === "jobEnded" || kind === "turnEnd" ? d?.usage : undefined;
 	if (usage && [usage.input, usage.output, usage.cacheRead, usage.cacheWrite].every((n) => Number.isSafeInteger(n) && n >= 0) && Number.isFinite(usage.cost) && usage.cost >= 0) {

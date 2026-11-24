@@ -208,7 +208,6 @@ export interface PluginApi {
 	// actors
 	ask(sessionId: string, request: InputRequestDraft): Promise<Answer>;
 	deferTool(sessionId: string, turnId: string | undefined, question: InputRequestDraft): Promise<{ pending: string } | { refuse: string } | undefined>;
-	answer(sessionId: string, answer: Answer): { accepted: boolean; reason?: string };
 	refreshApprovals(sessionId: string): Promise<void>;
 	registerApprovalRoute(policy: ApprovalRoute): () => void;
 	presentApproval(sessionId: string, requestId: string, delivery: ApprovalDelivery): Promise<boolean>;
@@ -239,7 +238,7 @@ export interface PluginApi {
 	config(): Record<string, unknown>;
 }
 
-export interface HarnessOptions { receiptDir?:string; approvalCoversNested?: boolean; agentName?: string; project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn" | "refused"; jobReportsStartTurns?: boolean; rejectUnknownModel?: boolean; reopenModelAliases?: Readonly<Record<string, string>>; resourceReservations?: ReservationOptions; tenants?: Record<string, Tenant> | null }
+export interface HarnessOptions { receiptDir?:string; approvalCoversNested?: boolean; agentName?: string; project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn" | "refused"; jobReportsStartTurns?: boolean; rejectUnknownModel?: boolean; resourceReservations?: ReservationOptions; tenants?: Record<string, Tenant> | null }
 
 export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"];
 
@@ -271,6 +270,23 @@ interface ApprovalPass {
 }
 interface DispatchAllowance { call: ToolCall; binding: ApprovalBinding; policy: unknown; cover?: CoveringAllow }
 interface NestedDispatch { depth: number; registration: NonNullable<ReturnType<Harness["findTool"]>>; approval: unknown; inherited?: CoveringAllow }
+type RecordedSnapshot = TurnSnapshot & { startedBy: QueuedInput["startedBy"]; resultShape?: Record<string, unknown> };
+function recordedSnapshot(start: HistoryEntry): RecordedSnapshot {
+	const d = start.data as RecordedSnapshot | undefined;
+	const id = (x: unknown) => typeof x === "string" && x.length > 0;
+	const object = (x: unknown) => x != null && typeof x === "object" && !Array.isArray(x);
+	const cap = (x?: number) => x === undefined || Number.isSafeInteger(x) && x > 0;
+	if (!d || !id(d.startedBy?.id) || !["actor", "job", "plugin", "answer", "toolResult"].includes(d.startedBy.kind) ||
+		d.model !== null && (!id(d.model?.id) || !id(d.model?.provider)) || typeof d.system !== "string" ||
+		d.context !== undefined && !validReportContent(d.context) || !Array.isArray(d.tools) ||
+		!d.tools.every(t => id(t?.name) && typeof t.description === "string" && (typeof t.parameters === "boolean" || object(t.parameters))) ||
+		!object(d.settings) || !cap(d.settings.maxSteps) || !cap(d.settings.maxOutput) ||
+		d.settings.reasoning !== undefined && !REASONING_LEVELS.some(level => level === d.settings.reasoning)) {
+		throw failure("unavailable", "Cannot recover an incomplete turn snapshot");
+	}
+	return d;
+}
+
 interface TurnState extends TurnSnapshot { interfaceOffer?: Map<string, InterfaceConnection>; interfaceAllowances?: Map<string, { call: ToolCall; approval: unknown } | null>; dispatched: Set<string>; steps: Map<string, Operation>; startingRights?: Authority[]; connectionRights?: ConnectionRights; endedHook?: boolean; sources: Map<string, string[]>; actors: Set<string>; jobs: Set<string>; tenantLimit?: boolean; capacityLimit?: boolean; stepAfterRunning?: boolean; toolResultError?: string }
 
 /**
@@ -307,7 +323,6 @@ export class Harness {
 	private readonly jobReportsStartTurns: boolean;
 	private readonly rejectUnknownModel: boolean;
 	private readonly agentName?: string;
-	private readonly reopenModelAliases: Readonly<Record<string, string>>;
 	private newId: () => string;
 	private jobSpans = new WeakMap<Session, Map<string, Operation>>();
 	private jobCancels = new Map<string, (jobId: string) => Promise<void>>();
@@ -331,7 +346,6 @@ export class Harness {
 		this.jobReportsStartTurns = options.jobReportsStartTurns ?? true;
 		this.rejectUnknownModel = options.rejectUnknownModel === true;
 		this.agentName = safeName(options.agentName);
-		this.reopenModelAliases = { ...options.reopenModelAliases };
 		this.hooks = new HookRegistry(({ hook, plugin, error }) => this.problem(plugin, `hook ${hook}`, error));
 		const h = (name: string, rule: HookRule, owner: string) => this.hooks.define(name, rule, owner);
 		// Harness hook points
@@ -523,7 +537,6 @@ export class Harness {
 			callTool: (sessionId, call) => this.callTool(this.session(sessionId), { ...call, id: call.id ?? this.newId() }),
 			ask: (sessionId, request) => this.ask(this.session(sessionId), request, pluginName),
 			deferTool: (id, turnId, question) => this.deferTool(this.session(id), turnId, question, pluginName),
-			answer: (sessionId, answer) => this.answer(this.session(sessionId), answer),
 			refreshApprovals: id => this.reconcileApprovals(this.session(id)),
 			registerApprovalRoute: policy => { this.approvalRoutes.set(policy.id, policy); return () => {
 				if (this.approvalRoutes.get(policy.id) === policy) this.approvalRoutes.delete(policy.id);
@@ -715,7 +728,7 @@ export class Harness {
 	// ---------- commands ----------
 
 	private async runCommand(sessionId: string, line: string, actorId: string): Promise<string | void> {
-		const match = /^\/(\S+)\s*([\s\S]*)$/.exec(line.trim());
+		const match = /^\/(\S+)\s?([\s\S]*)$/.exec(line.trimStart());
 		if (!match) throw failure("invalid_params", "Not a command");
 		const session = this.session(sessionId);
 		await this.reconcilePending(session);
@@ -814,7 +827,7 @@ export class Harness {
 				const unit = this.reservations.limits.settlementBytes;
 				for (const e of own) {
 					if (e.kind === "inputRequest" && !e.erased && !closed.has(requestIdOf(e))) {
-						this.reservations.reserve(s, `question:${requestIdOf(e) ?? readRequest(e).id}`, { storageBytes: 3 * unit }, true);
+						this.reservations.reserve(s, `question:${e.requestId}`, { storageBytes: 3 * unit }, true);
 					}
 					if (e.kind === "turnStart" && e.turnId && !ended.has(e.turnId)) this.reservations.reserve(s, `turn:${e.turnId}`, { storageBytes: 2 * unit }, true);
 					if (e.kind === "modelRequest" && e.stepId && !answered.has(e.stepId) && !ended.has(e.turnId)) {
@@ -973,8 +986,8 @@ export class Harness {
 		const s = new Session(meta, false);
 		if (store.historyErasure) this.storedTombstones.set(s, new Set(entries.filter(e => e.erased === true).map(e => e.id)));
 		for (const e of entries) s.apply(e);
-		const model = parseModel(s.settings.model);
-		if (model) s.settings.model = this.reopenModel(model);
+		const interrupted = this.unfinishedTurn(s, s.branch());
+		if (interrupted) recordedSnapshot(interrupted);
 		return s;
 	}
 
@@ -1208,7 +1221,7 @@ export class Harness {
 		const branch = s.branch();
 		const lastStart = this.unfinishedTurn(s, branch);
 		if (!lastStart?.turnId) return;
-		const startedBy = (lastStart.data as { startedBy?: QueuedInput["startedBy"] } | undefined)?.startedBy ?? { kind: "actor", id: lastStart.actorId ?? "user" };
+		const snapshot = recordedSnapshot(lastStart);
 		const pending = new Map((lastStart.continuesTurnId ? this.openCalls(s, lastStart.continuesTurnId) : []).map((c) => [c.id, c]));
 		for (const c of interruptedCalls(branch, lastStart.turnId)) pending.set(c.id, c);
 		// This host has no restart-time cleanup confirmation from its environments.
@@ -1217,7 +1230,7 @@ export class Harness {
 		const interrupted: InterruptedTurn = { turnId: lastStart.turnId, calls };
 		this.emit(s, "turn.interrupted", { pending: interrupted.calls.length }, "harness", { turnId: interrupted.turnId });
 		// Not awaited: the resumed turn may wait for an answer that only an Interface opened after this can give.
-		void connectionRights.exit(() => this.launch(s, interrupted.turnId, (signal) => this.resumeTurn(s, interrupted, startedBy, signal, lastStart.data as Partial<TurnSnapshot>)));
+		void connectionRights.exit(() => this.launch(s, interrupted.turnId, (signal) => this.resumeTurn(s, interrupted, snapshot, signal)));
 	}
 
 	/** Used when no Runtime is loaded: the turn ends as failed, and each pending call gets one result. */
@@ -1413,13 +1426,16 @@ export class Harness {
 				}
 				entry.data = setting;
 			}
+			if (pluginRecord && (entry.kind === "toolPending" || entry.kind === INTERFACE_HANDOFF)) throw failure("invalid_request", "Only the Harness records pending calls");
 			if (entry.kind === "inputRequest") {
 				const request = (entry.data as { request?: InputRequest })?.request;
 				if (pluginRecord && request?.coversNested !== undefined) throw failure("invalid_request", "Only the approval gate sets coverage");
 				if (request?.approvalWait !== undefined) {
 					if (pluginRecord || request.approvalWait !== "untilDeadline") throw failure("invalid_request", "Only the approval gate can park a call");
-					request.deadlineAt = entry.time + request.timeLimitMs!;
-					if (!Number.isSafeInteger(request.deadlineAt)) throw failure("invalid_request", "Unrepresentable approval deadline");
+				}
+				if (request?.timeLimitMs !== undefined) {
+					request.deadlineAt = entry.time + request.timeLimitMs;
+					if (!Number.isSafeInteger(request.timeLimitMs) || request.timeLimitMs < 0 || !Number.isSafeInteger(request.deadlineAt)) throw failure("invalid_request", "Unrepresentable question deadline");
 				}
 			}
 			if (pluginRecord && entry.kind === "inputAnswer" && entry.data && typeof entry.data === "object" && "approvalView" in entry.data) throw failure("invalid_request", "Only the Harness can attest to delivery");
@@ -2132,7 +2148,7 @@ export class Harness {
 			if (earlier) return { ...earlier, duplicate: true };
 		}
 		let content = typeof options.content === "string" ? [text(options.content)] : options.content;
-		const typed = textOf(content).trim();
+		const typed = textOf(content).trimStart();
 		if (options.when !== "propose" && !options.delegatedBy && options.startedBy?.kind !== "job" && typed.startsWith("/") && this.commandTable.has(/^\/(\S+)/.exec(typed)?.[1] ?? "")) {
 			const output = await this.runCommand(sessionId, typed, options.actorId);
 			const receipt = { inputId: this.newId(), taken: "now" as const, handled: true, output: output ?? undefined };
@@ -2151,8 +2167,8 @@ export class Harness {
 			if (this.receiptOperation.getStore()) {
 				await this.commit(s, [
 					{kind:"inputAccepted", writer:"harness", modelVisible:false, inputId, actorId:options.actorId,
-						data:{inputId, key:options.key, when:"now", taken:"now", content}},
-					{kind:"inputHandedBack", writer:"harness", modelVisible:false, inputId, data:{inputId, reason:"handled"}},
+						data:{key:options.key, when:"now", taken:"now", content}},
+					{kind:"inputHandedBack", writer:"harness", modelVisible:false, inputId, data:{reason:"handled"}},
 				]);
 			}
 			let output: string | void = undefined;
@@ -2219,7 +2235,7 @@ export class Harness {
 		try { await this.commit(s, [{
 			kind: "inputAccepted", writer: "harness", modelVisible: false, actorId: q.actorId, inputId: q.id, sources: q.sources,
 			jobId: q.startedBy.kind === "job" ? q.startedBy.id : undefined,
-			data: { inputId: q.id, key: q.key, when: q.when, ...(q.startedBy.kind === "job" && !q.releasedBy ? { parked: q.when === "propose" } : {}), content: q.content, releasedBy: q.releasedBy, submittedBy: q.delegatedBy, taken, connectionRights: q.connectionRights, rights: q.startingRights,
+			data: { key: q.key, when: q.when, ...(q.startedBy.kind === "job" && !q.releasedBy ? { parked: q.when === "propose" } : {}), content: q.content, releasedBy: q.releasedBy, submittedBy: q.delegatedBy, taken, connectionRights: q.connectionRights, rights: q.startingRights,
 				authorizers: authorizers.map(actorId => ({ sessionId: s.id, actorId })) },
 		}]); }
 		catch (error) {
@@ -2268,7 +2284,7 @@ export class Harness {
 
 	private async handBack(s: Session, queued: QueuedInput[], reason: string): Promise<void> {
 		const inputIds = queued.filter((q) => s.admissions.has(q.id)).map((q) => q.id);
-		if (inputIds.length) await this.commit(s, inputIds.map((inputId) => ({ kind: "inputHandedBack", writer: "harness", modelVisible: false, inputId, data: { inputId, reason } })));
+		if (inputIds.length) await this.commit(s, inputIds.map((inputId) => ({ kind: "inputHandedBack", writer: "harness", modelVisible: false, inputId, data: { reason } })));
 		for (const q of queued) this.emit(s, reason === "withdrawn" ? "input.withdrawn" : "input.handedBack",
 			{ inputId: q.id, content: q.content, reason }, "harness");
 	}
@@ -2547,24 +2563,24 @@ export class Harness {
 		if (open.size) this.maybeContinueOpenCalls(s);
 	}
 
-	private async resumeTurn(s: Session, interrupted: InterruptedTurn, startedBy: QueuedInput["startedBy"], signal: AbortSignal, snapshot?: Partial<TurnSnapshot> & { resultShape?: Record<string, unknown> }): Promise<void> {
+	private async resumeTurn(s: Session, interrupted: InterruptedTurn, snapshot: RecordedSnapshot, signal: AbortSignal): Promise<void> {
 		const turnId = interrupted.turnId;
-		if (!this.runtime()?.supports.continuesAfterRestart) return withTrace(undefined, () => this.resumeTurnWithin(s, interrupted, startedBy, signal, snapshot));
+		if (!this.runtime()?.supports.continuesAfterRestart) return withTrace(undefined, () => this.resumeTurnWithin(s, interrupted, snapshot, signal));
 		const saved = this.savedTrace(s, turnId);
 		const span = this.turnSpan(s, turnId, saved ?? null, true);
 		try {
 			await span.run(async () => {
 				const traceContext = carrier(span.spanContext);
 				if (traceContext) await this.commit(s, [{ kind: TURN_TRACE, writer: "harness", turnId, modelVisible: false, data: { traceContext } }]);
-				await this.resumeTurnWithin(s, interrupted, startedBy, signal, snapshot);
+				await this.resumeTurnWithin(s, interrupted, snapshot, signal);
 			});
 		} finally { span.end(); }
 	}
 
-	private async resumeTurnWithin(s: Session, interrupted: InterruptedTurn, startedBy: QueuedInput["startedBy"], signal: AbortSignal, snapshot?: Partial<TurnSnapshot> & { resultShape?: Record<string, unknown> }): Promise<void> {
+	private async resumeTurnWithin(s: Session, interrupted: InterruptedTurn, snapshot: RecordedSnapshot, signal: AbortSignal): Promise<void> {
 		const turnId = interrupted.turnId;
 		const runtime = this.runtime();
-		const model = this.modelAccess(s, snapshot?.model);
+		const model = this.modelAccess(s, snapshot.model);
 		if (!runtime || !model) {
 			const pending = new Set(pendingToolCalls(s.branch(), turnId, s.order.map((id) => s.entries.get(id)!)));
 			await this.endInterruptedTurn(s, { turnId, calls: interrupted.calls.filter((c) => !pending.has(c.id)) });
@@ -2573,8 +2589,8 @@ export class Harness {
 		}
 		const branch = s.branch();
 		const state: TurnState = {
-			model: model.model, system: snapshot?.system ?? "", context: snapshot?.context, tools: snapshot?.tools ?? this.toolDefinitions(s),
-			settings: snapshot?.settings ? { ...snapshot.settings, reasoning: lowerReasoning(snapshot.settings.reasoning, model.model) } : this.turnSettings(s, model.model),
+			model: model.model, system: snapshot.system, context: snapshot.context, tools: snapshot.tools,
+			settings: { ...snapshot.settings, reasoning: lowerReasoning(snapshot.settings.reasoning, model.model) },
 			dispatched: new Set(), steps: new Map(), sources: new Map(), actors: new Set(this.recordedTurnActors(branch, turnId)),
 			jobs: new Set(this.recordedTurnJobs(branch, turnId)),
 			startingRights: this.recordedTurnRights(branch, turnId),
@@ -2594,8 +2610,8 @@ export class Harness {
 			});
 			await this.endInterruptedTurn(s, { turnId, calls: calls.filter((c) => !eligible.includes(c)) });
 			outcome = await runtime.resumeTurn(
-				{ sessionId: s.id, turnId, startedBy, model: this.turnModel(s, turnId, state, model), settings: state.settings, resultShape: snapshot?.resultShape },
-				this.runtimeHost(s, turnId, state, snapshot?.resultShape, runtime.supports.continuesAfterRestart === true),
+				{ sessionId: s.id, turnId, startedBy: snapshot.startedBy, model: this.turnModel(s, turnId, state, model), settings: state.settings, resultShape: snapshot.resultShape },
+				this.runtimeHost(s, turnId, state, snapshot.resultShape, runtime.supports.continuesAfterRestart === true),
 				signal,
 				{ turnId, calls: eligible, ...(restored ? { lastStep: restored.lastStep } : {}) },
 			);
@@ -2608,7 +2624,7 @@ export class Harness {
 			const open = new Set(pendingToolCalls(s.branch(), turnId, keptNow));
 			await this.endInterruptedTurn(s, { turnId, calls: interrupted.calls.filter((c) => !terminal.has(c.id) && !open.has(c.id)) });
 		}
-		await this.finishTurn(s, turnId, outcome, state, signal, snapshot?.resultShape);
+		await this.finishTurn(s, turnId, outcome, state, signal, snapshot.resultShape);
 	}
 
 	private recordedTurnRights(branch: HistoryEntry[], turnId: string): Authority[] {
@@ -2653,7 +2669,7 @@ export class Harness {
 		const sources = jobId ? s.order.filter((id) => { const e = s.entries.get(id)!; return e.jobId === jobId && e.kind === "jobEnded"; }) : undefined;
 		return {
 			kind: "input", writer: "harness", modelVisible: true, turnId, actorId: q.actorId, jobId, inputId: q.id, sources: [...(sources ?? []), ...(q.sources ?? [])],
-			message: { role: "user", content: q.content }, data: { inputId: q.id, key: q.key, releasedBy: q.releasedBy, delegatedBy: q.delegatedBy, authorityActors: q.authorityActors, connectionRights: q.connectionRights, rights: q.startingRights },
+			message: { role: "user", content: q.content }, data: { key: q.key, releasedBy: q.releasedBy, delegatedBy: q.delegatedBy, authorityActors: q.authorityActors, connectionRights: q.connectionRights, rights: q.startingRights },
 		};
 	}
 
@@ -2923,7 +2939,7 @@ export class Harness {
 					const [intent] = await this.commit(s, [{
 						kind: "modelRequest", writer: "harness", turnId, stepId, modelVisible: false,
 						actorId: turnId ? undefined : [...state.actors][0],
-						data: { model: scope.model, ...(model.supports.keepsState === true ? { keepsState: true } : {}), safeToRepeat, tracksStepAfter: !!turnId, tools: prepared.request.tools.map((t) => t.name), ...(safeToRepeat || !turnId ? { request: dispatched } : {}) },
+						data: { model: scope.model, ...(model.supports.keepsState === true ? { keepsState: true } : {}), safeToRepeat, tools: prepared.request.tools.map((t) => t.name), ...(safeToRepeat ? { request: dispatched } : {}) },
 						sources: state.sources.get(stepId),
 					}]);
 					try { await check(); }
@@ -3000,14 +3016,9 @@ export class Harness {
 		} };
 	}
 
-	private reopenModel(ref: { provider: string; id: string }): { provider: string; id: string } {
-		return Object.hasOwn(this.reopenModelAliases, ref.provider) ? { ...ref, provider: this.reopenModelAliases[ref.provider] } : ref;
-	}
-
 	private providerFor(s: Session, ref = parseModel(s.settings.model) as ReturnType<typeof parseModel> | null): Provider | undefined {
 		if (!ref) return undefined;
-		const { provider } = this.reopenModel(ref);
-		return this.useAll<Provider>("provider").find((p) => p.id === provider);
+		return this.useAll<Provider>("provider").find((p) => p.id === ref.provider);
 	}
 
 	private modelAccess(s: Session, ref = parseModel(s.settings.model) as ReturnType<typeof parseModel> | null): ModelAccess | undefined {
@@ -3025,7 +3036,7 @@ export class Harness {
 				options.signal.throwIfAborted();
 				if (available === false) return { role: "assistant", stop: "failed", content: [],
 					error: { kind: "credentials", message: "Provider is not available" } };
-				return provider.request(this.reopenModel(ref), request, { ...options, sessionId: s.id });
+				return provider.request(ref, request, { ...options, sessionId: s.id });
 			},
 		};
 	}
@@ -3445,7 +3456,7 @@ export class Harness {
 		return undefined;
 	}
 
-	private toolDefinitions(s?: Session, applyLegacyFilter = true): ToolDefinition[] {
+	private toolDefinitions(s?: Session): ToolDefinition[] {
 		const seen = new Set<string>();
 		const out: ToolDefinition[] = [];
 		for (const { plugin, impl } of this.caps.get("tool-source") ?? []) {
@@ -3466,8 +3477,7 @@ export class Harness {
 				out.push(t);
 			}
 		}
-		const allowed = s?.settings.tools as string[] | undefined;
-		return applyLegacyFilter && allowed ? out.filter((t) => allowed.includes(t.name)) : out;
+		return out;
 	}
 
 	/** Run one tool call. Hook points are applied by whoever owns the operation. */
@@ -3596,7 +3606,7 @@ export class Harness {
 				tools: this.runtime()?.supports.nestedToolCalls === true ? {
 					list: async () => {
 						check();
-						return structuredClone(this.toolDefinitions(s, false).filter(t => !t.callers || t.callers.includes("plugin")));
+						return structuredClone(this.toolDefinitions(s).filter(t => !t.callers || t.callers.includes("plugin")));
 					},
 					call: async (name, input, askingSignal) => {
 						check();
@@ -3741,25 +3751,27 @@ export class Harness {
 		const branch = s.branch();
 		const origin = branch.find(e => e.kind === "turnStart" && e.turnId === turnId)?.continuesTurnId;
 		if (!origin || branch.some(e => e.kind === "response" && e.turnId === turnId && e.stepId === call.stepId)) return true;
-		const pending = branch.find(e => e.kind === "toolPending" && e.turnId === origin && e.toolCallId === call.id && !e.erased && !s.copied.has(e.id));
-		// Older portable histories have question-backed ends but no pending checkpoint.
-		// Do not reinterpret them as ADR 0034. A marked request, an opting-in setting,
-		// or a tombstoned checkpoint is not evidence for the legacy convention.
-		if (!pending && !s.hasWaitingApprovals && !branch.some(e => {
-			if (e.kind === "toolPending" && e.toolCallId === call.id) return true;
-			const setting = e.data as { key?: string; value?: unknown } | undefined;
-			return e.kind === "setting" && !e.erased && (setting?.key === "approvalWait" && setting.value === "untilDeadline" ||
-				setting?.key === "settings" && (setting.value as {approvalWait?: string} | null)?.approvalWait === "untilDeadline");
-		})) {
-			return branch.some(e => e.kind === "inputRequest" && !e.erased && e.turnId === origin && e.toolCallId === call.id);
+		return !!this.questionSettlement(s, branch, origin, call.id, call.stepId, true);
+	}
+
+	/** Return the last answer to the questions named by this call's host checkpoint. */
+	private questionSettlement(s: Session, branch: HistoryEntry[], origin: string, callId: string, stepId?: string, dispatch = false) {
+		const own = branch.filter(e => !e.erased && e.sessionId === s.id && !s.copied.has(e.id) && e.turnId === origin && e.toolCallId === callId);
+		const checkpoints = own.filter(e => e.kind === "toolPending");
+		const pending = checkpoints[0];
+		const data = pending?.data as { requestIds?: string[]; toolStartedId?: string } | undefined;
+		const ids = data?.requestIds;
+		if (checkpoints.length !== 1 || !pending.stepId || stepId && stepId !== pending.stepId || !Array.isArray(ids) || !ids.length) return;
+		const scope = own.filter(e => e.stepId === pending.stepId);
+		if (data?.toolStartedId !== undefined && !scope.some(e => e.kind === "toolStarted" && e.id === data.toolStartedId)) return;
+		for (const id of ids) {
+			const entry = scope.find(e => e.kind === "inputRequest" && e.requestId === id);
+			const request = (entry?.data as { request?: InputRequest })?.request;
+			if (!request || request.id !== id || request.sessionId !== s.id || request.toolCallId !== callId ||
+				dispatch && request.kind === "approval" && waitingApprovals(s).get(callId)?.entry !== entry ||
+				!scope.some(e => e.kind === "inputAnswer" && e.requestId === id)) return;
 		}
-		const ids = (pending?.data as {requestIds?: string[]})?.requestIds;
-		return Array.isArray(ids) && ids.length > 0 && ids.every(id => {
-			const entry = branch.find(e => e.kind === "inputRequest" && e.requestId === id && !e.erased && e.turnId === origin && e.toolCallId === call.id);
-			const request = (entry?.data as {request?: InputRequest})?.request;
-			return request && (request.kind !== "approval" || waitingApprovals(s).get(call.id)?.entry === entry) &&
-				branch.some(e => e.kind === "inputAnswer" && requestIdOf(e) === id && !e.erased);
-		});
+		return scope.findLast(e => e.kind === "inputAnswer" && !!e.requestId && ids.includes(e.requestId));
 	}
 
 	private async modelApprovalGate<T extends { call: ToolCall }>(s: Session, state: TurnState, turnId: string, payload: T): Promise<GateResult<T>> {
@@ -4016,7 +4028,7 @@ export class Harness {
 	private recordedOpenQuestionEntries(s: Session, branch: HistoryEntry[]) {
 		const settled = new Set(s.order.map(id => s.entries.get(id)!).filter(e =>
 			e.kind === "inputAnswer" || e.kind === "inputClosed" || e.kind === "secretAnswerAccepted").map(requestIdOf));
-		return branch.filter(e => e.kind === "inputRequest" && !s.copied.has(e.id) && !e.erased && !settled.has(e.requestId ?? readRequest(e).id));
+		return branch.filter(e => e.kind === "inputRequest" && !s.copied.has(e.id) && !e.erased && e.requestId && !settled.has(e.requestId));
 	}
 
 	private recordedOpenRequests(s: Session): InputRequest[] {
@@ -4041,7 +4053,7 @@ export class Harness {
 		const bound = (request as BoundRequest).boundCall;
 		if (bound && !isDeepStrictEqual(bound, draft.boundCall)) return undefined;
 		if (branch.some((e) => e.kind === "inputClosed" && (e.data as { requestId: string }).requestId === request.id)) return undefined;
-		const answered = branch.find((e) => e.kind === "inputAnswer" && !e.erased && (e.data as { requestId: string }).requestId === request.id);
+		const answered = branch.find((e) => e.kind === "inputAnswer" && !e.erased && e.requestId === request.id);
 		if (!answered) return { request };
 		const body = answered.data as Answer & { answer?: Answer };
 		const answer = body.answer ?? body;
@@ -4068,7 +4080,7 @@ export class Harness {
 			requestId: request.id, toolCallId: request.toolCallId, actorId: answer.actorId };
 		let kept = answer;
 		if (request.kind === "secret" && !answer.declined) {
-			if (acceptSecret) await this.commit(s, [{ ...fields, kind: "secretAnswerAccepted" }]);
+			if (acceptSecret && !(await this.commit(s, [{ ...fields, kind: "secretAnswerAccepted" }])).length) throw failure("lost", "Secret acceptance did not commit");
 			let outcome;
 			try { outcome = await this.secretStore()!.activate(this.secretScope(s, request.id)); }
 			catch { throw new Error("Could not confirm secret activation"); }
@@ -4077,8 +4089,9 @@ export class Harness {
 		}
 		const record = async () => {
 			const systemClosure = kept.actorId === "harness" && kept.declined;
-			await this.commit(s, [{ ...fields, kind: "inputAnswer", actorId:systemClosure ? undefined : kept.actorId,
+			const [entry] = await this.commit(s, [{ ...fields, kind: "inputAnswer", actorId:systemClosure ? undefined : kept.actorId,
 				data:systemClosure ? {requestId:kept.requestId, declined:true, reason:kept.reason, ...(kept.cause && {cause:kept.cause})} : kept }]);
+			if (!entry) throw failure("lost", "Answer did not commit");
 			const system = kept.actorId === "harness" && kept.reason &&
 				["cancelled", "noLongerAnswerable", "restart", "timeLimit", "superseded", "refused", "erased"].includes(kept.reason) ? kept.reason : undefined;
 			telemetryEvent("modular_agent.question.close", { "modular_agent.question.id": request.id,
@@ -4428,11 +4441,12 @@ export class Harness {
 					s.requests.delete(request.id);
 					s.lateAnswers.add(request.id);
 					for (const i of viewers) i.onInputRequestClosed?.(request.id);
-					if (s.suspended) { resolve({ ...answer, declined: true }); return Promise.resolve(); }
+					if (s.suspended) { const declined = { ...answer, declined: true }; resolve(declined); return Promise.resolve(declined); }
 					const work = this.recordAnswer(s, request, answer, stepId, request.kind === "secret" && !answer.declined).then(kept => {
 						this.emitAnswer(s, request, kept);
 						s.lateAnswers.delete(request.id);
 						resolve(kept);
+						return kept;
 					}, error => { reject(error); throw error; });
 					void work.catch(error => this.problem("harness", "record answer", error));
 					return work;
@@ -4470,7 +4484,7 @@ export class Harness {
 	}
 
 	/** Answer a question left open past its turn. The answer is recorded, then the open calls carry on if they can. */
-	private answerLate(s: Session, answer: Answer): { accepted: boolean; reason?: string; settled?: Promise<void> } {
+	private async answerLate(s: Session, answer: Answer): Promise<{ accepted: boolean; reason?: string }> {
 		const request = this.waitingRequests(s).find((r) => r.id === answer.requestId);
 		if (!request || request.approvalWait) return { accepted: false, reason: "The request is closed or can no longer be answered" };
 		if (!this.mayAnswer(s, request, answer.actorId)) return { accepted: false, reason: `${answer.actorId} may not answer this request` };
@@ -4486,12 +4500,14 @@ export class Harness {
 			this.emitAnswer(s, request, kept, true);
 			s.waiting.delete(request.id);
 			this.maybeContinueOpenCalls(s, currentSpan());
+			return kept;
 		}));
-		s.settling = work.catch((error) => this.problem("harness", "late answer", error)).finally(() => {
+		s.settling = work.then(() => {}, error => this.problem("harness", "late answer", error)).finally(() => {
 			if (s.settling === tracked) s.settling = undefined;
 		});
 		const tracked = s.settling;
-		return { accepted: true, settled: work };
+		const kept = await work;
+		return { accepted: !kept.declined || !!answer.declined };
 	}
 
 	/** Tool calls on the current branch that have no result and are not part of a running turn. */
@@ -4499,7 +4515,7 @@ export class Harness {
 		const branch = s.branch();
 		const kept = s.order.map((id) => s.entries.get(id)!);
 		const results = new Set(kept.filter((e) => e.kind === "toolResult").map((e) => e.toolCallId));
-		const continued = new Set(kept.filter((e) => e.kind === "turnStart").map((e) => e.continuesTurnId ?? (e.data as { continuesTurnId?: string } | undefined)?.continuesTurnId));
+		const continued = new Set(kept.filter((e) => e.kind === "turnStart").map((e) => e.continuesTurnId));
 		const open = new Set(branch.flatMap((e) => e.kind === "turnEnd" && !e.erased && (origin ? e.turnId === origin : !continued.has(e.turnId)) ? (e.data as { result?: TurnOutcome["result"] }).result?.openToolCalls ?? [] : []));
 		const calls: InterruptedTurn["calls"] = [];
 		const handoffs = this.interfaceRecords(s);
@@ -4527,10 +4543,10 @@ export class Harness {
 			const decisions = ids.map(id => {
 				const item = handoffs.get(id);
 				if (item) {
-					if (!this.interfaceSources.size || this.runtime()?.supports.interfaceTools !== true || !item.data || !item.checkpoint || !visible.has(item.checkpoint.id) || item.result?.erased) return undefined;
+					if (!this.interfaceSources.size || this.runtime()?.supports.interfaceTools !== true || !item.data || !item.checkpoint || item.checkpoint.turnId !== end.turnId || !visible.has(item.checkpoint.id) || !item.result || item.result.erased || item.result.turnId !== end.turnId || item.result.stepId !== item.checkpoint.stepId) return undefined;
 					return item.result && visible.get(item.result.id);
 				}
-				const answer = branch.findLast(e => e.kind === "inputAnswer" && !e.erased && e.toolCallId === id);
+				const answer = this.questionSettlement(s, branch, end.turnId!, id);
 				return answer && visible.get(answer.id);
 			});
 			if (decisions.some(d => !d)) continue;
@@ -4598,32 +4614,11 @@ export class Harness {
 			answer = { requestId: answer.requestId, actorId: answer.actorId, delegatedBy: answer.delegatedBy };
 		}
 		const open = s.requests.get(request.id);
-		if (open) await open.resolve(answer);
-		else {
-			const accepted = this.answerLate(s, answer);
-			if (!accepted.accepted) return accepted;
-			await accepted.settled;
-		}
-		return { accepted: true };
+		if (!open) return this.answerLate(s, answer);
+		const kept = await open.resolve(answer);
+		return { accepted: !kept.declined || !!answer.declined };
 	}
 
-	private answer(s: Session, answer: Answer): { accepted: boolean; reason?: string } {
-		const open = s.requests.get(answer.requestId);
-		const request = open?.request ?? this.waitingRequests(s).find(r => r.id === answer.requestId);
-		// Legacy local interfaces can submit asynchronously. ACP never carries secret values.
-		if (request?.kind === "secret" && !answer.declined) {
-			if (!this.mayAnswer(s, request, answer.actorId)) return { accepted: false };
-			void this.submitAnswer(s, answer).catch(error => this.problem("harness", "secret answer", error));
-			return { accepted: true };
-		}
-		if (!open) {
-			const { accepted, reason } = this.answerLate(s, answer);
-			return reason === undefined ? { accepted } : { accepted, reason };
-		}
-		if (!this.mayAnswer(s, open.request, answer.actorId)) return { accepted: false, reason: `${answer.actorId} may not answer this request` };
-		open.resolve(answer); // the first accepted answer closes the request
-		return { accepted: true };
-	}
 
 	// ---------- jobs ----------
 
@@ -4735,7 +4730,7 @@ export class Harness {
 							queued = { id: this.newId(), actorId: job.actorId ?? "harness", when: this.jobReportsStartTurns ? "after" : "propose", key: `job:${job.id}`, kind: "input",
 								startedBy: { kind: "job", id: job.id }, startingRights: rights, sources: [end.id!], content: content ?? [] };
 							drafts.push({ kind: "inputAccepted", writer: "harness", modelVisible: false, inputId: queued.id, actorId: queued.actorId, jobId: job.id,
-								sources: queued.sources, data: { inputId: queued.id, key: queued.key, content: queued.content, when: queued.when, taken: queued.when === "propose" ? "proposed" : "after", parked: queued.when === "propose", rights, authorizers: (kept.actors ?? []).map(actorId => ({ sessionId: s.id, actorId })) } });
+								sources: queued.sources, data: { key: queued.key, content: queued.content, when: queued.when, taken: queued.when === "propose" ? "proposed" : "after", parked: queued.when === "propose", rights, authorizers: (kept.actors ?? []).map(actorId => ({ sessionId: s.id, actorId })) } });
 						}
 						await this.commit(s, drafts);
 						if (queued) this.reservations.transfer(s, `job:${job.id}`, `input:${queued.id}`, {
@@ -5154,8 +5149,8 @@ function eraseCopies(origin: Session, ids: string[], sessions: Map<string, Sessi
 						seen.add(id);
 					}
 				}
-				const inputId = e.inputId ?? (e.data as { inputId?: string } | undefined)?.inputId;
-				const takingInput = inputId && erased.some((x) => (x.inputId ?? (x.data as { inputId?: string } | undefined)?.inputId) === inputId);
+				const inputId = e.inputId;
+				const takingInput = inputId && erased.some((x) => x.inputId === inputId);
 				if (links || callCopy || turnResult || endedTurnStart || jobCopy || startedByCall || ancestry || takingInput) grew = add(session, e.id) || grew;
 			}
 		}
@@ -5174,11 +5169,12 @@ function approvalKey(binding?: ApprovalBinding): string {
 type BoundRequest = InputRequestDraft & { coversNested?: true; boundCall?: Pick<ToolCall, "name" | "input"> };
 
 function requestIdOf(entry: HistoryEntry): string | undefined {
-	return entry.requestId ?? (entry.data as { requestId?: string } | undefined)?.requestId;
+	return entry.requestId;
 }
 
 function readRequest(entry: HistoryEntry): InputRequest {
 	const request = (entry.data as { request: InputRequest }).request;
+	if (!entry.requestId || entry.requestId !== request.id) throw failure("unavailable", "Question identity does not match its envelope");
 	return { ...request, sessionId: entry.sessionId, answerers: request.answerers ?? [], toolCallId: entry.toolCallId ?? request.toolCallId ?? undefined, turnId: entry.turnId ?? request.turnId ?? undefined };
 }
 

@@ -24,11 +24,11 @@ async function crashedSession() {
 	const api = h.api("test");
 	const s = await api.startSession();
 	await api.append(s, { kind: "inputAccepted", writer: "harness", modelVisible: false, actorId: "user", inputId: "foreign-input",
-		data: { inputId: "foreign-input", content: [{ type: "text", text: "do three things" }], when: "now", taken: "now" } });
+		data: { content: [{ type: "text", text: "do three things" }], when: "now", taken: "now" } });
 	await api.append(s, { kind: "turnStart", writer: "test", modelVisible: false, turnId: "t1", actorId: "user", data: { startedBy: { kind: "actor", id: "user" }, model: { provider: "faux", id: "faux-1" }, system: "", tools: api.tools(s), settings: {}, rights: ALL_AUTHORITY, authorizers: [{ sessionId: s, actorId: "user" }] } });
-	await api.append(s, { kind: "input", writer: "test", modelVisible: true, turnId: "t1", actorId: "user", message: { role: "user", content: [{ type: "text", text: "do three things" }] }, data: { inputId: "foreign-input" } });
+	await api.append(s, { kind: "input", writer: "test", modelVisible: true, turnId: "t1", actorId: "user", message: { role: "user", content: [{ type: "text", text: "do three things" }] }, inputId: "foreign-input" });
 	const calls = [fauxToolCall("read", { path: "notes.txt" }), fauxToolCall("bash", { command: "echo charged >> payments.log" }), fauxToolCall("write", { path: "done.txt", content: "ok" })];
-	await api.append(s, { kind: "modelRequest", writer: "test", modelVisible: false, turnId: "t1", stepId: "step1", data: { model: { provider: "faux", id: "faux-1" }, tools: calls.map((call) => call.name), tracksStepAfter: true } });
+	await api.append(s, { kind: "modelRequest", writer: "test", modelVisible: false, turnId: "t1", stepId: "step1", data: { model: { provider: "faux", id: "faux-1" }, tools: calls.map((call) => call.name), safeToRepeat: false } });
 	await api.append(s, { kind: "response", writer: "test", modelVisible: true, turnId: "t1", stepId: "step1", message: { role: "assistant", content: calls as never, stop: "toolUse" } });
 	for (const c of calls.slice(0, 2)) {
 		await api.append(s, { kind: "toolStarted", writer: "test", modelVisible: false, turnId: "t1", toolCallId: c.id, stepId: "step1", data: { call: { id: c.id, name: c.name, input: c.arguments, startedBy: "model", stepId: "step1" }, safeToRepeat: c.name === "read" && process.platform === "linux" } });
