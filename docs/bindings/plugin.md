@@ -6,7 +6,7 @@ Both peers MUST use the [shared data](data.md) shapes. The tables define method 
 
 ## Transport
 
-After the [handshake](#starting-the-handshake) agrees to `traceContext: 1`, either peer MAY send `params.traceContext: { traceparent: string, tracestate?: string }` on work requests and notifications. Peers MUST NOT send it on responses or control messages. They MUST ignore absent, invalid or unagreed context. See [Context on the wire](../telemetry.md#context-on-the-wire).
+Either peer MAY send a valid, trusted context for the current operation in `params.traceContext: { traceparent: string, tracestate?: string }` on work requests and notifications. Peers MUST omit it when there is no such context, MUST NOT send it on responses or control messages, and MUST ignore invalid or untrusted context. See [Context on the wire](../telemetry.md#context-on-the-wire).
 
 - The host MUST start the plugin as a child process and send and receive JSON-RPC 2.0 over its stdin and stdout, or connect to a plugin service over the [WebSocket transport](websocket.md), which replaces this section's stdio rules. See [Stdio authentication](../security.md#authentication-on-each-wire) for the peer and trust rules. The plugin MUST NOT write anything else to stdout. The host MAY route stderr to operator diagnostics. Each peer MUST NOT include secrets in errors, traces or diagnostics.
 - Each peer MUST send one UTF-8 JSON-RPC object per line, with no byte order mark or batch. Receivers MUST accept LF and CRLF. The 64 MiB cap counts 67,108,864 [actual line bytes](data.md#general-rules), excluding the line ending. Receivers MUST bound input before decoding or parsing and close the connection on an oversized frame, including a frame with no newline. Senders MUST substitute `result_too_large` for an oversized success result. For an oversized outgoing error, senders MUST replace its diagnostic text and data with the minimal envelope for the same code. A sender MUST NOT send an oversized request or notification.
@@ -45,12 +45,10 @@ The host MUST treat unexpected EOF, process exit, an unusable stream, a required
 
 | Host request | Params | Result | Errors |
 |---|---|---|---|
-| `plugin/initialize` | `{ binding: string, data: string, host: { name: string, version: string }, project: string, home: string, config: object, traceContext?: 1 }` | `Registration` | `not_supported` for an unsupported version |
+| `plugin/initialize` | `{ binding: string, data: string, host: { name: string, version: string }, project: string, home: string, config: object }` | `Registration` | `not_supported` for an unsupported version |
 | `plugin/shutdown` | `{ reason: "stop" \| "reload" \| "refused", detail?: string }` | `{}` | Common errors only |
 
 The first frame MUST be `plugin/initialize`, with `binding: "modular-agent-plugin/1"` and `data: "modular-agent-data/1"`. `project` and `home` are absolute paths to the project and the plugin's state folder. `config` is the plugin's settings, `{}` if none. A plugin MUST reject a second initialize with `invalid_request`. Until registration is accepted, only initialize, ping, cancel, shutdown and `host/problem` are available; there is no separate acceptance frame. The host's first request for registered work signals acceptance.
-
-A plugin MUST return `traceContext: 1` only if the host offered it. Both members MUST equal `1`; otherwise neither peer sends the work field. A peer that does not recognize the member MUST ignore it.
 
 **Registration**
 
@@ -58,7 +56,6 @@ A plugin MUST return `traceContext: 1` only if the host offered it. Both members
 |---|---|
 | `binding` | `"modular-agent-plugin/1"` |
 | `name` | Nonempty string, stable plugin identity |
-| `traceContext?` | `1`; acceptance of the host's offer. Omission means no agreement. |
 | `providers?` | `{ id: Id, supports: ProviderSupports, models: ModelInfo[] }[]`; default `[]` |
 | `toolSources?` | `{ id: Id, tools: ToolDefinition[], perSession?: boolean }[]`; defaults `[]` and `perSession: false` |
 | `workingEnvironment?` | `{ containment: "strong" \| "processGroup" \| "none", platforms?: string[], points?: boolean, confinesFiles?: boolean }`; default absent; omitted platforms makes no platform claim; omitted flags are false |
