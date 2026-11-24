@@ -2,6 +2,8 @@
 
 This kit checks [the Modular Agent AG-UI binding](../../docs/bindings/agui.md). It sends HTTP requests and checks SSE before handing JSON to the assertions. Two cases also run the official `@ag-ui/client` `HttpAgent` without a cursor or a presence stream. The app replaces provisional messages with each final snapshot. It waits for the terminal outcome before reporting a frontend result. It does not run anything from a snapshot.
 
+The runner lists 48 cases. Fourteen are the ADR 0035 host reads: seven for wait closures and seven for receipts. `npm test` runs 185 kit self-tests, including deliberately faulty servers. These counts are not SDK pass counts.
+
 Use Node.js 22.12 or later. The TLS self-test also uses OpenSSL 3 to generate a disposable CA and certificates. Use a disposable agent, tokens and store. Do not point the kit at a production listener.
 
 ```sh
@@ -42,19 +44,19 @@ Seven `closure-*` cases check [wait closures](../../docs/bindings/agui.md#wait-c
 | Case | What the fixture supplies |
 |---|---|
 | `closure-order` | Start a real choice on `openWait`. ACP answers after the snapshot and before the GET. A second choice is declined while following. While disconnected the kit expires a third; after reconnect it revokes the last eligible answerer's grant on a fourth. Keep that actor a watching member. |
-| `closure-routes` | Open a **live** server-tool approval with two eligible routes: primary AG-UI presence and the sibling ACP connection. The primary drops presence but keeps its feed. It cannot answer; the ACP poll and decline still work. |
-| `closure-presence` | As for `approval-absent`, use live approval for the offered call. Only the feed is open. The call is refused. |
-| `closure-left-open` | Ask from a call that can return pending and start a continuation. The 5,000 ms `leaveOpen` timeout ends its synchronous wait. ACP can still answer. |
-| `closure-interface` | As for `frontend`: release `pick_color` to the primary and accept the tool report. The feed carries the call ID and terminal status, not the result. |
+| `closure-routes` | Keep the thread on the first input. On the next input require live approval for the offered call. Deliver the actual interrupt to the primary's run and allow the sibling ACP connection to poll the same approval. The primary drops presence but keeps its feed. It cannot answer; the ACP poll and decline still work. |
+| `closure-presence` | As for `approval-absent`, use live approval for the offered call. Only the feed is open. The call is refused. In a fresh thread the primary receives the interrupt, then drops the last presence. Its system refusal has no recorded revocation cause. |
+| `closure-left-open` | Ask from a call that can return pending and start a continuation. The 5,000 ms `leaveOpen` timeout ends its synchronous wait. Return from `advance` after the real `toolPending` commits. ACP can still answer. |
+| `closure-interface` | As for `frontend`: release `pick_color` to the primary and accept the tool report. The feed carries the call ID and terminal status, not the result. A sibling replays from before settlement and sees only the next visible deadline closure. |
 | `closure-buffered` | Hold one closure before delivery. Block its opening or decision at the source gate, change the final notice, or revoke watch. The next visible decline fences the omitted item; on watch loss the stream ends. No sleep is evidence of omission. |
 | `closure-cursor` | Require authentication and `after`. Reject an unknown, expired or sibling-client cursor. |
 
 Use the [fixture controls](#fixture-controls). All new operations are on the **control port only**:
 
-- `openWait {kind}` returns `{requestId}` once the real Harness has recorded the request. Start the ask in the fixture, not by writing entries. For `choice`, `deadline`, `revocable` and `leaveOpen` offer `yes` and `no`; for `deadline` use 5,000 ms and decline on expiry; for `revocable` restrict answerers to `kit-owner`. For `approval` drive a live call through the approval gate. Each new ask must be ready for the kit to poll or advance; do not await the answer in this control. `inspect.project` is the absolute path for ACP resume.
+- `openWait {kind}` returns `{requestId}` once the real Harness has recorded the request. Start the ask in the fixture, not by writing entries. For `choice`, `deadline`, `revocable` and `leaveOpen` offer `yes` and `no`; for `deadline` use 5,000 ms and decline on expiry; for `revocable` restrict answerers to `kit-owner`. Each new ask must be ready for the kit to poll or advance; do not await the answer in this control. `inspect.project` is the absolute path for ACP resume.
 - `hold {name:"beforeWaitDelivery"}` pauses the next queued visible notice before the final authority/gate check or socket write. `barrier {name}` observes the pause; `release {name}` resumes it. `waitFollowing` is a barrier at installation of the follower (before draining replay); `presenceLost` waits for actual disconnect and route reconciliation. Latch boundaries even if reached before the control arrives.
 - `waitGate {requestId,mode}` changes policy for that ID and primary client only. `opening` blocks the opening request view, `decision` blocks the closing answer view, `notice` changes the reason in the final `modular-agent.waitClosed` output event. Do not filter the feed in the fixture.
-- `revokeRight {right}` removes the owner actor's named session grant (`answer` or `watch`) and waits for the change to commit. `expireWaitCursor {cursor}` evicts or expires the specified cursor. `advance` runs the due timers, not a wall clock sleep.
+- `revokeRight {right}` removes the owner actor's named session grant (`answer` or `watch`) and waits for the change to commit. `expireWaitCursor {cursor}` makes the cursor unresolvable, for example by advancing past retention or invalidating its view. It need not evict only that cursor. `advance` runs the due timers, not a wall clock sleep.
 
 ## Run-receipt checks
 
@@ -66,16 +68,20 @@ Seven `receipt-*` cases run only if the thread snapshot offers `runReceipts: 1`.
 | `receipt-after-admission`, `receipt-durable` | Stop after input admission and its `turnStart`, before the model step and `turnEnd`. The receipt is `unknown/unsettled`. Reopen normally; the transient Runtime fails, the scripted durable Runtime completes. Compare the receipt to that turn's committed end, including after a later turn. |
 | `receipt-before-terminal` | Stop after the turn's completed end commits, before the gated terminal group reaches the transport. Even after restart the terminal class is `unknown`. |
 | `receipt-interrupt` | Use the in-turn choice from `questions`. Finish the first exchange with an interrupt. The answer-only exchange completes the original turn. The first receipt stays `interrupt`, the second is `success`. |
-| `receipt-result` | Release the frontend call in the first exchange. In the result-only POST stop after its result commits but before its continuation starts. On reopening, the scripted Provider fails in that continuation. The result-only receipt has work `failed`; the opening receipt still has work `completed`. |
+| `receipt-result` | Release the frontend call in the first exchange. In the result-only POST stop after its result commits but before its continuation starts. On reopening, the scripted Provider fails in that continuation. The result-only receipt has work `failed`; the opening receipt still has work `completed`. Repeat in a fresh thread without a crash: the result-only receipt records the released `error` terminal. |
 | `receipt-visibility` | A known owner sees only two strings. Mask a missing ID or thread, another actor, sibling client, other tenant, blocked settlement and pending or finished erasure. Block the complete reply separately. Repeat GETs and retry POSTs, also with current history, and compare the recorded work. |
 
 Use the same `hold`, `barrier`, `release`, `inspect` and `erase` controls as above. For crash cases, `hold {name,runId}` arms a **one-shot pause for that POST only**. The names are `beforeAdmission`, `afterAdmission`, `beforeTerminal` and `afterResult`. Signal `barrier {name,runId}` at the boundary, with the store readable; do not hold the store lock while paused. The kit then kills and relaunches the whole fixture. Do not rearm the pause on restart. Keep the token assignments and all durable data. Reopening the thread (not a receipt GET) may start normal recovery. Signal `recoveryEnded` for the interrupted exchange when its linked work has settled. Signal `terminalRecorded` for an ordinary exchange after its released terminal class is durable. Both barriers take `runId` and work after the event.
 
-`receiptGate {mode}` selects the primary client's current output policy: `settlement` blocks the linked turn's settlement view; `reply` blocks the final `agui.runReceipt` reply only; `allow` removes both blocks. For `hold {name:"pendingErasure"}`, pause the next real `erase` after its intent commits but before reconciliation. Keep the read path available until `release {name:"pendingErasure"}`. No control supplies a receipt or makes up its expected status.
+`receiptGate {mode}` selects the primary client's current output policy: `settlement` blocks the linked turn's settlement view; `terminal` and `work` change that one string in the final `agui.runReceipt` reply to `unknown` and `unsettled`, respectively; `reply` blocks that reply; `allow` removes all blocks and redactions. For `hold {name:"pendingErasure"}`, pause the next real `erase` after its intent commits but before reconciliation. Keep the read path available until `release {name:"pendingErasure"}`. No control supplies a receipt or makes up its expected status.
 
 ## Launching a fixture
 
-The fixture is an SDK app, not a replacement AG-UI adapter. Use the real listener, Harness, Runtime, output gate and history store. For TypeScript, build the workspace and run `node conformance/agui/run.mjs -- "$(command -v node)" "$PWD/typescript/scripts/agui-ma.mjs"` from the repository root. The launcher uses `ma --agui --acp` for listener, thread listing, encoding, history and stock conversation. Its SDK fixture supplies the registered frontend tool and the test controls for the other cases. See [Serving AG-UI](../../docs/sdk/placement.md#serving-ag-ui) for the setup. `fake-agent.mjs` is only a launch-mode self-test for the basic cases. The Go launcher is `go.mjs`. From the repository root, `go/scripts/check-agui.sh` builds Go `ma` and the fixture, installs the pinned kit dependencies in scratch, and runs every case. Five Go cases launch `ma`; cases that need operator-only setup launch the test executable. See [Serving AG-UI](../../docs/sdk/placement.md#serving-ag-ui) for the proposed setup. `fake-agent.mjs` is only a launch-mode self-test for the basic cases. Run `conformance/agui/rust.sh` for Rust. It builds `ma` and the separate `sdk-scenarios` example `agui_fixture`. The launcher runs ordinary conversations against `ma` and uses the example for cases that need operator configuration or controls. All applicable cases run; no reference manifest fields are needed. See [Serving AG-UI](../../docs/sdk/placement.md#serving-ag-ui) for the proposed setup. `fake-agent.mjs` is only a launch-mode self-test for the basic cases.
+The fixture is an SDK app, not a replacement adapter. Use the real listener, Harness, Runtime, output gate and history store. See [Serving AG-UI](../../docs/sdk/placement.md#serving-ag-ui). Each launcher uses `ma` for ordinary conversations and an SDK fixture for operator-only setup. From the repository root:
+
+- TypeScript: build the workspace, then run `node conformance/agui/run.mjs -- "$(command -v node)" "$PWD/typescript/scripts/agui-ma.mjs"`.
+- Go: `go/scripts/check-agui.sh` builds `ma` and the fixture, installs the kit dependencies in scratch and runs the cases through `go.mjs`.
+- Rust: `conformance/agui/rust.sh` builds `ma` and the `sdk-scenarios` example `agui_fixture` and runs the cases through `rust-launch.mjs`.
 
 To run the Python implementation, run `(cd python && uv sync --python 3.13)` and `npm ci --prefix conformance/agui` from the repository root, then run:
 
@@ -147,3 +153,13 @@ Controlled cases add these behaviors:
 | `crash-continuation` | Pause at `duringContinuation` after committing its `turnStart` and trace checkpoint but before the model step. Use durable recovery and the original checkpoint. |
 
 The fake checks whether the runner recognizes known good and deliberately wrong behavior. It does not show that an SDK enforces the gates, stores the records atomically, exports real spans, or recovers from a process death. The fake's recovery cases drop transport connections and reopen in-memory state. Run the managed kit with an SDK fixture to test a real crash.
+
+## Findings
+
+In [Runs and events](../../docs/bindings/agui.md#runs-and-events), the last sentence of the “Questions or call waits and closures” row still describes snapshot-only reconnect. Replace it with:
+
+> Never append a closure to a closed run. A snapshot gives the current waits, not the reasons for missed closures. A client with a wait cursor can follow committed closures from that cursor.
+
+In [Run receipts](../../docs/bindings/agui.md#run-receipts), distinguish a hidden source from a blocked final reply. Replace the first two sentences of the last paragraph with:
+
+> Return 404 `not_found` for a missing, foreign, off-branch, erased or undisclosable receipt or thread, including a receipt hidden by pending erasure or the settlement gate. If the receipt's existence is visible and its source facts pass, but the `agui.runReceipt` reply gate blocks the reply or changes either status, return 403 `output_withheld`.

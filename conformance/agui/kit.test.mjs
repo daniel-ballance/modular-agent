@@ -25,6 +25,13 @@ test('runner launches a scripted agent command', async () => {
   assert.match(stdout, /1\/1 AG-UI cases passed/);
 });
 
+test('managed legacy listener needs no control URL for optional host reads', async () => {
+  const { stdout } = await exec(process.execPath, [here('run.mjs'), '--only', 'closure-order,receipt-durable', '--', process.execPath, here('fake-agent.mjs')], { signal: deadline() });
+  assert.match(stdout, /SKIP  closure-order \(thread snapshot does not offer waitCursor\)/);
+  assert.match(stdout, /SKIP  receipt-durable \(thread snapshot does not offer runReceipts\)/);
+  assert.match(stdout, /0\/0 AG-UI cases passed; 2 skipped/);
+});
+
 test('runner connects to an existing scripted agent with a token file', async () => {
   const server = await fake();
   const folder = await mkdtemp(join(tmpdir(), 'agui-connect-'));
@@ -69,6 +76,7 @@ async function run(name, fault) {
   finally { await server.close(); }
 }
 
+test('watch loss may reset a feed between complete frames', () => run('closure-buffered', 'reset-on-watch-loss'));
 for (const name of Object.keys(cases)) test(`fake passes ${name}`, () => run(name));
 for (const [name, fault, diagnosis] of [
   ['approval', 'missing-live-coverage', /approval interrupt declares coversNested/],
@@ -112,19 +120,27 @@ for (const [name, fault, diagnosis] of [
   ['closure-order', 'repeat-cutover', /closure in commit order/],
   ['closure-order', 'repeat-after', /closure in commit order/],
   ['closure-order', 'deadline-is-decline', /closure in commit order/],
+  ['closure-order', 'invent-expiry', /committed system timeLimit/],
   ['closure-order', 'lose-revocation', /closure in commit order/],
   ['closure-order', 'unrecorded-revocation', /recorded revocation/],
   ['closure-order', 'answer-in-notice', /closure in commit order/],
+  ['closure-order', 'wait-bad-framing', /SSE data line must end with LF LF/],
   ['closure-routes', 'route-is-closure', /closure in commit order/],
   ['closure-routes', 'feed-can-answer', /report is refused/],
   ['closure-presence', 'feed-is-presence', /feed alone is not presence/],
+  ['closure-presence', 'mark-loss-revoked', /not a recorded revocation/],
+  ['closure-presence', 'guess-revocation', /closure in commit order/],
   ['closure-left-open', 'timeout-is-closure', /closure in commit order/],
+  ['closure-left-open', 'no-pending-wait', /actually reached pending/],
   ['closure-interface', 'wrong-settlement', /closure in commit order/],
+  ['closure-interface', 'settlement-without-result', /matching terminal result/],
+  ['closure-interface', 'other-executor-notice', /closure in commit order/],
   ['closure-buffered', 'skip-source-gate', /closure in commit order/],
   ['closure-buffered', 'skip-decision-gate', /closure in commit order/],
   ['closure-buffered', 'changed-notice', /closure in commit order/],
   ['closure-buffered', 'skip-watch-recheck', /no final notice/],
   ['closure-buffered', 'comment-disclosure', /heartbeat disclosed/],
+  ['closure-buffered', 'cursor-disclosure', /cursor disclosed/],
   ['closure-cursor', 'missing-after', /HTTP status/],
   ['closure-cursor', 'stale-wait-cursor', /cursor_expired/],
   ['closure-cursor', 'foreign-wait-cursor', /cursor_expired/],
@@ -141,6 +157,7 @@ for (const [name, fault, diagnosis] of [
   ['receipt-interrupt', 'merge-exchanges', /receipt at this watermark/],
   ['receipt-interrupt', 'retry-decision', /reads and retries leave work unchanged/],
   ['receipt-result', 'follow-origin', /receipt at this watermark/],
+  ['receipt-result', 'lost-released-error', /receipt at this watermark/],
   ['receipt-result', 'extra-result-input', /one opening input/],
   ['receipt-result', 'read-rehandoff', /reads and retries leave work unchanged/],
   ['receipt-visibility', 'read-admits', /reads and retries leave work unchanged/],
@@ -151,6 +168,8 @@ for (const [name, fault, diagnosis] of [
   ['receipt-visibility', 'tenant-receipt', /HTTP status/],
   ['receipt-visibility', 'settlement-as-unknown', /HTTP status/],
   ['receipt-visibility', 'ignore-reply-gate', /HTTP status/],
+  ['receipt-visibility', 'redact-terminal', /HTTP status/],
+  ['receipt-visibility', 'redact-work', /HTTP status/],
   ['receipt-visibility', 'withheld-oracle', /HTTP status/],
   ['receipt-visibility', 'pending-receipt', /HTTP status/],
   ['receipt-visibility', 'erased-receipt', /HTTP status/],
