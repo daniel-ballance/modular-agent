@@ -1,6 +1,6 @@
 # modular-agent: the Python SDK
 
-Applications import `modular_agent`; they do not need to import the Harness or its plugins. This SDK targets [SDK 0.1](../docs/sdk/README.md) and edition 4. The `modular-agent` console script and `python -m modular_agent` still run the base CLI; `ma` runs the standard configuration.
+Applications import `modular_agent`; they do not need to import the Harness or its plugins. Use the [SDK specification](../docs/sdk/README.md) and kits from the same revision. The `modular-agent` console script and `python -m modular_agent` run the base CLI; `ma` runs the standard configuration.
 
 ```python
 from modular_agent import run
@@ -31,7 +31,7 @@ Set `TMPDIR=$HOME/.cache/ma-std-tmp` and create that directory first. From the r
 (cd python && uv run --offline pytest -q --runtime durable --binding process)
 (cd python && uv run --offline ruff check . && uv run --offline ruff format --check . && uv run --offline mypy)
 node conformance/reference/run.mjs --agent python
-MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- "$PWD/python/.venv/bin/ma" --acp
+for group in core covered waiting; do scripts/acp-kit.sh python "$group"; done
 node conformance/plugin/run.mjs -- "$PWD/python/.venv/bin/modular-agent-plugin"
 scripts/websocket-kits.sh python
 ```
@@ -54,17 +54,17 @@ The five [live checks](../docs/sdk/testing.md#live-checks) in `tests/test_sdk_li
 ## What is checked
 
 - **Shared scenarios:** 405/405 with `MODULAR_AGENT_SDK_REQUIRE=all`: 45 in process, and the same 45 with each of the four SDKs' fixture programs on stdio and over WebSocket.
-- **Pytest:** 823 passed and five live checks skipped in each of four configurations: transient and durable Runtimes, with local and process bindings.
+- **Pytest:** 836 passed and five live checks skipped in each of four configurations: transient and durable Runtimes, with local and process bindings.
 - **Covered approvals:** 11 public SDK cases check the request view, each nested start, refusal by policy or another gate, exact input, restart and continuation with or without a marked parent view.
 - **Waiting approvals:** 61 public SDK cases cover the composition, rights, polling handles, deadlines, erasure, fork/move refusal and recovery. SIGKILL tests stop the writer after the origin ends, after the answer commits and after the counter increments. They use both Runtime tiers in process and served. The ADR 0034 runner adds `poll`, `decide`, `clock`, `barrier`, `change` and `stop`. With the shared fixtures, the 28 new scenarios passed in all nine placements (252/252; 405/405 including the 17 existing scenarios). The in-process telemetry check passed 16/16, including the four waits with export on and off. The eight waiting AG-UI cases passed against the real fixture listener.
 - **Interface tools:** 35 public SDK cases cover in-process and served Runtimes. They check approvals, exact gated handoff, reconnect, competing reports, expiry, cancellation, erasure, trace links and SIGKILL recovery before and after the origin ends. No shared scenario was added: its format has no authenticated Interface connection or result-report operation.
 - **Reference `ma`:** 28/28 on Linux. `approval-covers-script` checks that a refused script writes neither file and an allowed script writes both. It also checks a new writer can finish the script after a waiting decision.
-- **Telemetry:** eight offline SDK cases check span parentage and IDs, inference metrics, private sentinels, a job-linked report, both handshake omissions, exporter failure, and operation without the OpenTelemetry SDK. The crash fixture kills two durable segments and checks that the third span has the last saved parent and link. Fork copies have no trace checkpoint or turn trace field.
+- **Telemetry:** offline SDK cases check span parentage and IDs, inference metrics, private sentinels, a job-linked report, scoped plugin callbacks, exporter failure, and operation without the OpenTelemetry SDK. The crash fixture kills two durable segments and checks that the third span has the last saved parent and link. Fork copies have no trace checkpoint or turn trace field.
 - **Subscriptions:** Offline checks cover the shared catalog and login file, both ChatGPT sign-in flows, and Grok's device flow, including slow-down, denial, expiry and refusal of non-HTTPS verification addresses. Both Responses Providers are checked in process and over the plugin binding for request shape, encrypted reasoning replay and refused refresh. The Grok checks force two refreshers to contend for the login lock. Claude fixtures exercise account readiness, thinking settings, streaming and host tool dispatch.
-- **ACP kit against `ma`:** 190/190 on Linux stdio with crash, probe and job checks. With `--approval off` (feature loaded), 193/193 including the live coverage check and waiting-declaration checks. With a 60-second maximum, 118/118 public, crash and job checks, including the covered continuation. Adding the Runtime probes to the maximum-bound run gave 165/169: those four probes register Runtimes without the required continuation support, so composition refuses them. The separate `--waiting-approval-only` group passed its two declaration checks but not its 42 managed-fixture checks. Plain `ma` does not supply that kit's private clock, control listener or offline test principals. The WebSocket run passed 195/195. Separate-listener plugin isolation passed 14/14. The named-caller fixture passed 29/29. The base build takes the opt-in policy with `modular-agent --acp` in conformance mode, without changing the legacy `--mode acp` composition.
-- **Plugin kit:** 146/146 on stdio and 153/153 over WebSocket, with both Runtime tiers.
+- **ACP:** `ma` passed 190/190 core checks and 2/2 covered-approval checks. The managed ACP fixture passed 50/50 waiting checks with its clock, real actors, control listener and persistent store. Over WebSocket, `ma` passed 195/195.
+- **Plugin kit:** 150/150 on stdio, 157/157 over WebSocket, 14/14 for separate-listener isolation and 29/29 for named callers.
 - **Discovery and recovery:** 49/49 AG-UI cases, including replay and live wait closures, masked receipts, the exact call on approval interrupts and nested dispatch after restart. The public Python tests cover page cursors, per-connection counts, revocation during delivery, a held writer, and durable and transient recovery after SIGKILL.
-- **Demos:** ops desk passed all six scripted cases. Project notes passed both the scripted case and crash and reopen; each produced one file, one completed turn and two tool results.
+- **Demos:** ops desk passed all eight scripted cases. Project notes passed both the scripted case and crash and reopen; each produced one file, one completed turn and two tool results.
 - **History kit:** 42/42 with restart and 42/42 with `--isolation-checks`, using two `serve_history(file_history(...))` services with different stores and tokens.
 - **Session publication:** six SDK cases cover file, HTTP and Registrar history with in-process and served Runtimes. Unused sessions leave no records on close or process loss. The first admission flushes setup in order, and forks publish the copied prefix and fresh setup together. A separate ACP case checks that `session/new` and close do not create an HTTP history record.
 - **Session interruption:** seven public API cases cover failed appends and revoked leases. Embedded `prompt`, embedded `prompt_stream` and WebSocket ACP each settle with `lost`; a follower sees the live interruption and reopening recovers from the kept journal. A custom store's revocation notice interrupts an idle session before any renewal or write.
@@ -305,7 +305,7 @@ For [paging history](../docs/bindings/plugin.md#paging-history):
 
 ## Remaining Python implementation gaps
 
-The older base build's private `MA_PLUGIN_PROCESSES` placement does not install OpenTelemetry in its worker processes. The shared telemetry check does not exercise it: `create_agent` passes an empty internal worker list to the Harness, and `process:<sdk>` uses the SDK's explicit plugin binding. The SDK's public hosted Runtime placement records the invocation in the host and uses the plugin binding for propagation.
+The base build's private `MA_PLUGIN_PROCESSES` placement does not install OpenTelemetry in its worker processes. The shared telemetry check does not exercise it: `create_agent` passes an empty internal worker list to the Harness, and `process:<sdk>` uses the SDK's explicit plugin binding. The SDK's public hosted Runtime placement records the invocation in the host and uses the plugin binding for propagation.
 
 Provider-owned tool dispatch, live sessions and late answers are outside the SDK 0.1 Provider port ([API, Providers](../docs/sdk/api.md#providers)).
 

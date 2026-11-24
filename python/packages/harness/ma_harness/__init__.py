@@ -1986,10 +1986,12 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
                     fork_source=e["id"],
                     copies=[e["id"]],
                 )
-                if (
-                    copied["kind"] in {"input_queued", "input", "input_withdrawn", "turn_start"}
-                    and "input" in copied["data"]
-                ):
+                if copied["kind"] in {
+                    "input_queued",
+                    "input",
+                    "input_withdrawn",
+                    "turn_start",
+                } and "input" in copied.get("data", {}):
                     copied["data"]["input"] = mapping.get(
                         copied["data"]["input"], copied["data"]["input"]
                     )
