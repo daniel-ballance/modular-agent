@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { at, exchange, finalView, input, tool, user } from './wire.mjs';
-import { checkWaiting, dispatch, draft, historyError, offer, options, opts, rawReport, reportRefused, second, success } from './cases.mjs';
+import { checkApprovalCall, checkWaiting, dispatch, draft, historyError, offer, options, opts, rawReport, reportRefused, second, success } from './cases.mjs';
 import { one, parked, rows, settled } from '../waiting/records.mjs';
 import { acpPeer } from '../waiting/acp-peer.mjs';
 
@@ -11,6 +11,7 @@ const resume = (v, id, cancel = false) => input(v, [], { resume: [action(id, can
 const state = (peer, id) => peer.control('inspect', { threadId: id });
 function interrupt(q, entry) {
   assert.equal(q?.reason, 'approval', 'answerable approval interrupt');
+  if (!checkApprovalCall(q, bump, 'waiting')) console.log('SKIP  waiting approvalCall (interrupt omits modular-agent.approvalCall)');
   if (entry.data.request.coversNested) assert.equal(q.metadata?.['modular-agent.coversNested'], true, 'waiting interrupt declares coversNested');
   assert.equal(q.id, entry.requestId, 'same request ID');
   assert.equal(q.toolCallId, entry.toolCallId, 'same call ID');
