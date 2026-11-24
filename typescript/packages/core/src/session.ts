@@ -390,7 +390,8 @@ export class Session {
 
   declaration(): Declaration {
     this.#require("watch");
-    return this.#api.declaration(this.id);
+    const declaration = this.#api.declaration(this.id);
+    return { ...declaration, lateAnswersStartTurns: declaration.questionsOutlastTurns === true };
   }
 
   async lastTurn(): Promise<PromptResult | undefined> {

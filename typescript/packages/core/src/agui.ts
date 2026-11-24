@@ -155,12 +155,12 @@ export class Route {
     await this.current();
     return { view: gated, cursor: { id: cursor, digest: hash(gated.messages), branch, http } };
   }
-  async deliverApprovals(presence: Presence | undefined, views: Interrupt[]) {
+  async deliverApprovals(presence: Presence | undefined, views: Interrupt[], surface: "snapshot" | "run" = "snapshot") {
     for (const q of views) {
       const r = this.api.openRequests(this.id).find(r => r.id === q.id);
       if (!r?.approvalWait) continue;
       const present = () => !!presence && this.c.presence === presence && !presence.response.destroyed;
-      if (!presence || !present() || !await this.api.presentApproval(this.id, r.id, { routeId: "agui:" + this.p.clientId,
+      if (!presence || !present() || !await this.api.presentApproval(this.id, r.id, { routeId: "agui:" + surface + ":" + this.p.clientId,
         actorId: this.p.actor.id, submittedBy: this.p.actor.id, handle: presence, present }) || !present()) fail("conflict");
       presence.delivered.add(r.id);
     }

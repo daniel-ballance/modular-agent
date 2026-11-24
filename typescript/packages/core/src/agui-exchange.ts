@@ -226,7 +226,7 @@ export class Exchange {
     const groups = calls.map(c => callFrames(c.call, c.call.stepId && snap.view.messages.some(m => m.id === assistantId(c.call.stepId!)) ? assistantId(c.call.stepId) : undefined));
     await r.events([...groups.flat(), ...terminal]); // Do not authorize a terminal or a subset in isolation.
     if (await r.branchGeneration() !== snap.cursor.branch) fail("conflict");
-    await r.deliverApprovals(presence, questions);
+    await r.deliverApprovals(presence, questions, "run");
     const tail = terminal.map(frame).join("");
     const frames = groups.map(group => group.map(frame).join(""));
     const end = () => {

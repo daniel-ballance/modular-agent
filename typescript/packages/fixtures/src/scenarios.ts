@@ -16,7 +16,10 @@ import { ScenarioEvidence, type TelemetryRun } from "./telemetry-scenario.js";
 const repo = fileURLToPath(new URL("../../../../../", import.meta.url)).replace(/\/$/, "");
 const files = (dir: string) => readdirSync(dir).filter(f => f.endsWith(".json")).sort().map(f => join(dir, f));
 const load = <T>(path: string): T => JSON.parse(readFileSync(path, "utf8"));
-export const scenarioFiles = () => files(join(repo, "conformance/sdk/scenarios"));
+export const scenarioFiles = () => {
+  const waiting = join(repo, "conformance/sdk/fixtures/waiting-approval");
+  return [...files(join(repo, "conformance/sdk/scenarios")), ...existsSync(waiting) ? files(waiting) : []];
+};
 export type Placement = { name: string; command?: string[]; servicePlugins?: ServicePlugin[] };
 export function placements(require = process.env.MODULAR_AGENT_SDK_REQUIRE): Placement[] {
   // `all`, or a comma-separated list of SDKs (docs/sdk/testing.md#finding-the-fixture-programs).
@@ -49,6 +52,7 @@ type Step = ({ prompt: string; as?: string; crashWhen?: Crash } | { reopen: true
   { send: string; timing?: InputTiming } | { answer: Answer } | { wait: true }) & { expect?: Expect };
 export interface Scenario {
   scenario: string;
+  requires?: { approvalsOutlastTurns?: boolean };
   agent: Pick<AgentOptions, "durability" | "approval" | "settings" | "severalActors"> & {
     plugins?: string[]; answers?: Answer[]; actors?: Actor[]; history?: "file" | "service";
   };
@@ -103,7 +107,7 @@ export async function scenarioAgent(s: Scenario, dir: string, p: Placement,
 
 // A process that is already a zombie cannot race recovery. Container PID 1
 // may not reap orphaned killed plugins. On Linux check actual group states.
-async function waitGroup(pid: number) {
+export async function waitGroup(pid: number) {
   const deadline = Date.now() + 5000;
   while (true) {
     let live: boolean;
@@ -144,7 +148,7 @@ async function killGroup(pid?: number) {
   }
 }
 
-async function servicesFor(s: Scenario, dir: string, p: Placement) {
+export async function servicesFor(s: Scenario, dir: string, p: Placement) {
   const children: { pid?: number; reaped: Promise<void> }[] = [];
   let stopping: Promise<void> | undefined;
   const stop = () => stopping ??= Promise.all(children.map(async ({ pid, reaped }) => {
@@ -226,6 +230,10 @@ async function crashRun(path: string, dir: string, p: Placement, i: number, when
 
 export async function runScenario(path: string, p: Placement, run?: TelemetryRun): Promise<string[]> {
   const s = loadScenario(path);
+  if (s.requires?.approvalsOutlastTurns) {
+    const driver = await import(new URL("../../../../scripts/waiting-scenarios.mjs", import.meta.url).href);
+    return driver.runWaitingScenario(path, p, run);
+  }
   const dir = run?.workDir ?? await mkdtemp(join(tmpdir(), "sdk-scenario-"));
   const evidence = run && new ScenarioEvidence(run, s.steps.some(step => "prompt" in step && !!step.crashWhen));
   let report: unknown;

@@ -12,10 +12,10 @@ import { durableRuntime } from "@modular-agent/runtime-durable";
 import { startExternalPlugin, startPluginService, pluginSpecsFromEnv, conformanceProvider, conformanceTools, ACP_PROTOCOL, listenWebSocket, receiveMessages, type ListenOptions, type ServiceServer, type ExternalPluginSpec, type PluginSpec, type ServicePluginSpec } from "@modular-agent/plugin-wire";
 import { acpInterface, localAcpActor, unchangedAcpApproval } from "@modular-agent/interface-acp";
 import { HistoryArchive, historyClientOptions, historyRelay, historyService, HttpHistoryStore, type HistoryServiceStore } from "@modular-agent/services";
-import { interrupt, type Principal } from "./agui-view.js";
+import { interrupt, messages, pending as pendingFrontend, reply as aguiReply, type Principal } from "./agui-view.js";
 import { createHash } from "node:crypto";
 import { AguiBinding, type AguiProjectionOptions, type Target } from "./agui.js";
-import { fail } from "./agui-wire.js";
+import { fail, same } from "./agui-wire.js";
 import { AgentError, checked, messageOf } from "./errors.js";
 import { collect, definePlugin, type AgentInterface, type Plugin } from "./plugin.js";
 import { type Provider } from "./provider.js";
@@ -432,8 +432,8 @@ export class Agent {
   }
   #localInterface(): BasePlugin {
     return { name: "sdk.local", setup: api => {
-      api.registerApprovalRoute({ id: "sdk.local", ceiling: (_id, actor, principal) =>
-        principal === local.id && (actor === local.id || this.#authority.severalActors) ? ALL_AUTHORITY : [],
+      api.registerApprovalRoute({ id: "sdk.local", ceiling: (id, actor, principal) =>
+        api.session(id).project === this.#project && principal === local.id && (actor === local.id || this.#authority.severalActors) ? ALL_AUTHORITY : [],
         unchanged: async (entry, actor) => {
           const request = (entry.data as { request: import("@modular-agent/harness").InputRequest }).request;
           const q = await questionOf(api, { ...request, answerers: request.answerers ?? [] });
@@ -677,12 +677,26 @@ export class Agent {
           unchanged: entry => unchangedAcpApproval(api, entry, scope.actor.id) }));
         if (agui && scope.clientId) {
           const p = scope as Principal;
-          cleanRoutes.push(api.registerApprovalRoute({ id: "agui:" + p.clientId, ceiling: (id, actor, principal) =>
+          for (const surface of ["run", "snapshot"] as const) cleanRoutes.push(api.registerApprovalRoute({ id: "agui:" + surface + ":" + p.clientId, ceiling: (id, actor, principal) =>
             actor === principal ? ceiling(id, actor, principal) : [],
             unchanged: async entry => {
               const raw = (entry.data as { request: import("@modular-agent/harness").InputRequest }).request;
               const request = { ...raw, answerers: raw.answerers ?? [], turnId: entry.turnId };
-              return !!await interrupt(api, entry.sessionId, p, request, entry, false);
+              const id = entry.sessionId, view = await interrupt(api, id, p, request, entry, false);
+              if (!view) return false;
+              // Check the binding envelope too, even when the old stream is gone. Compare
+              // the approval content, not the set of currently open requests.
+              if (surface === "snapshot") {
+                const records = await api.readHistory(id);
+                const copy = await messages(api, id, p, records, new Set());
+                const snapshot = { threadId:id, declaration:agent.declaration(), cursor:"approval-recheck", messages:copy,
+                  lastMessageId:copy.at(-1)?.id ?? null, waiting:{questions:[view.wire],
+                    toolCalls:pendingFrontend(records,p).filter(c=>c.ended).map(({toolCallId,expiresAt})=>({toolCallId,expiresAt}))} };
+                const out = await aguiReply(api,id,p,"snapshot",structuredClone(snapshot));
+                return out.threadId === id && same(out.waiting?.questions,[view.wire]);
+              }
+              const terminal = [{ type:"RUN_FINISHED", threadId:id, runId:"approval-recheck", outcome:{type:"interrupt",interrupts:[view.wire]} }];
+              return same(await aguiReply(api,id,p,"events",structuredClone(terminal)),terminal);
             } }));
         }
       };

@@ -21,14 +21,16 @@ const actors = Object.entries(tokenFiles).map(([role, tokenFile]) => ({ tokenFil
   actor: { id: role === 'foreign' ? 'kit-foreign' : 'kit-owner', kind: 'user', rights: role === 'watch' ? ['watch'] : rights },
   clientId: ['owner','rotated'].includes(role) ? 'kit-primary' : `kit-${role}`, projects: role === 'project' ? [] : [project],
   tenants: role === 'tenant' ? ['other'] : ['kit'], traceTrusted: ['owner','rotated'].includes(role) }));
-const source = { sourceId: 'palette', actorId: 'kit-owner', routeId: 'kit-primary', resultTimeoutMs: 60000, tools: [{ ...offer, callers: ['model'] }] };
+const waiting = name.startsWith("waiting-");
+const redacted = new Set();
+const source = { sourceId: 'palette', actorId: 'kit-owner', routeId: 'kit-primary', resultTimeoutMs: 60000, tools: [{ ...offer, ...(name.startsWith("waiting-mixed") ? { hints: { readOnly: true } } : {}), callers: ['model'] }] };
 // Export synchronously. export() must not depend on advancing the question clock.
 const captured = [];
 const exporter = { export(spans, callback) { captured.push(...spans); callback({code:0}); }, async shutdown() {} };
 const tracer = new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
 trace.setGlobalTracerProvider(tracer);
-const controlledClock = ['approval-expired','questions','report-cutoffs'].includes(name);
-if (controlledClock) mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
+const controlledClock = waiting || ['approval-expired','questions','report-cutoffs'].includes(name);
+if (controlledClock) mock.timers.enable({ apis: ['Date', 'setTimeout'], now: waiting ? 1_800_000_000_000 : Date.now() });
 const barriers = new Map();
 function latch(id, at) {
   const key = JSON.stringify([id,at]);
@@ -38,7 +40,7 @@ function latch(id, at) {
 async function pause(id, at) { latch(id, at).resolve(); await latch(id, 'release').promise; }
 const lines = async file => (await readFile(file, 'utf8').catch(e => { if (e.code !== 'ENOENT') throw e; return ''; })).trim().split('\n').filter(Boolean).map(x => JSON.parse(x));
 class Store extends JsonlHistoryStore {
-  supports = { ...this.supports, persistent: true };
+  supports = { ...this.supports, persistent: true, portableSessions: true };
   async append(id, entries) {
     if (name === 'crash-before-handoff' && entries.some(e => e.kind === 'toolStarted')) await pause(id, 'beforeHandoff');
     await super.append(id, entries);
@@ -46,6 +48,10 @@ class Store extends JsonlHistoryStore {
     await appendFile(join(dataDir, `${id}.batches`), JSON.stringify(entries.map(e => e.id)) + '\n');
     if (name === 'crash-after-result' && entries.some(e => e.kind === 'toolResult')) await pause(id, 'afterResult');
     if (name === 'crash-continuation' && entries.some(e => e.kind === 'turnStart' && e.continuesTurnId)) await pause(id, 'duringContinuation');
+    if (entries.some(e => e.kind === 'turnEnd') && this.continuations?.has(id)) latch(id,'continuationEnded').resolve();
+    if (entries.some(e => e.kind === 'turnStart' && e.continuesTurnId)) (this.continuations ??= new Set()).add(id);
+    if (entries.some(e => e.kind === 'inputAnswer')) latch(id,'answerCommitted').resolve();
+    if (entries.some(e => e.kind === 'toolResult')) latch(id,'reportCommitted').resolve();
     if (entries.some(e => e.kind === 'turnEnd')) latch(id, 'turnEnd').resolve();
     if (entries.some(e => e.kind === 'turnStart' && e.continuesTurnId)) latch(id, 'continued').resolve();
     if (entries.some(e => e.kind === 'toolResult')) latch(id, 'settled').resolve();
@@ -60,6 +66,9 @@ const question = tool({ name: 'kit_choice', description: 'Ask a test question', 
   async run(_input, cx) { await cx.ask({ kind: 'choice', question: 'Choose a color?', options: ['yes','no'], timeLimitMs: 5000 }); return ''; } });
 const plugin = definePlugin({ name: 'kit', replaces: ['history-store'], setup(r) {
   r.historyStore(store);
+  if (waiting) r.tool(tool({ name:'bump', description:'Increment the counter', input:{type:'object'}, async run() {
+    await appendFile(join(dataDir,'counter'), '1'); return 'Incremented';
+  } }));
   if (['questions','mixed'].includes(name)) r.tool(question);
   r.on('session.start', async ({sessionId, resumed}) => {
     if (!resumed) sessions.set(sessionId, await agent.openSession(sessionId));
@@ -78,7 +87,7 @@ const plugin = definePlugin({ name: 'kit', replaces: ['history-store'], setup(r)
   r.on('output', async ({ sessionId, recipient, events }) => {
     const event = events[0], d = event.data;
     if (name === 'release-gate' && event.type === 'reply' && d.method === 'agui.events' && d.result.some(e => e.type === 'TOOL_CALL_START')) await pause(sessionId, 'beforeRelease');
-    if (name === 'approval-redacted' && d?.method === 'agui.interrupt') d.interrupt.message = 'Changed arguments';
+    if ((name === 'approval-redacted' || redacted.has(d?.clientId)) && d?.method === 'agui.interrupt') d.interrupt.message = 'Changed arguments';
     else if (name === 'error-gate' && (d?.method === 'agui.discovery' || event.type === 'turnEnded' && d.outcome.kind === 'failed')) return 'block';
     else if (name === 'output-size' && event.type === 'kit.oversized') d.copy = 'x'.repeat(64*1024*1024);
     else if (name === 'output-size' && d?.method === 'agui.snapshot' && d.clientId === 'kit-sibling') d.result.messages.at(-1).content = 'x'.repeat(64*1024*1024);
@@ -99,8 +108,9 @@ if (state) {
 const script = await loadScript(env.MODULAR_AGENT_SCRIPT, env.MODULAR_AGENT_SCRIPT_LOG);
 const provider = state ? { ...script, async request(...args) { const m = await script.request(...args); return { ...m, providerData:'provider-only-sentinel' }; } } : script;
 const agent = await createAgent({ project, severalActors: true, sessionLimits: true, tenants: { kit: {rights} }, environment: memoryEnvironment(), runtime,
-  durability: name === 'crash-continuation' ? 'durable' : 'kept', dataDir, interfaceTools: [source], plugins, approval:name.startsWith('approval')?'all':'off',
-  settings:{approvalWaitMs:5000}, providers:[provider] });
+  durability: name === 'crash-continuation' ? 'durable' : 'kept', dataDir, interfaceTools: [source], plugins, approval: name.startsWith('waiting-mixed') ? 'ask' : waiting || name.startsWith('approval') ? 'all' : 'off',
+  ...(waiting ? { questionsOutlastTurns:true, maxApprovalWaitMs:5000 } : {}),
+  settings:{approvalWaitMs:5000, ...(waiting && name !== 'waiting-live' ? {approvalWait:'untilDeadline'} : {})}, providers:[provider] });
 // Observe delivery at the real connection callback, not a model draft or a snapshot.
 const connect = agent.connectInterfaceTools.bind(agent);
 agent.connectInterfaceTools = (id, options) => connect(id, { ...options, onHandoff(request) {
@@ -116,7 +126,7 @@ if (tls) {
 const listener = await agent.serveAgui({ listen: env.MA_AGUI_LISTEN, actors, tenant: 'kit', acp: true, tls:tlsOptions,
   statePlugin: state ? {name:'kit',snapshot} : undefined, rawSources: {kit:'kit'}, traceStateVendors:['kit'], onWarning: field => warnings.push(field) });
 const auth = createHash('sha256').update('Bearer '+(await readFile(controlTokenFile,'utf8')).trim()).digest();
-async function control({operation,threadId:id,name:at,milliseconds}) {
+async function control({operation,threadId:id,name:at,milliseconds,client,mode}) {
   if (operation === 'tls') return tls.client;
   if (!/^[\w-]+$/.test(id)) throw Error('invalid session');
   const session = sessions.get(id);
@@ -127,7 +137,7 @@ async function control({operation,threadId:id,name:at,milliseconds}) {
       await tracer.forceFlush();
       const spans = captured.filter(s => s.attributes['gen_ai.conversation.id'] === id).map(s => ({name:s.name,...s.spanContext(),
         parentSpanId:s.parentSpanContext?.spanId, attributes:s.attributes, links:s.links.map(l => l.context)}));
-      return {batches, dispatches:await lines(join(dataDir,`${id}.dispatches`)), model:await lines(env.MODULAR_AGENT_SCRIPT_LOG), warnings, spans, erasure:erasures.get(id) ?? {outOfReach:[]}};
+      return {project, batches, counter: (await readFile(join(dataDir,'counter')).catch(e => { if (e.code !== 'ENOENT') throw e; return ''; })).length, dispatches:await lines(join(dataDir,`${id}.dispatches`)), model:await lines(env.MODULAR_AGENT_SCRIPT_LOG), warnings, spans, erasure:erasures.get(id) ?? {outOfReach:[]}};
     }
     case 'barrier': if (at === 'presenceLost') await session.waitIdle(); else await latch(id,at).promise; break;
     case 'advance': {
@@ -139,6 +149,7 @@ async function control({operation,threadId:id,name:at,milliseconds}) {
       }
       await session.waitIdle(); break;
     }
+    case 'approvalGate': if (mode === 'redact') redacted.add(client); else redacted.delete(client); break;
     case 'release': latch(id,'release').resolve(); break;
     case 'revoke': await session.setLimit(rights.filter(r => r !== 'tools')); break;
     case 'move': { const {entries} = await store.load(id); await session.moveTo(entries[entries.findIndex(e => e.kind === 'inputAccepted')-1].id); break; }
