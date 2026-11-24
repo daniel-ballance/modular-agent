@@ -2893,7 +2893,7 @@ impl AgentApi for Harness {
             !jobs(&self.snapshot(&scope.session)?)?
                 .iter()
                 .any(|j| j.state == JobState::Running),
-            "cancel jobs before moving position"
+            OperationError::Busy("cancel jobs before moving position".into())
         );
         ensure!(
             !self.is_running(&scope.session),
@@ -2908,7 +2908,7 @@ impl AgentApi for Harness {
             position
                 .as_ref()
                 .is_none_or(|p| open.data.entries.iter().any(|e| e.id == *p)),
-            "unknown position"
+            OperationError::NotFound("unknown position".into())
         );
         let mut next = open.data.clone();
         ensure!(
@@ -2920,7 +2920,7 @@ impl AgentApi for Harness {
             !original
                 .iter()
                 .any(|e| interface_handoff(e) && interface_result(&next, e).is_none()),
-            "settle Interface calls before moving position"
+            OperationError::Busy("settle Interface calls before moving position".into())
         );
         let mut additions: Vec<(Scope, Draft)> = vec![];
         for q in questions(&next)?.into_iter().filter(|q| q.answerable) {
@@ -2993,7 +2993,8 @@ impl AgentApi for Harness {
         Ok(())
     }
     fn fork(&self, scope: &Scope, position: Option<String>) -> Result<String> {
-        require(self, scope, "input")?;
+        require(self, scope, "watch")?;
+        require(self, scope, "settings")?;
         let _workspace = self.begin_environment_work(&scope.session)?;
         ensure!(
             !self.is_running(&scope.session),
@@ -3007,7 +3008,7 @@ impl AgentApi for Harness {
         if let Some(p) = position {
             ensure!(
                 source.entries.iter().any(|e| e.id == p),
-                "unknown fork point"
+                OperationError::NotFound("unknown fork point".into())
             );
             source.position = Some(p);
         }
@@ -3019,7 +3020,7 @@ impl AgentApi for Harness {
                     && !branch
                         .iter()
                         .any(|r| r.kind == "tool.result" && r.scope.call == e.scope.call)),
-            "settle pending work before forking"
+            OperationError::Busy("settle pending work before forking".into())
         );
         ensure!(
             self.sessions
@@ -3029,7 +3030,7 @@ impl AgentApi for Harness {
                 .unwrap()
                 .queue
                 .is_empty(),
-            "take or withdraw queued input before forking"
+            OperationError::Busy("take or withdraw queued input before forking".into())
         );
         let new_id = id();
         let lease = self.store().map(|s| s.acquire(&new_id)).transpose()?;

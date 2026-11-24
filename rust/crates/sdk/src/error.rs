@@ -143,6 +143,7 @@ impl From<anyhow::Error> for Error {
                 Forbidden(_) => Code::Forbidden,
                 Conflict(_) => Code::Conflict,
                 InvalidParams(_) => Code::InvalidParams,
+                ResultTooLarge(_) => Code::ResultTooLarge,
             };
             return Error::new(code, format!("{error:#}"));
         }

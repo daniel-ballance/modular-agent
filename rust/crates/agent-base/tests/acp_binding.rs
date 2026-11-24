@@ -624,6 +624,65 @@ async fn erase_during_a_turn_returns_busy_and_preserves_the_approval() {
 }
 
 #[tokio::test]
+async fn invalid_history_changes_leave_the_record_intact() {
+    let rig = Rig::new(json!(["done"]));
+    let cwd = rig.project.path().to_owned();
+    rig.client(None, false, async move |cx| {
+        let id = cx
+            .send_request(NewSessionRequest::new(cwd))
+            .block_task()
+            .await?
+            .session_id;
+        cx.send_request(PromptRequest::new(id.clone(), vec!["first".into()]))
+            .block_task()
+            .await?;
+        let all = json!({"sessionId":id,"all":true});
+        let before = rpc(&cx, "_modular-agent/history", all.clone()).await?;
+        let rows = before["entries"].as_array().unwrap();
+        let entry = |kind| &rows.iter().find(|e| e["kind"] == kind).unwrap()["id"];
+        let target = entry("turnEnd");
+        for (method, args, code) in [
+            ("erase", json!({"entryIds":[]}), "invalid_params"),
+            (
+                "erase",
+                json!({"entryIds":[target, "missing"]}),
+                "not_found",
+            ),
+            (
+                "erase",
+                json!({"entryIds":[target, entry("actorJoined")]}),
+                "forbidden",
+            ),
+            (
+                "move",
+                json!({"entryId":target,"rewind":"yes"}),
+                "invalid_params",
+            ),
+            ("move", json!({"entryId":entry("response")}), "conflict"),
+            ("move", json!({"entryId":"missing"}), "not_found"),
+            ("fork", json!({"entryId":""}), "invalid_params"),
+            ("fork", json!({"entryId":"missing"}), "not_found"),
+        ] {
+            let mut params = args;
+            params["sessionId"] = json!(id);
+            let error = rpc(&cx, &format!("_modular-agent/{method}"), params)
+                .await
+                .unwrap_err();
+            assert_eq!(json!(error.code), -32602);
+            assert_eq!(
+                error.data,
+                Some(json!({"code":code})),
+                "{method}: {}",
+                error.message
+            );
+        }
+        assert_eq!(rpc(&cx, "_modular-agent/history", all).await?, before);
+        Ok(())
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn binding_optional_methods_branch_history_and_erasure_shapes() {
     let r = Rig::new(json!(["one", "two"]));
     let cwd = r.project.path().to_path_buf();
