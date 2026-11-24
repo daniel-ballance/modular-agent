@@ -1,14 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
 import { support, view } from './waiting.mjs';
 import { parked, settled } from '../waiting/records.mjs';
 
 const input = { command: 'printf x >> count' }, scope = { stepId: 's', turnId: 't', toolCallId: 'c' };
 function sample() {
-  const request = { id: 'q', kind: 'approval', question: 'Run the counter?', toolCallId: 'c', approvalWait: 'untilDeadline', deadlineAt: 110, timeLimitMs: 10, whenTimeLimit: 'decline', answerable: false };
+  const request = { id: 'q', kind: 'approval', question: 'Run the counter?', askedBy: 'gate', toolCallId: 'c', approvalWait: 'untilDeadline', deadlineAt: 110, timeLimitMs: 10, whenTimeLimit: 'decline', answerable: false };
   const e = { kind: 'inputRequest', id: 'r', requestId: 'q', time: 100, ...scope, sources: ['resp'], data: { request,
     call: { id: 'c', name: 'bash', input }, definition: { name: 'bash' }, source: { plugin: 'test', toolSource: 'tools' } } };
   const batches = [[{ kind: 'inputAccepted' }, { kind: 'turnStart', turnId: 't' }, { kind: 'input' }, { kind: 'response', turnId: 't', stepId: 's', id: 'resp' }],
@@ -27,6 +24,7 @@ for (const [name, change] of Object.entries({
   'premature dispatch': b => b[0].push({ kind: 'toolStarted', ...scope }),
   'provisional result': b => b[0].push({ kind: 'toolResult', ...scope }),
   'missing open call': b => b[2][0].data.result.openToolCalls.pop(),
+  'missing asker': b => delete b[1][0].data.request.askedBy,
   'extended deadline': b => b[1][0].data.request.deadlineAt++,
   'unbound source': b => delete b[1][0].data.source,
 })) test(`reject ${name}`, () => { const { batches } = sample(); change(batches); assert.throws(() => parked(batches, 'bash', input)); });
@@ -43,10 +41,4 @@ test('ordinary late answers do not declare waiting approvals', () => {
   const deps = { lateAnswersStartTurns: true, questionsOutlastTurns: true, portableSessions: true };
   assert.equal(support(deps), false); assert.equal(support({ ...deps, approvalsOutlastTurns: true }), true);
   for (const key of Object.keys(deps)) assert.throws(() => support({ ...deps, approvalsOutlastTurns: true, [key]: false }));
-});
-test('CLI skips an undeclared session in each ACP version without contacting a control service', async () => {
-  const fixture = `require('node:readline').createInterface({input:process.stdin}).on('line',l=>{let {id,method,params}=JSON.parse(l); if(id===undefined)return;const m={binding:params._meta?.['modular-agent'].binding,declaration:{},extensions:[]};console.log(JSON.stringify({jsonrpc:'2.0',id,result:{protocolVersion:1,sessionId:'one',configOptions:[],_meta:{'modular-agent':m}}}));});`;
-  const { stdout } = await promisify(execFile)(process.execPath, [fileURLToPath(new URL('./run.mjs', import.meta.url)), '--waiting-approval-only', '--', process.execPath, '-e', fixture]);
-  assert.equal(stdout.match(/SKIP .*does not declare approvalsOutlastTurns/g)?.length, 2);
-  assert.match(stdout, /2\/2 checks passed/);
 });

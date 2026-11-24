@@ -13,6 +13,7 @@ export function parked(batches, name, input, { ended = true, otherOpen = [] } = 
   const { request: q, call, source, definition } = entry.data;
   assert.ok(q.id && q.id === entry.requestId && q.toolCallId && q.toolCallId === entry.toolCallId, 'bound request and call IDs');
   assert.ok(entry.stepId && entry.turnId && q.question, 'bound step, turn and question');
+  assert.ok(typeof q.askedBy === 'string' && q.askedBy.length, 'question names its authenticated asker');
   assert.equal(q.approvalWait, 'untilDeadline');
   assert.equal(q.answerable, false, 'not answerable at publication');
   assert.equal(q.whenTimeLimit, 'decline');

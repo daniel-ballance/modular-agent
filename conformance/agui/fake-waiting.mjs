@@ -35,7 +35,7 @@ export function fakeWaiting(name, fault, model, covers) {
         metadata: { ...(covers && fault !== 'missing-waiting-coverage' && { 'modular-agent.coversNested': true }),
           'modular-agent.approvalCall': { name: call.name, input: fault === 'wrong-waiting-call' ? {} : call.input } },
         expiresAt: new Date(deadlineAt).toISOString() };
-      s.entry = append(s, 'inputRequest', { request: { id: s.qid, toolCallId, question, deadlineAt, timeLimitMs: 5000,
+      s.entry = append(s, 'inputRequest', { request: { id: s.qid, askedBy: 'gate', toolCallId, question, deadlineAt, timeLimitMs: 5000,
         ...(covers && { coversNested: true }), whenTimeLimit: 'decline', kind: 'approval', approvalWait: 'untilDeadline', answerable: false }, call: { ...call, id: toolCallId },
         source: { plugin: 'counter', toolSource: 'counter' }, definition: { name: call.name } }, { ...s.scope, requestId: s.qid, sources: [response.id] });
       const pending = append(s, 'toolPending', { requestIds: [s.qid] }, s.scope);
