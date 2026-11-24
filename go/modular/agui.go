@@ -509,6 +509,34 @@ func (q *agRequest) serve(r *http.Request) error {
 			return denied
 		}
 		return q.jsonReply(201, "agui.create", agObject{"threadId": id, "declaration": q.a.Declaration()})
+	case r.Method == "POST" && q.a.Declaration()["approvalCoversNested"] == true && strings.HasPrefix(path, base+"/threads/") && strings.HasSuffix(path, "/settings"):
+		id := strings.TrimSuffix(strings.TrimPrefix(path, base+"/threads/"), "/settings")
+		if id == "" || strings.ContainsAny(id, "/%") {
+			return missing
+		}
+		if err := q.attach(id); err != nil {
+			return err
+		}
+		if !q.allowed("settings") {
+			return denied
+		}
+		v, err := agRead(r)
+		if err != nil {
+			return err
+		}
+		value, ok := v["approval"].(string)
+		if len(v) != 1 || !ok || !validApproval(value) {
+			return invalid
+		}
+		snap, err := q.a.a.Snapshot(id)
+		if err != nil {
+			return err
+		}
+		snap.Settings.Approval = api.ApprovalInternal(value)
+		if err = q.a.a.SetSettings(q.ctx, id, snap.Settings); err != nil {
+			return err
+		}
+		return q.jsonReply(200, "agui.settings", agObject{"approval": value})
 	case r.Method == "GET" && strings.HasPrefix(path, base+"/threads/"):
 		id, pres := strings.CutSuffix(strings.TrimPrefix(path, base+"/threads/"), "/presence")
 		if strings.ContainsAny(id, "/%") {

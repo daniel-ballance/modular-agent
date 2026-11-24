@@ -30,6 +30,16 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 	}
 	opts := []modular.Option{modular.WithAgentName("ma"), modular.WithProject(o.project), modular.WithProviderAliases(providerAliases), modular.WithDataDir(d.state), modular.WithHistory(store), modular.WithDurability(durability), modular.WithPluginHost(o.acp || o.agui), modular.WithJobReportsStartTurns(true), modular.WithLateAnswersStartTurns(true), modular.WithRefusedSettingsDuringTurn()}
 	opts = append(opts, modular.WithCapacityLimits(o.policy.Limits))
+	if o.approval != "" {
+		opts = append(opts, modular.WithApproval(o.approval), modular.WithApprovalCoversNested(true))
+		if ms := o.policy.ApprovalWaitMaxMs; ms > 0 {
+			wait := o.approvalWait
+			if o.prompt != nil || wait == "" {
+				wait = "live"
+			}
+			opts = append(opts, modular.WithMaxApprovalWaitMs(ms), modular.WithSettings(modular.Settings{"approvalWait": wait}))
+		}
+	}
 	if len(o.policy.Tenants) != 0 {
 		opts = append(opts, modular.WithTenants(o.policy.Tenants))
 	}
