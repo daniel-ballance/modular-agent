@@ -87,11 +87,11 @@ mise exec -- cargo run -p modular-agent --locked --offline -- --acp --runtime du
 mise exec -- cargo run -p modular-agent --locked --offline -- --project /absolute/project --trust-project
 ```
 
-ACP uses the official Rust SDK and declares its standard session lifecycle, configuration selectors and MCP transport support. Approvals become permission requests; text and choice questions become form elicitation when supported. Secret forms are never sent. The declared _modular/ extensions expose the rest of the host surface, including keyed input, history cursors, jobs and direct tool calls. See MILESTONE-4.md for parameters and limitations.
+ACP uses the official Rust SDK and declares its standard session lifecycle, configuration selectors and MCP transport support. Approvals become permission requests; text and choice questions become form elicitation when supported. Secret forms are never sent. The `_modular-agent/` extensions provide keyed input, history cursors and jobs. See [the ACP binding](../../../docs/bindings/acp.md) for request shapes.
 
 MCP uses official rmcp over stdio and Streamable HTTP. Settings servers serve every session; servers passed by an ACP client serve only that session and close with it. Tool annotations become hints and raw definitions/results are retained. Names are mcp_SERVER__TOOL, with documented naming restrictions.
 
-Settings can name the prelinked plugins guardrail.literal, feature.subagents and tools.mcp in an ordered plugins array, with options. Project plugin declarations and plugin_settings apply only after explicit trust. Ordinary project defaults, such as model/thinking, still apply before trust. The canonical-path trust ledger is trusted-projects.json beside the global settings file. An ACP host can explicitly trust through _modular/trust_project. Trust affects new/reopened compositions, not running ones. MILESTONE-4.md has complete examples.
+Settings can name the prelinked plugins guardrail.literal, feature.subagents and tools.mcp in an ordered plugins array, with options. Project plugin declarations and plugin_settings apply only after explicit trust. Ordinary project defaults, such as model/thinking, still apply before trust. The canonical-path trust ledger is trusted-projects.json beside the global settings file. An ACP host can explicitly trust the attached session’s project through `_modular-agent/trust-project`. Trust affects new/reopened compositions, not running ones. MILESTONE-4.md has complete examples.
 
 ## Settings and data
 
