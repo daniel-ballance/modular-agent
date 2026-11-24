@@ -41,6 +41,14 @@ func newView(branch, history []api.Entry) view {
 	return v
 }
 
+func (v view) waitingForResult(part api.Part) bool {
+	if part.Call == nil {
+		return false
+	}
+	source := v.results[part.Call.ID]
+	return source != nil && source.Kind == "turn.end"
+}
+
 func Messages(branch []api.Entry) ([]api.Message, []string) {
 	v := newView(branch, branch)
 	return v.messages(v.entries, "")

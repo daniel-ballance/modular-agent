@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/turnrun"
+	"slices"
 	"strings"
 )
 
@@ -170,6 +171,10 @@ func (m *manager) compactWith(ctx context.Context, id string, step *api.StepCont
 		// or complete model/tool batch, not the whole user exchange.
 		if e.Kind == "input" || e.Kind == "model" {
 			cut = i
+		}
+		// Keep this response: a later result still needs its call part.
+		if e.Kind == "model" && slices.ContainsFunc(e.Content, view.waitingForResult) {
+			break
 		}
 	}
 	if cut <= 0 {
