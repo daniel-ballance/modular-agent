@@ -323,8 +323,12 @@ cases.capacity = async c => {
   const r = await c.prompt(); assert.equal(meta(r).outcome.kind, 'limit'); assert.equal(meta(r).outcome.limit, 'capacity');
   const p = await delivery(c, e); assert.deepEqual(await answer(p, c.sid, e.requestId, 'refuse'), accepted);
   await c.idle(); const es = (await c.batches()).flat(); assert.equal(one(es.filter(x => x.toolCallId === e.toolCallId), 'toolResult').data.status, 'refused');
-  assert.equal(c.count(), 0); const reply = await c.prompt(); assert.equal(reply.stopReason, 'end_turn');
-  assert.equal(meta(reply).openToolCalls?.length, 1, 'reservation was released');
+  assert.equal(c.count(), 0);
+  // The probe's directive has no result, so the continuation's model step asks for it again
+  // (ACP conformance mode). That new call can only be recorded in the slot the refusal released.
+  const next = rows(es, 'inputRequest').filter(r => r.toolCallId !== e.toolCallId);
+  assert.equal(next.length, 1, 'the continuation parked the probe call in the released slot');
+  assert.ok(!rows(es, 'toolResult').some(r => r.toolCallId === next[0].toolCallId), 'the new call waits');
 };
 export async function waitingChecks(kit) {
   for (const v of [1, 2]) {
