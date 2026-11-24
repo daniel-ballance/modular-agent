@@ -66,7 +66,7 @@ function settled(evidence, callId, status, { continuation = true, report = statu
   assert.equal(result.turnId, start.turnId, 'result belongs to origin');
   assert.equal(result.stepId, start.stepId);
   assert.ok(result.sources.includes(start.id) && result.sources.includes(checkpoint.id), 'result preserves handoff erasure lineage');
-  const continuations = entries(evidence, 'turnStart').filter(e => (e.continuesTurnId ?? e.data?.continuesTurnId) === start.turnId);
+  const continuations = entries(evidence, 'turnStart').filter(e => e.continuesTurnId === start.turnId);
   assert.equal(continuations.length, Number(continuation), 'one continuation iff origin is ready and remains eligible');
   if (!continuation) return;
   const [next] = continuations;
@@ -120,9 +120,8 @@ export const advanced = {
       assert.equal(waiting.calls.size, 0, 'no handoff before approval');
       const [approval] = interrupts(waiting, 'approval');
       assert.ok(approval.toolCallId && approval.message.includes(offer.name) && approval.message.includes(dispatch.color), 'approval view names exact dispatched tool and arguments');
-      const covers = view.declaration.approvalCoversNested === true;
-      if (covers) assert.equal(approval.metadata?.['modular-agent.coversNested'], true, 'approval interrupt declares coversNested');
-      else console.log('SKIP  live interrupt coverage (session does not declare approvalCoversNested)');
+      assert.equal(view.declaration.approvalCoversNested, true, 'fixture must declare approvalCoversNested');
+      assert.equal(approval.metadata?.['modular-agent.coversNested'], true, 'approval interrupt declares coversNested');
       assert.ok(Number.isFinite(Date.parse(approval.expiresAt)), 'approval deadline is ISO 8601');
       await checkWaiting(api, view.threadId, 1, 0, 'running');
       await checkWaiting(at(origin, tokens.sibling), view.threadId, 0, 0, 'running');
@@ -141,12 +140,10 @@ export const advanced = {
       const evidence = await evidenceFor(control, view.threadId);
       const { start } = startRecord(evidence, id);
       assert.equal(entries(evidence, 'turnStart').length, 1, 'approval resumes existing turn');
-      if (covers) {
-        const request = entries(evidence, 'inputRequest').find(e => e.requestId === approval.id);
-        assert.equal(request?.data.request.coversNested, true, 'record matches the covered view');
-        assert.equal(start.data.approvalCoveredBy, undefined, 'the approved top-level call is not itself covered');
-      }
-      const record = evidence.batches.flat().find(e => e.kind === 'inputAnswer' && e.data.requestId === approval.id);
+      const recordedRequest = entries(evidence, 'inputRequest').find(e => e.requestId === approval.id);
+      assert.equal(recordedRequest?.data.request.coversNested, true, 'record matches the covered view');
+      assert.equal(start.data.approvalCoveredBy, undefined, 'the approved top-level call is not itself covered');
+      const record = evidence.batches.flat().find(e => e.kind === 'inputAnswer' && e.requestId === approval.id);
       assert.ok(record && evidence.batches.flat().indexOf(record) < evidence.batches.flat().indexOf(start), 'allow is committed before dispatch');
     } finally { await presence.close(); }
   }),
@@ -276,7 +273,7 @@ export const advanced = {
         const evidence = await evidenceFor(control, view.threadId);
         if (operation === 'timeout') settled(evidence, id, 'outcomeUnknown');
         else if (operation === 'erase') {
-          assert.equal(entries(evidence, 'turnStart').filter(e => e.continuesTurnId ?? e.data?.continuesTurnId).length, 0, 'erased call cannot authorize a continuation');
+          assert.equal(entries(evidence, 'turnStart').filter(e => e.continuesTurnId).length, 0, 'erased call cannot authorize a continuation');
           assert.ok(evidence.erasure.outOfReach.length, 'possibly handed-off copy is out of reach');
           clean(current, dispatch.color, rawReport);
         } else assert.equal(entries(evidence, 'toolResult').some(e => e.actorId), false, 'changed tool authority refuses the report');

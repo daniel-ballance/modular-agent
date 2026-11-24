@@ -120,7 +120,7 @@ export const receipts = {
     const ctl = controls(peer, view.threadId); await ctl('barrier', { name: 'recoveryEnded', runId: report.runId });
     const after = await ctl('inspect'), starts = records(after, 'turnStart');
     assert.equal(starts.length, 2, 'one origin and one continuation');
-    assert.equal(starts[1].continuesTurnId ?? starts[1].data.continuesTurnId, starts[0].turnId, 'continued the report origin');
+    assert.equal(starts[1].continuesTurnId, starts[0].turnId, 'continued the report origin');
     assert.deepEqual(starts.map(s => records(after, 'turnEnd').find(e => e.turnId === s.turnId)?.data.outcome.kind), ['completed', 'failed'], 'origin and continuation have different outcomes');
     assert.equal(records(after, 'inputAccepted').length, 1, 'one opening input, no result-only admission');
     assert.deepEqual(after.dispatches, [call.id], 'original handoff released only once');
