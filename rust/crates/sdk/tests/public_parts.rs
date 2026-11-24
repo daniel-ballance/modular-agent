@@ -219,6 +219,31 @@ async fn a_local_command_asks_without_a_turn() -> Result<()> {
     agent.close().await
 }
 
+#[tokio::test]
+async fn a_tool_approval_without_options_accepts_allow() -> Result<()> {
+    // data.md: an approval's answer is "allow"; a draft lists no options.
+    let plugin = Plugin::new("approves").command(
+        Command::new("approve", "Ask for approval.", |_, cx| async move {
+            match cx.ask(Ask::approval("Write the file?")).await? {
+                modular_agent::Answer::Allow => Ok(Some("allowed".into())),
+                answer => panic!("expected allow, got {answer:?}"),
+            }
+        })
+        .in_process_only(),
+    );
+    let agent = test_agent()
+        .plugin(plugin)
+        .on_question(|_| async { modular_agent::Answer::Allow })
+        .build()
+        .await?;
+    let session = agent.session().await?;
+    assert_eq!(
+        session.run_command("/approve").await?.as_deref(),
+        Some("allowed")
+    );
+    agent.close().await
+}
+
 #[derive(Default)]
 struct Changing(Arc<Mutex<(bool, Option<ToolsChanged>)>>);
 impl ToolSource for Changing {

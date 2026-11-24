@@ -511,7 +511,19 @@ impl Questions {
                     Value::Null
                 } else {
                     match q.kind {
-                        RequestKind::Approval | RequestKind::Choice => {
+                        // data.md: an approval's answer is "allow" and a refusal is a
+                        // decline, so a draft need not list options. An older draft
+                        // that lists "refuse" as an option keeps accepting it.
+                        RequestKind::Approval => {
+                            ensure!(
+                                value.as_str().is_some_and(|s| {
+                                    s == "allow" || q.options.iter().any(|o| o == s)
+                                }),
+                                "approval answer must be allow"
+                            );
+                            value
+                        }
+                        RequestKind::Choice => {
                             ensure!(
                                 value
                                     .as_str()

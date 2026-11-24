@@ -34,8 +34,7 @@ async def apply_change(old: str, new: str, ctx: ToolContext) -> str:
         raise ctx.refuse("Replace just the return expression with a numeric expression using value, min or max.")
     args = {"old": old, "new": new}
     prompt = f"Allow apply_change {json.dumps(args, sort_keys=True)} in limits.py and commit?"
-    # Rust currently checks the approval value against options as for a choice.
-    answer = await ctx.ask({"kind": "approval", "question": prompt, "options": ["allow", "refuse"]},
+    answer = await ctx.ask({"kind": "approval", "question": prompt},
                            wait=int(os.environ["DESK_APPROVAL_MS"]) / 1000)
     if answer.kind != "allow":
         raise ctx.refuse("The change was refused. No file was written.")
