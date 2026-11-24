@@ -769,6 +769,7 @@ class Session:
                         q["entry"],
                         "sdk",
                         present and exact,
+                        "user",
                     )
                 if visible is not None:
                     visible = {**visible, "answerable": bool(present and exact)}

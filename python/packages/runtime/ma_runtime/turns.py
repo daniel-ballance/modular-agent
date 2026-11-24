@@ -326,9 +326,24 @@ class Turns:
                 origin = (start["data"].get("source") or {}).get("continuesTurnId") or start.get(
                     "wire_fields", {}
                 ).get("continuesTurnId")
-                open_calls = await self._tools(
-                    sid, turn, "late:" + turn, calls, tools, continuation_of=origin
+                inherited = next(
+                    (
+                        e["step"]
+                        for e in es
+                        if e.get("call") in resume
+                        and e["kind"] == "tool_deferred"
+                        and e.get("step")
+                    ),
+                    None,
                 )
+                if inherited:
+                    ot.step_start(inherited)
+                try:
+                    open_calls = await self._tools(
+                        sid, turn, "late:" + turn, calls, tools, continuation_of=origin
+                    )
+                finally:
+                    ot.step_end()
             # Replay journal decisions, not model requests or completed effects.
             while not open_calls:
                 tools = await self._definitions(sid, turn)
@@ -1208,11 +1223,17 @@ class Turns:
     async def _settle(
         self, sid, turn, cancelled=False, *, prior_starts=(), preserve_interface=False
     ):
+        inherited = {
+            cid
+            for start in await self._entries(sid, turn=turn, kind="turn_start")
+            for cid in start["data"].get("continuationCalls", [])
+        }
+
         async def call_records():
             # Results can settle in a later turn. Select by the original call
             # IDs, not by the terminal record's turn.
             responses = await self._entries(sid, turn=turn, kind="response")
-            ids = {c["id"] for e in responses for c in e["data"].get("calls", [])}
+            ids = inherited | {c["id"] for e in responses for c in e["data"].get("calls", [])}
             ids.update(
                 e["call"]
                 for e in await self._entries(
@@ -1253,7 +1274,7 @@ class Turns:
                         )
                         existing.add(c["id"])
                         es.append(added)
-        deferred = {e["call"] for e in es if e["kind"] == "tool_deferred"}
+        deferred = {e["call"] for e in es if e["kind"] == "tool_deferred" and e.get("turn") == turn}
         for e in es:
             if e.get("call") in handed_off or (
                 not cancelled and e.get("call") in deferred and e.get("call") not in receipts
@@ -1261,7 +1282,7 @@ class Turns:
                 continue
             if (
                 e["kind"] != "tool_call"
-                or e.get("turn") != turn
+                or (e.get("turn") != turn and e["call"] not in inherited)
                 or e["call"] in done
                 or e["data"].get("parentCallId")
             ):

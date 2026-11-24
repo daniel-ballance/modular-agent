@@ -1687,9 +1687,7 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
                 self.sessions[sid]
             ):
                 # Once a principal loses eligibility, restoring rights needs a fresh delivery.
-                for key in list(self.approval_deliveries):
-                    if key[0] == sid:
-                        self.approval_deliveries.pop(key)
+                self.prune_wait_deliveries(sid)
                 await self.reconcile_waits(sid)
             if d["kind"] == "turn_end" and d["data"].get("outcome") != "completed":
                 await self.reconcile_waits(sid, reason="cancelled", turn=d["turn"], kick=False)

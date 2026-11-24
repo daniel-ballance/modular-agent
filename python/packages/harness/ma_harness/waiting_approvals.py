@@ -112,6 +112,16 @@ class WaitingApprovals:
             return set()
         return rights
 
+    def prune_wait_deliveries(self, sid):
+        s = self.sessions[sid]
+        entries = {e["id"]: e for e in waiting_entries(s)}
+        for key, (_, principal) in list(self.approval_deliveries.items()):
+            if key[0] == sid and (
+                not (entry := entries.get(key[3]))
+                or not self.wait_eligible(s, entry["data"], key[2], principal)
+            ):
+                self.approval_deliveries.pop(key)
+
     def wait_members(self, s, q):
         token = CONNECTION_AUTHORITY.set(None)
         try:
@@ -279,10 +289,10 @@ class WaitingApprovals:
         s = self.sessions[s["id"]]
         return self.wait_eligible(s, e["data"], actor, principal, ceiling) & set(allowed)
 
-    def remember_wait(self, sid, token, actor, entry, route, exact):
+    def remember_wait(self, sid, token, actor, entry, route, exact, principal=None):
         key = (sid, token, actor, entry)
         if exact:
-            self.approval_deliveries[key] = route
+            self.approval_deliveries[key] = (route, principal or actor)
         else:
             self.approval_deliveries.pop(key, None)
 
@@ -303,14 +313,15 @@ class WaitingApprovals:
             ):
                 raise AgentError("This approval is not open for an answer", "conflict")
             key = (sid, token, actor, e["id"])
-            route = self.approval_deliveries.get(key)
+            delivery = self.approval_deliveries.get(key)
+            route = delivery[0] if delivery and delivery[1] == principal else None
             rights = await self.wait_route_rights(s, e, actor, principal, route, d.get("authority"))
             why = self.wait_reason(s, e)
             if why:
                 records = await self.settle_wait(s, e, *why)
             elif (
                 not route
-                or self.approval_deliveries.get(key) != route
+                or self.approval_deliveries.get(key) != delivery
                 or not {"watch", "approve"} <= rights
             ):
                 self.approval_deliveries.pop(key, None)
@@ -368,7 +379,7 @@ class WaitingApprovals:
             "data": {"status": status, "toolName": call.get("name", "unknown")},
         }
 
-    async def settle_wait(self, s, e, reason, status, turn=None):
+    async def settle_wait(self, s, e, reason, status, turn=None, *, erasing=False):
         """Called under the append lock. Keep an earlier answer."""
         decision, started, result = self.wait_state(s, e)
         if result or started:
@@ -382,13 +393,22 @@ class WaitingApprovals:
             "copies": [e["id"]],
         }
         result = self.wait_result(e, status)
+        tombstone = {}
+        if erasing:
+            # The registry already fences new copies. Publish only terminal identities.
+            tombstone = {
+                "erased": True,
+                "originalKind": "inputAnswer",
+                "requestId": e["data"]["id"],
+            }
+            result.update(visible=False, data={"erased": True, "originalKind": "toolResult"})
         if decision:
             return await self._append({**base, **result, "copies": [e["id"], decision["id"]]})
         return await self._append(
             {
                 **base,
                 "kind": "question_closed",
-                "data": {"request": e["data"]["id"], "reason": reason},
+                "data": {"request": e["data"]["id"], "reason": reason, **tombstone},
                 "wait_result": result,
             }
         )
@@ -446,7 +466,9 @@ class WaitingApprovals:
                     else:
                         self.arm_wait(sid, e)
                 if why:
-                    records = await self.settle_wait(s, e, *why, turn=executing)
+                    records = await self.settle_wait(
+                        s, e, *why, turn=executing, erasing=affected is not None
+                    )
                     closures.append((e, records))
                     s = self.sessions[sid]
         for e, records in closures:

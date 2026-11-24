@@ -463,6 +463,7 @@ def entry_out(e):
             "parentId": e["parent"],
             "kind": e.get("data", {}).get("originalKind", kind),
             "erased": True,
+            **({"requestId": e["data"]["requestId"]} if e.get("data", {}).get("requestId") else {}),
             **{TAGS[k]: e[k] for k in ("turn", "step", "call", "job") if e.get(k) is not None},
             **({"sources": e["copies"]} if e.get("data", {}).get("interfaceErasure") else {}),
             **{

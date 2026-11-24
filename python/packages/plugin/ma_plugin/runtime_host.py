@@ -188,6 +188,11 @@ class HostedRuntime(Runtime):
                 method = "resumeTurn"
             elif resume or queued.get("interface_continuation"):
                 params["calls"] = scope.calls(await scope.entries(), resume)
+                if params["calls"] and (step := params["calls"][0].get("stepId")):
+                    scope.traced_step = step
+                    scope.step_span = ot.begin(
+                        "modular_agent.step", ot.attrs(sid, turn, step), parent=scope.trace_parent
+                    )
                 method = "continueOpenCalls"
             else:
                 method = "runTurn"
@@ -391,6 +396,9 @@ class TurnHost:
             )
             c["safeToRepeat"] = bool(
                 prior
+                and not self.runtime.plugin.h.waiting_request(
+                    self.runtime.plugin.h.sessions[self.sid], cid
+                )
                 and source
                 and prior["data"].get("source") == source
                 and prior["data"].get("definition") == wire_definition
@@ -1445,7 +1453,9 @@ class TurnHost:
             self.step_span = self.traced_step = None
 
     async def callback(self, method, p, key):
-        step = p.get("stepId") or self.step
+        step = (
+            p.get("stepId") or (p.get("call") or {}).get("stepId") or self.step or self.traced_step
+        )
         if (
             method in {"prepareStep", "model"}
             and step in self.allocated
