@@ -17,6 +17,9 @@ const projects = new Projects(root, resolve(process.env.DESK_SAMPLE ?? join(demo
 const processes = new Map<Agent, ReturnType<typeof launch>>();
 const services = new Map<Agent, { url: string; close(): Promise<void> }>();
 const presence = new Map<string, AbortController>();
+// A process being stopped stays in `processes` until it exits; it must not
+// answer a start or take a presence stream meanwhile.
+const stopping = new WeakSet<ReturnType<typeof launch>>();
 let host: Socket | undefined;
 function notify(event: object) {
   host?.write(JSON.stringify(event) + '\n');
@@ -92,6 +95,10 @@ async function handle({ agent, op, thread, parent, approvalMs }: Command) {
   if (!agents.includes(agent)) throw Error('Unknown agent');
   let child = processes.get(agent);
   if (op === 'start') {
+    if (child && stopping.has(child)) {
+      await child.exited; // its exit handler runs first and clears the entry
+      child = processes.get(agent);
+    }
     if (!child) {
       child = launch(projects, agent, services.get(agent)!.url, approvalMs);
       processes.set(agent, child);
@@ -110,10 +117,11 @@ async function handle({ agent, op, thread, parent, approvalMs }: Command) {
     return (await child.ready).origin;
   }
   if (op === 'stop') {
+    if (child) stopping.add(child);
     await child?.stop();
     return;
   }
-  if (!child) throw Error('Agent stopped');
+  if (!child || stopping.has(child)) throw Error('Agent stopped');
   if (!thread) throw Error('Missing session');
   const key = agent + ':' + thread;
   if (op === 'detach') {
@@ -122,7 +130,10 @@ async function handle({ agent, op, thread, parent, approvalMs }: Command) {
   } else if (op === 'presence') {
     if (presence.has(key)) return; // Keep the original stream. Never re-offer its views.
     const p = new AbortController();
-    await (await child.ready).presence({ thread, parent: parent ?? null }, p, () => void child!.stop());
+    await (await child.ready).presence({ thread, parent: parent ?? null }, p, () => {
+      stopping.add(child!);
+      void child!.stop();
+    });
     presence.set(key, p);
   } else throw Error('Unknown operation');
 }
