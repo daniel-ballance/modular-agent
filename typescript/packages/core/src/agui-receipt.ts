@@ -2,7 +2,7 @@ import { linkedWork, receiptId, type HistoryEntry, type ReleaseProof, type Termi
 import { HostRead } from "./agui-host-reads.js";
 import { callFrames } from "./agui-exchange.js";
 import { assistantId, messages, reply } from "./agui-view.js";
-import { fail, object, same, type WireEvent } from "./agui-wire.js";
+import { fail, hash, object, same, type WireEvent } from "./agui-wire.js";
 
 async function visibleRelease(r:HostRead, runId:string, entries:HistoryEntry[], terminal:TerminalClass, proof:ReleaseProof) {
   const boundary = {threadId:r.id,runId};
@@ -18,10 +18,13 @@ async function visibleRelease(r:HostRead, runId:string, entries:HistoryEntry[], 
     for (const id of proof.questions ?? []) {
       const entry = prefix.find(e=>e.kind === "inputRequest" && e.requestId === id);
       const q = entry && await r.question(entry);
+      const {rights} = await r.view();
+      if (!rights.includes(q?.reason === "approval" ? "approve" : "answer")) return false;
       if (!q) return false;
       questions.push(q);
     }
     for (const id of proof.calls ?? []) {
+      if (!(await r.view()).rights.includes("tools")) return false;
       const call = await r.handoff(prefix,id);
       if (!call) return false;
       calls.push(call);
@@ -31,6 +34,7 @@ async function visibleRelease(r:HostRead, runId:string, entries:HistoryEntry[], 
       {type:"MESSAGES_SNAPSHOT",messages:copy}, {type:"CUSTOM",name:"modular-agent.history",value:{cursor:proof.cursor,lastMessageId:copy.at(-1)?.id ?? null}},
       {type:"RUN_FINISHED",...boundary,outcome}];
   }
+  if (proof.groupDigest && hash(group) !== proof.groupDigest) return false;
   return same(group, await reply(r.t.api,r.id,r.p,"events",structuredClone(group)));
 }
 

@@ -3,7 +3,7 @@ import { inputIdOf, isText, textOf, type AgentEvent, type HistoryEntry, type Inp
 import type { Interrupt } from "@ag-ui/core";
 import type { Route } from "./agui.js";
 import { assistantId, content, displayEntry, toolId } from "./agui-view.js";
-import { MAX, errorCode, fail, frame, object, same, sse, type WireEvent } from "./agui-wire.js";
+import { MAX, errorCode, fail, frame, hash, object, same, sse, type WireEvent } from "./agui-wire.js";
 
 export const callFrames = (call: ToolCall, parentMessageId?: string): WireEvent[] => [
   { type: "TOOL_CALL_START", toolCallId: call.id, toolCallName: call.name, ...(parentMessageId ? { parentMessageId } : {}) },
@@ -107,9 +107,11 @@ export class Exchange {
     if (this.closed || this.failing) return;
     this.failing = true; this.r.c.cursor = undefined; this.r.c.needsSnapshot = true;
     const terminal = { type: "RUN_ERROR", code: errorCode(error), message: "Run could not be delivered." };
-    void this.r.events([terminal]).catch(() => frame({ ...terminal, code: "output_withheld" })).then(frames => {
+    void this.r.events([terminal]).then(frames => ({frames, gated:true}), () => ({
+      frames:frame({ ...terminal, code:"output_withheld" }), gated:false,
+    })).then(({frames,gated}) => {
       if (this.res.headersSent && !this.res.destroyed && !this.res.writableEnded) {
-        const mark = this.prepareRelease("error",{error:JSON.parse(frames.slice(6)).code,sources:[]});
+        const mark = gated && this.prepareRelease("error",{error:terminal.code,sources:[]});
         if (mark) this.res.once("finish",mark);
         this.res.end(frames);
       }
@@ -234,7 +236,8 @@ export class Exchange {
     const snap = await r.snapshot(false);
     const terminal = [...snapshotFrames(snap.view), { type: "RUN_FINISHED", ...this.boundary, outcome }];
     const groups = calls.map(c => callFrames(c.call, c.call.stepId && snap.view.messages.some(m => m.id === assistantId(c.call.stepId!)) ? assistantId(c.call.stepId) : undefined));
-    await r.events([...groups.flat(), ...terminal]); // Do not authorize a terminal or a subset in isolation.
+    const group = [...groups.flat(), ...terminal];
+    await r.events(group); // Do not authorize a terminal or a subset in isolation.
     if (await r.branchGeneration() !== snap.cursor.branch) fail("conflict");
     await r.deliverApprovals(presence, questions, "run");
     const tail = terminal.map(frame).join("");
@@ -242,7 +245,7 @@ export class Exchange {
     const end = () => {
       const sources = snap.records.filter(e => !e.erased && (["input","response","toolResult"].includes(e.kind) ||
         e.turnId === this.turn && ["turnEnd","inputRequest","toolStarted","modular-agent.interfaceHandoff"].includes(e.kind))).map(e=>e.id);
-      const mark = this.prepareRelease(outcome.type as TerminalClass, {through:snap.records.at(-1)?.id,cursor:snap.view.cursor,
+      const mark = this.prepareRelease(outcome.type as TerminalClass, {through:snap.records.at(-1)?.id,cursor:snap.view.cursor,groupDigest:hash(group),
         questions:questions.map(q=>q.id), calls:calls.map(c=>c.toolCallId), sources});
       this.write(tail); if (mark) this.res.once("finish",mark); this.finishedNormally = true; this.res.end(); r.remember(snap); r.c.delivered = new Set(questions.map(q => q.id)); this.stop();
     };

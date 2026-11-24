@@ -3,7 +3,7 @@ import type { ServerResponse } from "node:http";
 import type { HistoryEntry, InputRequest } from "@modular-agent/harness";
 import type { Target } from "./agui.js";
 import { encode, fail, object, same, sse } from "./agui-wire.js";
-import { interrupt, type Principal } from "./agui-view.js";
+import { interrupt, watch, type Principal } from "./agui-view.js";
 
 export class HostRead {
   constructor(readonly t: Target, readonly id: string, readonly p: Principal) {}
@@ -35,6 +35,8 @@ export class HostRead {
     if (!start || !object(start.data) || start.data.source?.plugin !== "sdk.interface-tools" || !start.data.call) return;
     const open = await this.entry(start);
     if (!open || !object(open.data) || !same(open.data.call, start.data.call)) return;
+    const started = await this.gate("tool.started",{call:start.data.call},start);
+    if (!same(started?.call,start.data.call)) return;
     const request = {sessionId:this.id, turnId:start.turnId, deadline:d.deadline, call:start.data.call};
     if (!same(request, await this.gate("tool.handoff", request, start))) return;
     return start.data.call;
@@ -88,16 +90,12 @@ export class WaitClosures {
     };
     const disconnect = () => { res.destroy(); };
     sse(res);
-    // follow installs the catch-up prefix and live subscription synchronously. Buffer
-    // raw commits, not notices that have already passed this viewer's gate.
-    const off = r.t.api.follow(r.id, {fromEntry:at.offset, recipient:r.p.actor.id, raw:true, onLag:disconnect, include:e => {
-      if (["session.ended","session.interrupted","entries.erased","position.moved"].includes(e.type)) disconnect();
-      return ["entry","entry.added"].includes(e.type) && ["inputAnswer","toolResult","actorJoined","actorLeft","limit","position","erasure"].includes(e.data.kind);
-    }}, async e => {
+    const open = () => !res.destroyed && !res.writableEnded;
+    const deliver = async (id:string) => {
       try {
+        if (!open()) return;
         const v = await current();
-        if (res.destroyed || !["inputAnswer","toolResult"].includes(e.data.kind)) return;
-        const close = v.records.find(entry => entry.id === e.data.id);
+        const close = v.records.find(entry => entry.id === id);
         if (!close) return;
         const fact = await r.closure(v.records, close);
         if (!fact) return;
@@ -105,12 +103,25 @@ export class WaitClosures {
         if (!same(item, await r.gate("modular-agent.waitClosed", item, close))) return;
         // A gate can suspend. Re-read its sources and membership before releasing any bytes.
         if (!same(fact, await r.closure((await current()).records, close))) return;
+        if (!same(item, await r.gate("modular-agent.waitClosed", item, close))) return;
         await current();
-        if (res.destroyed) return;
+        if (!open()) return;
         this.remember(item.cursor, r, v, v.order.indexOf(close.id) + 1);
         if (!res.write(`data: ${encode(item)}\n\n`)) disconnect();
-      } catch { res.end(); }
-    });
+      } catch { if (open()) res.end(); }
+    };
+    // A fast reader can have more old closures than the live queue capacity. Replay
+    // one by one; reserve that queue for commits after the single cutover watermark.
+    const prefix = new Set(basis.order.slice(at.offset));
+    const ids = basis.records.filter(e=>prefix.has(e.id) && ["inputAnswer","toolResult"].includes(e.kind)).map(e=>e.id);
+    const replay = Promise.resolve().then(async () => { for (const id of ids) { if (!open()) break; await deliver(id); } });
+    const off = r.t.api.follow(r.id, {fromEntry:basis.order.length, recipient:r.p.actor.id, raw:true, onLag:disconnect, include:e => {
+      if (["session.ended","session.interrupted","entries.erased","position.moved"].includes(e.type)) disconnect();
+      if (e.type === "entry.added" && ["actorJoined","actorLeft","limit","tenant"].includes(e.data.kind)) {
+        try { r.t.h.withConnectionActor(r.p.actor,()=>watch(r.t.api,r.id,r.p)); } catch { if (open()) res.end(); }
+      }
+      return ["entry","entry.added"].includes(e.type) && ["inputAnswer","toolResult"].includes(e.data.kind);
+    }}, async e => { await replay; await deliver(e.data.id); });
     const beat = setInterval(() => { void current().then(() => { if (!res.write(": waiting\n\n")) disconnect(); }, disconnect); }, 15_000).unref();
     res.once("close", () => { clearInterval(beat); off(); });
   }

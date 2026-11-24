@@ -81,7 +81,7 @@ export async function servePluginService(makePlugins: (() => ServeOptions) | ((c
 				Array.from(callers).some(c=>!c || typeof c.callerId !== "string" || !c.callerId || typeof c.tokenFile !== "string" || !c.tokenFile) ||
 				new Set(callers.map(c=>c.callerId)).size !== callers.length) throw new Error("Invalid named callers");
 			const table = callers.map(({callerId,tokenFile})=>({tokenFile,value:{callerId,
-				stateDir: join(dirname(tokenFile), ".ma-callers", createHash("sha256").update(callerId).digest("hex"))}}));
+				stateDir: join(`${tokenFile}.state`, createHash("sha256").update(callerId).digest("hex"))}}));
 			return await listenWebSocket(options, PLUGIN_PROTOCOL, table, (ws, {callerId,stateDir}) =>
 				servePlugins(makePlugins({callerId}), {ws,stateDir}));
 		} catch (cause) { throw Object.assign(new Error("Invalid named plugin listener", {cause}), {code:"invalid_composition"}); }

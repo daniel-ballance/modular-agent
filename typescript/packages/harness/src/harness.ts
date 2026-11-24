@@ -480,7 +480,7 @@ export class Harness {
 			presenceChanged: (id) => { const s = this.sessions.get(id); if (s) {
 				const delivered = this.approvalDeliveries.get(s);
 				for (const d of delivered ?? []) if (!d.present()) delivered!.delete(d);
-				this.closeUnanswerable(s);
+				void this.closeUnanswerable(s).catch(e => this.problem("harness", "close unanswerable wait", e));
 			} },
 			listSessions: async (project) => (await this.use<HistoryStore>("history-store")?.list(project === null ? undefined : { project: project ?? this.project })) ?? [],
 			sessionSummary: (id, viewer) => this.sessionSummary(id, viewer),
@@ -1111,7 +1111,7 @@ export class Harness {
 		if (!rights.includes("watch")) throw failure("not_found", "Thread not found");
 		const order = s.order.slice();
 		return { records:s.branch(), order, all:order.map(id=>s.entries.get(id)!), rights, live:s === live, kept:!s.ephemeral && this.use<HistoryStore>("history-store")?.supports.persistent !== false,
-			generation:JSON.stringify([freshness, order.filter(id => { const e = s.entries.get(id)!; return e.kind === "position" || e.erased; })]) };
+			generation:createHash("sha256").update(JSON.stringify([freshness, order.filter(id => { const e = s.entries.get(id)!; return e.kind === "position" || e.erased; })])).digest("hex") };
 	}
 
 	private discoveryRights(s: Session, actor: Actor, allowJoin: boolean): Authority[] {
@@ -1488,10 +1488,13 @@ export class Harness {
 		for (const e of entries) {
 			// Attribute a closure to revocation only when this authority commit
 			// actually removes the last eligible route. Presence changes are not grants.
-			const eligible = ["actorJoined", "actorLeft", "limit"].includes(e.kind)
-				? this.recordedOpenRequests(s).filter(r => this.hasQuestionRoute(s, r)) : [];
+			const routes = ["actorJoined","actorLeft","limit"].includes(e.kind)
+				? this.recordedOpenRequests(s).map(r => [r,this.hasQuestionRoute(s,r)] as const) : [];
 			s.apply(e);
-			for (const r of eligible) if (!this.hasQuestionRoute(s, r)) s.revokedQuestions.add(r.id);
+			for (const [r, previouslyEligible] of routes) {
+				if (this.hasQuestionRoute(s,r)) s.revokedQuestions.delete(r.id);
+				else if (previouslyEligible) s.revokedQuestions.add(r.id);
+			}
 			if (e.kind === "inputAnswer") s.revokedQuestions.delete(requestIdOf(e)!);
 			const inputId = inputIdOf(e);
 			if (inputId && e.kind === "input" && e.turnId) {
@@ -3984,17 +3987,19 @@ export class Harness {
 			: this.hasAnswerer(s, r)));
 	}
 
-	private closeUnanswerable(s: Session): void {
+	private async closeUnanswerable(s: Session) {
+		const closed = [];
 		for (const { request, resolve } of s.requests.values()) {
 			if (!this.hasQuestionRoute(s, request)) {
-				resolve({ requestId: request.id, actorId: "harness", declined: true, reason: "noLongerAnswerable",
-					...(s.revokedQuestions.has(request.id) && {cause:"revoked" as const}) });
+				closed.push(resolve({ requestId: request.id, actorId: "harness", declined: true, reason: request.kind === "approval" ? "refused" : "noLongerAnswerable",
+					...(s.revokedQuestions.has(request.id) && {cause:"revoked" as const}) }));
 			}
 		}
+		await Promise.all(closed);
 	}
 
 	private async closeRevokedWaits(s: Session) {
-		this.closeUnanswerable(s);
+		await this.closeUnanswerable(s);
 		for (const r of this.waitingRequests(s)) {
 			if (r.approvalWait || !s.revokedQuestions.has(r.id) || this.hasQuestionRoute(s, r)) continue;
 			s.lateAnswers.add(r.id);
@@ -4071,7 +4076,7 @@ export class Harness {
 				: { requestId: request.id, actorId: answer.actorId, declined: true, reason: "superseded" };
 		}
 		const record = async () => {
-			const systemClosure = kept.actorId === "harness" && kept.cause === "revoked";
+			const systemClosure = kept.actorId === "harness" && kept.declined;
 			await this.commit(s, [{ ...fields, kind: "inputAnswer", actorId:systemClosure ? undefined : kept.actorId,
 				data:systemClosure ? {requestId:kept.requestId, declined:true, reason:kept.reason, ...(kept.cause && {cause:kept.cause})} : kept }]);
 			const system = kept.actorId === "harness" && kept.reason &&

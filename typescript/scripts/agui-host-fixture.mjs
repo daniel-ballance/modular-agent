@@ -57,6 +57,7 @@ export function hostControls(name, latch) {
       if (event.type==='reply' && d.method==='agui.events') {
         const end=d.result.find(e=>e.type==='RUN_FINISHED'); if (end) await boundary(id,'beforeTerminal',end.runId);
       }
+      if (['terminal','work'].includes(receiptPolicy) && d?.method==='agui.runReceipt') { d.result[receiptPolicy]='changed'; return {redact:[event]}; }
       if (receiptPolicy==='settlement' && event.type==='turnEnded' || receiptPolicy==='reply' && d?.method==='agui.runReceipt') return 'block';
       if (event.type==='entry' && ((d.entry.kind==='inputRequest' && waitPolicy.get(d.entry.requestId)==='opening') ||
           (d.entry.kind==='inputAnswer' && waitPolicy.get(d.entry.requestId)==='decision'))) return 'block';

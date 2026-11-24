@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { HistoryEntry } from "./types.js";
@@ -7,7 +7,7 @@ import type { HistoryEntry } from "./types.js";
 export type TerminalClass = "success" | "interrupt" | "cancelled" | "error";
 /** Only references needed to re-gate the original release. Never store frame bodies. */
 export interface ReleaseProof {
-  through?: string; cursor?: string; questions?: string[]; calls?: string[]; error?: string;
+  through?: string; cursor?: string; groupDigest?:string; questions?: string[]; calls?: string[]; error?: string;
   sources: string[];
 }
 export interface ReceiptOperation { id:string; thread:string; actor:string; key:string; answers:Set<string>; reports:Set<string>; bound?:boolean }
@@ -33,7 +33,7 @@ export class RunReceipts {
   constructor(private dir:string) { this.path = join(dir,"agui-receipts.sqlite"); }
   private use<T>(fn:(db:DatabaseSync)=>T) {
     const db = new DatabaseSync(this.path);
-    try { db.exec("PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON"); return fn(db); }
+    try { chmodSync(this.path,0o600); db.exec("PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON"); return fn(db); }
     finally { db.close(); }
   }
   reserve(thread:string, id:string) {

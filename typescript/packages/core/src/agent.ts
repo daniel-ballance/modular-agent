@@ -856,7 +856,7 @@ export class Agent {
         const target = (agent: Agent): Target => ({ h: agent.#h, api: agent.#api, agent, sources: agent.#sources });
         http = new AguiBinding({ ...agui, root: target(this), project: this.#project, owner: id => target(sessions.get(id) ?? this), principalScope: (actor, fn) => this.#h.withConnectionActor(actor, fn),
           associate: (id, agent) => sessions.set(id, agent),
-          locate: async (p, id) => {
+          locate: async (p, id, memberOnly) => {
             if (!id && !p.allowProject(this.#project)) fail("not_found");
             const owner = id && sessions.get(id) || this;
             const live = id ? owner.#h.liveSessionInfo(id) : undefined;
@@ -865,7 +865,7 @@ export class Agent {
             }) : undefined;
             const info = live ?? saved;
             if (info && (!p.allowProject(info.project) || !p.allowTenant(info.tenant ?? null))) fail("not_found");
-            if (id && !await owner.#h.canDiscoverSession(id, p.actor, owner.#authority.severalActors)) fail("not_found");
+            if (id && !await owner.#h.canDiscoverSession(id, p.actor, !memberOnly && owner.#authority.severalActors)) fail("not_found");
             const agent = await selectProject(info?.project ?? this.#project, id, saved);
             if (id) sessions.set(id, agent);
             return target(agent);

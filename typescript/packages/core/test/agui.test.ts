@@ -161,16 +161,19 @@ test("a closure cursor replays a decision to its own client without delivering a
   } finally { await reader.cancel(); }
 });
 
-for (const stop of ["before-marker","after-marker"]) test(`SIGKILL ${stop}: read the released exchange after restart without reopening`, async t => {
+async function receiptWriter(t:TestContext) {
   const dir = await mkdtemp(join(tmpdir(),"receipt-flush-")); t.after(()=>rm(dir,{recursive:true,force:true}));
   const token = randomUUID(); await writeFile(join(dir,"token"),token,{mode:0o600});
-  async function writer(stop:string) {
+  return async function writer(stop:string) {
     const child = fork(new URL("../../../../scripts/receipt-writer.mjs",import.meta.url),[dir,stop],{stdio:["ignore","ignore","inherit","ipc"]});
     const ended = once(child,"exit"); t.after(()=>{ if (child.exitCode===null && child.signalCode===null) child.kill("SIGKILL"); });
-    const [origin] = await once(child,"message");
+    const [origin] = await Promise.race([once(child,"message"),ended.then(()=>{throw Error("Writer exited before listening");})]);
     const http = (path:string,body?:unknown)=>fetch(`${origin}/agui/v1`+path,{method:body?"POST":"GET",headers:{authorization:"Bearer "+token,"content-type":"application/json"},body:body===undefined ? undefined : JSON.stringify(body)});
     return {child,ended,http};
-  }
+  };
+}
+for (const stop of ["before-marker","after-marker"]) test(`SIGKILL ${stop}: read the released exchange after restart without reopening`, async t => {
+  const writer=await receiptWriter(t);
   const first = await writer(stop), {threadId} = await (await first.http("/threads",{})).json() as any;
   const runId = randomUUID(), post = first.http("/run",{threadId,runId,protocolVersion:"1.0",messages:[prompt("Begin")]});
   await post.then(r=>r.text()).catch(()=>{}); assert.deepEqual(await first.ended,[null,"SIGKILL"]);
@@ -178,6 +181,29 @@ for (const stop of ["before-marker","after-marker"]) test(`SIGKILL ${stop}: read
   try { assert.deepEqual(await (await second.http(`/threads/${threadId}/run-receipt?runId=${runId}`)).json(),
     {terminal:stop==="before-marker"?"unknown":"success",work:"completed"}); }
   finally { second.child.send("stop"); await second.ended; }
+});
+
+test("SIGKILL after the first decision of a batch reserves its run but not the remaining result",{timeout:10000},async t=>{
+  const writer=await receiptWriter(t), first=await writer("after-answer");
+  const {threadId}=await (await first.http("/threads",{})).json() as any, path="/threads/"+threadId;
+  const run=(runId:string,messages:unknown[],extra={})=>({threadId,runId,protocolVersion:"1.0",messages,...extra});
+  const origin=(await events(await first.http("/run",run("origin",[prompt("Mixed")],{tools:[definition]})))).at(-1);
+  const [call]=origin.outcome.pendingToolCallIds;
+  const presence=await first.http(path+"/presence"), view=await (await first.http(path)).json() as any;
+  const [question]=view.waiting.questions, result={id:"report",role:"tool",toolCallId:call,content:"Done"};
+  const batch=run("batch",[...view.messages,result],{resume:[{interruptId:question.id,status:"resolved",payload:{allow:true}}]});
+  await first.http("/run",batch).then(r=>r.text()).catch(()=>{});
+  assert.deepEqual(await first.ended,[null,"SIGKILL"]); await presence.body?.cancel().catch(()=>{});
+  const next=await writer("read-batch"), receipt=()=>next.http(path+"/run-receipt?runId=batch").then(r=>r.json());
+  try {
+    assert.deepEqual(await receipt(),{terminal:"unknown",work:"unsettled"});
+    const current=await (await next.http(path)).json() as any;
+    assert.deepEqual(current.waiting.toolCalls.map((c:any)=>c.toolCallId),[call]);
+    const remaining=[...current.messages,result];
+    assert.equal((await next.http("/run",run("batch",remaining))).status,409);
+    assert.equal((await events(await next.http("/run",run("remaining",remaining)))).at(-1).outcome.type,"success");
+    assert.deepEqual(await receipt(),{terminal:"unknown",work:"completed"});
+  } finally { next.child.send("stop"); await next.ended; }
 });
 
 test("a handled input binds its no-turn disposition before release",async t=>{

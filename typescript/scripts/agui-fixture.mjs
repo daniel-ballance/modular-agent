@@ -1,5 +1,5 @@
 // Controlled, disposable SDK application for conformance/agui. No controls are part of ma.
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { appendFile, readFile, writeFile } from 'node:fs/promises';
 import { appendFileSync } from 'node:fs';
@@ -125,7 +125,17 @@ if (state) {
 }
 const script = await loadScript(env.MODULAR_AGENT_SCRIPT, env.MODULAR_AGENT_SCRIPT_LOG);
 let controlModel;
-const provider = closure ? {...script, request:(...args)=>(controlModel ?? script).request(...args)} : state ? { ...script, async request(...args) { const m = await script.request(...args); return { ...m, providerData:'provider-only-sentinel' }; } } : script;
+const provider = closure ? {...script, request:(model,request,cx)=>{
+  const last = request.messages.findLastIndex(m=>m.role==='user');
+  if (controlModel && request.messages[last]?.content.some(p=>p.text===controlModel.prompt)) {
+    // A failed or recovered response need not appear in the next model request.
+    // Pick the step from the actual request, not from raw session history.
+    const step = request.messages.slice(last+1).some(m=>m.role==='assistant') ? {text:'Finished.'}
+      : {toolCalls:[{name:'closure_tool',input:{kind:controlModel.kind}}]};
+    return scriptedProvider([...Array(request.messages.filter(m=>m.role==='assistant').length).fill({}),step]).request(model,request,cx);
+  }
+  return script.request(model,request,cx);
+}} : state ? { ...script, async request(...args) { const m = await script.request(...args); return { ...m, providerData:'provider-only-sentinel' }; } } : script;
 const agent = await createAgent({ project, severalActors: true, sessionLimits: true, tenants: { kit: {rights} }, environment: memoryEnvironment(), runtime,
   durability: durable ? 'durable' : 'kept', dataDir, interfaceTools: [source], plugins, approval: name.startsWith('waiting-mixed') ? 'ask' : waiting || name.startsWith('approval') || ['closure-presence','closure-routes'].includes(name) ? 'all' : 'off',
   approvalCoversNested: waiting || name.startsWith('approval'),
@@ -162,12 +172,12 @@ async function control({operation,threadId:id,name:at,milliseconds,client,mode,k
     }
     case 'openWait': {
       // Use a real turn so leaveOpen can park its call and continue it after the decision.
-      await host.jobs.get(id);
-      const previous = (await session.history()).filter(e=>e.kind==='response' && e.modelVisible && e.message?.role==='assistant').length;
-      controlModel=scriptedProvider([...Array(previous).fill({}),{toolCalls:[{name:'closure_tool',input:{kind}}]},{text:'Finished.'}]);
+      await host.jobs.get(id); await session.waitIdle();
+      if (name === "closure-routes") await session.setSetting("approval","off");
+      controlModel={kind,prompt:'Open an operator question: '+randomUUID()};
       const opened = Promise.withResolvers(); host.opened.set(id,opened);
-      const job = session.prompt('Open an operator question.').finally(()=>{controlModel=undefined;});
-      job.catch(opened.reject); host.jobs.set(id,job);
+      const job = session.prompt(controlModel.prompt);
+      job.then(()=>opened.reject(Error('Turn ended without opening its question')),opened.reject); host.jobs.set(id,job);
       return {requestId:await opened.promise};
     }
     case 'hold': host.hold(id,at,runId); break;
@@ -175,7 +185,10 @@ async function control({operation,threadId:id,name:at,milliseconds,client,mode,k
     case 'waitGate': host.waitPolicy.set(requestId,mode); break;
     case 'receiptGate': host.receiptGate(mode); break;
     case 'expireWaitCursor': host.expire(cursor); break;
-    case 'barrier': if (closure || name.startsWith('receipt-')) await host.barrier(id,at,runId,store);
+    case 'barrier': if (closure || name.startsWith('receipt-')) {
+      await host.barrier(id,at,runId,store);
+      if (name==='closure-presence' && at==='presenceLost') await session.waitIdle();
+    }
       else if (at === 'presenceLost') await session.waitIdle(); else await latch(id,at).promise; break;
     case 'advance': {
       mock.timers.tick(milliseconds);

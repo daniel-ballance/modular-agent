@@ -26,7 +26,7 @@ interface Host extends AguiProjectionOptions {
   principalScope<T>(actor: Actor, work: () => T): T;
   root: Target; project: string; tenant?: string; origins?: readonly string[]; tls?: unknown;
   owner(id: string): Target;
-  locate(p: Principal, id?: string): Promise<Target>; associate(id: string, agent: Agent): void;
+  locate(p: Principal, id?: string, memberOnly?:boolean): Promise<Target>; associate(id: string, agent: Agent): void;
 }
 export interface Presence { delivered: Set<string>; response: ServerResponse; questions: Set<string>; rejected: Set<string> }
 export interface Client {
@@ -81,7 +81,7 @@ export class AguiBinding {
       const match = method === "GET" && /^\/agui\/v1\/threads\/([\w-]+)(\/presence)?$/.exec(path ?? "");
       const read = method === "GET" && /^\/agui\/v1\/threads\/([\w-]+)\/(wait-closures|run-receipt)(?:\?(.*))?$/.exec(path ?? "");
       if (read) {
-        const t = await this.host.locate(p, read[1]);
+        const t = await this.host.locate(p, read[1], true);
         const reader = new HostRead(t, read[1], p), query = new URLSearchParams(read[3]);
         if (read[2] === "run-receipt") {
           try { return json(res, 200, await runReceipt(reader, query) ?? fail("output_withheld")); }

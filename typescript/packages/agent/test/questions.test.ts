@@ -135,7 +135,7 @@ test("transient: a question open when the process stopped is recorded as no long
 	assert.equal(ui.requests.length, 0);
 	const closed = kinds(h, s, "inputAnswer");
 	assert.equal(closed.length, 1);
-	assert.deepEqual(closed[0].data, { requestId: asked.id, reason: "noLongerAnswerable", actorId: "harness", declined: true });
+	assert.deepEqual(closed[0].data, { requestId: asked.id, reason: "noLongerAnswerable", declined: true });
 	assert.equal(status(h, s), "notStarted");
 	assert.equal(outcome(h, s), "failed");
 	assert.equal(h.declaration(h.session(s)).waitingThroughRestart, false);
