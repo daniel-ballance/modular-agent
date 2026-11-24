@@ -150,25 +150,19 @@ fi
 
 # The kit makes each operator policy, including the small capacity ceilings.
 # Erasure needs a shared store without the raw records left by the history kit.
-# Python shares the service's SQLite registry and separate restore witness.
-# The kit strips ambient environment settings, so set these paths in the launcher.
-python_coordination=(bash -c 'export MODULAR_AGENT_HISTORY_COORDINATION="$1" MODULAR_AGENT_HISTORY_WITNESS="$2"; shift 2; exec "$@"' _
-  "$work/erasure/store/history-service/records.db" "$work/erasure/witness")
 openssl rand -hex 32 >"$work/acp-token"
 unset MODULAR_AGENT_HISTORY_URL MODULAR_AGENT_HISTORY_TOKEN_FILE MODULAR_AGENT_PLUGINS
 cd "$repo/conformance/acp"
 options=(--isolation-checks --capacity-checks --erasure-checks)
 if $erasure_only; then options=(--erasure-checks); fi
 for option in "${options[@]}"; do
-  prefix=()
   if [ "$option" = --erasure-checks ]; then
     history_service "$work/erasure"
     export MODULAR_AGENT_HISTORY_URL="$history_url" MODULAR_AGENT_HISTORY_TOKEN_FILE="$work/erasure/token"
-    if [ "$language:$history_language" = python:python ]; then prefix=("${python_coordination[@]}"); fi
   fi
   for launcher in ma base; do
-    if [ "$launcher" = ma ]; then command=("${prefix[@]}" "${ma[@]}")
-    else command=("${prefix[@]}" "${base[@]}"); fi
+    if [ "$launcher" = ma ]; then command=("${ma[@]}")
+    else command=("${base[@]}"); fi
     run "ACP $launcher stdio $option" node run.mjs --production-only "$option" -- "${command[@]}"
     # Go's base CLI has no ACP listener; Go ma does.
     if [ "$language:$launcher" = go:base ]; then continue; fi

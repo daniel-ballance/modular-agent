@@ -56,7 +56,7 @@ export function fakeWaiting(name, fault, model, covers) {
     const actorId = client === 'foreign' ? 'kit-foreign' : 'kit-owner', value = allow ? { value: 'allow', actorId,
       approvalView: { requestEntryId: s.entry.id, submittedBy: actorId, routeId: client, rights: ['approve', 'watch'] } } :
       { declined: true, ...(system ? { reason: 'timeLimit' } : { actorId }) };
-    s.answer = append(s, 'inputAnswer', { requestId: s.qid, ...value }, { ...s.scope, requestId: s.qid, sources: [s.entry.id] });
+    s.answer = append(s, 'inputAnswer', value, { ...s.scope, requestId: s.qid, sources: [s.entry.id] });
     s.status = allow ? 'completed' : system && fault !== 'wait-expiry-refused' ? 'notStarted' : fault === 'wait-decline-runs' ? 'completed' : 'refused';
     s.question = undefined; s.cause = { kind: 'answer', id: s.qid }; signal(s, 'answerCommitted');
   }

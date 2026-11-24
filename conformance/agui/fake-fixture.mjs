@@ -136,7 +136,7 @@ export function fakeFixture(name, fault, script, covers) {
   }
   function closeQuestion(s, { reason, declined, value, system = false }) {
     if (!s.question) return;
-    record(s, 'inputAnswer', { requestId: s.question.id, ...(declined ? { declined } : { value }), ...(reason ? { reason } : {}) }, { turnId: s.originTurn, ...(system ? {} : { actorId: 'kit-owner' }) });
+    record(s, 'inputAnswer', { ...(declined ? { declined } : { value }), ...(reason ? { reason } : {}) }, { turnId: s.originTurn, requestId: s.question.id, ...(system ? {} : { actorId: 'kit-owner' }) });
     if (s.question.reason === 'approval' && declined) record(s, 'toolResult', { status: 'refused' }, { toolCallId: s.question.toolCallId, turnId: s.originTurn });
     s.question = undefined;
   }
