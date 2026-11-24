@@ -13,7 +13,7 @@ import { Readable, Writable } from "node:stream";
 import { createInterface } from "node:readline";
 import { client, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import { historyService } from "./history.mjs";
-import { portableProblems } from "./portable.mjs";
+import { portableProblems, validActor } from "./portable.mjs";
 import { manageServices } from "./service.mjs";
 import { capacity, erasure, isolation } from "./production.mjs";
 import { coveredApproval } from "./covered.mjs";
@@ -371,7 +371,7 @@ await attempt("initialize", async () => {
 	const ext = m?.extensions ?? [];
 	check("initialize: required extensions listed", REQUIRED_EXTENSIONS.every((e) => ext.includes(e)), JSON.stringify(ext));
 	// ACP: initialize; Shared data: Actors. The kind is configured, not inferred from ACP.
-	check("initialize: configured actor has a valid id, kind and rights", ["user", "host", "agent", "program"].includes(m?.actor?.kind) && typeof m?.actor?.id === "string" && m.actor.id.length > 0 && Array.isArray(m.actor.rights) && m.actor.rights.every((r) => typeof r === "string" && r.length > 0));
+	check("initialize: configured actor has a valid id, kind and rights", validActor(m?.actor));
 });
 
 if (network) {
@@ -640,7 +640,7 @@ if (decl.severalActors) {
 		await sleep(400);
 		const after = (await ask("proposals", {})).proposals ?? [];
 		const es2 = (await history(agent, sessionId)).entries;
-		check("withdraw: the proposal is gone, handed back, and never ran", !after.some((x) => x.inputId === p2.inputId) && es2.some((e) => e.kind === "inputHandedBack" && (e.inputId === p2.inputId || e.data?.inputIds?.includes(p2.inputId))) && !said(es2, "echo: a second proposal"), String(JSON.stringify(after)).slice(0, 200));
+		check("withdraw: the proposal is gone, handed back, and never ran", !after.some((x) => x.inputId === p2.inputId) && es2.some((e) => e.kind === "inputHandedBack" && e.inputId === p2.inputId) && !said(es2, "echo: a second proposal"), String(JSON.stringify(after)).slice(0, 200));
 		await ask("join", { actor: { id: guest, kind: "user", rights: ["watch"] } });
 		check("join again: replaces recorded rights", (await ask("actors", {})).actors.some((a) => a.id === guest && equal(a.rights, ["watch"])));
 		await ask("leave", { actorId: "kit-viewer" });
@@ -853,7 +853,7 @@ await attempt("requests and answer", async () => {
 		release?.({ outcome: { outcome: "selected", optionId: "refuse" } });
 		check("answer: closed request rejects a later answer", equal(await answer(q.id, "refuse"), { accepted: false, reason: "not_open" }));
 		await within(12000, pending, "tool after the winning approval");
-		const answers = (await history(agent, sessionId, { all: true })).entries.filter((e) => e.kind === "inputAnswer" && (e.requestId ?? e.data?.requestId) === q.id);
+		const answers = (await history(agent, sessionId, { all: true })).entries.filter((e) => e.kind === "inputAnswer" && e.requestId === q.id);
 		const marker = join(project, "answer-race.txt");
 		check("answer: only the winning approval is recorded and the call runs once", answers.length === 1 && existsSync(marker) && readFileSync(marker, "utf8") === "approved\n");
 	} finally {
@@ -940,7 +940,7 @@ if (probeChecks) {
 		check("output events: the gate was given events", events.length > 0, `${seen.length} payloads`);
 		// Plugin binding: Held output; ACP: Output gate.
 		check("output events: every batch is final and fits 4 MiB", seen.every((x) => (typeof x?.sessionId === "string" || x?.sessionId === null) && typeof x?.recipient === "string" && Array.isArray(x?.events) && x?.final === true && Buffer.byteLength(JSON.stringify(x.events)) <= 4 * 1024 * 1024), String(JSON.stringify(seen.find((x) => !(typeof x?.sessionId === "string" && Array.isArray(x?.events))))).slice(0, 200));
-		const OUT = { text: (d) => typeof d?.delta === "string", reasoning: (d) => typeof d?.delta === "string", toolCall: (d) => typeof d?.call?.id === "string" && typeof d?.call?.name === "string", toolOutput: (d) => typeof d?.toolCallId === "string" && typeof d?.chunk === "string", toolResult: (d) => typeof d?.toolCallId === "string" && typeof d?.status === "string" && Array.isArray(d?.content), entry: (d) => typeof d?.entry?.id === "string", request: (d) => typeof d?.method === "string" && typeof d?.params === "object", turnEnded: (d) => typeof d?.outcome?.kind === "string", reply: (d) => typeof d?.method === "string" };
+		const OUT = { text: (d) => typeof d?.delta === "string", reasoning: (d) => typeof d?.delta === "string", toolCall: (d) => typeof d?.call?.id === "string" && typeof d?.call?.name === "string", toolOutput: (d) => typeof d?.toolCallId === "string" && Array.isArray(d.content) && !Object.hasOwn(d, "chunk"), toolResult: (d) => typeof d?.toolCallId === "string" && typeof d?.status === "string" && Array.isArray(d?.content), entry: (d) => typeof d?.entry?.id === "string", request: (d) => typeof d?.method === "string" && typeof d?.params === "object", turnEnded: (d) => typeof d?.outcome?.kind === "string", reply: (d) => typeof d?.method === "string" };
 		const bad = events.filter((e) => (OUT[e?.type] ? !OUT[e.type](e.data) : !String(e?.type ?? "").includes(".")));
 		check("output events: every event is a standard type in its shape, or a build's own type with a dot", bad.length === 0, String(JSON.stringify(bad.slice(0, 2))).slice(0, 300));
 		const types = new Set(events.map((e) => e?.type));
@@ -999,10 +999,10 @@ if (probeChecks) {
 		const isResult = (e) => e.kind === "toolResult" && e.toolCallId === question.toolCallId;
 		const stats = { reads: 0 };
 		const entries = await waitFor(agent, sessionId, (es) => es.some((e) => isResult(e) && hasValue(e)), 8000, stats);
-		const answers = entries.filter((e) => e.kind === "inputAnswer" && (e.requestId ?? e.data?.requestId) === question.id);
+		const answers = entries.filter((e) => e.kind === "inputAnswer" && e.requestId === question.id);
 		const results = entries.filter(isResult);
 		const starts = late ? entries.filter((e) => e.kind === "turnStart").map((e) => ({
-			turnId: e.turnId, continues: e.continuesTurnId ?? e.data?.continuesTurnId, startedBy: e.data?.startedBy?.id,
+			turnId: e.turnId, continues: e.continuesTurnId, startedBy: e.data?.startedBy?.id,
 		})).filter((e) => e.startedBy === question.id || (originatingTurn && e.continues === originatingTurn)) : [];
 		const valueAndResult = answers.length === 1 && answers[0].data?.value === "fixture value" && results.length === 1 && hasValue(results[0]);
 		const oneContinuation = !!originatingTurn && starts.filter((e) => e.continues === originatingTurn && e.startedBy === question.id).length === 1;
@@ -1090,10 +1090,10 @@ if (probeChecks) {
 			void pending.catch(() => undefined);
 			const find = (es) => es.find((e) => e.kind === "inputRequest" && e.data?.request?.kind === "approval");
 			const question = find(await waitFor(agent, sid, (es) => !!find(es), 5000));
-			const id = question?.requestId ?? question?.data?.request?.id;
+			const id = question?.requestId;
 			if (!id) throw Error("fixture approval request not recorded");
 			if (portableChecks && meta(s)?.declaration?.portableSessions) {
-				const raw = (await store.pages(sid)).find((e) => e.kind === "inputRequest" && (e.requestId ?? e.data?.request?.id) === id);
+				const raw = (await store.pages(sid)).find((e) => e.kind === "inputRequest" && e.requestId === id);
 				const binding = raw?.data;
 				check("Standard kinds / Questions: approval records the exact call, registration source and definition", !!raw?.toolCallId && binding?.call?.id === raw.toolCallId && binding?.call?.name === "bash" &&
 					equal(binding.call.input, { command: "echo ran > kit-gated-approval.txt" }) &&
@@ -1296,8 +1296,8 @@ if (probeChecks) await attempt("Input admission: steering cutoff", async () => {
 		writeFileSync(release, "continue");
 		const first = await within(10000, opening, "first steering fixture turn");
 		const es = await waitFor(remote, s.sessionId, (rows) => rows.filter((e) => e.kind === "turnEnd").length >= 2 ||
-			rows.some((e) => e.kind === "inputHandedBack" && (e.inputId === late.inputId || e.data?.inputIds?.includes(late.inputId))));
-		const input = es.filter((e) => e.kind === "input" && (e.inputId ?? e.data?.inputId) === late.inputId);
+			rows.some((e) => e.kind === "inputHandedBack" && e.inputId === late.inputId));
+		const input = es.filter((e) => e.kind === "input" && e.inputId === late.inputId);
 		const firstEnd = es.findIndex((e) => e.kind === "turnEnd" && e.turnId === finalTurn);
 		check("Input admission: steering after the final check queues after and cannot enter the ending turn", !!late.inputId && late.taken === "after" &&
 			first.stopReason === "end_turn" && firstEnd >= 0 && input.length === 1 && input[0].turnId !== finalTurn && es.indexOf(input[0]) > firstEnd, JSON.stringify(late));
@@ -1456,7 +1456,7 @@ if (decl.erasure && extensions.includes("erase")) await attempt("erased input ke
 		const first = await within(15000, prompt(agent, sid, content, key), "admit erasable input");
 		const id = meta(first)?.inputId;
 		const log = (await history(agent, sid, { all: true })).entries;
-		const input = log.find((e) => e.kind === "input" && (e.inputId ?? e.data?.inputId) === id)
+		const input = log.find((e) => e.kind === "input" && e.inputId === id)
 			?? log.find((e) => e.kind === "input" && e.message?.content?.some((p) => p.text === content));
 		if (!id || !input) throw Error("erasable fixture input was not admitted and consumed");
 		const erased = await agent.ctx.request(`_${NS}/erase`, { sessionId: sid, entryIds: [input.id, input.id] });
@@ -1591,20 +1591,10 @@ if (portableChecks && canConfigure) await attempt("Extension methods: oversized 
 	const s = connect(command, { MODULAR_AGENT_HISTORY_URL: tap.url });
 	try {
 		const init = await s.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
-		const principal = meta(init)?.actor;
-		if (!meta(init)?.extensions?.includes("fork")) {
-			console.log("SKIP  oversized fork (fork extension unavailable)");
-			return;
-		}
-		let actor = principal;
-		if (!principal?.rights && meta(init)?.extensions?.includes("actors")) {
-			// Read the effective fixture actor from a provisional session on older builds.
-			const provisional = await s.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] });
-			const { actors } = await s.ctx.request(`_${NS}/actors`, { sessionId: provisional.sessionId });
-			actor = actors.find((a) => a.id === principal?.id);
-			await closeSession(s, provisional.sessionId);
-		}
-		if (!actor?.rights?.includes("settings") || !actor.rights.includes("watch") || !actor.rights.includes("input"))
+		const actor = meta(init)?.actor;
+		if (!validActor(actor)) throw Error("initialize must supply the configured Actor");
+		if (!meta(init)?.extensions?.includes("fork")) throw Error("fixture must offer fork");
+		if (!["watch", "settings", "input"].every(r => actor.rights.includes(r)))
 			throw Error("fixture requires a principal with watch, settings and input");
 		const sid = `kit-fork-${randomUUID()}`, base = store.path(sid), time = Date.now();
 		const content = [{ type: "text", text: "x".repeat(4_000_000) }];
@@ -1622,7 +1612,7 @@ if (portableChecks && canConfigure) await attempt("Extension methods: oversized 
 		for (let i = 0; i < 17; i++) {
 			await store.json(leasePath + "/renew", "POST");
 			const inputId = randomUUID();
-			const accepted = entry("inputAccepted", { actorId: actor.id, inputId, data: { content, authorizers, rights: actor.rights, when: "now" } });
+			const accepted = entry("inputAccepted", { actorId: actor.id, inputId, data: { content, authorizers, rights: actor.rights, when: "now", taken: "now" } });
 			await store.json(base + "/entries", "POST", { lease, entries: [accepted, entry("inputHandedBack", { inputId, data: { reason: "handled" } })] });
 		}
 		await store.json(leasePath, "DELETE");
@@ -1657,8 +1647,8 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 				{ kind: "actorJoined", data: { actor: { id: "kit-granter", kind: "user", rights: [...actor.rights, "grant"] }, operatorAdmission: true } },
 				{ kind: "actorJoined", actorId: "kit-granter", data: { actor } },
 				{ kind: "setting", data: { key: "model", value: { provider: "conformance", id: "echo" } } },
-				{ kind: "inputAccepted", inputId: "initial-input", actorId: actor.id, data: { when: "after", key: "fixture-old", content: [{ type: "text", text: "old input" }], authorizers: [{ sessionId, actorId: actor.id }], rights: actor.rights } },
-				{ kind: "inputHandedBack", data: { inputIds: ["initial-input"] } },
+				{ kind: "inputAccepted", inputId: "initial-input", actorId: actor.id, data: { when: "after", taken: "after", key: "fixture-old", content: [{ type: "text", text: "old input" }], authorizers: [{ sessionId, actorId: actor.id }], rights: actor.rights } },
+				{ kind: "inputHandedBack", inputId: "initial-input", data: { reason: "handled" } },
 			];
 			if (mode === "approval") rows.push({ kind: "setting", data: { key: "approval", value: "kit-unrecognized-policy" } });
 			if (mode === "rights") rows.push({ kind: "actorJoined", actorId: "kit-granter", data: { actor: { ...actor, rights: ["watch", "input"] } } });
@@ -1669,7 +1659,7 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 				rows.push(
 					start(jobId), { kind: "jobCleanupUnconfirmed", jobId }, start(reported),
 					{ kind: "jobEnded", jobId: reported, data: { outcome: { kind: "completed" }, report: true, result: report } },
-					{ kind: "inputAccepted", jobId: reported, inputId: randomUUID(), actorId: actor.id, data: { key: `job:${reported}`, when: "after", content: report, parked: true, authorizers: [{ sessionId, actorId: actor.id, jobId: reported }], rights: ["watch", "input"] } },
+					{ kind: "inputAccepted", jobId: reported, inputId: randomUUID(), actorId: actor.id, data: { key: `job:${reported}`, when: "after", content: report, parked: true, authorizers: [{ sessionId, jobId: reported }], rights: ["watch", "input"] } },
 				);
 			}
 			if (mode === "queue") rows.push({ kind: "inputAccepted", inputId: "older-ready", actorId: actor.id, data: {
@@ -1739,23 +1729,23 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 				const admissions = (await store.pages(cleanup)).filter((e) => e.kind === "inputAccepted" && e.jobId === report?.jobId);
 				check("Several actors / Job reports: release consumes the parked proposal once and preserves job attribution", released.inputId === reportId &&
 					!(await proposals()).some((p) => p.inputId === reportId) && admissions.length === 2 &&
-					(admissions[1].inputId ?? admissions[1].data?.inputId) === reportId && admissions[1].data?.releasedBy === actor.id &&
+					admissions[1].inputId === reportId && admissions[1].data?.releasedBy === actor.id &&
 					finished.some((e) => e.kind === "turnStart" && equal(e.data?.startedBy, { kind: "job", id: report.jobId })));
 			});
 			await closeSession(s, cleanup);
 		}
 
-		// Shared data: Legacy associations and Session state; ACP: Input admission.
+		// Shared data: Envelope associations and Session state; ACP: Input admission.
 		const queued = await seed("queue");
 		const queueOpen = await load(queued);
 		if (!meta(queueOpen)?.declaration) throw Error("could not open queue fixture");
 		const fresh = await s.ctx.request(`_${NS}/input`, { sessionId: queued, when: "now", key: "fixture-fresh", content: "fresh input" });
 		await waitFor(s, queued, (es) => es.some((e) => e.kind === "turnEnd" && es.some((input) => input.kind === "input" && input.inputId === fresh.inputId && input.turnId === e.turnId)));
 		const kept = await store.pages(queued);
-		const isFor = (e, inputId) => (e.inputId ?? e.data?.inputId) === inputId;
+		const isFor = (e, inputId) => e.inputId === inputId;
 		const tomb = kept.find((e) => e.id === `${queued}-e4`);
-		check("Legacy associations: a tombstoned batch hand-back keeps its IDs and stays terminal on reopen", tomb?.erased === true && equal(tomb.inputIds, ["initial-input"]) &&
-			!kept.some((e) => e !== tomb && ((e.kind === "input" || e.kind === "inputHandedBack") && isFor(e, "initial-input") || e.kind === "inputHandedBack" && e.data?.inputIds?.includes("initial-input"))));
+		check("A tombstoned hand-back keeps its input ID and stays terminal on reopen", tomb?.erased === true && tomb.inputId === "initial-input" &&
+			!kept.some((e) => e !== tomb && (e.kind === "input" || e.kind === "inputHandedBack") && isFor(e, "initial-input")));
 		if (meta(queueOpen).declaration.queuedInputAfterRestart === "run") {
 			const admission = kept.find((e) => e.kind === "inputAccepted" && isFor(e, fresh.inputId));
 			const older = kept.find((e) => e.kind === "input" && isFor(e, "older-ready"));
@@ -1848,15 +1838,15 @@ if (probeChecks && portableChecks) for (const [mode, safe] of [
 			{ kind: "inputAccepted", inputId, actorId: actor.id, data: { when: "now", taken: "now", content, authorizers, rights } },
 			{ kind: "turnStart", turnId, data: { startedBy: { kind: "actor", id: actor.id }, model, system, tools: [], settings: {}, authorizers, rights } },
 			{ kind: "input", turnId, inputId, actorId: actor.id, message, modelVisible: true },
-			{ kind: "modelRequest", turnId, stepId: "old-step", data: { model, safeToRepeat: safe, tools: [], tracksStepAfter: true, ...(safe ? { request } : {}) }, sources: [entryId(4)] },
+			{ kind: "modelRequest", turnId, stepId: "old-step", data: { model, safeToRepeat: safe, tools: [], ...(safe ? { request } : {}) }, sources: [entryId(4)] },
 		];
 		if (mode === "fresh" && !safe) {
 			const empty = { role: "assistant", stop: "failed", content: [], error: { kind: "other", message: "Fixture failure" }, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } };
 			rows.splice(5, 0,
-				{ kind: "modelRequest", turnId, stepId: "failed-step", data: { model, safeToRepeat: false, tools: [], tracksStepAfter: true }, sources: [entryId(4)] },
+				{ kind: "modelRequest", turnId, stepId: "failed-step", data: { model, safeToRepeat: false, tools: [] }, sources: [entryId(4)] },
 				{ kind: "response", turnId, stepId: "failed-step", message: empty, modelVisible: true, sources: [entryId(5)] },
 				{ kind: "modular-agent.stepAfter", turnId, stepId: "failed-step", data: { decision: null } },
-				{ kind: "modelRequest", turnId, stepId: "settled-step", data: { model, safeToRepeat: false, tools: [], tracksStepAfter: true }, sources: [entryId(4)] },
+				{ kind: "modelRequest", turnId, stepId: "settled-step", data: { model, safeToRepeat: false, tools: [] }, sources: [entryId(4)] },
 				{ kind: "response", turnId, stepId: "settled-step", modelVisible: true, sources: [entryId(8)], message: { role: "assistant", stop: "toolUse", usage: empty.usage, content: [{ type: "toolCall", id: "settled-call", name: "not-offered", arguments: {} }] } },
 				{ kind: "toolResult", turnId, stepId: "settled-step", toolCallId: "settled-call", modelVisible: true, data: { status: "refused" }, message: { role: "toolResult", toolCallId: "settled-call", toolName: "not-offered", isError: true, content: [{ type: "text", text: "not offered" }] } },
 				{ kind: "modular-agent.stepAfter", turnId, stepId: "settled-step", data: { decision: null } });

@@ -445,7 +445,7 @@ async function jobCapacity(kit, scope) {
 		const terminal = (await history(a, sid, { all: true })).entries;
 		check("capacity: cancellation at saturation still closes the question and hands back accepted input", afterCancel.result?.stopReason === "cancelled" &&
 			equal(stale, { accepted: false, reason: "not_open" }) && rows("inputHandedBack", terminal).some((e) =>
-				e.inputId === ordinary.inputId || e.inputIds?.includes(ordinary.inputId)));
+				e.inputId === ordinary.inputId));
 	} finally { await h.stop(); }
 }
 
