@@ -3,6 +3,8 @@
 mod input;
 mod listing;
 mod reads;
+mod receipts;
+pub(crate) use receipts::ReceiptFiles;
 mod run;
 mod view;
 use crate::{AcpActor, Agent, Code, Error, InterfaceConnection, Rights, Session};
@@ -464,6 +466,12 @@ impl Service {
             && let Some(id) = path.strip_suffix("/wait-closures")
         {
             return self.wait_closures(a, id, req.uri().query());
+        }
+        if req.method() == Method::GET
+            && let Some(path) = path.strip_prefix("/agui/v1/threads/")
+            && let Some(id) = path.strip_suffix("/run-receipt")
+        {
+            return self.run_receipt(&a, id, req.uri().query()).await;
         }
         if req.uri().query().is_some() {
             return Err(Fail::Invalid);

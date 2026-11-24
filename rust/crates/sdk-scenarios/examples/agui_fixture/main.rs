@@ -33,6 +33,7 @@ struct Kit {
     restarted: bool,
     redacted_client: Mutex<String>,
     wait_gate: Mutex<(String, String)>,
+    receipt_gate: Mutex<String>,
     api: OnceLock<base::Api>,
     changed: Notify,
     latches: Mutex<BTreeSet<(String, String)>>,
@@ -83,6 +84,18 @@ impl Kit {
                 .contains(&(id.into(), name.into()))
         })
         .await;
+    }
+    fn held(&self, id: &str, name: &str) -> bool {
+        self.latches
+            .lock()
+            .unwrap()
+            .contains(&(id.into(), format!("hold:{name}")))
+    }
+    async fn pause(&self, id: &str, name: &str) {
+        if self.held(id, name) {
+            self.latch(id, name);
+            self.barrier(id, "released").await;
+        }
     }
     fn inspect(&self, id: &str) -> Result<Value> {
         let d = self.file(id)?;
@@ -176,6 +189,28 @@ impl Kit {
                 self.api()?.grant(&scope, "kit-owner", Rights(rights))?;
             }
             Some("expireWaitCursor") => base::advance_clock_for_test(300_001),
+            Some("receiptGate") => {
+                *self.receipt_gate.lock().unwrap() = v["mode"].as_str().context("gate mode")?.into()
+            }
+            Some("barrier") if v["name"] == "terminalRecorded" => {
+                use sha2::{Digest, Sha256};
+                let key = format!(
+                    "{:x}",
+                    Sha256::digest(
+                        json!(["agui:receipt:1", id, "kit-owner", "kit-primary", v["runId"]])
+                            .to_string()
+                    )
+                );
+                self.barrier(id, &format!("terminal:{key}")).await;
+            }
+            Some("barrier") if v["name"] == "recoveryEnded" => {
+                self.until(|| {
+                    self.file(id).is_ok_and(|d| {
+                        d.entries.iter().filter(|e| e.kind == "turn.end").count() >= 2
+                    })
+                })
+                .await
+            }
             Some("tls") => return read(self.dir.join("tls-client.json")),
             Some("approvalGate") if v["mode"] == "redact" => {
                 *self.redacted_client.lock().unwrap() =
@@ -274,6 +309,22 @@ impl log::Log for Logger {
     }
     fn log(&self, r: &log::Record<'_>) {
         match r.target() {
+            "modular_agent::agui::terminal_recorded" => {
+                if let Some((id, key)) = r.args().to_string().split_once(' ') {
+                    self.0.latch(id, &format!("terminal:{key}"));
+                }
+            }
+            "modular_agent::agui::report_committed" if self.0.name == "receipt-result" => {
+                let id = r.args().to_string();
+                if self.0.held(&id, "afterResult") {
+                    tokio::task::block_in_place(|| {
+                        self.0.latch(&id, "afterResult");
+                        loop {
+                            std::thread::park();
+                        }
+                    });
+                }
+            }
             "modular_agent::agui::warning" => {
                 let _ = self.0.append("warnings", json!(r.args().to_string()));
             }
@@ -349,6 +400,7 @@ async fn serve(config: Value) -> Result<()> {
         restarted,
         redacted_client: Default::default(),
         wait_gate: Default::default(),
+        receipt_gate: Default::default(),
         api: Default::default(),
         changed: Default::default(),
         latches: Default::default(),
@@ -372,7 +424,10 @@ async fn serve(config: Value) -> Result<()> {
         read(std::env::var("MODULAR_AGENT_SCRIPT")?)?,
         Some(std::env::var("MODULAR_AGENT_SCRIPT_LOG")?.into()),
     );
-    let durable = k.name != "crash-before-handoff";
+    let durable = !matches!(
+        k.name.as_str(),
+        "crash-before-handoff" | "receipt-after-admission"
+    );
     let mut builder = Agent::builder()
         .project(&project)
         .plugin_host(true)

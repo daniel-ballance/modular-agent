@@ -13,6 +13,7 @@ mod interface_tools;
 mod output;
 pub use interface_tools::{InterfaceConnection, InterfaceReportDisposition, InterfaceToolSource};
 pub use output::{apply_redactions, encode as output_event};
+pub mod receipt;
 mod rewind;
 mod tenants;
 use std::{
@@ -91,6 +92,7 @@ impl std::fmt::Display for OutputOverflow {
 }
 impl std::error::Error for OutputOverflow {}
 
+type PrivateErasure = dyn Fn(&SessionData) -> Result<()> + Send + Sync;
 pub struct Harness {
     me: Weak<Harness>,
     agent_name: std::sync::OnceLock<String>,
@@ -111,6 +113,7 @@ pub struct Harness {
     admissions: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
     erasure: tokio::sync::RwLock<()>,
     reservations: RwLock<Arc<ReservationPool>>,
+    private_erasure: std::sync::OnceLock<Box<PrivateErasure>>,
 }
 impl Harness {
     pub fn new() -> Arc<Self> {
@@ -124,6 +127,7 @@ impl Harness {
         Arc::new_cyclic(|me| Self {
             me: me.clone(),
             agent_name: Default::default(),
+            private_erasure: Default::default(),
             project,
             approval_maximum: Default::default(),
             live_covers: Default::default(),
@@ -200,6 +204,12 @@ impl Harness {
         );
         *self.reservations.write().unwrap() = pool;
         Ok(())
+    }
+    pub fn on_reconciled_erasure(
+        &self,
+        remove: impl Fn(&SessionData) -> Result<()> + Send + Sync + 'static,
+    ) {
+        assert!(self.private_erasure.set(Box::new(remove)).is_ok());
     }
     pub fn reservations(&self) -> Arc<ReservationPool> {
         self.reservations.read().unwrap().clone()
@@ -553,6 +563,9 @@ impl Harness {
         let Some((lease, mut data, erased)) = loaded else {
             return Ok(None);
         };
+        if let Some(remove) = self.private_erasure.get() {
+            remove(&data)?;
+        }
         if erased {
             self.invalidate_providers(id)?;
         }
@@ -903,6 +916,9 @@ impl Harness {
         Ok(())
     }
     fn install_erased_data(&self, open: &mut OpenSession, data: SessionData) -> Result<()> {
+        if let Some(remove) = self.private_erasure.get() {
+            remove(&data)?;
+        }
         let session = data.id.clone();
         open.queue.retain(|q| {
             data.entries
@@ -1123,6 +1139,10 @@ impl Harness {
                 .skip(open.data.entries.len())
                 .any(|entry| {
                     entry.kind == "input.accepted"
+                        || (entry.kind == "command"
+                            && receipt::BIND_ENTRY
+                                .try_with(|b| b.entry_id == entry.id)
+                                .unwrap_or(false))
                         || (entry.kind == "actor.grant"
                             && entry.writer == "interface.acp"
                             && entry
@@ -1134,6 +1154,14 @@ impl Harness {
                 return Ok(());
             }
             open.lease = self.store().map(|s| s.acquire(&data.id)).transpose()?;
+        }
+        if let Ok(Some(id)) =
+            receipt::BIND_ENTRY.try_with(|b| (b.session == data.id).then(|| &b.entry_id).cloned())
+        {
+            ensure!(
+                data.entries.iter().filter(|e| e.id == id).count() <= 1,
+                OperationError::Conflict("run ID already accepted".into())
+            );
         }
         let pool = self.reservations();
         let mut write_failed = false;
@@ -2165,6 +2193,7 @@ fn push_setup(data: &mut SessionData, kind: &str, content: impl FnOnce(&SessionD
 fn make_entry(data: &SessionData, scope: &Scope, writer: &str, draft: Draft) -> Entry {
     // Imported calls are a view over a real response or start, not entries
     // that can be named in a persisted sources list.
+    let id = receipt::bound_id(scope, &draft).unwrap_or_else(id);
     let mut seen = std::collections::HashSet::new();
     let copies = draft
         .copies
@@ -2179,7 +2208,7 @@ fn make_entry(data: &SessionData, scope: &Scope, writer: &str, draft: Draft) -> 
         .filter(|id| seen.insert(id.clone()))
         .collect();
     Entry {
-        id: id(),
+        id,
         parent: data.position.clone(),
         scope: scope.clone(),
         writer: writer.into(),
@@ -2700,6 +2729,17 @@ impl AgentApi for Harness {
             let mut result = serde_json::from_value(draft.content.clone())?;
             self.finish_open_interface_turn(open, scope, &mut result)?;
             draft.content["open_calls"] = json!(result.open_calls);
+        }
+        if draft.kind == "request.answer"
+            && let Some(q) = open.data.entries.iter().find(|e| {
+                e.kind == "request.open"
+                    && e.content
+                        .as_ref()
+                        .is_some_and(|v| v["id"] == draft.content["request"])
+            })
+            && !draft.copies.contains(&q.id)
+        {
+            draft.copies.push(q.id.clone());
         }
         if draft.kind == "tool.result" {
             ensure!(
@@ -3227,9 +3267,16 @@ impl AgentApi for Harness {
                     }
                 } else {
                     store.acquire(session).and_then(|_lease| {
-                        store
-                            .reconcile_erasure(session)
-                            .map(|result| result.map(|(_, ids)| ids))
+                        store.reconcile_erasure(session).and_then(|result| {
+                            result
+                                .map(|(data, ids)| {
+                                    if let Some(remove) = self.private_erasure.get() {
+                                        remove(&data)?;
+                                    }
+                                    Ok(ids)
+                                })
+                                .transpose()
+                        })
                     })
                 };
                 let done = result

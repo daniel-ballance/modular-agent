@@ -108,6 +108,8 @@ pub(crate) struct Inner {
     pub hub: Arc<Hub>,
     pub project: PathBuf,
     pub persistent: bool,
+    #[cfg(feature = "agui")]
+    pub receipts: crate::agui::ReceiptFiles,
     pub history: History,
     pub plugin_host: bool,
     #[cfg(feature = "agui")]
@@ -1002,6 +1004,33 @@ impl AgentBuilder {
                 "runtime recovery does not match the chosen durability",
             ));
         }
+        #[cfg(feature = "agui")]
+        let receipts = {
+            // Custom kept history need not set data_dir. Do not put that
+            // deployment's index in the scratch directory removed on exit.
+            let root = if saved_history.1 && !has_data_dir {
+                std::env::var_os("XDG_STATE_HOME")
+                    .map(PathBuf::from)
+                    .or_else(|| {
+                        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state"))
+                    })
+                    .ok_or_else(|| {
+                        Error::new(
+                            Code::InvalidComposition,
+                            "kept AG-UI history needs a deployment state directory",
+                        )
+                    })?
+                    .join("modular-agent/rust")
+            } else {
+                state.clone()
+            };
+            crate::agui::ReceiptFiles::new(root.join("agui-receipts"))
+        };
+        #[cfg(feature = "agui")]
+        if saved_history.1 {
+            let copies = receipts.clone();
+            harness.on_reconciled_erasure(move |d| copies.erase(d));
+        }
         let agent = Agent {
             inner: Arc::new(Inner {
                 #[cfg(feature = "agui")]
@@ -1013,6 +1042,8 @@ impl AgentBuilder {
                 hub,
                 project,
                 persistent: saved_history.1,
+                #[cfg(feature = "agui")]
+                receipts,
                 history: saved_history,
                 plugin_host,
                 acp: Default::default(),

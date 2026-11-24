@@ -136,7 +136,7 @@ impl Service {
         }
         Ok(self.read_gate(a, &d.id, json!({"entry":row})).await?["entry"].clone())
     }
-    async fn closure(
+    async fn closure_fact(
         &self,
         a: &AguiActor,
         d: &SessionData,
@@ -240,6 +240,7 @@ impl Service {
                 self.read_entry(a, d, start).await?;
                 let result = self.read_entry(a, d, e).await?;
                 let status = &result["data"]["status"];
+                self.read_gate(a,&d.id,json!({"type":"toolResult","data":{"toolCallId":call,"status":status,"content":result["message"]["content"]}})).await?;
                 if result["toolCallId"] != call || !status.is_string() {
                     return Ok(None);
                 }
@@ -247,8 +248,29 @@ impl Service {
             }
             _ => return Ok(None),
         };
+        Ok(Some(item))
+    }
+    async fn closure(
+        &self,
+        a: &AguiActor,
+        d: &SessionData,
+        e: &base::Entry,
+        token: &str,
+    ) -> R<Option<Value>> {
+        let Some(item) = self.closure_fact(a, d, e, token).await? else {
+            return Ok(None);
+        };
         let notice = json!({"type":"modular-agent.waitClosed","data":item});
-        Ok((self.read_gate(a, &d.id, notice.clone()).await? == notice).then_some(item))
+        if self.read_gate(a, &d.id, notice.clone()).await? != notice {
+            return Ok(None);
+        }
+        // A notice gate can suspend after the opening and closing gates ran.
+        if self.h().gates_output()
+            && self.closure_fact(a, d, e, token).await?.as_ref() != Some(&item)
+        {
+            return Ok(None);
+        }
+        Ok(Some(item))
     }
     pub(super) fn wait_closures(
         self: Arc<Self>,

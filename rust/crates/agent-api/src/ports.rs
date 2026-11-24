@@ -312,6 +312,15 @@ pub trait Lease: Send + Sync {
         Ok(())
     }
 }
+/// Positive evidence of a committed erasure intent, distinct from an unavailable registry.
+#[derive(Debug)]
+pub struct PendingErasure;
+impl std::fmt::Display for PendingErasure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("content is pending erasure")
+    }
+}
+impl std::error::Error for PendingErasure {}
 pub trait HistoryStore: Send + Sync {
     fn supports_erasure(&self) -> bool {
         false

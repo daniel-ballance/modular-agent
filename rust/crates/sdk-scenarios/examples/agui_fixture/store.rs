@@ -81,7 +81,14 @@ impl HistoryStore for Journal {
         source: &str,
         targets: &[String],
     ) -> Result<BTreeMap<String, Vec<String>>> {
-        self.inner.mark_erasure(source, targets)
+        let marked = self.inner.mark_erasure(source, targets)?;
+        if self.state.held(source, "pendingErasure") {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(self.state.pause(source, "pendingErasure"))
+            });
+        }
+        Ok(marked)
     }
     fn check_erasure(&self, d: &SessionData) -> Result<()> {
         self.inner.check_erasure(d)

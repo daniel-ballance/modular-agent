@@ -46,7 +46,8 @@ pub fn install(b: sdk::AgentBuilder, k: &Arc<Kit>) -> sdk::AgentBuilder {
             let mut scope = base::Scope::session(&input.session_id);
             scope.turn = Some(input.turn_id);
             scope.actor = input.context.actor_id;
-            if k.name == "questions" {
+            k.pause(&scope.session, "afterAdmission").await;
+            if matches!(k.name.as_str(), "questions" | "receipt-interrupt") {
                 choice(api.clone(), scope.clone()).await?;
             }
             if k.name == "crash-continuation"
@@ -96,6 +97,18 @@ pub fn install(b: sdk::AgentBuilder, k: &Arc<Kit>) -> sdk::AgentBuilder {
         let k = state.clone();
         async move {
             let mut v = out.value;
+            if v["type"] == "RUN_FINISHED" {
+                k.pause(&out.session_id, "beforeTerminal").await;
+            }
+            if out.recipient == "kit-primary"
+                && match k.receipt_gate.lock().unwrap().as_str() {
+                    "reply" => v["method"] == "agui.runReceipt",
+                    "settlement" => v["type"] == "turnEnded",
+                    _ => false,
+                }
+            {
+                return Ok(OutputDecision::Block);
+            }
             if k.name == "closure-buffered" && out.recipient == "kit-primary" {
                 if v["question"]["id"].is_string()
                     && k.latches
@@ -221,7 +234,16 @@ pub fn install(b: sdk::AgentBuilder, k: &Arc<Kit>) -> sdk::AgentBuilder {
             Ok(None)
         }
     });
-    b.plugin(start)
+    let state = k.clone();
+    let admission = Plugin::new("kit.admission").on_input(move |input| {
+        let k = state.clone();
+        async move {
+            k.pause(&input.session_id, "beforeAdmission").await;
+            Ok(sdk::InputChange::Pass)
+        }
+    });
+    b.plugin(admission)
+        .plugin(start)
         .plugin(transform)
         .plugin(plugin)
         .plugin(other)

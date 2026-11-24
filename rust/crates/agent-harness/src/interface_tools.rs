@@ -957,6 +957,7 @@ impl Harness {
             }
         }
         op.outcome("modular_agent.tool.status", wire::status(&proposed.status));
+        log::debug!(target:"modular_agent::agui::report_committed","{}",connection.session);
         self.interface_work_ready(&connection.session).await?;
         self.emit(Event::new(&scope, "tool.ended", json!(proposed)))
             .await?;

@@ -40,6 +40,39 @@ fn parts(content: &Value) -> Value {
         json!(parts)
     }
 }
+pub(super) fn interrupt(q: &base::Question, v: &Value, at: u64) -> Option<Value> {
+    let mut interrupt = json!({"id":q.id,"reason":v["kind"],"message":v["question"]});
+    interrupt["responseSchema"] = match q.kind {
+        base::RequestKind::Approval => {
+            interrupt["toolCallId"] = json!(q.scope.call);
+            if q.covers_nested() {
+                interrupt["metadata"] = json!({"modular-agent.coversNested":true});
+            }
+            json!({"type":"object","properties":{"allow":{"type":"boolean"}},"required":["allow"],"additionalProperties":false})
+        }
+        base::RequestKind::Choice => json!({"type":"string","enum":v["options"]}),
+        _ => json!({"type":"string"}),
+    };
+    if v["kind"] == "link" {
+        let Some(uri) = v["details"]
+            .as_str()
+            .filter(|s| reqwest::Url::parse(s).is_ok())
+        else {
+            return None;
+        };
+        interrupt["metadata"] = json!({"modular-agent.link":uri});
+    }
+    if q.extra["whenTimeLimit"] == "decline"
+        && let Some(ms) = q.timeout_ms
+        && let Some(date) = iso(q.extra["deadlineAt"]
+            .as_u64()
+            .unwrap_or(at.saturating_add(ms)))
+    {
+        interrupt["expiresAt"] = json!(date);
+    }
+
+    Some(interrupt)
+}
 impl Service {
     // Replay has the same display gates as the live exchange. A terminal
     // snapshot is not an alternate channel for a withheld text stream.
@@ -245,38 +278,16 @@ impl Service {
             }
             let Ok(view) = view else { continue };
             let v = &view["question"];
-            let mut interrupt = json!({"id":q.id,"reason":v["kind"],"message":v["question"]});
-            interrupt["responseSchema"] = match q.kind {
-                base::RequestKind::Approval => {
-                    interrupt["toolCallId"] = json!(q.scope.call);
-                    if q.covers_nested() {
-                        interrupt["metadata"] = json!({"modular-agent.coversNested":true});
-                    }
-                    json!({"type":"object","properties":{"allow":{"type":"boolean"}},"required":["allow"],"additionalProperties":false})
-                }
-                base::RequestKind::Choice => json!({"type":"string","enum":v["options"]}),
-                _ => json!({"type":"string"}),
-            };
-            if v["kind"] == "link" {
-                let Some(uri) = v["details"]
-                    .as_str()
-                    .filter(|s| reqwest::Url::parse(s).is_ok())
-                else {
-                    continue;
-                };
-                interrupt["metadata"] = json!({"modular-agent.link":uri});
-            }
-            if q.extra["whenTimeLimit"] == "decline"
-                && let Some(ms) = q.timeout_ms
-                && let Some(open) = d.entries.iter().find(|e| {
+            let at = d
+                .entries
+                .iter()
+                .find(|e| {
                     e.kind == "request.open" && e.content.as_ref().is_some_and(|v| v["id"] == q.id)
                 })
-                && let Some(date) = iso(q.extra["deadlineAt"]
-                    .as_u64()
-                    .unwrap_or(open.at.saturating_add(ms)))
-            {
-                interrupt["expiresAt"] = json!(date);
-            }
+                .map_or(0, |e| e.at);
+            let Some(interrupt) = interrupt(&q, v, at) else {
+                continue;
+            };
             result.push((q, interrupt));
         }
         Ok(result)
@@ -293,7 +304,7 @@ impl Service {
         let http = wait.is_some();
         let messages = self.messages(a, d).await?;
         let last = messages.as_array().and_then(|l| l.last()).map(|m| &m["id"]);
-        let v = if http {
+        let mut v = if http {
             let questions = self
                 .questions(a, d, c, false, true)
                 .await?
@@ -309,10 +320,15 @@ impl Service {
         } else {
             json!({"type":"MESSAGES_SNAPSHOT","messages":messages})
         };
+        if http && self.agent.inner.persistent {
+            v["runReceipts"] = json!(1);
+        }
         let waiting = v.get("waiting").cloned();
         let view = self.gate(a, id, v).await?;
         if http
             && (view["cursor"] != token
+                || view.get("runReceipts")
+                    != (self.agent.inner.persistent).then(|| json!(1)).as_ref()
                 || view["waitCursor"] != json!(wait)
                 || view["lastMessageId"] != json!(last)
                 || view.get("waiting") != waiting.as_ref())

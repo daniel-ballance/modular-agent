@@ -1,3 +1,5 @@
+#[path = "agui/crash.rs"]
+mod crash;
 #[path = "agui/listing.rs"]
 mod listing;
 
