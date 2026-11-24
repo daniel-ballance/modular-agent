@@ -69,6 +69,7 @@ type ServicePlugin struct {
 }
 
 type options struct {
+	maxApprovalWaitMs                       int64
 	agentName                               string
 	project, dataDir, model                 string
 	durability                              Durability
@@ -180,6 +181,18 @@ func WithApproval(a Approval) Option {
 		return nil
 	}
 }
+
+// WithMaxApprovalWaitMs bounds a pre-dispatch approval, through the first handoff.
+func WithMaxApprovalWaitMs(ms int64) Option {
+	return func(o *options) error {
+		if ms <= 0 || ms > 9007199254740991 {
+			return &Error{Code: InvalidComposition, Message: "maxApprovalWaitMs must be a positive safe integer"}
+		}
+		o.maxApprovalWaitMs = ms
+		return nil
+	}
+}
+
 func WithOnQuestion(h QuestionHandler) Option {
 	return func(o *options) error { o.handler = h; return nil }
 }
@@ -278,7 +291,13 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	if err != nil || !info.IsDir() {
 		return nil, &Error{Code: InvalidParams, Message: "project must be a directory"}
 	}
+	if o.maxApprovalWaitMs != 0 && (o.durability == Ephemeral || !o.lateAnswers || o.approval == "" && !o.conformance) {
+		return nil, &Error{Code: InvalidComposition, Message: "waiting approval needs kept history, the approval gate and late-answer continuations"}
+	}
 	defaults := api.Settings{MaxSteps: 12, MaxOutput: 1024}
+	if o.maxApprovalWaitMs > 0 {
+		defaults.ApprovalWait = "live"
+	}
 	if o.conformance {
 		defaults.Model, defaults.Approval = conformancemodel.ID, "off"
 	}
@@ -498,6 +517,13 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	if err := h.RegisterInterfaceTools(o.interfaceTools); err != nil {
 		return nil, appError(err, InvalidComposition)
 	}
+	if o.maxApprovalWaitMs > 0 {
+		if _, ok := selectedRuntime.(interface{ SupportsEmptyContinuation() bool }); !ok || !selectedRuntime.(interface{ SupportsEmptyContinuation() bool }).SupportsEmptyContinuation() {
+			return nil, &Error{Code: InvalidComposition, Message: "Runtime cannot continue settled calls"}
+		}
+		h.ConfigureWaitingApprovals(o.maxApprovalWaitMs)
+		h.RegisterApprovalRoute("sdk", a.sdkApprovalView)
+	}
 	continues := selectedRuntime.(Runtime).Declaration().Durable
 	// The conformance harness deliberately probes a non-recovering served
 	// Runtime on a durable host. Ordinary SDK compositions must agree.
@@ -577,10 +603,16 @@ func (a *Agent) Session(ctx context.Context, options ...SessionOptions) (*Sessio
 			return nil, appError(err, InvalidParams)
 		}
 	}
+	if a.h.SupportsWaitingApprovals() && settings.ApprovalWait == "" {
+		settings.ApprovalWait = "live"
+	}
 	for key, value := range opt.Settings {
 		if err := applySetting(&settings, key, value); err != nil {
 			return nil, err
 		}
+	}
+	if !a.h.SupportsWaitingApprovals() && settings.ApprovalWait != "" {
+		return nil, &Error{Code: NotSupported, Message: "waiting approvals are not supported"}
 	}
 	if settings.Model != "" && !a.offersModel(settings.Model) {
 		return nil, &Error{Code: InvalidRequest, Message: "model is not offered"}
@@ -610,7 +642,7 @@ func (a *Agent) Session(ctx context.Context, options ...SessionOptions) (*Sessio
 	if err != nil {
 		return nil, appError(err, Lost)
 	}
-	return &Session{agent: a, id: id}, nil
+	return &Session{agent: a, id: id, approvalInstance: api.ID()}, nil
 }
 func (a *Agent) OpenSession(ctx context.Context, id string) (*Session, error) {
 	a.lifecycle.Lock()
@@ -640,7 +672,7 @@ func (a *Agent) OpenSession(ctx context.Context, id string) (*Session, error) {
 		_ = a.a.StopSession(id)
 		return nil, appError(err, Lost)
 	}
-	return &Session{agent: a, id: id}, nil
+	return &Session{agent: a, id: id, approvalInstance: api.ID()}, nil
 }
 
 // ResumeInterrupted takes a free writer for a kept session in this Agent's
@@ -693,6 +725,9 @@ func (a *Agent) Declaration() Declaration {
 	runtime, err := a.a.Get("runtime")
 	d["nestedToolCalls"] = err == nil && runtime.(api.Runtime).Declaration().NestedToolCalls
 	d["questionsOutlastTurns"], d["lateAnswersStartTurns"] = a.lateAnswers, a.lateAnswers
+	if a.h.SupportsWaitingApprovals() {
+		d["approvalsOutlastTurns"] = true
+	}
 	d["startsTurnsUnasked"] = "never"
 	if a.jobReports {
 		d["startsTurnsUnasked"] = "jobReports"
@@ -875,6 +910,14 @@ func applySetting(s *api.Settings, k string, v any) error {
 		var ref ModelRef
 		if decodeInto(v, &ref) == nil && ref.Provider != "" && ref.ID != "" {
 			s.Model = ref.String()
+			return nil
+		}
+	case "approvalWait":
+		if s.ApprovalWait == "" {
+			return &Error{Code: NotSupported, Message: "waiting approvals are not supported"}
+		}
+		if val, ok := v.(string); ok && (val == "live" || val == api.UntilDeadline) {
+			s.ApprovalWait = val
 			return nil
 		}
 	case "modelTools":

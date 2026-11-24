@@ -69,6 +69,7 @@ func usageIn(o object) api.Usage {
 func settingsOut(s api.Settings) object {
 	v := object{"reasoning": s.Thinking, "maxSteps": s.MaxSteps, "maxOutput": s.MaxOutput}
 	set(v, "model", ref(s.Model, ""), s.Model != "")
+	set(v, "approvalWait", s.ApprovalWait, s.ApprovalWait != "")
 	set(v, "approval", api.ApprovalWire(s.Approval), s.Approval != "")
 	set(v, "modelTools", s.ModelTools, s.ModelTools != nil)
 	set(v, "go.contextLimit", s.ContextLimit, s.ContextLimit != 0)
@@ -85,6 +86,8 @@ func applySettings(s *api.Settings, v object) {
 			s.MaxSteps = number(v, k)
 		case "maxOutput":
 			s.MaxOutput = number(v, k)
+		case "approvalWait":
+			s.ApprovalWait = str(v, k)
 		case "go.approval":
 			// Only older Go sessions used this key. The standard key wins
 			// if both appear, regardless of object iteration order.
@@ -127,7 +130,7 @@ type storedQuestion struct {
 // EntryWithoutTrace keeps private trace records in the topology but does not
 // disclose their data to ACP or a plugin.
 func EntryWithoutTrace(e api.Entry) map[string]any {
-	v := Entry(e)
+	v := Entry(WithoutApprovalView(e))
 	switch e.Kind {
 	case telemetry.TurnTrace, api.InterfaceHandoffKind:
 		delete(v, "data")
@@ -323,7 +326,14 @@ func Entry(e api.Entry) map[string]any {
 		for k, x := range map[string]string{"toolCallId": q.Call, "key": q.Key, "credential": q.Credential, "go.actor": q.Actor, "go.forwardSession": stored.ForwardSession, "go.forwardRequest": stored.ForwardRequest} {
 			set(r, k, x, x != "")
 		}
-		set(r, "options", q.Options, len(q.Options) > 0)
+		if q.ApprovalWait != "" {
+			r["approvalWait"], r["whenTimeLimit"] = q.ApprovalWait, "decline"
+			if q.Allowed != nil {
+				r["answerers"] = q.Allowed
+			}
+		} else {
+			set(r, "options", q.Options, len(q.Options) > 0)
+		}
 		set(r, "details", q.Details, len(q.Details) > 0)
 		set(r, "timeLimitMs", max(1, q.Wait.Milliseconds()), q.Wait > 0)
 		if q.Defer {
@@ -353,6 +363,7 @@ func Entry(e api.Entry) map[string]any {
 		a := api.Decode[api.Answer](e.Data)
 		set(v, "requestId", a.Request, a.Request != "")
 		d["requestId"] = a.Request
+		set(d, "approvalView", a.ApprovalView, a.ApprovalView != nil)
 		set(d, "actorId", a.Actor, a.Actor != "")
 		if a.Actor == "" {
 			delete(v, "actorId")
@@ -600,6 +611,14 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 		}
 		q.Options = api.Decode[[]string](api.JSON(r["options"]))
 		q.Allowed = api.Decode[[]string](api.JSON(r["go.allowed"]))
+		q.ApprovalWait = str(r, "approvalWait")
+		if has(r, "answerers") {
+			q.Allowed = api.Decode[[]string](api.JSON(r["answerers"]))
+		}
+		if has(r, "deadlineAt") {
+			t := time.UnixMilli(int64(number(r, "deadlineAt"))).UTC()
+			q.Deadline = &t
+		}
 		q.Path = api.Decode[[]string](api.JSON(r["go.path"]))
 		if call := asObject(d["call"]); len(call) != 0 {
 			c := callIn(call)
@@ -617,7 +636,7 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 	case "question.secret":
 		e.Data = api.JSON(association(v, d, "requestId"))
 	case "question.answer":
-		e.Data = api.JSON(api.Answer{Request: association(v, d, "requestId"), Actor: str(d, "actorId"), Value: str(d, "value"), Reason: str(d, "reason"), Stored: str(d, "stored"), Declined: boolean(d, "declined"), Via: api.Decode[[]api.ActorRef](api.JSON(d["go.via"]))})
+		e.Data = api.JSON(api.Answer{ApprovalView: api.Decode[*api.ApprovalView](api.JSON(d["approvalView"])), Request: association(v, d, "requestId"), Actor: str(d, "actorId"), Value: str(d, "value"), Reason: str(d, "reason"), Stored: str(d, "stored"), Declined: boolean(d, "declined"), Via: api.Decode[[]api.ActorRef](api.JSON(d["go.via"]))})
 	case "turn.end":
 		outcome, r := asObject(d["outcome"]), asObject(d["result"])
 		o := api.Outcome{Status: str(outcome, "kind"), Error: str(outcome, "error"), Usage: usageIn(asObject(d["usage"])), Steps: number(d, "go.steps"), Copies: e.Copies}

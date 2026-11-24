@@ -22,6 +22,8 @@ import (
 )
 
 type session struct {
+	approvalDeliveries   map[approvalDelivery]string
+	approvalTimer        worktime.Timer
 	interfaceConnections []*InterfaceConnection
 	interfaceSpans       map[string]trace.SpanContext
 	interfaceParents     map[string]*telemetry.Wire
@@ -840,6 +842,7 @@ func (c *client) Fork(ctx context.Context, id, target string) (string, error) {
 			start.TraceContext = nil
 			e.Data = api.JSON(start)
 		}
+		e = portable.WithoutApprovalView(e)
 		source := e.ID
 		e.ID = api.ID()
 		mapping[source] = e.ID
@@ -946,17 +949,24 @@ func (c *client) SetSettings(ctx context.Context, id string, settings api.Settin
 		// turn retains its recorded settings, including across recovery.
 		before, after := s.data.Settings, settings
 		before.Model, before.Thinking, before.Approval = after.Model, after.Thinking, after.Approval
+		before.ApprovalWait = after.ApprovalWait
 		before.ModelTools = after.ModelTools
 		if before != after {
 			return errors.New("non-model settings change applies between turns only")
 		}
 	}
 	next := clone(s.data)
+	if settings.ApprovalWait != s.data.Settings.ApprovalWait && (!c.h.SupportsWaitingApprovals() || settings.ApprovalWait != "live" && settings.ApprovalWait != api.UntilDeadline) {
+		return errors.New("unsupported approvalWait setting")
+	}
 	next.Settings = settings
 	e := api.Entry{ID: api.ID(), Parent: next.Position, Session: id, Actor: api.Acting(ctx), Writer: c.owner, Time: time.Now().UTC(), Kind: "setting", Data: api.JSON(settings)}
 	next.Entries = append(next.Entries, e)
 	next.Position = e.ID
-	return s.commitLocked(next)
+	if err := s.commitLocked(next); err != nil {
+		return err
+	}
+	return c.h.afterApprovalChangeLocked(ctx, s)
 }
 func (c *client) Submit(ctx context.Context, id string, in api.Input) (receipt api.Receipt, errOut error) {
 	ctx, span := telemetry.Start(telemetry.Session(ctx, id), "modular_agent.input.admit")
@@ -1202,6 +1212,9 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 		}
 		s.activeActor, s.activeInput = in.Actor, in
 	}
+	if in.Continuation != "" {
+		in.Calls = slices.DeleteFunc(slices.Clone(in.Calls), func(c api.Call) bool { return interfaceTerminal(s.data, c.ID).ID != "" })
+	}
 	snap := copySession(s.data)
 	s.mu.Unlock()
 	v, err := h.API().Get("runtime")
@@ -1336,6 +1349,15 @@ func (c *client) cancel(ctx context.Context, id string) error {
 	if s.running {
 		s.cancel(context.Canceled)
 	}
+	for _, w := range api.WaitingApprovals(s.data) {
+		if w.Start.ID == "" && w.Terminal.ID == "" {
+			a := api.Answer{Request: w.Question.ID, Declined: true, Reason: "cancelled"}
+			if err := c.h.decideApprovalLocked(ctx, s, w, &a, "not_started"); err != nil {
+				return err
+			}
+		}
+	}
+	c.h.armApprovalTimerLocked(s)
 	if err := c.h.settleInterfacesLocked(s, "", "Interface call cancelled before its outcome was known."); err != nil {
 		return err
 	}
@@ -1455,6 +1477,10 @@ func (c *client) stopSessionAs(ctx context.Context, id string, closing bool, who
 		}
 	}
 	s.stopping, s.closing = true, true
+	if s.approvalTimer != nil {
+		s.approvalTimer.Stop()
+		s.approvalTimer = nil
+	}
 	if s.interfaceTimer != nil {
 		s.interfaceTimer.Stop()
 	}
@@ -1603,6 +1629,9 @@ func (p *turnPorts) Hook(ctx context.Context, name string, v any) (any, error) {
 				if err := validate(call); err != nil {
 					return err
 				}
+			}
+			if _, err := p.checkWaiting(ctx, call, true); err != nil {
+				return err
 			}
 			if !p.canRunTools(call.Actor) {
 				return errors.New("tool authority refused")
@@ -1766,6 +1795,28 @@ func (p *turnPorts) Record(ctx context.Context, e api.Entry) (api.Entry, error) 
 	e.Actor = p.actor
 	if e.Kind == "tool.started" {
 		call := api.Decode[api.Call](e.Data)
+		sources, err := p.checkWaiting(ctx, call, false)
+		if err != nil {
+			return e, err
+		}
+		e.Copies = append(e.Copies, sources...)
+		if len(sources) > 0 {
+			p.s.mu.Lock()
+			err := p.finalWaitingLocked(ctx, call, sources, false)
+			if err == nil {
+				w := api.WaitingApprovals(p.s.data)[call.ID]
+				no := false
+				e.SafeToRepeat = &no
+				e.OpenWorld = &w.Question.Definition.External
+				e.Wire = api.JSON(map[string]any{"data": map[string]any{"source": w.Question.Source, "definition": json.RawMessage(definitionJSON(*w.Question.Definition))}})
+				e, err = p.s.recordLocked(e, p.c.owner, true, ctx)
+			}
+			p.s.mu.Unlock()
+			if err == nil {
+				p.Emit(ctx, api.Event{Kind: "history.added", Data: api.JSON(e)})
+			}
+			return e, err
+		}
 		if p.c.h.interfaceTools[call.Name] != nil {
 			return e, errors.New("Interface start must be committed with its handoff")
 		}
@@ -1779,10 +1830,30 @@ func (p *turnPorts) Record(ctx context.Context, e api.Entry) (api.Entry, error) 
 			return e, err
 		}
 	}
-	if e.Kind == "turn.end" && (len(p.c.h.interfaceTools) != 0 || len(api.InterfaceHandoffs(p.rawSnapshot())) != 0) {
+	if e.Kind == "turn.end" && (p.c.h.SupportsWaitingApprovals() || len(p.c.h.interfaceTools) != 0 || len(api.InterfaceHandoffs(p.rawSnapshot())) != 0) {
 		return p.recordInterfaceTurnEnd(ctx, e)
 	}
 	if e.Kind != "turn.start" {
+		if e.Kind == "tool.result" && p.c.h.SupportsWaitingApprovals() {
+			p.s.mu.Lock()
+			if w := api.WaitingApprovals(p.s.data)[e.Call]; w != nil {
+				if w.Terminal.ID != "" {
+					p.s.mu.Unlock()
+					return w.Terminal, nil
+				}
+				e.Copies = append(e.Copies, w.Request.ID)
+				if w.Decision.ID != "" {
+					e.Copies = append(e.Copies, w.Decision.ID)
+				}
+				e, err := p.s.recordLocked(e, p.c.owner, true, ctx)
+				p.s.mu.Unlock()
+				if err == nil {
+					p.Emit(ctx, api.Event{Kind: "history.added", Data: api.JSON(e)})
+				}
+				return e, err
+			}
+			p.s.mu.Unlock()
+		}
 		if e.Kind == "input" {
 			if e.InputID() == "" {
 				e.Data = api.JSON(api.ID())
@@ -1913,7 +1984,13 @@ func (p *turnPorts) RunTool(ctx context.Context, call api.Call) (result api.Tool
 	if ctx.Err() != nil || p.CheckWriter() != nil || !p.canRunTools(call.Actor) {
 		return api.ToolResult{Call: call.ID, Status: "not_started", NotDispatched: true}
 	}
-	result, err := p.executeTool(ctx, source, snap, call, api.ToolRegistration{Plugin: plugin, ToolSource: id}, 0)
+	binding := api.ToolRegistration{Plugin: plugin, ToolSource: id}
+	if p.c.h.SupportsWaitingApprovals() {
+		if _, err := p.waitingProof(ctx, snap, call, &binding, &def, true); err != nil {
+			return api.ToolResult{Call: call.ID, Status: api.GateFailureStatus(err), NotDispatched: true}
+		}
+	}
+	result, err := p.executeTool(ctx, source, snap, call, binding, 0)
 	result.Returns = def.Output
 	if err != nil {
 		result.ProcessingError = err

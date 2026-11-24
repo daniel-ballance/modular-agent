@@ -125,6 +125,7 @@ type Entry struct {
 	Data               json.RawMessage `json:"data,omitempty"`
 }
 type Settings struct {
+	ApprovalWait string    `json:"approvalWait,omitempty"`
 	ModelTools   *[]string `json:"modelTools"`
 	Approval     string    `json:"approval,omitempty"`
 	Model        string    `json:"model"`

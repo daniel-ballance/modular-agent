@@ -90,6 +90,7 @@ type ToolRegistration struct {
 }
 
 type Question struct {
+	ApprovalWait                                                        string            `json:",omitempty"`
 	ApprovalCall                                                        *Call             `json:",omitempty"`
 	Definition                                                          *Tool             `json:",omitempty"`
 	Source                                                              *ToolRegistration `json:",omitempty"`
@@ -102,6 +103,7 @@ type Question struct {
 	Answerable                                                          bool
 }
 type Answer struct {
+	ApprovalView          *ApprovalView `json:",omitempty"`
 	Request, Actor, Value string
 	Reason, Stored        string
 	Declined              bool

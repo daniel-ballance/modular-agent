@@ -141,6 +141,10 @@ func (w *runtimeWork) leavePending(ctx context.Context, c api.Call) error {
 	if err != nil {
 		return err
 	}
+	if wApproval := api.WaitingApprovals(snap)[c.ID]; wApproval != nil && wApproval.Request.Turn == w.turn.ID && wApproval.Pending.ID != "" {
+		w.pending[c.ID] = true
+		return nil
+	}
 	requests := []string{}
 	var latest string
 	for _, e := range snap.Branch() {
@@ -200,12 +204,16 @@ func (w *runtimeWork) runTool(ctx context.Context, submitted api.Call) (any, err
 		}
 	}
 	delete(w.approved, c.ID)
-	reason := ""
+	reason, status := "", "refused"
 	registration := w.registrations[c.ID]
 	switch {
 	case submitted.Name != check.Call.Name || !sameJSON(submitted.Input, check.Call.Input):
 		reason = "submitted call differs from allowance"
 	case w.registration != nil && !sameJSON(registration, w.registration(c.Name)):
+		if snap, err := w.turn.IO.Snapshot(); err == nil && api.WaitingApprovals(snap)[c.ID] != nil {
+			reason = "approved tool registration changed"
+			break
+		}
 		w.mu.Unlock()
 		return nil, fault("invalid_request", "tool registration changed; obtain a fresh allowance")
 	case w.priorInputs[c.ID] != nil && !sameJSON(w.priorInputs[c.ID], check.Call.Input):
@@ -217,11 +225,12 @@ func (w *runtimeWork) runTool(ctx context.Context, submitted api.Call) (any, err
 	}
 	if reason == "" && check.Validate != nil {
 		if err := check.Validate(check.Call); err != nil {
-			reason = err.Error()
+			reason, status = err.Error(), api.GateFailureStatus(err)
 		}
 	}
 	if reason != "" {
-		out, err := w.settleTool(context.WithoutCancel(ctx), c, api.ToolResult{Status: "refused", Content: api.Text(reason)})
+		api.ObserveToolDisposition(w.traceStep(ctx, c.Step), c, status)
+		out, err := w.settleTool(context.WithoutCancel(ctx), c, api.ToolResult{Status: status, Content: api.Text(reason)})
 		w.mu.Unlock()
 		return resultOut(out), err
 	}
@@ -264,6 +273,13 @@ func (w *runtimeWork) runTool(ctx context.Context, submitted api.Call) (any, err
 		return nil, fault("result_too_large", "tool checkpoint cannot fit history")
 	}
 	if _, err := w.record(ctx, e); err != nil {
+		if errors.Is(err, api.ErrAnswerAuthority) || errors.Is(err, api.ErrApprovalExpired) {
+			status := api.GateFailureStatus(err)
+			api.ObserveToolDisposition(w.traceStep(ctx, c.Step), c, status)
+			out, err := w.settleTool(context.WithoutCancel(ctx), c, api.ToolResult{Status: status, Content: api.Text(err.Error())})
+			w.mu.Unlock()
+			return resultOut(out), err
+		}
 		w.mu.Unlock()
 		return nil, err
 	}

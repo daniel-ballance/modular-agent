@@ -25,6 +25,8 @@ type BoundPorts interface {
 	CanRepeatCall(string) bool
 }
 
+func (*Runner) SupportsEmptyContinuation() bool { return true }
+
 func (r *Runner) Declaration() api.RuntimeDeclaration {
 	return api.RuntimeDeclaration{Durable: r.Durable, Steering: true, Parallel: true, WaitingThroughRestart: r.Durable, NestedToolCalls: true, InterfaceTools: true}
 }

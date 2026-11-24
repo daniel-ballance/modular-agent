@@ -15,9 +15,10 @@ import (
 )
 
 type Session struct {
-	agent *Agent
-	id    string
-	actor string
+	approvalInstance string
+	agent            *Agent
+	id               string
+	actor            string
 }
 
 func (s *Session) ID() string { return s.id }
@@ -482,7 +483,7 @@ func (s *Session) Cancel(ctx context.Context) ([]InputReceipt, error) {
 	if err != nil {
 		return nil, appError(err, NotOpen)
 	}
-	if !busy && !s.agent.h.SupportsInterfaceTools() {
+	if !busy && !s.agent.h.SupportsInterfaceTools() && !s.agent.h.SupportsWaitingApprovals() {
 		return nil, nil
 	}
 	if err := s.agent.a.CancelAs(ctx, s.id); err != nil {
@@ -511,6 +512,9 @@ func (s *Session) Settings(ctx context.Context) (Settings, error) {
 
 func sessionSettings(b api.Settings) Settings {
 	out := Settings{"reasoning": b.Thinking, "approval": api.ApprovalWire(b.Approval), "maxSteps": b.MaxSteps, "maxOutput": b.MaxOutput}
+	if b.ApprovalWait != "" {
+		out["approvalWait"] = b.ApprovalWait
+	}
 	if b.ModelTools == nil {
 		out["modelTools"] = nil
 	} else {
@@ -543,6 +547,14 @@ func (s *Session) setSetting(ctx context.Context, key string, value any) (_ any,
 	if err := s.require(ctx, "settings"); err != nil {
 		return nil, err
 	}
+	if key == "approvalWait" {
+		if !s.agent.h.SupportsWaitingApprovals() {
+			return nil, &Error{Code: NotSupported, Message: "waiting approvals are not supported"}
+		}
+		if snap.Settings.ApprovalWait == "" {
+			snap.Settings.ApprovalWait = "live"
+		}
+	}
 	if err = applySetting(&snap.Settings, key, value); err != nil {
 		return nil, err
 	}
@@ -572,7 +584,7 @@ func (s *Session) Fork(ctx context.Context, entryID ...string) (*Session, error)
 	if err != nil {
 		return nil, appError(err, Busy)
 	}
-	return &Session{agent: s.agent, id: id, actor: s.actor}, nil
+	return &Session{agent: s.agent, id: id, actor: s.actor, approvalInstance: api.ID()}, nil
 }
 func (s *Session) OnQuestion(ctx context.Context, h QuestionHandler) error {
 	if err := ctx.Err(); err != nil {

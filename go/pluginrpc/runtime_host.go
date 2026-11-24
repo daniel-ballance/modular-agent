@@ -12,6 +12,8 @@ import (
 
 type remoteRuntime struct{ *remote }
 
+func (r *remoteRuntime) SupportsEmptyContinuation() bool { return r.Declaration().InterfaceTools }
+
 func (r *remoteRuntime) Declaration() api.RuntimeDeclaration {
 	d := r.reg.Runtime.Supports
 	return api.RuntimeDeclaration{Durable: d.ContinuesAfterRestart, Steering: d.InputDuringTurn, WaitingThroughRestart: d.WaitingThroughRestart, InterfaceTools: d.InterfaceTools}

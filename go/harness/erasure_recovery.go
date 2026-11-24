@@ -56,7 +56,7 @@ func settleForErasure(row api.Session) api.Session {
 			q := api.Decode[struct{ Question api.Question }](e.Data).Question
 			if q.ID != "" && !closedQuestions[q.ID] {
 				add(api.Entry{Kind: "question.answer", Turn: e.Turn, Step: e.Step, Call: e.Call, Actor: e.Actor,
-					Data: api.JSON(api.Answer{Request: q.ID, Declined: true, Reason: "noLongerAnswerable"})})
+					Copies: []string{e.ID}, Data: api.JSON(api.Answer{Request: q.ID, Declined: true, Reason: "noLongerAnswerable"})})
 				closedQuestions[q.ID] = true
 			}
 		case e.Kind == "job.start" && !endedJobs[e.Job]:
@@ -77,6 +77,7 @@ func settleForErasure(row api.Session) api.Session {
 			}
 		}
 	}
+	waits := api.WaitingApprovals(next)
 	live := row
 	live.Entries = row.LiveEntries()
 	handoffs := api.InterfaceHandoffs(row)
@@ -94,6 +95,12 @@ func settleForErasure(row api.Session) api.Session {
 			add(e)
 			next.Entries[len(next.Entries)-1].Actor = ""
 		} else {
+			if w := waits[call.ID]; w != nil {
+				e.Copies = []string{w.Request.ID}
+				if w.Decision.ID != "" {
+					e.Copies = append(e.Copies, w.Decision.ID)
+				}
+			}
 			add(e)
 		}
 	}

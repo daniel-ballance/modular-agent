@@ -65,7 +65,15 @@ func Plugin() api.Plugin {
 			}
 			// Include the transformed arguments: an allow for old arguments cannot authorize new ones.
 			key := fmt.Sprintf("approval:%s:%x", check.Call.ID, sha256.Sum256(check.Call.Input))
-			answer, err := q.(api.Questions).Ask(ctx, api.Question{Session: s.ID, Turn: check.Turn, Call: check.Call.ID, Actor: check.Call.Actor, Key: key, Kind: "approval", Prompt: "Allow " + check.Call.Name + " " + string(check.Call.Input) + "?", Wait: time.Minute, ApprovalCall: &check.Call, Definition: &check.Definition, Source: api.Executing(ctx).ToolSource})
+			draft := api.Question{Session: s.ID, Turn: check.Turn, Call: check.Call.ID, Actor: check.Call.Actor, Key: key, Kind: "approval", Prompt: "Allow " + check.Call.Name + " " + string(check.Call.Input) + "?", Wait: time.Minute, ApprovalCall: &check.Call, Definition: &check.Definition, Source: api.Executing(ctx).ToolSource}
+			if host, ok := a.(interface {
+				ParkApproval(context.Context, api.Question) (bool, error)
+			}); ok {
+				if handled, err := host.ParkApproval(ctx, draft); handled {
+					return api.Decision{Value: check}, err
+				}
+			}
+			answer, err := q.(api.Questions).Ask(ctx, draft)
 			if err != nil {
 				return api.Decision{}, err
 			}

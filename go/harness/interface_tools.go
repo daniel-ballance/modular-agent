@@ -484,6 +484,10 @@ func (h *Harness) settleInterfacesLocked(s *session, turn, reason string) error 
 }
 
 func (h *Harness) recoverInterfaceLocked(s *session) error {
+	if err := h.reconcileApprovalsLocked(context.Background(), s); err != nil {
+		return err
+	}
+	h.armApprovalTimerLocked(s)
 	for _, cp := range api.InterfaceHandoffs(s.data) {
 		if interfaceTerminal(s.data, cp.Call).ID != "" {
 			continue
@@ -550,6 +554,15 @@ func (p *turnPorts) recordInterfaceTurnEnd(ctx context.Context, e api.Entry) (ap
 		_, saved, valid := p.c.h.restoreInterface(s.data, cp)
 		if out.Status != "completed" || !valid || saved.Deadline <= worktime.Now().UnixMilli() {
 			if err := p.c.h.settleInterfaceUnknownLocked(s, cp, "Turn ended without a confirmed Interface tool outcome."); err != nil {
+				s.mu.Unlock()
+				return e, err
+			}
+		}
+	}
+	for _, w := range api.WaitingApprovals(s.data) {
+		if w.Terminal.ID == "" && w.Start.ID == "" && w.Request.Turn == p.id && out.Status != "completed" {
+			a := api.Answer{Request: w.Question.ID, Declined: true, Reason: "cancelled"}
+			if err := p.c.h.decideApprovalLocked(ctx, s, w, &a, "not_started"); err != nil {
 				s.mu.Unlock()
 				return e, err
 			}
