@@ -58,6 +58,15 @@ func (h AGUIHost) get(ctx context.Context, thread, route, query, value, media st
 	return res.Body, nil
 }
 
+func decodeWaitClosure(data []byte) (WaitClosure, bool) {
+	m, err := agDecodeObject(data)
+	if err != nil || len(data) > wswire.MaxFrame {
+		return WaitClosure{}, false
+	}
+	item := WaitClosure{Cursor: agString(m, "cursor"), Reason: agString(m, "reason"), RequestID: agString(m, "requestId"), ToolCallID: agString(m, "toolCallId"), Status: agString(m, "status")}
+	return item, item.valid()
+}
+
 // WaitClosures reads from a snapshot's waitCursor or the last applied notice.
 // It does not reconnect, open presence or deliver an answerable view.
 func (h AGUIHost) WaitClosures(ctx context.Context, thread, after string) iter.Seq2[WaitClosure, error] {
@@ -85,8 +94,9 @@ func (h AGUIHost) WaitClosures(ctx context.Context, thread, after string) iter.S
 				continue
 			}
 			data, ok := bytes.CutPrefix(line, []byte("data: "))
-			item = WaitClosure{}
-			if !ok || ready || json.Unmarshal(data, &item) != nil || item.Cursor == "" || item.Reason == "" || (item.RequestID == "") == (item.ToolCallID == "") {
+			var valid bool
+			item, valid = decodeWaitClosure(data)
+			if !ok || ready || !valid {
 				yield(WaitClosure{}, fmt.Errorf("invalid wait closure"))
 				return
 			}

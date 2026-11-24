@@ -25,6 +25,19 @@ type WaitClosure struct {
 	Status     string `json:"status,omitempty"`
 }
 
+func (item WaitClosure) valid() bool {
+	if item.Cursor == "" {
+		return false
+	}
+	switch item.Reason {
+	case "settled":
+		return item.ToolCallID != "" && item.RequestID == "" && slices.Contains([]string{"completed", "failed", "refused", "cancelled", "notStarted", "outcomeUnknown"}, item.Status)
+	case "answered", "declined", "expired", "revoked", "cancelled", "noLongerAnswerable", "refused", "superseded":
+		return item.RequestID != "" && item.ToolCallID == "" && item.Status == ""
+	}
+	return false
+}
+
 func branchVersion(s api.Session) string {
 	for _, e := range slices.Backward(s.Entries) {
 		if e.WasKind("position") {
@@ -270,6 +283,19 @@ func (q *agRequest) waitItem(s api.Session, i int) ([]byte, error) {
 				return nil, nil
 			}
 		}
+		req := api.Decode[struct{ Question api.Question }](visible.Data).Question
+		g, err := q.gate(api.Event{Kind: "question.open", Turn: opened.Turn, Call: opened.Call, Data: api.JSON(req)})
+		if err != nil || api.Decode[api.Question](g.Data).ID != req.ID {
+			return nil, err
+		}
+		g, err = q.gate(api.Event{Kind: "question.answered", Turn: closed.Turn, Step: closed.Step, Call: closed.Call, Actor: ans.Actor, Data: api.JSON(ans)})
+		if err != nil {
+			return nil, err
+		}
+		shown := api.Decode[api.Answer](g.Data)
+		if shown.Request != ans.Request || answerReason(shown) != reason {
+			return nil, nil
+		}
 		item.RequestID, item.Reason = ans.Request, reason
 	case "tool.result":
 		cp := api.InterfaceHandoffs(s)[e.Call]
@@ -277,12 +303,17 @@ func (q *agRequest) waitItem(s api.Session, i int) ([]byte, error) {
 		if cp.Kind != api.InterfaceHandoffKind || h.Actor != q.Actor.ID || h.Route != q.client {
 			return nil, nil
 		}
-		start, err := a.entry(a.entries[h.Started])
+		start, err := a.entry(api.Entry{ID: h.Started, Kind: "tool.started", Turn: cp.Turn, Call: e.Call})
 		if err != nil {
 			return nil, err
 		}
-		if start.Kind != "tool.started" || start.Call != e.Call {
+		call := api.Decode[api.Call](start.Data)
+		if call.ID != e.Call {
 			return nil, nil
+		}
+		open, err := q.gate(api.Event{Kind: "interface.handoff", Turn: start.Turn, Step: start.Step, Call: e.Call, Actor: h.Actor, Data: start.Data})
+		if err != nil || api.Decode[api.Call](open.Data).ID != e.Call {
+			return nil, err
 		}
 		raw := api.Decode[api.ToolResult](e.Data)
 		r := api.Decode[api.ToolResult](closed.Data)
@@ -301,6 +332,9 @@ func (q *agRequest) waitItem(s api.Session, i int) ([]byte, error) {
 		return nil, nil
 	}
 	item.Cursor = q.waitCursor(s, i+1)
+	if !item.valid() {
+		return nil, nil
+	}
 	b := api.JSON(item)
 	g, err := q.gate(api.Event{Kind: "modular-agent.waitClosed", Data: b})
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -11,6 +12,27 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/modular"
 	"github.com/daniel-ballance/modular-agent/go/modular/modulartest"
 )
+
+func TestWaitHostRejectsMalformedNotice(t *testing.T) {
+	for _, data := range []string{
+		`{"cursor":"c","requestId":"q","reason":"answered","reason":"declined"}`,
+		`{"cursor":"c","requestId":"q","reason":"settled"}`,
+		`{"cursor":"c","toolCallId":"x","reason":"settled"}`,
+	} {
+		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: " + data + "\n\n"))
+		}))
+		h := modular.AGUIHost{Origin: s.URL, Client: s.Client()}
+		for _, err := range h.WaitClosures(t.Context(), "thread", "previous") {
+			if err == nil {
+				t.Error("host accepted malformed closure:", data)
+			}
+			break
+		}
+		s.Close()
+	}
+}
 
 type agTestAuth struct{}
 
