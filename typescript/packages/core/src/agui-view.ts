@@ -41,8 +41,8 @@ export function pending(entries: HistoryEntry[], p: Principal): Pending[] {
     return [{ toolCallId: e.toolCallId, expiresAt: new Date(d.deadline).toISOString(), turnId: e.turnId, ended: !!end, call: sd.call }];
   });
 }
-export async function interrupt(api: PluginApi, id: string, p: Principal, r: InputRequest, entry: HistoryEntry, inTurn: boolean): Promise<InterruptView | undefined> {
-  if (r.kind === "secret" || !rights(api, id, p).includes(r.kind === "approval" ? "approve" : "answer") || r.answerers.length && !r.answerers.includes(p.actor.id)) return;
+export async function interrupt(api: PluginApi, id: string, p: Principal, r: InputRequest, entry: HistoryEntry, inTurn: boolean, statusOnly = false): Promise<InterruptView | undefined> {
+  if (r.kind === "secret" || !statusOnly && !rights(api, id, p).includes(r.kind === "approval" ? "approve" : "answer") || r.answerers.length && !r.answerers.includes(p.actor.id)) return;
   const call = object(entry.data) ? entry.data.call as ToolCall | undefined : undefined;
   if (r.kind === "approval" && (!call || call.id !== r.toolCallId)) return;
   const wire: Interrupt = { id: r.id, reason: r.kind, message: r.kind === "approval" ? `${r.question}\n${call!.name} ${JSON.stringify(call!.input)}` : r.question,

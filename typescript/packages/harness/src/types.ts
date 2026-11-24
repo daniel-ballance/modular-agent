@@ -408,6 +408,8 @@ export interface Answer {
 	declined?: boolean;
 	actorId: string;
 	reason?: string;
+	/** Only on a system closure caused by removing authority. */
+	cause?: "revoked";
 	/** The question is still open, past its turn. */
 	pending?: boolean;
 	/** A secret's answer: the credential it was stored as. The value itself goes only to the credential store. */

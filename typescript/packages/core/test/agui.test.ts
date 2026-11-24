@@ -133,6 +133,32 @@ test("a presence opened after the turn receives a waiting approval only on its o
   } finally { await presence.body?.cancel(); }
 });
 
+test("a closure cursor replays a decision to its own client without delivering an approval", {timeout:10000}, async t => {
+  const dataDir = await mkdtemp(join(tmpdir(),"closure-replay-")); t.after(()=>rm(dataDir,{recursive:true,force:true}));
+  const {thread, run, request, agent} = await setup(t, {dataDir,durability:"kept", sessionLimits:true, approval:"all", maxApprovalWaitMs:60_000,
+    questionsOutlastTurns:true, settings:{approvalWait:"untilDeadline"}, tools:[tool({name:"bump", description:"Increment", input:{}, run:()=>"ran"})],
+    providers:[scriptedProvider([{toolCalls:[{name:"bump",input:{}}]}])]});
+  const id = await thread(), path = "/threads/"+id;
+  await events(await run(id,[prompt("increment")]));
+  const snap = await (await request(path)).json() as any;
+  const feed = path+"/wait-closures", after = "?after="+snap.waitCursor;
+  assert.equal((await request(feed)).status,400);
+  assert.equal((await request(feed+"?after="+snap.cursor)).status,409);
+  assert.equal((await request(feed+after,undefined,1)).status,409);
+  assert.deepEqual(snap.waiting.questions,[]);
+  const session = await agent.openSession(id);
+  const [opened] = (await session.history()).filter(e=>e.kind==="inputRequest");
+  await session.setLimit(owner.rights.filter(r=>r!=="approve"));
+  const res = await request(feed+after);
+  assert.equal(res.status,200);
+  const reader = res.body!.getReader();
+  try {
+    const {value} = await reader.read(); const item = JSON.parse(new TextDecoder().decode(value).trim().slice(6));
+    assert.deepEqual(item,{cursor:item.cursor,requestId:opened.requestId,reason:"revoked"});
+    assert.notEqual(item.cursor,snap.waitCursor);
+  } finally { await reader.cancel(); }
+});
+
 test("a withheld HTTP snapshot retires its cursor, even if the gate later opens",async t=>{
   let blocked=false;
   const plugin=definePlugin({name:"privacy", hooks:{output:({events})=> {if (blocked && events.some(e=>(e.data as any)?.method==="agui.snapshot")) return "block";}}});

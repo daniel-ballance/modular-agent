@@ -6,6 +6,7 @@ import type { Actor, Declaration, Harness, HistoryEntry, InputRequest, Interface
 import type { Agent } from "./agent.js";
 import { PATH, body, encode, errorCode, fail, frame, hash, httpError, json, object, parts, runInput, same, sse, type Code, type WireEvent } from "./agui-wire.js";
 import { checkedMessages, current, interrupt, messages, pending, reply, rights, watch, type InterruptView, type Principal } from "./agui-view.js";
+import { HostRead, WaitClosures } from "./agui-host-reads.js";
 import { ThreadListing } from "./agui-list.js";
 import { Exchange } from "./agui-exchange.js";
 
@@ -35,6 +36,7 @@ export class AguiBinding {
   clients = new Map<string, Client>();
   streams = new Set<ServerResponse>();
   readonly listing = new ThreadListing();
+  readonly waits = new WaitClosures();
   constructor(readonly host: Host) {}
   warn = (key: string) => { if (this.host.onWarning) this.host.onWarning(key); else console.warn(`AG-UI: ${key}`); };
   allowOrigin = (req: IncomingMessage) => {
@@ -75,6 +77,12 @@ export class AguiBinding {
       }
       const input = path === PATH + "/run" && method === "POST" ? runInput(await body(req), this.warn) : undefined;
       const match = method === "GET" && /^\/agui\/v1\/threads\/([\w-]+)(\/presence)?$/.exec(path ?? "");
+      const read = method === "GET" && /^\/agui\/v1\/threads\/([\w-]+)\/wait-closures(?:\?(.*))?$/.exec(path ?? "");
+      if (read) {
+        const t = await this.host.locate(p, read[1]);
+        this.track(res);
+        return this.waits.serve(new HostRead(t, read[1], p), res, new URLSearchParams(read[2]));
+      }
       const settings = method === "POST" && this.host.root.agent.declaration().approvalCoversNested === true && /^\/agui\/v1\/threads\/([\w-]+)\/settings$/.exec(path ?? "");
       const id = input?.threadId ?? (settings ? settings[1] : match && match[1]);
       if (!id || !/^[\w-]+$/.test(id)) fail("not_found");
@@ -104,9 +112,15 @@ export class AguiBinding {
       if (match && match[2]) return route.presence(res);
       try {
         const presence = client.presence;
-        const snap = await route.snapshot(true);
+        const reader = new HostRead(t, id, p);
+        await t.api.refreshApprovals(id);
+        const watermark = await reader.view(), waitCursor = randomUUID();
+        const snap = await route.snapshot(true, undefined, undefined, undefined, {records:watermark.records, waitCursor});
         if (res.destroyed) fail("conflict");
         await route.deliverApprovals(presence, snap.view.waiting.questions);
+        const check = await reader.view();
+        if (check.generation !== watermark.generation || check.order.length !== watermark.order.length) fail("conflict");
+        this.waits.remember(waitCursor, reader, watermark, watermark.order.length);
         json(res, 200, snap.view); route.remember(snap);
       } catch (e) { client.cursor = undefined; client.needsSnapshot = true; throw e; }
     };
@@ -148,11 +162,11 @@ export class Route {
     }
     return result.filter(q => this.api.openRequests(this.id).some(r => r.id === q.wire.id));
   }
-  async snapshot(http: boolean, through?: string, cursor = randomUUID() as string, inclusive?: string) {
+  async snapshot(http: boolean, through?: string, cursor = randomUUID() as string, inclusive?: string, host?: {records:HistoryEntry[]; waitCursor:string}) {
     const branch = await this.branchGeneration();
-    const records = await this.records();
+    const records = host?.records ?? await this.records();
     const copy = await messages(this.api, this.id, this.p, inclusive ? records.slice(0, records.findIndex(e => e.id === inclusive) + 1) : records, this.c.hidden, through);
-    const view = { threadId: this.id, declaration: this.t.agent.declaration(), messages: copy, cursor, lastMessageId: copy.at(-1)?.id ?? null,
+    const view = { ...(host && {waitCursor:host.waitCursor}), threadId: this.id, declaration: this.t.agent.declaration(), messages: copy, cursor, lastMessageId: copy.at(-1)?.id ?? null,
       waiting: { questions: (await this.questions(records)).map(q => q.wire), toolCalls: this.pending(records).filter(c => c.ended).map(({toolCallId, expiresAt}) => ({ toolCallId, expiresAt })) } };
     const gated = http ? await reply(this.api, this.id, this.p, "snapshot", view) : view;
     encode(gated);

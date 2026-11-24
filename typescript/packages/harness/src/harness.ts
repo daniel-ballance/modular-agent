@@ -469,7 +469,7 @@ export class Harness {
 				await this.commit(s, [{ kind: "actorLeft", writer: pluginName, actorId, modelVisible: false, data: { actorId } }]);
 				await this.hooks.observe("session.leave", { sessionId, actorId, requestedBy });
 				this.emit(s, "session.left", { actorId }, pluginName, { actorId });
-				this.closeUnanswerable(s);
+				await this.closeRevokedWaits(s);
 				await this.reconcileApprovals(s);
 			},
 			presentActors: (id) => this.presentActors(this.session(id)),
@@ -1096,6 +1096,20 @@ export class Harness {
 		return !!s && this.discoveryRights(s, actor, severalActors).includes("watch");
 	}
 
+	/** A host read never joins the viewer, takes a writer or starts recovery. Capture the
+	 * branch, the commit offset and effective rights without yielding between them. */
+	async hostView(id: string, actor: Actor, scope: (project: string, tenant: string | null) => boolean) {
+		const live = this.sessions.get(id);
+		const s = live && !live.closed && !live.suspended ? live : await this.loadInto(id);
+		if (!s || !scope(s.meta.project, s.tenant ?? null)) throw failure("not_found", "Thread not found");
+		const freshness = await this.admitHistory(s);
+		const rights = this.discoveryRights(s, actor, false);
+		if (!rights.includes("watch")) throw failure("not_found", "Thread not found");
+		const order = s.order.slice();
+		return { records:s.branch(), order, rights, live:s === live, kept:!s.ephemeral && this.use<HistoryStore>("history-store")?.supports.persistent !== false,
+			generation:JSON.stringify([freshness, order.filter(id => { const e = s.entries.get(id)!; return e.kind === "position" || e.erased; })]) };
+	}
+
 	private discoveryRights(s: Session, actor: Actor, allowJoin: boolean): Authority[] {
 		if (s.tenant !== undefined && !this.tenants.has(s.tenant)) return [];
 		if (s.actors.has(actor.id)) return this.actorRights(s, actor.id).filter(right => actor.authority.includes(right));
@@ -1455,7 +1469,13 @@ export class Harness {
 			await this.write(s, () => store?.append(s.id, entries));
 		}
 		for (const e of entries) {
+			// Attribute a closure to revocation only when this authority commit
+			// actually removes the last eligible route. Presence changes are not grants.
+			const eligible = ["actorJoined", "actorLeft", "limit"].includes(e.kind)
+				? this.recordedOpenRequests(s).filter(r => this.hasQuestionRoute(s, r)) : [];
 			s.apply(e);
+			for (const r of eligible) if (!this.hasQuestionRoute(s, r)) s.revokedQuestions.add(r.id);
+			if (e.kind === "inputAnswer") s.revokedQuestions.delete(requestIdOf(e)!);
 			const inputId = inputIdOf(e);
 			if (inputId && e.kind === "input" && e.turnId) {
 				const unit = this.reservations.limits.settlementBytes;
@@ -1944,7 +1964,7 @@ export class Harness {
 		await this.commit(s, [actorJoined(actor, writer, grantedBy)]);
 		await this.hooks.observe("session.join", { sessionId: s.id, actorId: actor.id, actor, grantedBy });
 		this.emit(s, "session.joined", { actor }, writer, { actorId: actor.id });
-		this.closeUnanswerable(s);
+		await this.closeRevokedWaits(s);
 		await this.reconcileApprovals(s);
 	}
 
@@ -2018,7 +2038,7 @@ export class Harness {
 			const effective = (s.actors.get(actorId)?.authority ?? []).filter((r) => s.tenant === undefined || this.tenants.get(s.tenant)?.rights.includes(r));
 			if ((rights ?? ALL_AUTHORITY).some((right) => !effective.includes(right))) throw Object.assign(new Error("A limit cannot give a right the administrator lacks"), { code: "forbidden" });
 			await this.commit(s, [{ kind: "limit", writer, actorId, modelVisible: false, data: { rights: rights === null ? null : [...new Set(rights)] } }]);
-			this.closeUnanswerable(s);
+			await this.closeRevokedWaits(s);
 			await this.reconcileApprovals(s);
 		});
 	}
@@ -3931,11 +3951,33 @@ export class Harness {
 		return candidates.some(id => this.mayAnswer(s, request, id));
 	}
 
+	private hasQuestionRoute(s: Session, r: InputRequest) {
+		return this.turnAuthority.exit(() => connectionRights.exit(() => r.approvalWait
+			? [...s.actors.keys()].some(id => this.eligibleMember(s, r.answerers.length ? r.answerers : undefined, id))
+			: this.hasAnswerer(s, r)));
+	}
+
 	private closeUnanswerable(s: Session): void {
 		for (const { request, resolve } of s.requests.values()) {
-			if (!this.hasAnswerer(s, request)) {
-				resolve({ requestId: request.id, actorId: "harness", declined: true, reason: "noLongerAnswerable" });
+			if (!this.hasQuestionRoute(s, request)) {
+				resolve({ requestId: request.id, actorId: "harness", declined: true, reason: "noLongerAnswerable",
+					...(s.revokedQuestions.has(request.id) && {cause:"revoked" as const}) });
 			}
+		}
+	}
+
+	private async closeRevokedWaits(s: Session) {
+		this.closeUnanswerable(s);
+		for (const r of this.waitingRequests(s)) {
+			if (r.approvalWait || !s.revokedQuestions.has(r.id) || this.hasQuestionRoute(s, r)) continue;
+			s.lateAnswers.add(r.id);
+			try {
+				const answer: Answer = {requestId:r.id, actorId:"harness", declined:true, reason:"noLongerAnswerable", cause:"revoked"};
+				await this.recordAnswer(s, r, answer);
+				s.waiting.delete(r.id);
+				this.emitAnswer(s, r, answer, true);
+			} finally { s.lateAnswers.delete(r.id); }
+			this.maybeContinueOpenCalls(s);
 		}
 	}
 
@@ -4002,7 +4044,9 @@ export class Harness {
 				: { requestId: request.id, actorId: answer.actorId, declined: true, reason: "superseded" };
 		}
 		const record = async () => {
-			await this.commit(s, [{ ...fields, kind: "inputAnswer", data: kept }]);
+			const systemClosure = kept.actorId === "harness" && kept.cause === "revoked";
+			await this.commit(s, [{ ...fields, kind: "inputAnswer", actorId:systemClosure ? undefined : kept.actorId,
+				data:systemClosure ? {requestId:kept.requestId, declined:true, reason:kept.reason, ...(kept.cause && {cause:kept.cause})} : kept }]);
 			const system = kept.actorId === "harness" && kept.reason &&
 				["cancelled", "noLongerAnswerable", "restart", "timeLimit", "superseded", "refused", "erased"].includes(kept.reason) ? kept.reason : undefined;
 			telemetryEvent("modular_agent.question.close", { "modular_agent.question.id": request.id,
@@ -4199,7 +4243,8 @@ export class Harness {
 	private async closeWaiting(s: Session, w: WaitingApproval, reason: string, status: "refused" | "notStarted" | "outcomeUnknown", erasing = false) {
 		const run = async () => {
 			const id = w.decision?.id ?? this.newId();
-			const body = { requestId: w.request.id, declined: true, reason };
+			const body = { requestId: w.request.id, declined: true, reason,
+				...(reason === "noLongerAnswerable" && s.revokedQuestions.has(w.request.id) && {cause:"revoked" as const}) };
 			const drafts: EntryDraft[] = w.decision ? [] : [{ kind: "inputAnswer", id, writer: "harness", modelVisible: false, turnId: w.entry.turnId, stepId: w.entry.stepId,
 				toolCallId: w.entry.toolCallId, requestId: w.request.id, data: body, sources: [w.entry.id] }];
 			drafts.push(this.approvalResult(s, w, status, reason, id));
