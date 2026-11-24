@@ -238,7 +238,7 @@ The agent MUST decide admission and its receipt in the same serialized operation
 | `after` | Start a turn; receipt `now`. | Queue a new turn; receipt `after`. |
 | `propose` | Keep a proposal; receipt `proposed`. | Keep a proposal; receipt `proposed`. |
 
-The agent MUST refuse mixed-actor steering under `mixedActorInput: "refused"` with `conflict`. It MUST acknowledge extension input without waiting for its turn and keep the initial `taken` with the admission. A duplicate MUST reuse that disposition, not infer it from current state. For a legacy admission without a provable `taken`, the agent MUST return `conflict` without running new work. A duplicate prompt MUST observe the original turn or no-turn disposition in the caller's version, except that an unreleased proposal returns `conflict`. Cancelling or losing a duplicate waiter MUST NOT affect work. A host MAY retry keyed input to reconcile admission.
+The agent MUST refuse mixed-actor steering under `mixedActorInput: "refused"` with `conflict`. It MUST acknowledge extension input without waiting for its turn and keep the initial `taken` with the admission. A duplicate MUST reuse that disposition, not infer it from current state. A duplicate prompt MUST observe the original turn or no-turn disposition in the caller's version, except that an unreleased proposal returns `conflict`. Cancelling or losing a duplicate waiter MUST NOT affect work. A host MAY retry keyed input to reconcile admission.
 
 ## Updates
 
