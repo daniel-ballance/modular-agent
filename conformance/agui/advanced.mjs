@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { checkTls } from './tls.mjs';
-import { answer, checkWaiting, dispatch, draft, first, frontend, handoff, historyError, offer, options, opts, rawReport, reportRefused, second, simple, success, transformed } from './cases.mjs';
+import { answer, checkApprovalCall, checkWaiting, dispatch, draft, first, frontend, handoff, historyError, offer, options, opts, rawReport, reportRefused, second, simple, success, transformed } from './cases.mjs';
 import { at, clean, finalView, input, refused, threadPath, tool, user } from './wire.mjs';
 
 const action = (id, payload, status = 'resolved') => ({ interruptId: id, status, ...(payload === undefined ? {} : { payload }) });
@@ -95,6 +95,22 @@ export const advanced = {
     assert.ok(entries(evidence, 'toolResult').some(e => e.data.status === 'refused'), 'approval refused');
   }),
 
+  'approval-call': scenario(frontend, async ({ api }) => {
+    const { view, request } = await prompt(api, options);
+    const presence = await api.presence(view.threadId);
+    try {
+      const [approval] = interrupts(await api.run(request, opts(view)), 'approval');
+      const { waiting } = await api.view(view.threadId);
+      const snapshot = waiting.questions.find(q => q.id === approval.id);
+      assert.ok(snapshot, 'live presence still sees the approval in the snapshot');
+      const expected = { name: offer.name, input: dispatch }; // tool.before changed the model draft
+      const missing = [];
+      if (!checkApprovalCall(approval, expected, 'run')) missing.push('run');
+      if (!checkApprovalCall(snapshot, expected, 'snapshot')) missing.push('snapshot');
+      if (missing.length) return { skipped: 'modular-agent.approvalCall absent from ' + missing.join(' and ') };
+    } finally { await presence.close(); }
+  }),
+
   'approval': scenario(frontend, async ({ api, origin, tokens, control }) => {
     const { view, request } = await prompt(api, options);
     const presence = await api.presence(view.threadId);
@@ -145,6 +161,10 @@ export const advanced = {
       if (name === 'approval-redacted') {
         success(run);
         assert.equal(run.calls.size, 0, 'changed approval view cannot allow dispatch');
+        clean(run.events, '"modular-agent.approvalCall"');
+        const snapshot = await api.view(view.threadId);
+        assert.deepEqual(snapshot.waiting.questions, [], 'redacted approval is not answerable');
+        clean(snapshot.waiting, '"modular-agent.approvalCall"');
       } else {
         const [approval] = interrupts(run, 'approval');
         if (name === 'approval-lost') {

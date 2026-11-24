@@ -72,13 +72,21 @@ async function run(name, fault) {
   const server = await fake({ model: scenario.model, fault, scenario: scenario.control ? name : undefined });
   const peer = () => ({ ...server, api: at(server.origin, server.tokens.owner), restart });
   const restart = async () => { await server.restart(); return peer(); };
-  try { assert.equal((await scenario.run(peer()))?.skipped, undefined, 'fake must exercise this case'); }
+  try { return await scenario.run(peer()); }
   finally { await server.close(); }
 }
 
 test('watch loss may reset a feed between complete frames', () => run('closure-buffered', 'reset-on-watch-loss'));
-for (const name of Object.keys(cases)) test(`fake passes ${name}`, () => run(name));
+for (const name of Object.keys(cases)) test(`fake passes ${name}`, async () => {
+  assert.equal((await run(name))?.skipped, undefined, 'fake must exercise this case');
+});
+test('approval-call skips when the optional metadata is absent', async () => {
+  assert.deepEqual(await run('approval-call', 'omit-approval-call'), { skipped: 'modular-agent.approvalCall absent from run and snapshot' });
+});
 for (const [name, fault, diagnosis] of [
+  ['approval-call', 'model-history-call', /run approvalCall matches the exact approval/],
+  ['approval-call', 'wrong-snapshot-call', /snapshot approvalCall matches the exact approval/],
+  ['waiting-restart', 'wrong-waiting-call', /waiting approvalCall matches the exact approval/],
   ['approval', 'missing-live-coverage', /approval interrupt declares coversNested/],
   ['waiting-restart', 'missing-waiting-coverage', /waiting interrupt declares coversNested/],
   ['waiting-restart', 'wrong-covering-request', /child start names the covering request/],

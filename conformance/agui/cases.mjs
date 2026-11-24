@@ -21,6 +21,13 @@ export const historyError = response => refused(response, 409, 'conflict', 'curs
 export const success = run => assert.equal(run.terminal.outcome?.type, 'success', 'run outcome');
 export const options = { tools: [offer] };
 
+// Compare the whole object, including its keys. An omitted field is optional; null is not a call.
+export function checkApprovalCall(q, expected, surface) {
+  if (!Object.hasOwn(q.metadata ?? {}, 'modular-agent.approvalCall')) return false;
+  assert.deepEqual(q.metadata['modular-agent.approvalCall'], expected, `${surface} approvalCall matches the exact approval`);
+  return true;
+}
+
 export function answer(run, expected) {
   success(run);
   assert.ok(run.events.some(e => e.type === 'STEP_STARTED'), 'run follows a model step');

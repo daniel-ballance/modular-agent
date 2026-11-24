@@ -126,7 +126,10 @@ export function fakeFixture(name, fault, script, covers) {
   function question(s, reason, toolCallId) {
     s.question = { id: randomUUID(), reason, message: reason === 'approval' ? `Allow ${offer.name} with ${JSON.stringify(dispatch)}?` : 'Choose yes or no.',
       expiresAt: new Date(s.now + 5000).toISOString(), ...(toolCallId ? { toolCallId } : {}),
-      ...(covers && reason === 'approval' && fault !== 'missing-live-coverage' && { metadata: { 'modular-agent.coversNested': true } }),
+      ...(reason === 'approval' && { metadata: {
+        ...(covers && fault !== 'missing-live-coverage' && { 'modular-agent.coversNested': true }),
+        ...(fault !== 'omit-approval-call' && { 'modular-agent.approvalCall': { name: offer.name, input: dispatch } }),
+      } }),
       responseSchema: reason === 'approval' ? { type: 'object', properties: { allow: { type: 'boolean' } }, required: ['allow'] } : { type: 'string', enum: ['yes', 'no'] } };
     record(s, 'inputRequest', { request: { id: s.question.id, ...(covers && reason === 'approval' && { coversNested: true }) } }, { requestId: s.question.id, turnId: s.originTurn });
     return s.question;
@@ -195,7 +198,12 @@ export function fakeFixture(name, fault, script, covers) {
         turnEnd(s, s.originTurn);
         return sendEnd(s, emit, push, finish);
       }
-      const q = question(s, 'approval', id);
+      const q = structuredClone(question(s, 'approval', id));
+      if (fault === 'model-history-call') q.metadata['modular-agent.approvalCall'] = script[0].toolCalls[0];
+      if (fault === 'wrong-snapshot-call') {
+        delete q.metadata['modular-agent.approvalCall'];
+        s.question.metadata['modular-agent.approvalCall'].name = 'other';
+      }
       return sendEnd(s, emit, push, finish, { type: 'interrupt', interrupts: [q] });
     }
     if (name === 'error-gate') {
