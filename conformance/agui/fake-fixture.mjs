@@ -200,10 +200,7 @@ export function fakeFixture(name, fault, script, covers) {
       }
       const q = structuredClone(question(s, 'approval', id));
       if (fault === 'model-history-call') q.metadata['modular-agent.approvalCall'] = script[0].toolCalls[0];
-      if (fault === 'wrong-snapshot-call') {
-        delete q.metadata['modular-agent.approvalCall'];
-        s.question.metadata['modular-agent.approvalCall'].name = 'other';
-      }
+      if (fault === 'wrong-snapshot-call') s.question.metadata['modular-agent.approvalCall'].name = 'other'; // the run copy stays exact
       return sendEnd(s, emit, push, finish, { type: 'interrupt', interrupts: [q] });
     }
     if (name === 'error-gate') {

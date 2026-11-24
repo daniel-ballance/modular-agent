@@ -81,8 +81,7 @@ class Desk:
         q = wait(first, 'coder approval')
         call = json.loads((DEMO / 'coder/model.json').read_text())[0]['toolCalls'][0]
         metadata = q.get('metadata', {})
-        if 'modular-agent.approvalCall' in metadata:
-            check(metadata['modular-agent.approvalCall'] == call, 'wrong call offered for display')
+        check(metadata.get('modular-agent.approvalCall') == call, 'approval did not carry the exact call for display')
         check(q['agent'] == 'coder' and q['reason'] == 'approval' and q['toolCallId'] and q['expiresAt'] and
               metadata.get('modular-agent.coversNested') is True and
               call['name'] in q['message'] and json.dumps(call['input']['code']) in q['message'],

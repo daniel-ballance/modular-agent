@@ -20,7 +20,7 @@ The first invocation of `run.mjs` with a command runs every case, with a fresh f
 
 When a session declares `approvalCoversNested`, the approval cases check the marker in the interrupt metadata and in the recorded request. In `waiting-restart`, have `bump` increment the counter through a nested tool instead of incrementing it directly. The kit checks that the child's start names that parent and request. Without the declaration the coverage assertions are skipped with a reason.
 
-The `approval-call` case checks the optional `modular-agent.approvalCall` in the live interrupt and the thread snapshot. It expects the call after `tool.before` changes its input, not the model draft. The waiting cases check the parked call on each delivered interrupt. A missing field skips that check with a reason. The fixture's approval output gates withhold the whole interrupt if its exact view changes; they do not offer redacted arguments for approval.
+The `approval-call` case checks the required `modular-agent.approvalCall` in the live interrupt and the thread snapshot. It expects the call after `tool.before` changes its input, not the model draft. The waiting cases check the parked call on each delivered interrupt. A missing field fails. The fixture's approval output gates withhold the whole interrupt if its exact view changes; they do not offer redacted arguments for approval.
 
 ## Waiting approval checks
 

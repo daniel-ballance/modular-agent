@@ -80,8 +80,8 @@ test('watch loss may reset a feed between complete frames', () => run('closure-b
 for (const name of Object.keys(cases)) test(`fake passes ${name}`, async () => {
   assert.equal((await run(name))?.skipped, undefined, 'fake must exercise this case');
 });
-test('approval-call skips when the optional metadata is absent', async () => {
-  assert.deepEqual(await run('approval-call', 'omit-approval-call'), { skipped: 'modular-agent.approvalCall absent from run and snapshot' });
+test('approval-call fails when the metadata is absent', async () => {
+  await assert.rejects(run('approval-call', 'omit-approval-call'), /carries modular-agent.approvalCall/);
 });
 for (const [name, fault, diagnosis] of [
   ['approval-call', 'model-history-call', /run approvalCall matches the exact approval/],

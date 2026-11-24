@@ -11,7 +11,7 @@ const resume = (v, id, cancel = false) => input(v, [], { resume: [action(id, can
 const state = (peer, id) => peer.control('inspect', { threadId: id });
 function interrupt(q, entry) {
   assert.equal(q?.reason, 'approval', 'answerable approval interrupt');
-  if (!checkApprovalCall(q, bump, 'waiting')) console.log('SKIP  waiting approvalCall (interrupt omits modular-agent.approvalCall)');
+  checkApprovalCall(q, bump, 'waiting');
   if (entry.data.request.coversNested) assert.equal(q.metadata?.['modular-agent.coversNested'], true, 'waiting interrupt declares coversNested');
   assert.equal(q.id, entry.requestId, 'same request ID');
   assert.equal(q.toolCallId, entry.toolCallId, 'same call ID');

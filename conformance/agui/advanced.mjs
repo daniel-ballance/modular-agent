@@ -104,10 +104,8 @@ export const advanced = {
       const snapshot = waiting.questions.find(q => q.id === approval.id);
       assert.ok(snapshot, 'live presence still sees the approval in the snapshot');
       const expected = { name: offer.name, input: dispatch }; // tool.before changed the model draft
-      const missing = [];
-      if (!checkApprovalCall(approval, expected, 'run')) missing.push('run');
-      if (!checkApprovalCall(snapshot, expected, 'snapshot')) missing.push('snapshot');
-      if (missing.length) return { skipped: 'modular-agent.approvalCall absent from ' + missing.join(' and ') };
+      checkApprovalCall(approval, expected, 'run');
+      checkApprovalCall(snapshot, expected, 'snapshot');
     } finally { await presence.close(); }
   }),
 

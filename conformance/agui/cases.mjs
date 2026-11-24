@@ -21,11 +21,10 @@ export const historyError = response => refused(response, 409, 'conflict', 'curs
 export const success = run => assert.equal(run.terminal.outcome?.type, 'success', 'run outcome');
 export const options = { tools: [offer] };
 
-// Compare the whole object, including its keys. An omitted field is optional; null is not a call.
+// Required on every approval interrupt. Compare the whole object, including its keys.
 export function checkApprovalCall(q, expected, surface) {
-  if (!Object.hasOwn(q.metadata ?? {}, 'modular-agent.approvalCall')) return false;
+  assert.ok(Object.hasOwn(q.metadata ?? {}, 'modular-agent.approvalCall'), `${surface} approval interrupt carries modular-agent.approvalCall`);
   assert.deepEqual(q.metadata['modular-agent.approvalCall'], expected, `${surface} approvalCall matches the exact approval`);
-  return true;
 }
 
 export function answer(run, expected) {
