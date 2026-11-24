@@ -102,6 +102,72 @@ async def test_thread_listing_only_returns_committed_kept_sessions(tmp_path, dur
             ]
 
 
+async def test_waiting_approval_on_returning_presence(tmp_path):
+    effects = []
+
+    @tool
+    async def bump(amount: int) -> str:
+        """Count once."""
+        effects.append(amount)
+        return "done"
+
+    a, token = principal(tmp_path, rights=("input", "watch", "tools", "approve"))
+    async with create_agent(
+        project=tmp_path,
+        data_dir=tmp_path / "store",
+        durability="kept",
+        providers=[
+            scripted_provider(
+                [{"toolCalls": [{"name": "bump", "input": {"amount": 1}}]}, {"text": "done"}]
+            )
+        ],
+        tools=[bump],
+        approval="all",
+        late_answers_start_turns=True,
+        max_approval_wait_ms=60_000,
+        settings={"approvalWait": "untilDeadline"},
+    ) as agent:
+        listener = await agent.serve_agui(listen="127.0.0.1:0", actors=[a])
+        async with AsyncClient(
+            base_url=listener.url + "/agui/v1/",
+            headers={"Authorization": "Bearer " + token},
+            trust_env=False,
+        ) as client:
+            sid = await new(client)
+            first = events(await client.post("run", json=prompt(sid)))
+            assert first[-1]["outcome"] == {"type": "success"}
+            assert not any(e["type"].startswith("TOOL_CALL") for e in first)
+            [listing] = (await client.get("threads")).json()["threads"]
+            assert listing["waiting"] == {"questions": 1, "toolCalls": 0, "turn": "none"}
+            path = "threads/" + sid
+            assert (await client.get(path)).json()["waiting"] == {"questions": [], "toolCalls": []}
+            async with client.stream("GET", path + "/presence") as stream:
+                assert stream.status_code == 200
+                snapshot = (await client.get(path)).json()
+                [q] = snapshot["waiting"]["questions"]
+                assert q["reason"] == "approval" and q["toolCallId"] and q["expiresAt"]
+                assert "bump" in q["message"] and "amount" in q["message"]
+                assert not effects
+                reply = await client.post(
+                    "run",
+                    json=prompt(
+                        sid,
+                        runId="answer",
+                        messages=snapshot["messages"],
+                        resume=[
+                            {
+                                "interruptId": q["id"],
+                                "status": "resolved",
+                                "payload": {"allow": True},
+                            }
+                        ],
+                    ),
+                )
+                assert events(reply)[-1]["outcome"] == {"type": "success"}
+                assert effects == [1]
+        await listener.close()
+
+
 async def test_preflight_does_not_need_identity_or_admit_work(tmp_path):
     origin = "https://allowed.invalid"
     async with service(tmp_path, server={"origins": [origin]}) as (agent, client):

@@ -326,9 +326,24 @@ class Turns:
                 origin = (start["data"].get("source") or {}).get("continuesTurnId") or start.get(
                     "wire_fields", {}
                 ).get("continuesTurnId")
-                open_calls = await self._tools(
-                    sid, turn, "late:" + turn, calls, tools, continuation_of=origin
+                inherited = next(
+                    (
+                        e["step"]
+                        for e in es
+                        if e.get("call") in resume
+                        and e["kind"] == "tool_deferred"
+                        and e.get("step")
+                    ),
+                    None,
                 )
+                if inherited:
+                    ot.step_start(inherited)
+                try:
+                    open_calls = await self._tools(
+                        sid, turn, "late:" + turn, calls, tools, continuation_of=origin
+                    )
+                finally:
+                    ot.step_end()
             # Replay journal decisions, not model requests or completed effects.
             while not open_calls:
                 tools = await self._definitions(sid, turn)
@@ -601,7 +616,10 @@ class Turns:
 
     async def _recovered_handoffs(self, sid, turn):
         calls = [
-            e["call"] for e in await self._entries(sid, turn=turn, kind=HANDOFF, fields=["call"])
+            e["call"]
+            for e in await self._entries(
+                sid, turn=turn, kinds=[HANDOFF, "tool_deferred"], fields=["call"]
+            )
         ]
         if not calls:
             return []
@@ -859,7 +877,7 @@ class Turns:
         return step
 
     async def _result(self, sid, turn, step, call, answer):
-        if answer.get("interface"):
+        if answer.get("interface") or answer.get("gate_checkpoint"):
             return  # The Harness owns the checkpoint and terminal result.
         if answer.get("open"):
             pending = answer
@@ -1042,6 +1060,8 @@ class Turns:
                     "definition": definition,
                 },
             )
+            if terminal := gate.get("wait_terminal"):
+                return terminal
             authority = await self.api.session(
                 "authority", session=sid, actor=call["actor"], ceiling=call.get("authority")
             )
@@ -1052,7 +1072,15 @@ class Turns:
             if "tools" not in authority:
                 gate = {**gate, "refused": True, "reason": "Actor lacks authority: tools"}
             if gate.get("open") and not gate.get("refused") and not gate.get("pending"):
-                return unknown if replay else {"open": True, "request": gate["request"]}
+                return (
+                    unknown
+                    if replay
+                    else {
+                        "open": True,
+                        "request": gate["request"],
+                        **({"gate_checkpoint": True} if gate.get("gate_checkpoint") else {}),
+                    }
+                )
             caller = "plugin" if call.get("parentCallId") else call.get("initiator", "model")
             if definition and caller not in definition.get("callers", []):
                 gate = {**gate, "refused": True, "reason": "Tool does not allow this initiator"}
@@ -1072,10 +1100,11 @@ class Turns:
                     if reply.get("declined"):
                         gate = {**gate, "refused": True, "reason": reply.get("reason", "Declined")}
             if gate.get("refused"):
-                ot.tool_disposition(sid, turn, step, call, definition, {"status": "refused"})
+                status = gate.get("wait_status", "refused")
+                ot.tool_disposition(sid, turn, step, call, definition, {"status": status})
                 if replay:
                     return unknown
-                answer.update(status="refused", content=content(gate.get("reason", "Refused")))
+                answer.update(status=status, content=content(gate.get("reason", "Refused")))
             elif definition is None:
                 if call.get("parentCallId"):
                     answer["status"] = "refused"
@@ -1111,6 +1140,11 @@ class Turns:
                         e["id"] for e in await self._entries(sid, call=call["id"], kind="tool_call")
                     ],
                 )
+
+                if invocation.get("denied"):
+                    answer = {"status": invocation["denied"], "content": []}
+                    ot.tool_disposition(sid, turn, step, call, definition, answer)
+                    return answer
 
                 async def progress(piece):
                     await self.api.event(
@@ -1191,11 +1225,17 @@ class Turns:
     async def _settle(
         self, sid, turn, cancelled=False, *, prior_starts=(), preserve_interface=False
     ):
+        inherited = {
+            cid
+            for start in await self._entries(sid, turn=turn, kind="turn_start")
+            for cid in start["data"].get("continuationCalls", [])
+        }
+
         async def call_records():
             # Results can settle in a later turn. Select by the original call
             # IDs, not by the terminal record's turn.
             responses = await self._entries(sid, turn=turn, kind="response")
-            ids = {c["id"] for e in responses for c in e["data"].get("calls", [])}
+            ids = inherited | {c["id"] for e in responses for c in e["data"].get("calls", [])}
             ids.update(
                 e["call"]
                 for e in await self._entries(
@@ -1236,7 +1276,7 @@ class Turns:
                         )
                         existing.add(c["id"])
                         es.append(added)
-        deferred = {e["call"] for e in es if e["kind"] == "tool_deferred"}
+        deferred = {e["call"] for e in es if e["kind"] == "tool_deferred" and e.get("turn") == turn}
         for e in es:
             if e.get("call") in handed_off or (
                 not cancelled and e.get("call") in deferred and e.get("call") not in receipts
@@ -1244,7 +1284,7 @@ class Turns:
                 continue
             if (
                 e["kind"] != "tool_call"
-                or e.get("turn") != turn
+                or (e.get("turn") != turn and e["call"] not in inherited)
                 or e["call"] in done
                 or e["data"].get("parentCallId")
             ):

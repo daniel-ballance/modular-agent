@@ -442,9 +442,18 @@ class Runtime(Turns, Plugin):
             )
         for e in await self._pending(sid):
             await self._return(sid, e)
-        await self.api.session("invalidate", session=sid, reason="cancelled")
+        preserve = d.get("preserve_waits", False)
+        await self.api.session(
+            "invalidate", session=sid, reason="cancelled", preserve_waits=preserve
+        )
         es = await self._entries(sid)
         done = {e.get("call") for e in es if recorded_as(e, "tool_result")}
+        if preserve:
+            done.update(
+                e.get("call")
+                for e in es
+                if e["kind"] == "question_open" and e["data"].get("approvalWait") == "untilDeadline"
+            )
         for e in es:
             if e["kind"] == "tool_deferred" and e["call"] not in done:
                 await self._result(
@@ -501,6 +510,9 @@ class Runtime(Turns, Plugin):
             if e["kind"] == "turn_end"
             and interface_calls.intersection(e["data"].get("open_calls", ()))
         }
+        interface_origins.update(
+            q.get("turn") for q in qs if q.get("approvalWait") == "untilDeadline"
+        )
         groups = {}
         for cid, entry in deferred.items():
             groups.setdefault(entry.get("turn"), []).append(cid)
@@ -628,7 +640,10 @@ class Runtime(Turns, Plugin):
 
     async def _close(self, d):
         sid = d["session"]
-        await self.cancel(d, None)
+        state = await self.api.session("get", session=sid, include_entries=False)
+        await self.cancel(
+            {**d, "preserve_waits": bool(state.get("closing") and not state.get("busy"))}, None
+        )
         if closing := self.closing_history.get(sid):
             # Waiting prompts may wake after the Harness removes the session.
             closing.set_result(await self.api.session("input_outcomes", session=sid))

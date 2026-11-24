@@ -49,11 +49,24 @@ def summarize(
     for q in question_state(branch).values():
         if q["kind"] == "secret" or {"answer", "selected", "closed"}.intersection(q):
             continue
-        if q["kind"] == "approval" and (q["id"] not in approval_views or q["turn"] in ended):
+        if q.get("approvalWait"):
+            entry = harness.waiting_request(state, q["call"])
+            if (
+                not entry
+                or not harness.wait_ended(branch, entry)
+                or harness.wait_reason(state, entry)
+            ):
+                continue
+        elif q["kind"] == "approval" and (q["id"] not in approval_views or q["turn"] in ended):
             continue
         if live_questions is not None and q["turn"] not in ended and q["id"] not in live_questions:
             continue
-        if not q.get("park") and q.get("deadline") and datetime.fromisoformat(q["deadline"]) <= now:
+        if (
+            not q.get("approvalWait")
+            and not q.get("park")
+            and q.get("deadline")
+            and datetime.fromisoformat(q["deadline"]) <= now
+        ):
             continue
         if any(eligible_question(q, aid, allowed) for aid, allowed in responders.items()):
             questions += 1

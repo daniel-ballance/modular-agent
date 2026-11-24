@@ -188,6 +188,11 @@ class HostedRuntime(Runtime):
                 method = "resumeTurn"
             elif resume or queued.get("interface_continuation"):
                 params["calls"] = scope.calls(await scope.entries(), resume)
+                if params["calls"] and (step := params["calls"][0].get("stepId")):
+                    scope.traced_step = step
+                    scope.step_span = ot.begin(
+                        "modular_agent.step", ot.attrs(sid, turn, step), parent=scope.trace_parent
+                    )
                 method = "continueOpenCalls"
             else:
                 method = "runTurn"
@@ -391,6 +396,9 @@ class TurnHost:
             )
             c["safeToRepeat"] = bool(
                 prior
+                and not self.runtime.plugin.h.waiting_request(
+                    self.runtime.plugin.h.sessions[self.sid], cid
+                )
                 and source
                 and prior["data"].get("source") == source
                 and prior["data"].get("definition") == wire_definition
@@ -995,6 +1003,14 @@ class TurnHost:
             # Use only transformed input, never a handler's change to caller identity.
             call = {**d["call"], "input": a["call"]["input"]}
             value["call"] = call_out(call)
+            if result := a.get("wait_terminal"):
+                self.gating.discard(cid)
+                self.results[cid] = result_out({**result, "call": cid})
+                return {
+                    "value": value,
+                    "refused": "Call already settled",
+                    "result": self.results[cid],
+                }
             if "checked_input" in a and a["checked_input"] != call["input"]:
                 a = {**a, "refused": True, "reason": "Tool input changed after approval"}
             if a.get("open") and isinstance(a.get("pending"), dict) and not a.get("refused"):
@@ -1012,8 +1028,14 @@ class TurnHost:
                 else:
                     a = {**a, "open": False}
             if a.get("refused"):
-                return await self.refuse_tool(value, call, d["step"], a.get("reason", "Refused"))
-            if a.get("open") and a.get("request"):
+                return await self.refuse_tool(
+                    value,
+                    call,
+                    d["step"],
+                    a.get("reason", "Refused"),
+                    a.get("wait_status", "refused"),
+                )
+            if a.get("open") and a.get("request") and not a.get("gate_checkpoint"):
                 await self.append(
                     "tool_deferred", step=d["step"], call=cid, data={"requestIds": [a["request"]]}
                 )
@@ -1077,8 +1099,9 @@ class TurnHost:
                 result["refused"] = saved["decision"]["refuse"]
             return result
 
-    async def refuse_tool(self, value, call, step, reason):
-        result = {"status": "refused", "content": content(reason)}
+    async def refuse_tool(self, value, call, step, reason, status="refused"):
+        ot.tool_disposition(self.sid, self.turn, step, call, None, {"status": status})
+        result = {"status": status, "content": content(reason)}
         if self.unrepeated(call["id"]):
             result = {"status": "outcome_unknown", "content": content(UNKNOWN)}
         terminal = await self.finish_tool(call, step, result)
@@ -1200,6 +1223,11 @@ class TurnHost:
                 ],
             )
 
+            if started.get("denied"):
+                result = {"status": started["denied"], "content": []}
+                ot.tool_disposition(self.sid, self.turn, step, call, definition, result)
+                return await self.finish_tool(call, step, result)
+
             rights = await self.runtime._turn_authority(self.sid, self.turn, call["actor"])
             if "tools" not in set(rights) & set(
                 call["authority"]
@@ -1276,6 +1304,8 @@ class TurnHost:
             "position_move",
             "tool_started",
             "toolStarted",
+            "inputRequest",
+            "inputAnswer",
             "toolPending",
             "model_started",
             "modelRequest",
@@ -1285,7 +1315,7 @@ class TurnHost:
             HANDOFF,
             ot.TURN_TRACE,
             ot.DISCLOSURE,
-        } or kind.startswith(("question_", "job_")):
+        } or kind.removeprefix("python.").startswith(("question_", "job_")):
             raise WireError("Entry kind is owned by the host", "invalid_request")
         sources = list(entry.get("sources") or [])
         if kind == "response":
@@ -1304,7 +1334,9 @@ class TurnHost:
                 return prior
             sources = [expected[1]]
             data = response_in(message)
-        elif kind == "tool_result" and data.get("status") == "notStarted":
+        elif (
+            kind == "tool_result" and data.get("status") == "notStarted" and cid not in self.results
+        ):
             raise WireError("Only the host can settle an abandoned call", "invalid_request")
         elif kind == "tool_result" and cid in self.results:
             result = self.results[cid]
@@ -1431,7 +1463,9 @@ class TurnHost:
             self.step_span = self.traced_step = None
 
     async def callback(self, method, p, key):
-        step = p.get("stepId") or self.step
+        step = (
+            p.get("stepId") or (p.get("call") or {}).get("stepId") or self.step or self.traced_step
+        )
         if (
             method in {"prepareStep", "model"}
             and step in self.allocated

@@ -54,6 +54,11 @@ def question(q):
     return {
         **{k: q[k] for k in ("id", "kind", "question")},
         **({"toolCallId": q["call"]} if q.get("call") else {}),
+        **(
+            {"approvalWait": "untilDeadline", "deadlineAt": q["deadlineAt"]}
+            if q.get("approvalWait") == "untilDeadline"
+            else {}
+        ),
         **({"call": q["approval_call"]} if q.get("approval_call") else {}),
         **({"options": q["options"]} if q["kind"] == "choice" else {}),
         **({"details": q["details"]} if isinstance(q.get("details"), str) else {}),

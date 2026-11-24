@@ -8,13 +8,22 @@ import os
 import secrets
 import signal
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from . import Agent, AgentError, JsonObject, ProcessPlugin, PromptResult, ServicePlugin, Session
+from . import (
+    Agent,
+    AgentError,
+    JsonObject,
+    Plugin,
+    ProcessPlugin,
+    PromptResult,
+    ServicePlugin,
+    Session,
+)
 from ._event_types import EntryEvent
 from ._history import HistoryStore, file_history, http_history
 from ._scenario_telemetry import TelemetryRun, exporter
@@ -62,7 +71,10 @@ def _config(name: str, directory: Path) -> JsonObject:
 
 
 class _Services:
-    def __init__(self, command: list[str], directory: Path) -> None:
+    def __init__(
+        self, command: list[str], directory: Path, *, separate_groups: bool = True
+    ) -> None:
+        self.separate_groups = separate_groups
         self.command = command
         self.directory = directory
         self.children: list[asyncio.subprocess.Process] = []
@@ -88,8 +100,9 @@ class _Services:
                     for k in ("PATH", "LANG", "LC_ALL", "TZ", "TMPDIR")
                     if k in os.environ
                 },
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
-                start_new_session=True,
+                start_new_session=self.separate_groups,
             )
             self.children.append(proc)
             assert proc.stdout is not None
@@ -126,6 +139,9 @@ async def _agent(
     services: list[ServicePlugin] | None = None,
     history: HistoryStore | None = None,
     telemetry: TelemetryRun | None = None,
+    *,
+    controls: Sequence[Plugin] = (),
+    agent_name: str | None = None,
 ) -> Agent:
     options = scenario["agent"]
     project = directory / "project"
@@ -149,8 +165,10 @@ async def _agent(
         approval=options.get("approval"),
         settings=options.get("settings"),
         several_actors=options.get("severalActors", False),
-        plugins=plugins,
-        agent_name=telemetry.request["agentName"] if telemetry else None,
+        plugins=[*plugins, *controls],
+        max_approval_wait_ms=options.get("maxApprovalWaitMs"),
+        late_answers_start_turns=options.get("lateAnswersStartTurns", False),
+        agent_name=telemetry.request["agentName"] if telemetry else agent_name,
         process_plugins=processes or None,
         service_plugins=services,
         on_question=answers(options["answers"]) if "answers" in options else None,
@@ -290,6 +308,25 @@ async def run_scenario(
     )
     with scratch as temp:
         directory = Path(temp)
+        if "approvalsOutlastTurns" in scenario.get("requires", {}):
+            kit = path.parents[2] / "waiting.mjs"
+            if not kit.exists():
+                kit = Path(Path.cwd() / "conformance/sdk/waiting.mjs")
+            proc = await asyncio.create_subprocess_exec(
+                "node",
+                Path(__file__).resolve().parents[1] / "scripts/waiting-scenario.mjs",
+                sys.executable,
+                kit,
+                directory,
+                path,
+                placement,
+                *command,
+            )
+            return (
+                []
+                if await proc.wait() == 0
+                else [f"{path.stem} ({placement}): waiting scenario failed"]
+            )
         pool = _Services(command, directory) if placement.startswith("service:") else None
         process_command = command if pool is None else []
         service: asyncio.subprocess.Process | None = None
@@ -492,7 +529,10 @@ async def run_scenario(
 async def _main(files: list[str]) -> int:
     repo = Path(__file__).resolve().parents[2]
     paths = [Path(f).resolve() for f in files] or sorted(
-        (repo / "conformance/sdk/scenarios").glob("*.json")
+        [
+            *(repo / "conformance/sdk/scenarios").glob("*.json"),
+            *(repo / "conformance/sdk/fixtures/waiting-approval").glob("*.json"),
+        ]
     )
     success, failure = 0, 0
     for placement, command in placements(repo):
@@ -545,6 +585,22 @@ if __name__ == "__main__":
                     telemetry_run,
                 )
             )
+    elif len(sys.argv) > 1 and sys.argv[1] == "--waiting-probe":
+
+        async def probe() -> None:
+            async with test_agent(
+                script=[],
+                durability="kept",
+                data_dir=sys.argv[2],
+                approval="all",
+                several_actors=True,
+                late_answers_start_turns=True,
+                max_approval_wait_ms=100,
+            ) as agent:
+                await agent.session()
+                print(json.dumps(agent.declaration()))
+
+        asyncio.run(probe())
     elif telemetry_run:
         with exporter(telemetry_run.endpoint), telemetry_run.observe():
             raise SystemExit(asyncio.run(_telemetry_main(telemetry_run)))

@@ -11,6 +11,19 @@ STATUS_IN = {v: k for k, v in STATUS_OUT.items()}
 HINTS = {"read_only": "readOnly", "safe_to_repeat": "safeToRepeat", "external": "openWorld"}
 
 
+def json_equal(left, right):
+    """Shared JSON equality. Python's True == 1 is not JSON equality."""
+    if type(left) in (int, float) and type(right) in (int, float):
+        return float(left) == float(right)
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(json_equal(v, right[k]) for k, v in left.items())
+    if isinstance(left, list):
+        return len(left) == len(right) and all(json_equal(a, b) for a, b in zip(left, right))
+    return left == right
+
+
 def tool_out(t):
     return {
         **{k: v for k, v in t.items() if k not in {"schema", "target"}},
@@ -450,6 +463,7 @@ def entry_out(e):
             "parentId": e["parent"],
             "kind": e.get("data", {}).get("originalKind", kind),
             "erased": True,
+            **({"requestId": e["data"]["requestId"]} if e.get("data", {}).get("requestId") else {}),
             **{TAGS[k]: e[k] for k in ("turn", "step", "call", "job") if e.get(k) is not None},
             **({"sources": e["copies"]} if e.get("data", {}).get("interfaceErasure") else {}),
             **{
@@ -544,10 +558,13 @@ def entry_out(e):
                 **d,
                 "id": d["id"],
                 "sessionId": e["session"],
-                "answerable": True,
+                "answerable": d.get("answerable", True),
+                **({"askedBy": d["asker"]} if d.get("approvalWait") else {}),
                 "toolCallId": d.get("call"),
                 "credential": d.get("name"),
-                "timeLimitMs": d["timeout"] * 1000 if d.get("timeout") is not None else None,
+                "timeLimitMs": d.get(
+                    "timeLimitMs", d["timeout"] * 1000 if d.get("timeout") is not None else None
+                ),
                 "whenTimeLimit": "leaveOpen" if d.get("park") else "decline",
             },
         }
@@ -578,6 +595,8 @@ def entry_out(e):
                 r["data"]["reason"] = d.get("reason", "noLongerAnswerable")
         else:
             r["data"]["value"] = value
+            if "approvalView" in d:
+                r["data"]["approvalView"] = d["approvalView"]
     elif kind == "actorJoined" and e["kind"] == "authority":
         r["data"] = {
             "actor": {"id": d["subject"], "kind": d.get("kind", "user"), "rights": d["authority"]}
@@ -763,7 +782,16 @@ def entry_in(e, sid, default_actor="user"):
             **details,
             "key": q.get("key") or q["id"],
             "signature": q.get("signature") or json.dumps(details, sort_keys=True),
-            "asker": q.get("asker", e["writer"]),
+            "asker": q.get("askedBy", q.get("asker", e["writer"])),
+            **({"restrictedResponders": q["answerers"]} if "answerers" in q else {}),
+            **(
+                {
+                    "approval_registration": {k: d[k] for k in ("call", "source", "definition")},
+                    "approval_call": {k: d["call"][k] for k in ("name", "input")},
+                }
+                if all(k in d for k in ("call", "source", "definition"))
+                else {}
+            ),
             "actor": q.get("actor", result["actor"]),
             "authority": q.get("authority"),
             "responders": q.get("responders", [default_actor]),

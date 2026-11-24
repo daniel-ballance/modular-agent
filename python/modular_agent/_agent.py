@@ -21,7 +21,7 @@ from referencing import Registry
 from ma_approval import Approval as _Approval
 from ma_core import plain
 from ma_core import telemetry as ot
-from ma_core.wire import model_out, settings_in, settings_out
+from ma_core.wire import json_equal, model_out, settings_in, settings_out
 from ma_durable import Durable
 from ma_harness import Harness
 from ma_harness.authority import PERMISSIONS, read_tenants
@@ -81,6 +81,7 @@ from ._types import (
     ErrorCode,
     JsonObject,
     ModelRef,
+    Question,
     QuestionHandler,
     Tenant,
 )
@@ -246,6 +247,7 @@ class Agent:
         scratch: TemporaryDirectory[str],
     ) -> None:
         self._h = harness
+        harness.approval_routes["sdk"] = self._sdk_approval_rights
         self._api = harness.api()
         self._project = project
         self._settings = settings
@@ -309,12 +311,37 @@ class Agent:
 
     async def _set_handler(self, sid: str, handler: QuestionHandler | None) -> None:
         self._handlers[sid] = handler
+        if session := self._sessions.get(sid):
+            self._h.forget_waits(sid, token=session._delivery_token)
         await self._call(
             "questions", "connect" if handler else "disconnect", session=sid, actor="user"
         )
+        await self._offer_waits(sid)
+
+    async def _sdk_approval_rights(
+        self, sid: str, entry: dict[str, Any], actor: str, principal: str
+    ) -> set[str]:
+        if principal != "user" or self._h.sessions[sid]["project"] != str(self._project):
+            return set()
+        q = {
+            **entry["data"],
+            "deadline": entry["data"].get("deadlineAt"),
+            "entry": entry["id"],
+            "answerable": True,
+        }
+        visible = await self._session(
+            "view", session=sid, recipient=actor, type="reply", method="questions", value=q
+        )
+        return PERMISSIONS if json_equal(q, visible) else set()
 
     async def _answer(
-        self, sid: str, question_id: str, answer: Answer, actor: str = "user"
+        self,
+        sid: str,
+        question_id: str,
+        answer: Answer,
+        actor: str = "user",
+        *,
+        delivery_token: str | None = None,
     ) -> None:
         value = (
             "allow"
@@ -359,6 +386,7 @@ class Agent:
             request=question_id,
             value=value,
             declined=answer.kind == "decline",
+            delivery_token=delivery_token,
             **acting,
             reason=answer.reason,
         )
@@ -386,6 +414,8 @@ class Agent:
             d["kind"] == "input_request_opened"
             and (handler := self._handlers.get(sid, self._handler)) is not None
         ):
+            if d["request"].get("approvalWait"):
+                return
             q = _question(sid, d["request"])
             key = (sid, q.id)
             if key in self._question_tasks:
@@ -405,6 +435,28 @@ class Agent:
                     self._question_tasks.pop(key, None)
 
             self._question_tasks[key] = asyncio.create_task(answer())
+
+        if d["kind"] == "turn_ended":
+            await self._offer_waits(sid)
+
+    async def _offer_waits(self, sid: str) -> None:
+        handler = self._handlers.get(sid, self._handler)
+        if not handler or not self._h.max_approval_wait_ms:
+            return
+        session = self._attach(sid)
+        for q in await session.questions(present=True):
+            key = sid, q.id
+            if q.approval_wait and q.answerable and key not in self._question_tasks:
+
+                async def respond(q: Question = q, key: tuple[str, str] = key) -> None:
+                    try:
+                        await session.answer(q.id, await _reply(handler, q))
+                    except AgentError:
+                        pass
+                    finally:
+                        self._question_tasks.pop(key, None)
+
+                self._question_tasks[key] = asyncio.create_task(respond())
 
     async def session(
         self,
@@ -461,6 +513,7 @@ class Agent:
                 old._closed = True
                 self._detached(id)
             await self._session("open", session=id, actor="user")
+            await self._offer_waits(id)
             await self._call("runtime", "wait", session=id)
             return self._attach(id)
 
@@ -623,6 +676,8 @@ class Agent:
         environment = parts[self._h.capabilities["environment"][0]]
         store = parts[self._h.capabilities["history"][0]]
         value.pop("plugins", None)
+        if self._h.max_approval_wait_ms:
+            value["approvalsOutlastTurns"] = True
         value.update(
             waitingThroughRestart=bool(
                 value["waitingThroughRestart"] and self._late_answers and "questions" in parts
@@ -713,13 +768,14 @@ class Agent:
         project_mcp: Callable[[Path], Sequence[JsonObject]] | None,
     ) -> tuple[Sequence[AcpActor], Callable[[Any, AcpActor], Awaitable[None]]]:
         kinds: dict[str, str] = {}
-        from ._acp_interface import _AcpConnections, _Interface
+        from ._acp_interface import _AcpConnections, _Interface, install_poll_route
 
         connections = _AcpConnections()
         principals = actors
         scopes = {}
+        routes = {}
         try:
-            for entry in principals:
+            for index, entry in enumerate(principals):
                 actor = entry["actor"]
                 aid, kind = actor["id"], actor["kind"]
                 if not _actor_id(aid) or kind not in ("user", "host", "agent", "program"):
@@ -728,6 +784,10 @@ class Agent:
                     raise ValueError("Tokens for the same actor id must agree on kind")
                 kinds[aid] = kind
                 scopes[id(entry)] = _acp_scope(entry), _acp_rights(actor["rights"])
+                routes[id(entry)] = f"acp:ws:{index}:{aid}"
+                policy = (routes[id(entry)], aid, kind, *scopes[id(entry)])
+                install_poll_route(self, *policy)
+                connections.poll_policies.append(policy)
             if not principals:
                 raise ValueError("WebSocket ACP requires at least one configured actor")
         except (TypeError, ValueError, KeyError) as exc:
@@ -745,6 +805,7 @@ class Agent:
                 connections=connections,
                 scope=scopes[id(entry)][0],
                 rights=scopes[id(entry)][1],
+                poll_route=routes[id(entry)],
             )
             await self._h.attach_interface(interface)
             try:
@@ -1024,6 +1085,7 @@ def create_agent(
     agent_name: str | None = None,
     job_reports_start_turns: bool = False,
     late_answers_start_turns: bool = False,
+    max_approval_wait_ms: int | None = None,
     resource_reservations: Mapping[str, Mapping[str, int]] | None = None,
 ) -> AgentStart:
     async def build() -> Agent:
@@ -1383,6 +1445,28 @@ def create_agent(
                 durability == "durable"
             ):
                 raise ValueError("Runtime does not match the requested durability")
+            if max_approval_wait_ms is not None:
+                declaration = agent.declaration()
+                if (
+                    type(max_approval_wait_ms) is not int
+                    or not 0 < max_approval_wait_ms < 2**53
+                    or "approval" not in h.plugins
+                    or not all(
+                        declaration.get(k)
+                        for k in (
+                            "portableSessions",
+                            "questionsOutlastTurns",
+                            "lateAnswersStartTurns",
+                        )
+                    )
+                    or not h.plugins[runtime_owner].declarations.get("interface_tools")
+                ):
+                    raise AgentError(
+                        ErrorCode.INVALID_COMPOSITION,
+                        "Waiting approval needs a positive Duration, kept history, approval and a Runtime with late and empty-call continuations",
+                    )
+                h.max_approval_wait_ms = max_approval_wait_ms
+            h.validate_wait_setting(defaults)
             models = await agent.models()
             choices = {f"{m['provider']}/{m['id']}" for m in models}
             selected = str(model) if model is not None else defaults.get("model")

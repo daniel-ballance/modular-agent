@@ -102,8 +102,12 @@ class Tools(Plugin):
     async def run(self, d, emit):
         call = d["call"]
         try:
-            tool = next(
-                (t for t in await self.definitions(d, emit) if t["name"] == call["name"]), None
+            tool = (
+                d["definition"]
+                if d.get("_checked_definition")
+                else next(
+                    (t for t in await self.definitions(d, emit) if t["name"] == call["name"]), None
+                )
             )
             if not tool:
                 raise AgentError("Unknown tool")

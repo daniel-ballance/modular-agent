@@ -389,6 +389,9 @@ class Exchange:
                     session=v.sid,
                     actor=v.actor,
                     request=q["id"],
+                    delivery_token=self.p.route
+                    if self.p and self.p is v.binding.presence.get(v.key)
+                    else None,
                     declined=declined,
                     value="declined" if declined else value,
                 )
@@ -427,7 +430,7 @@ class Exchange:
             staged.append(cid)
             for item in triad(cid, request["name"], request["input"]):
                 frames += await self.frame(item, exact=True)
-        if staged:
+        if staged and outcome["type"] == "success":
             outcome["pendingToolCallIds"] = staged
         snap, cursor = await self.snapshot()
         end = await self.frame(event("RUN_FINISHED", **self.bounds, outcome=outcome), exact=True)
@@ -476,6 +479,8 @@ class Exchange:
             await self.write(snap)
             v.remember(stamp)
         if kind == "input_request_opened":
+            if d["request"].get("approvalWait"):
+                return  # Offer this interrupt at completed turn end, never at publication.
             if not self.p or v.binding.presence.get(v.key) is not self.p:
                 return
             qid = d["request"]["id"]
@@ -577,10 +582,21 @@ class Exchange:
         elif kind == "turn_ended":
             require(d["outcome"] not in ("failed", "interrupted"), "unavailable")
             success = d["outcome"] == "completed"
+            waits = {}
+            if success and self.p and self.p is v.binding.presence.get(v.key):
+                waits = {
+                    qid: item
+                    for qid, item in (await v.questions(v.branch(), offer_waits=True)).items()
+                    if item[0].get("approvalWait") and item[0].get("turn") == self.turn
+                }
             await self.finish(
-                {"type": "success" if success else "cancelled"},
+                {"type": "interrupt", "interrupts": [i for _, i in waits.values()]}
+                if waits
+                else {"type": "success" if success else "cancelled"},
                 d.get("open_calls", []) if success else [],
             )
+            if self.p and self.p is v.binding.presence.get(v.key):
+                v.remember_approvals(self.p, waits)
         elif kind in ("job_started", "job_progress", "job_ended", "child_started", "child_ended"):
             name = {
                 "job_started": "jobStarted",
