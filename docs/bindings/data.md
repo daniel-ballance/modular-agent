@@ -292,7 +292,7 @@ Outcome is exactly one of `{ kind: "completed" }`, `{ kind: "cancelled" }`, `{ k
 
 A private kind MUST have a dot in its name, be namespaced by its writer and be non-model-visible in a portable session. A reader MUST keep private records. Portable reconstruction MUST NOT depend on their meaning.
 
-`TraceContext` is `{ traceparent: string, tracestate?: string }` in W3C format. These two fields are private Harness metadata, not content or authority. A legacy reader keeps the unknown field and dotted kind as inert data. Readers that recognize them ignore invalid context without rejecting otherwise valid history. The usual envelope and topology checks still apply. See [Restart](../telemetry.md#restart).
+`TraceContext` is `{ traceparent: string, tracestate?: string }` in W3C format. These two fields are private Harness metadata, not content or authority. Readers that do not use trace context keep it as inert data. Readers that recognize them ignore invalid context without rejecting otherwise valid history. The usual envelope and topology checks still apply. See [Restart](../telemetry.md#restart).
 
 ### Recording order and ownership
 
