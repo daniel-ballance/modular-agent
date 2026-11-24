@@ -1,0 +1,14 @@
+{
+  "scenario": "waiting-approval-default",
+  "about": "With no present approver, live approval still refuses on a capable agent.",
+  "rules": ["contracts.md#approvals-that-wait","bindings/data.md#waiting-approval-records","sdk/api.md#questions"],
+  "requires": {"approvalsOutlastTurns":true},
+  "agent": {"durability":"kept","plugins":["counter"],"approval":"all","maxApprovalWaitMs":100,"settings":{}},
+  "model": [
+    {"toolCalls":[{"name":"bump","input":{"hold":false,"note":"kit-counter"}}]},
+    {"text":"Done."}
+  ],
+  "steps": [
+    {"prompt":"Bump the counter.","expect":{"outcome":"completed","openToolCalls":[],"recordCounts":{"toolStarted":0,"toolPending":0},"toolResults":[{"name":"bump","status":"refused"}],"count":0}}
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "scenario": "waiting-approval-policy-never",
+  "about": "Waiting does not change which calls the approval policy allows or refuses.",
+  "rules": ["contracts.md#approvals-that-wait","bindings/data.md#waiting-approval-records","sdk/api.md#questions"],
+  "requires": {"approvalsOutlastTurns":true},
+  "agent": {"durability":"kept","plugins":["counter"],"approval":"never","maxApprovalWaitMs":100,"settings":{"approvalWait":"untilDeadline"}},
+  "model": [
+    {"toolCalls":[{"name":"bump","input":{}}]},
+    {"text":"Done."}
+  ],
+  "steps": [
+    {"prompt":"Call the tool.","expect":{"outcome":"completed","openToolCalls":[],"toolResults":[{"name":"bump","status":"refused"}],"recordCounts":{"inputRequest":0,"toolPending":0,"toolStarted":0},"count":0}}
+  ]
+}

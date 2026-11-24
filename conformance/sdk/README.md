@@ -39,13 +39,40 @@ SDK specification 0.1 after the fifth build round. Each runner ran all seventeen
 
 612 runs, all passed. The crash scenarios killed the agent's whole process group, and each service's group, with `SIGKILL` in every cell. Earlier rounds passed the same matrix with fewer scenarios or placements: 140 runs with the first seven scenarios, 220 with eleven, 280 with fourteen and no services, 504 with fourteen and services.
 
+## Waiting approval scenarios
+
+The [28 conditional fixtures](fixtures/waiting-approval/) use the [shared format](../../docs/sdk/testing.md#the-format). Enumerate the JSON files in this subdirectory **in addition to** the unconditional scenarios. Do not treat them as plugin launch manifests. [waiting.mjs](waiting.mjs) provides a reference interpreter for the new steps and expectations. Run `npm test` here to check the fixture contracts. This is not a result from a language runner.
+
+**Opt-in.** Probe a kept, compatible test composition with an approval gate, explicit positive `maxApprovalWaitMs` and the planned tool placement. Read its session declaration, not its version or language name. Run the fixture when **every** key in `requires` is true; otherwise report the scenario, placement and missing declaration as skipped. Probe with several actors enabled for fixtures that require that feature. Use this probe even for the controls that deliberately use an invalid composition or omit the maximum. The fixture itself uses exactly its listed composition, no handler and no initial polling presence. Existing scenarios, including `approval-without-handler`, keep their existing requirements.
+
+| Group | Cases |
+|---|---|
+| Session and policy | Happy path (including a plain listing and duplicate decision); default and explicit live; unsupported opt-in; invalid maximum and incompatible composition; off, never and ask/read-only |
+| Cutoffs | Decline, shorter requested deadline, clamped deadline, timely allow whose dispatch reaches the deadline |
+| Rechecks | Changed source, whole definition or final input; changed display after allow; worker loses tools; approver loses approve; separate minimal approver; redacted delivery on just one handle |
+| Reopen | Each of kept and durable at origin end, answer commit and after effect; expiry while stopped |
+
+Use the normal in-process, process and service tool placements. Keep the clock, saved request, count file, store and committed batch boundaries across restarts. The Harness clock starts frozen at a representable epoch in milliseconds. Supply `agent.maxApprovalWaitMs` as an **operator** option, never a session setting. Set `agent.settings` at session creation. `fixture.requestedApprovalMs` supplies the approval gate's requested interval, absent for no shorter limit. `expectDeclaration` checks the actual case's declaration (omission counts as false for optional booleans). For `expectCreateError` compare its code and any supplied message substring. Never inject declarations or write a question, decision or start on behalf of the tested Harness.
+
+### Additional runner step kinds
+
+Retain one authenticated Session handle per `as` actor (`user` by default). Use `session.as(actorId)` for the fixture members. Reopen invalidates every old handle. Keep the immutable ID in the driver, **not** its right to answer. Never install a question handler to implement a step.
+
+| Step | Operation and expected observation |
+|---|---|
+| `poll: {present: boolean}` | Call ordinary `questions()` if false, `questions({present:true})` if true, on this handle. `expect.view` is `listed` (matching ID only), `exact` (one matching request, kind, call ID, exact name, full input, immutable text, wait marker and absolute deadline), `empty`, or `notAnswerable` (redacted, absent, withheld, or explicitly non-actionable). Never treat a listing as a delivery. |
+| `decide: "allow"\| "decline"` | Call `answer` on that handle with the saved request ID and the tagged answer, **without polling**. Compare `expect.accepted`. Normalize only an explicit negative acknowledgement or an SDK denial for this decision to false, not a timeout or fixture failure. An acknowledgment need not wait for dispatch. |
+| `clock: {deadlineOffsetMs: integer}` | Advance to the saved absolute deadline plus this signed offset. Never read wall time. Serialize due timers on the writer; do not wait for a held handoff. While stopped, only advance the test clock; the next writer reconciles. |
+| `barrier: {arm\|reached\|release: boundary}` | Arm a latch before starting the operation, await its observation, or release it. `afterAnswer` is after the answer commit, before taking ready work. `beforeGates` precedes re-running the original gate chain. `beforeHandoff` precedes the final checks and first start. `afterEffect` observes the counter write while the held invocation has no committed result. Keep controls independent of the held work. Never sleep in place of a latch. |
+| `change: object` | `setting` calls setSetting for the supplied key/value. `registration: "source"` refreshes the source ID for the same name/input/definition; `"definition"` changes only its description. Keep the tool available. `gateInput` makes a test hook return this different valid input on the continuation. `gateView: {actor,mode:"redact"}` changes only this recipient's approval output view. `removeRight: {actor,right}` narrows the recorded grant while the continuation waits. Do not bypass the SDK's rights, refresh or gate code. |
+| `stop: "close"\| "kill"` | Close the otherwise idle kept session and writer normally, or kill the agent and fixture process groups as in the existing crash scenarios. Reap before returning. Preserve the independent count file, frozen clock and store. A later `reopen: true` uses a new agent and fresh handles, not an old callback. |
+
+Check existing `count` against the actual counter file, including while a writer is stopped. New expectations:
+
+- `recordCounts: {kind:n,...}` is exact across the committed session, including zero. `openToolCalls` compares the PromptResult IDs in order, resolving `$call` to the bound original call. `toolResults: []` forbids a provisional result.
+- `parked: {timeLimitMs:n}` captures the immutable request, response and origin associations from the store. Check the request and pending checkpoint share a commit, the original call and registration match, the deadline equals ask time plus n, and the origin ended completed with the call open. There is no start, result, handoff or decision. On subsequent checks compare the request to the saved one **including IDs and deadline**.
+- `settled: {status,decision,actor?}` checks the one answer and result for that call. System expiry has no actor. An allow has the private proof and its ceiling. Exactly one continuation names the origin and last closure; no substitute question or new admission/input. A dispatched call starts once under that continuation with its old step/call IDs and both sources. For a refusal or expiry, check the factual pre-dispatch status, lineage and zero starts. Run these against the actual store, not a projected history or the model. [Shared assertions](../waiting/records.mjs) give the ID comparisons.
+
 ## Proposed, not yet written
-
-[ADR 0034](../../docs/adr/0034-approvals-that-wait.md) needs these [shared checks and runner extensions](../../docs/sdk/testing.md#planned-checks-for-approvals-that-wait). No scenario files or results exist for them yet.
-
-- **waiting-approval:** opt in, finish the turn with one open call and counter zero, return as a present approver, then count one initial dispatch in one continuation. Keep the live-only and unsupported cases as controls.
-- **waiting-approval-cutoff:** compare explicit decline, expiry while unanswered and an allow that reaches dispatch too late. No effect in any case; expiry of an unstarted call gives `notStarted`.
-- **waiting-approval-changed:** mutate the registration or final gated input, or revoke the worker or approver after allow. Expect `refused`, not a second question or a modified call.
-- **waiting-approval-reopen:** stop before the answer and again after commit in separate runs. Restore the same deadline, call and queue identity. Never inherit a live delivery; never repeat a dispatch with an unknown outcome.
 
 - **queued-cancel:** an input queued `after` a held call, then cancel, then a retry with the same key returns `handedBack` without another turn. Needs receipt expectations in the format.
