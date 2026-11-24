@@ -166,7 +166,7 @@ DirEntry is `{ name: string, kind: "file" | "directory" | "other" }`. `name` is 
 
 ## Actors
 
-Actor is `{ id: Id, kind: "user" | "host" | "agent" | "program", rights: Rights }`. A reader MUST interpret a recorded legacy `kind: "plugin"` as `program`. Rights is a set encoded as an array of Ids. A receiver MUST retain unknown rights as inert values and disregard them in authorization.
+Actor is `{ id: Id, kind: "user" | "host" | "agent" | "program", rights: Rights }`. Rights is a set encoded as an array of Ids. A receiver MUST retain unknown rights as inert values and disregard them in authorization.
 
 | Right | What it means |
 |---|---|
