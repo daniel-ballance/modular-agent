@@ -100,7 +100,6 @@ pub struct Harness {
     approval_maximum: std::sync::OnceLock<u64>,
     live_covers: covered_approvals::Dispatches,
     approval_audiences: RwLock<waiting_approvals::Audiences>,
-    model_provider_aliases: std::sync::OnceLock<&'static [(&'static str, &'static str)]>,
     tenants: RwLock<tenants::Tenants>,
     registry: RwLock<Registry>,
     points: BTreeMap<String, HookPoint>,
@@ -132,7 +131,6 @@ impl Harness {
             approval_maximum: Default::default(),
             live_covers: Default::default(),
             approval_audiences: Default::default(),
-            model_provider_aliases: Default::default(),
             tenants: RwLock::default(),
             registry: RwLock::new(registry),
             points,
@@ -172,29 +170,6 @@ impl Harness {
         }
         Operation::start(name, SpanKind::Internal, Some(scope), attrs, parent, links)
             .interrupted("modular_agent.turn.outcome")
-    }
-
-    /// Normalize old Provider ids supplied by a reference implementation
-    /// before session preparation or recovery, without rewriting history.
-    pub fn configure_model_provider_aliases(
-        &self,
-        aliases: &'static [(&'static str, &'static str)],
-    ) {
-        assert!(self.model_provider_aliases.set(aliases).is_ok());
-    }
-
-    fn normalize_model(&self, settings: &mut Value) {
-        let Some(aliases) = self.model_provider_aliases.get() else {
-            return;
-        };
-        let Some(model) = settings.get_mut("model") else {
-            return;
-        };
-        if let Some((provider, id)) = model.as_str().and_then(|model| model.split_once('/'))
-            && let Some((_, canonical)) = aliases.iter().find(|(alias, _)| *alias == provider)
-        {
-            *model = json!(format!("{canonical}/{id}"));
-        }
     }
 
     pub fn configure_reservations(&self, pool: Arc<ReservationPool>) -> Result<()> {
@@ -401,7 +376,6 @@ impl Harness {
             if self.max_approval_wait_ms().is_some() && defaults.get("approvalWait").is_none() {
                 defaults["approvalWait"] = json!("live");
             }
-            self.normalize_model(&mut defaults);
             let id = id();
             op.attr("gen_ai.conversation.id", id.clone());
             let lease = if provisional {
@@ -584,7 +558,6 @@ impl Harness {
                 json!("ask_always")
             };
         }
-        self.normalize_model(&mut data.settings);
         data.project = data.project.canonicalize()?;
         let previous_plugins = data.plugins.clone();
         data.plugins = self.registry.read().unwrap().names();
@@ -2830,10 +2803,9 @@ impl AgentApi for Harness {
             .get(session)
             .is_some_and(|s| s.active.is_some())
     }
-    fn settings(&self, scope: &Scope, mut patch: Value) -> Result<Value> {
+    fn settings(&self, scope: &Scope, patch: Value) -> Result<Value> {
         require(self, scope, "settings")?;
         self.validate_approval_wait(&patch)?;
-        self.normalize_model(&mut patch);
         ensure!(
             patch
                 .as_object()

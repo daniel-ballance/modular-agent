@@ -116,7 +116,7 @@ For approvals that wait, set a positive integer `approvalWaitMaxMs` in operator 
 
 `MODULAR_AGENT_DATA_DIR` puts the configuration files directly in that folder and puts the state in its `state/` subfolder. Without it, the XDG configuration and state variables take precedence over the paths above. Set `MODULAR_AGENT_CLAUDE_SIDECAR` to the Claude program's `dist/src/main.js` if it is not installed at `~/.local/share/modular-agent/sidecars/claude/dist/src/main.js`.
 
-The old ids `openai-codex` and `xai` still work in `--model`, `ma login`, `ma logout`, `settings.json`, `models.json` and reopened sessions. `ma` moves old login keys to the new ids the next time it writes `auth.json`. It refuses a login file readable by others. Every write and refresh uses the lock in `auth.lock` beside the file.
+The subscription Provider IDs are `chatgpt`, `grok` and `claude`. `ma` refuses a login file readable by others. Every write and refresh uses the lock in `auth.lock` beside the file.
 
 ### Client identity
 

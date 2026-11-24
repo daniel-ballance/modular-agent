@@ -62,25 +62,13 @@ pub struct LoginContents {
 #[derive(Clone)]
 pub struct SubscriptionLogins {
     path: PathBuf,
-    aliases: Vec<(&'static str, &'static str)>,
 }
 
 pub fn subscription_logins(path: impl Into<PathBuf>) -> SubscriptionLogins {
-    SubscriptionLogins {
-        path: path.into(),
-        aliases: Vec::new(),
-    }
+    SubscriptionLogins { path: path.into() }
 }
 
 impl SubscriptionLogins {
-    /// Compatibility for applications migrating older Provider ids. Lookups
-    /// prefer the canonical id; the next successful write removes the aliases.
-    #[doc(hidden)]
-    pub fn with_aliases(mut self, aliases: &[(&'static str, &'static str)]) -> Self {
-        self.aliases = aliases.to_vec();
-        self
-    }
-
     fn parent(&self) -> &Path {
         self.path
             .parent()
@@ -103,14 +91,8 @@ impl SubscriptionLogins {
             metadata.permissions().mode() & 0o044 == 0,
             "the login file is readable by others; set its mode to 0600"
         );
-        let mut contents: LoginContents = serde_json::from_reader(BufReader::new(file))
-            .map_err(|_| anyhow!("the login file is not valid JSON or has an invalid login"))?;
-        for &(old, new) in &self.aliases {
-            if let Some(login) = contents.logins.remove(old) {
-                contents.logins.entry(new.into()).or_insert(login);
-            }
-        }
-        Ok(contents)
+        serde_json::from_reader(BufReader::new(file))
+            .map_err(|_| anyhow!("the login file is not valid JSON or has an invalid login"))
     }
 
     fn write(&self, contents: &LoginContents) -> Result<()> {
@@ -176,7 +158,7 @@ impl SubscriptionLogins {
     }
 
     /// Check again under the lock before spending a refresh token. A failed
-    /// refresh leaves the file untouched, including any old Provider ids.
+    /// refresh leaves the file untouched.
     #[doc(hidden)]
     pub async fn current<F, Fut>(
         &self,
