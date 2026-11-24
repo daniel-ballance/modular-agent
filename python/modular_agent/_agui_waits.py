@@ -60,8 +60,8 @@ async def question_fact(v: View, entry: Obj, opening: Obj) -> Obj | None:
         allowed = q.get("restrictedResponders")
         if q["kind"] == "secret" or allowed is not None and v.actor not in allowed:
             return None
-        answer = entry_out(decision)["data"]
-        if answer.get("requestId") != q["id"] or not (why := reason(answer)):
+        answer = entry_out(decision)
+        if answer.get("requestId") != q["id"] or not (why := reason(answer["data"])):
             return None
         return {"requestId": q["id"], "reason": why}
 

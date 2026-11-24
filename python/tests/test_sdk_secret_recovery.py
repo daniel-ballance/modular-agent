@@ -81,15 +81,15 @@ async def test_reopens_secret_answer_after_sigkill(tmp_path: Path, cutoff: str) 
         assert await session.questions() == []
         records = await session.history()
         assert CANARY not in repr(records)
-        answers = [e["data"] for e in records if e["kind"] == "inputAnswer"]
-        [answer] = answers
+        [answer] = [e for e in records if e["kind"] == "inputAnswer"]
+        assert "requestId" not in answer["data"]
         if cutoff == "staged":
-            assert answer["declined"] is True
+            assert answer["data"]["declined"] is True
             assert store.read(NAME) is None
         else:
             accepted = next(e for e in records if e["kind"] == "secretAnswerAccepted")
             assert answer["requestId"] == accepted["requestId"]
-            assert answer["stored"] == NAME
+            assert answer["data"]["stored"] == NAME
             assert store.read(NAME) == CANARY
 
 

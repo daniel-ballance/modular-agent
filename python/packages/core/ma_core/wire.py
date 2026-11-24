@@ -464,12 +464,12 @@ def entry_out(e):
             "parentId": e["parent"],
             "kind": e.get("data", {}).get("originalKind", kind),
             "erased": True,
-            **({"requestId": e["data"]["requestId"]} if e.get("data", {}).get("requestId") else {}),
+            **({"requestId": e["data"]["request"]} if e.get("data", {}).get("request") else {}),
             **{TAGS[k]: e[k] for k in ("turn", "step", "call", "job") if e.get(k) is not None},
             **({"sources": e["copies"]} if e.get("data", {}).get("interfaceErasure") else {}),
             **{
                 k: e["wire_fields"][k]
-                for k in ("inputId", "inputIds", "requestId", "sources", "usage", "jobKey")
+                for k in ("inputId", "requestId", "continuesTurnId", "sources", "usage", "jobKey")
                 if k in e.get("wire_fields", {})
             },
         }
@@ -490,20 +490,21 @@ def entry_out(e):
     if kind == "inputAccepted":
         r["inputId"] = d.get("input", e["id"])
         r["data"] = {
-            **{k: v for k, v in d.items() if v is not None and k not in {"input", "authority"}},
+            **{
+                k: v
+                for k, v in d.items()
+                if v is not None and k not in {"input", "inputId", "authority"}
+            },
             **({"rights": d["authority"]} if d.get("authority") is not None else {}),
-            "inputId": r["inputId"],
             "content": e["content"],
         }
     elif kind == "inputHandedBack":
-        ids = d.get("inputIds") or [d["input"]]
-        r["data"] = {"inputIds": ids, **({"reason": d["reason"]} if d.get("reason") else {})}
-        if len(ids) == 1:
-            r["inputId"] = ids[0]
+        r["inputId"] = d["input"]
+        r["data"] = {"reason": d["reason"]} if d.get("reason") else {}
     elif kind == "input":
         r["inputId"] = d.get("input", e["id"])
         r["message"] = {"role": "user", "content": e["content"]}
-        r["data"] = {**d, "inputId": r["inputId"]}
+        r["data"] = {k: v for k, v in d.items() if k not in {"input", "inputId"}}
     elif kind == "python.tool_call":
         r["modelVisible"] = False
     elif kind == "response":
@@ -582,7 +583,7 @@ def entry_out(e):
         value = d.get("value")
         r["requestId"] = d["request"]
         r.pop("actorId", None)
-        r["data"] = {"requestId": d["request"]}
+        r["data"] = {}
         declined = d.get("declined", value == "declined")
         system_closed = e["kind"] == "question_closed" or (
             declined
@@ -732,35 +733,36 @@ def entry_in(e, sid, default_actor="user"):
             "data": {
                 "erased": True,
                 "originalKind": kind,
-                **{k: e[k] for k in ("inputId", "inputIds") if k in e},
+                **({"input": e["inputId"]} if "inputId" in e else {}),
             },
         }
     if kind == "inputAccepted":
         result.update(
             content=d["content"],
             data={
-                **d,
-                "input": e.get("inputId", d.get("inputId")),
+                **{k: v for k, v in d.items() if k != "inputId"},
+                "input": e["inputId"],
                 "authority": d.get("rights", d.get("authority")),
             },
         )
-    elif kind == "inputHandedBack":
-        input_id = e.get("inputId", d.get("inputId"))
-        batch = e.get("inputIds", d.get("inputIds", []))
-        if input_id is not None or len(batch) == 1:
-            result["data"] = {**d, "input": input_id or batch[0]}
-        else:
-            result["data"] = {**d, "inputIds": batch}
-    elif kind == "input":
-        result["data"] = {**d, "input": e.get("inputId", d.get("inputId", e["id"]))}
+    elif kind in {"inputHandedBack", "input"}:
+        result["data"] = {
+            **{k: v for k, v in d.items() if k not in {"inputId", "inputIds"}},
+            "input": e["inputId"],
+        }
     elif kind == "response":
         response = response_in(message)
         result.update(data={**d, **response}, content=response["content"])
         result["data"]["usage"] = {k: (response.get("usage") or {}).get(k, 0) for k in USAGE}
-    elif kind == "turnStart" and not e.get("actorId"):
-        started_by = d.get("startedBy") or {}
-        if started_by.get("kind") == "actor":
-            result["actor"] = started_by["id"]
+    elif kind == "turnStart":
+        if not e.get("actorId"):
+            started_by = d.get("startedBy") or {}
+            if started_by.get("kind") == "actor":
+                result["actor"] = started_by["id"]
+        data = {k: v for k, v in d.items() if k != "continuesTurnId"}
+        if isinstance(source := data.get("source"), dict):
+            data["source"] = {k: v for k, v in source.items() if k != "continuesTurnId"}
+        result["data"] = data
     elif kind == "toolPending":
         result["kind"] = "tool_deferred"
     elif kind == "toolStarted":
@@ -809,6 +811,8 @@ def entry_in(e, sid, default_actor="user"):
         }
     elif kind == "inputRequest":
         q = d["request"]
+        if q["id"] != e["requestId"]:
+            raise ValueError("Question ID does not match the envelope requestId")
         name = q.get("credential", q.get("name"))
         details = {
             "kind": q["kind"],
@@ -857,13 +861,13 @@ def entry_in(e, sid, default_actor="user"):
         if d.get("declined") and not d.get("actorId"):
             result["kind"] = "question_closed"
         result["data"] = {
-            **d,
+            **{k: v for k, v in d.items() if k != "requestId"},
             **(
                 {"system": False}
                 if d.get("actorId") and d.get("declined") and d.get("reason")
                 else {}
             ),
-            "request": d["requestId"],
+            "request": e["requestId"],
             "actor": d.get("actorId", result["actor"]),
             "value": value,
             "declined": d.get("declined", False),

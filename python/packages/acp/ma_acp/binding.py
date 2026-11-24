@@ -99,8 +99,9 @@ def entry(value):
         result["message"] = {"role": role, "content": value["content"]}
     data = value.get("data", {})
     if value["kind"] == "input":
-        result["inputId"] = data.get("input", value["id"])
-        result["data"] = {**data, "inputId": result["inputId"]}
+        wire = entry_out(value)
+        result["inputId"] = wire["inputId"]
+        result["data"] = wire["data"]
     elif value["kind"] == "response":
         result["message"] = entry_out(value)["message"]
     elif value["kind"] == "tool_result":

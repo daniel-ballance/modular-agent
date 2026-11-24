@@ -48,9 +48,8 @@ def discover(sessions, source, targets):
         prefix = fork_prefix(metadata, rows)
         admissions = {}
         for entry in rows:
-            if entry.get("kind") == "inputAccepted":
-                eid = entry["id"]
-                admissions[entry.get("inputId") or eid] = eid
+            if entry.get("kind") == "inputAccepted" and _id(entry.get("inputId")):
+                admissions[entry["inputId"]] = entry["id"]
         for entry in rows:
             key = sid, entry["id"]
             records[key] = entry
@@ -62,18 +61,15 @@ def discover(sessions, source, targets):
             else:
                 for entry_id in sources:
                     edges[sid, entry_id].add(key)
-            if entry.get("kind") in {
-                "inputAccepted",
-                "input",
-                "inputHandedBack",
-                "modular-agent.inputWithdrawn",
-            }:
-                inputs = entry.get("inputIds") or [entry.get("inputId")]
-                for input_id in inputs:
-                    if admission := admissions.get(input_id):
-                        other = sid, admission
-                        edges[other].add(key)
-                        edges[key].add(other)
+            input_id = entry.get("inputId")
+            if (
+                entry.get("kind") in {"inputAccepted", "input", "inputHandedBack"}
+                and _id(input_id)
+                and (admission := admissions.get(input_id))
+            ):
+                other = sid, admission
+                edges[other].add(key)
+                edges[key].add(other)
     todo = deque((source, key) for key in targets)
     if any(key not in records for key in todo):
         raise AgentError("Unknown erasure entry", "not_found")

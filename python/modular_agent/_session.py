@@ -383,8 +383,9 @@ class Session:
             for entry in reversed(records):
                 if entry.get("turn") == turn_id and turn_id and entry["kind"] == "turn_end":
                     return _turn(entry, records)
-                if entry["kind"] == "input_withdrawn" and receipt.input_id in (
-                    entry["data"].get("inputIds") or [entry["data"].get("input")]
+                if (
+                    entry["kind"] == "input_withdrawn"
+                    and entry["data"].get("input") == receipt.input_id
                 ):
                     return PromptResult(receipt.input_id, Disposition.HANDED_BACK)
             if state.get("writer_lost"):

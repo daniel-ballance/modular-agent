@@ -83,16 +83,6 @@ def tombstone(row):
     out = {"id": row["id"], "parentId": row["parentId"], "kind": kind, "erased": True}
     data = row.get("data") if isinstance(row.get("data"), dict) else {}
     message = row.get("message") if isinstance(row.get("message"), dict) else {}
-    request = data.get("request") if isinstance(data.get("request"), dict) else {}
-    fallback = {}
-    if kind in {"input", "inputAccepted", "inputHandedBack"}:
-        fallback["inputId"] = data.get("inputId")
-    if kind in {"inputRequest", "inputAnswer"}:
-        fallback["requestId"] = data.get("requestId")
-        if kind == "inputRequest" and not is_id(fallback["requestId"]):
-            fallback["requestId"] = request.get("id")
-    if kind == "turnStart":
-        fallback["continuesTurnId"] = data.get("continuesTurnId")
     for key in (
         "turnId",
         "stepId",
@@ -104,12 +94,6 @@ def tombstone(row):
     ):
         if isinstance(row.get(key), str):
             out[key] = row[key]
-        elif key not in row and is_id(fallback.get(key)):
-            out[key] = fallback[key]
-    if kind == "inputHandedBack" and "inputId" not in row and "inputId" not in data:
-        ids = data.get("inputIds")
-        if isinstance(ids, list) and ids and all(is_id(i) for i in ids):
-            out["inputIds"] = ids
     sources = row.get("sources")
     if isinstance(sources, list) and all(is_id(x) for x in sources):
         out["sources"] = sources

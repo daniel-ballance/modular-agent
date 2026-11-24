@@ -67,7 +67,7 @@ async def test_acp_joins_foreign_session_before_replay(tmp_path, monkeypatch):
             "modelVisible": True,
             "actorId": foreign["id"],
             "message": {"role": "user", "content": content("foreign message")},
-            "data": {"inputId": "old-receipt"},
+            "inputId": "old-receipt",
         },
     ]
 
@@ -171,7 +171,8 @@ async def test_recover_foreign_standard_record(tmp_path, monkeypatch):
     )
     entry(
         "input",
-        {"inputId": "receipt", "key": "once"},
+        {"key": "once"},
+        inputId="receipt",
         turnId=turn,
         actorId="user",
         message={"role": "user", "content": content("foreign question")},
