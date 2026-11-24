@@ -3732,25 +3732,25 @@ export class Harness {
 		const branch = s.branch();
 		const origin = branch.find(e => e.kind === "turnStart" && e.turnId === turnId)?.continuesTurnId;
 		if (!origin || branch.some(e => e.kind === "response" && e.turnId === turnId && e.stepId === call.stepId)) return true;
-		const pending = branch.find(e => e.kind === "toolPending" && e.turnId === origin && e.toolCallId === call.id && !e.erased && !s.copied.has(e.id));
-		// Older portable histories have question-backed ends but no pending checkpoint.
-		// Do not reinterpret them as ADR 0034. A marked request, an opting-in setting,
-		// or a tombstoned checkpoint is not evidence for the legacy convention.
-		if (!pending && !s.hasWaitingApprovals && !branch.some(e => {
-			if (e.kind === "toolPending" && e.toolCallId === call.id) return true;
-			const setting = e.data as { key?: string; value?: unknown } | undefined;
-			return e.kind === "setting" && !e.erased && (setting?.key === "approvalWait" && setting.value === "untilDeadline" ||
-				setting?.key === "settings" && (setting.value as {approvalWait?: string} | null)?.approvalWait === "untilDeadline");
-		})) {
-			return branch.some(e => e.kind === "inputRequest" && !e.erased && e.turnId === origin && e.toolCallId === call.id);
+		return !!this.questionSettlement(s, branch, origin, call.id, call.stepId, true);
+	}
+
+	/** Return the last answer to the questions named by this call's host checkpoint. */
+	private questionSettlement(s: Session, branch: HistoryEntry[], origin: string, callId: string, stepId?: string, dispatch = false) {
+		const own = branch.filter(e => !e.erased && e.sessionId === s.id && !s.copied.has(e.id) && e.turnId === origin && e.toolCallId === callId);
+		const checkpoints = own.filter(e => e.kind === "toolPending");
+		const pending = checkpoints[0];
+		const ids = (pending?.data as { requestIds?: string[] })?.requestIds;
+		if (checkpoints.length !== 1 || !pending.stepId || stepId && stepId !== pending.stepId || !Array.isArray(ids) || !ids.length) return;
+		const scope = own.filter(e => e.stepId === pending.stepId);
+		for (const id of ids) {
+			const entry = scope.find(e => e.kind === "inputRequest" && e.requestId === id);
+			const request = (entry?.data as { request?: InputRequest })?.request;
+			if (!request || request.id !== id || request.sessionId !== s.id || request.toolCallId !== callId ||
+				dispatch && request.kind === "approval" && waitingApprovals(s).get(callId)?.entry !== entry ||
+				!scope.some(e => e.kind === "inputAnswer" && e.requestId === id)) return;
 		}
-		const ids = (pending?.data as {requestIds?: string[]})?.requestIds;
-		return Array.isArray(ids) && ids.length > 0 && ids.every(id => {
-			const entry = branch.find(e => e.kind === "inputRequest" && e.requestId === id && !e.erased && e.turnId === origin && e.toolCallId === call.id);
-			const request = (entry?.data as {request?: InputRequest})?.request;
-			return request && (request.kind !== "approval" || waitingApprovals(s).get(call.id)?.entry === entry) &&
-				branch.some(e => e.kind === "inputAnswer" && requestIdOf(e) === id && !e.erased);
-		});
+		return scope.findLast(e => e.kind === "inputAnswer" && !!e.requestId && ids.includes(e.requestId));
 	}
 
 	private async modelApprovalGate<T extends { call: ToolCall }>(s: Session, state: TurnState, turnId: string, payload: T): Promise<GateResult<T>> {
@@ -4518,10 +4518,10 @@ export class Harness {
 			const decisions = ids.map(id => {
 				const item = handoffs.get(id);
 				if (item) {
-					if (!this.interfaceSources.size || this.runtime()?.supports.interfaceTools !== true || !item.data || !item.checkpoint || !visible.has(item.checkpoint.id) || item.result?.erased) return undefined;
+					if (!this.interfaceSources.size || this.runtime()?.supports.interfaceTools !== true || !item.data || !item.checkpoint || item.checkpoint.turnId !== end.turnId || !visible.has(item.checkpoint.id) || !item.result || item.result.erased || item.result.turnId !== end.turnId || item.result.stepId !== item.checkpoint.stepId) return undefined;
 					return item.result && visible.get(item.result.id);
 				}
-				const answer = branch.findLast(e => e.kind === "inputAnswer" && !e.erased && e.toolCallId === id);
+				const answer = this.questionSettlement(s, branch, end.turnId!, id);
 				return answer && visible.get(answer.id);
 			});
 			if (decisions.some(d => !d)) continue;
