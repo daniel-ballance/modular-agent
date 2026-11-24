@@ -60,7 +60,7 @@ func appError(err error, fallback Code) error {
 		fallback = Unavailable
 	case errors.Is(err, api.ErrErasureUnsupported):
 		fallback = NotSupported
-	case errors.Is(err, api.ErrErasureBusy):
+	case errors.Is(err, api.ErrErasureBusy), errors.Is(err, api.ErrUnfinishedWork):
 		fallback = Busy
 	case errors.Is(err, api.ErrResultTooLarge):
 		fallback = ResultTooLarge

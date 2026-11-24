@@ -17,6 +17,8 @@ var ErrTenantTokens = errors.New("tenantTokens limit")
 var ErrAuthority = errors.New("authority refused")
 var ErrTenantForbidden = errors.New("tenant access forbidden")
 
+var ErrUnfinishedWork = errors.New("session has unfinished work")
+
 var ErrSettingsBusy = errors.New("settings cannot change during a turn")
 
 var ErrProcessStopped = errors.New("agent process stopped")

@@ -299,6 +299,9 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 		lifecycle.Lock()
 		defer lifecycle.Unlock()
 		id, err := s.a.Fork(ctx, p.SessionID, p.EntryID)
+		if errors.Is(err, api.ErrUnfinishedWork) {
+			return nil, acpError("busy")
+		}
 		if errors.Is(err, api.ErrResultTooLarge) {
 			return nil, acpError("result_too_large")
 		}
@@ -319,6 +322,9 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 		outside, err := s.a.(interface {
 			MoveDetails(context.Context, string, string, bool) ([]string, error)
 		}).MoveDetails(ctx, p.SessionID, p.EntryID, p.Rewind)
+		if errors.Is(err, api.ErrUnfinishedWork) {
+			return nil, acpError("busy")
+		}
 		if errors.Is(err, api.ErrMoveConflict) {
 			return nil, acpError("conflict")
 		}

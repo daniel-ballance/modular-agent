@@ -779,7 +779,7 @@ func (c *client) move(ctx context.Context, id, target string, rewind bool, outsi
 		return err
 	}
 	if s.running || s.opening || s.closing || len(s.queue) > 0 || unfinished(s.data) {
-		return api.ErrMoveConflict
+		return api.ErrUnfinishedWork
 	}
 	branch := s.data.Branch()
 	i := slices.IndexFunc(branch, func(e api.Entry) bool { return e.ID == target })
@@ -820,10 +820,10 @@ func (c *client) Fork(ctx context.Context, id, target string) (string, error) {
 		return "", api.ErrAuthority
 	}
 	if running {
-		return "", errors.New("cancel turn before forking")
+		return "", api.ErrUnfinishedWork
 	}
 	if unfinished(snap) {
-		return "", errors.New("settle calls and jobs before forking")
+		return "", api.ErrUnfinishedWork
 	}
 	if target != "" {
 		snap.Position = target

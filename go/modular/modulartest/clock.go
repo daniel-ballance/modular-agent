@@ -31,9 +31,15 @@ func (t *clockTimer) Stop() bool {
 
 func UseClock(t testing.TB, start time.Time) *ManualClock {
 	t.Helper()
-	c := &ManualClock{now: start, timers: map[*clockTimer]bool{}}
-	t.Cleanup(worktime.Install(c))
+	c, restore := InstallClock(start)
+	t.Cleanup(restore)
 	return c
+}
+
+// InstallClock controls deadlines in a standalone fixture process.
+func InstallClock(start time.Time) (*ManualClock, func()) {
+	c := &ManualClock{now: start, timers: map[*clockTimer]bool{}}
+	return c, worktime.Install(c)
 }
 func (c *ManualClock) Now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.now }
 func (c *ManualClock) At(at time.Time, f func()) worktime.Timer {

@@ -110,8 +110,6 @@ scripts/websocket-kits.sh go
 
 ## Known gaps
 
-- The public ACP check passes with a waiting parent and no private test controls (118/118 with crash and job checks). The separate `--waiting-approval-only` group passed its two declaration checks (2/44); it needs a `MA_ACP_WAIT_FIXTURE` launcher with a controlled clock, offline approver and second listener. Stock `ma` has no such launcher. Combining the operator maximum with `--probe-checks` refused four substitute Runtimes that cannot continue waiting approvals (165/169). Those probes pass in live mode.
-
 - `find` uses `git ls-files` where Git can read a worktree and falls back to `find` otherwise. It does not interpret `.gitignore` outside a Git worktree. The existing SDK command environment is required for this tool. Very long command output is held by that environment before being cut and spilled.
 - The SDK's question handler supports in-turn text and choice answers. `auth.json` preserves named answers written by Rust, but this configuration does not store new secret answers. The SDK's question tool keeps its existing definition, which is not word-for-word the Rust question tool.
 - Only offline fixtures checked the subscription protocols in this round. ChatGPT and Grok streams honor request cancellation and a response-header timeout; a quiet stream after headers has no independent idle timeout.
