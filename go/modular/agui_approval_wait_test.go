@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -44,14 +43,6 @@ func TestAGUIApprovalSettingIsPerSessionAndRequiresSettings(t *testing.T) {
 	}
 }
 
-func checkApprovalCall(t *testing.T, metadata map[string]any, name string, input map[string]any) {
-	t.Helper()
-	want := map[string]any{"name": name, "input": input}
-	if got := metadata["modular-agent.approvalCall"]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("approvalCall = %#v; want %#v", got, want)
-	}
-}
-
 func TestAGUIWaitingApprovalDeliveredOnReturn(t *testing.T) {
 	var effects atomic.Int32
 	bump := modular.NewTool("bump", "Bump.", func(_ context.Context, in bumpInput, _ *modular.ToolContext) (string, error) {
@@ -78,10 +69,7 @@ func TestAGUIWaitingApprovalDeliveredOnReturn(t *testing.T) {
 		Declaration map[string]any
 		Messages    []map[string]any
 		Waiting     struct {
-			Questions []struct {
-				ID, ToolCallID, Message, ExpiresAt string
-				Metadata                           map[string]any
-			}
+			Questions []agApprovalInterrupt
 			ToolCalls []any
 		}
 	}
