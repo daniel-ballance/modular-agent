@@ -47,6 +47,7 @@ export async function interrupt(api: PluginApi, id: string, p: Principal, r: Inp
   if (r.kind === "approval" && (!call || call.id !== r.toolCallId)) return;
   const wire: Interrupt = { id: r.id, reason: r.kind, message: r.kind === "approval" ? `${r.question}\n${call!.name} ${JSON.stringify(call!.input)}` : r.question,
     ...(r.toolCallId ? { toolCallId: r.toolCallId } : {}), ...(r.timeLimitMs === undefined || r.whenTimeLimit === "leaveOpen" ? {} : { expiresAt: new Date(entry.time + r.timeLimitMs).toISOString() }),
+    ...(r.coversNested ? { metadata: { "modular-agent.coversNested": true } } : {}),
     ...(r.kind === "link" && r.details ? { metadata: { "modular-agent.link": r.details } } : {}),
     responseSchema: r.kind === "approval" ? { type: "object", properties: { allow: { type: "boolean" } }, required: ["allow"], additionalProperties: false }
       : r.kind === "choice" ? { type: "string", enum: r.options } : { type: "string" } };

@@ -1,4 +1,5 @@
 import { untilAborted, inputHandedBackIds, inputIdOf, isToolCall, textOf, type AgentEvent, type InputRequest, type PluginApi, type TurnOutcome } from "@modular-agent/harness";
+import { isDeepStrictEqual } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Actor, Answer, Content, Declaration, Question, Right, ToolCall, HistoryEntry, InputTiming, InputReceipt, Input, Outcome, QuestionHandler, Settings, ToolStatus, TurnResult, Usage } from "./data.js";
 import { AgentError, checked, sdkError } from "./errors.js";
@@ -136,9 +137,14 @@ export async function questionOf(api: PluginApi, request: InputRequest): Promise
   const { id, kind, sessionId, question, details, options, timeLimitMs, answerers, credential } = request;
   const entry = (await api.readHistory(sessionId, { all: true })).findLast(e => e.kind === "inputRequest" && e.requestId === id);
   return structuredClone({ id, kind, sessionId, question, details, options, answerers, credential,
+    ...(request.coversNested ? { coversNested: true as const } : {}),
     ...(request.approvalWait ? { approvalWait: request.approvalWait } : {}),
     call: (entry?.data as { call?: ToolCall } | undefined)?.call,
     deadline: timeLimitMs === undefined || !entry ? undefined : entry.time + timeLimitMs });
+}
+
+export async function exactLocalApproval(api: PluginApi, q: Question, actor: string) {
+  return isDeepStrictEqual(await api.gateOutput(q.sessionId, actor, "input.request.opened", structuredClone(q)), q);
 }
 
 export async function submitAnswer(api: PluginApi, request: InputRequest, actorId: string, answer: Answer, delegatedBy?: string, handle?: object): Promise<void> {
@@ -160,6 +166,7 @@ export class Session {
   static { makeSession = (id, api, owner) => new Session(id, api, owner); }
   #api: PluginApi;
   #owner: Owner;
+  #deliveredCovered = new Set<string>();
   private constructor(readonly id: string, api: PluginApi, owner: Owner, private readonly actor = local) { this.#api = api; this.#owner = owner; }
 
   #require(right: Right, actor = this.actor) {
@@ -468,11 +475,17 @@ export class Session {
     this.#require("watch");
     if (options.present && !this.#api.declaration(this.id).approvalsOutlastTurns) throw new AgentError("not_supported", "Polling as present requires waiting approvals");
     await this.#api.refreshApprovals(this.id);
+    this.#deliveredCovered.clear();
     const visible = await Promise.all(this.#api.openRequests(this.id).map(async request => {
       const question = await questionOf(this.#api, request);
       if (options.present && request.approvalWait) {
         return await this.#api.presentApproval(this.id, request.id, { routeId: "sdk.local", handle: this, actorId: this.actor,
           submittedBy: local, present: () => this.#owner.isOpen() }) ? question : undefined;
+      }
+      if (request.coversNested && !request.approvalWait) {
+        if (!await exactLocalApproval(this.#api, question, this.actor)) return;
+        this.#deliveredCovered.add(request.id);
+        return question;
       }
       return this.#api.gateOutput(this.id, this.actor, "input.request.opened", question);
     }));
@@ -485,6 +498,8 @@ export class Session {
     if (!request) throw new AgentError("not_found", "No such open question");
     this.#require(request.kind === "approval" ? "approve" : "answer");
     if (request.answerers.length && !request.answerers.includes(this.actor)) throw new AgentError("forbidden", "Actor is not an eligible answerer");
+    if (request.coversNested && !request.approvalWait && (!this.#deliveredCovered.has(id) ||
+        !await exactLocalApproval(this.#api, await questionOf(this.#api, request), this.actor))) throw new AgentError("forbidden", "No unchanged approval view on this route");
     await checked(() => submitAnswer(this.#api, request, this.actor, answer, this.actor === local ? undefined : local, this));
   }
   onQuestion(handler?: QuestionHandler): void {
