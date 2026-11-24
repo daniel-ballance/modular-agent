@@ -93,6 +93,19 @@ async def test_reopens_secret_answer_after_sigkill(tmp_path: Path, cutoff: str) 
             assert store.read(NAME) == CANARY
 
 
+async def test_flat_answer_file_is_unavailable(tmp_path: Path) -> None:
+    path = tmp_path / "answers.json"
+    original = '{"survey-token":"stale"}'
+    path.write_text(original)
+    store = file_credentials(path)
+    with pytest.raises(Exception, match="Credential store unavailable"):
+        store.read(NAME)
+    assert store.stage
+    with pytest.raises(Exception, match="Credential store unavailable"):
+        await store.stage("s", "r", NAME, "user", CANARY)
+    assert path.read_text() == original
+
+
 async def test_stages_do_not_replace_active_or_newer_answers(tmp_path: Path) -> None:
     store = file_credentials(tmp_path / "answers.json")
     assert store.stage and store.lookup_staged and store.activate and store.discard

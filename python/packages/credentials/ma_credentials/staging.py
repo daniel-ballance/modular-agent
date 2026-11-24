@@ -13,15 +13,20 @@ from ma_core import AgentError
 
 
 class StagedFile:
-    def __init__(self, path, *, legacy=False):
+    def __init__(self, path):
         self.path = Path(path)
-        self.legacy = legacy
 
     def document(self):
         try:
             doc = json.loads(self.path.read_text())
-            if self.legacy and all(isinstance(v, str) for v in doc.values()):
-                return {"answers": doc}
+            sections = {"answers", "generations", "staged"}
+            if (
+                not isinstance(doc, dict)
+                or not sections.intersection(doc)
+                or any(not isinstance(doc[key], dict) for key in sections.intersection(doc))
+                or any(not isinstance(value, str) for value in doc.get("answers", {}).values())
+            ):
+                raise AgentError("Credential store unavailable", "credentials")
             return doc
         except FileNotFoundError:
             return {}
