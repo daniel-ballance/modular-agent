@@ -179,18 +179,7 @@ With a state plugin, set `StatePlugin` and supply its current revision and JSON 
 
 ### Specification findings
 
-Proposed replacements for covered approvals:
-
-- [SDK Questions](../../docs/sdk/api.md#questions), replace the `call` row with these two rows:
-
-  | Question field | Meaning |
-  |---|---|
-  | `call` | For an approval, the exact tool call, name and input. |
-  | `coversNested?: true` | An allow also answers approval for the nested calls made in this dispatch. Omission grants no coverage. |
-
-- [ACP Approvals](../../docs/bindings/acp.md#approvals), replace “A valid `allow` permits only the displayed call” with “A valid `allow` permits the displayed call. When the bound request has `coversNested: true`, include `_meta["modular-agent"].coversNested: true` and tell the approver that the allow also covers its nested calls in this dispatch”. In [Entry](../../docs/bindings/acp.md#entry), replace the data cell for `toolStarted`, `toolResult` with “`call`, `status` where present; on a covered nested start, `approvalCoveredBy: { toolCallId, requestId }`”.
-- [AG-UI Questions](../../docs/bindings/agui.md#interrupts-and-frontend-tools), replace “For approvals include `toolCallId` and an exact unchanged name and arguments in the prompt.” with “For approvals include `toolCallId` and an exact unchanged name and arguments in the prompt. When the request has `coversNested: true`, include `metadata["modular-agent.coversNested"]: true` and tell the approver the allow covers the call's nested calls in this dispatch.”
-- [AG-UI](../../docs/bindings/agui.md), replace “This binding does not offer session close, cancellation, steering, rewind, administration or erasure methods.” with “When the agent declares `approvalCoversNested`, `POST /agui/v1/threads/{threadId}/settings` takes exactly `{"approval": POLICY}` and returns that object on success. Require `watch` and `settings` on the session. Accept `off`, `ask`, `all` or `never`. This is not a run POST. The binding offers no other administration, session close, cancellation, steering, rewind or erasure method.”
+None open.
 
 ### Known gaps
 
