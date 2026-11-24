@@ -83,10 +83,9 @@ impl CredentialStore for FileCredentials {
 /// The file is a deployment-local namespace. Its owner controls its directory.
 pub struct SecretFile(pub PathBuf);
 #[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Contents {
-    #[serde(default)]
     answers: BTreeMap<String, String>,
-    #[serde(default)]
     staging: SecretJournal,
 }
 pub fn valid_name(name: &str) -> bool {
