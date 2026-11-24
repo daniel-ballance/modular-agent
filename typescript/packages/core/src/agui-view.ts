@@ -41,13 +41,24 @@ export function pending(entries: HistoryEntry[], p: Principal): Pending[] {
     return [{ toolCallId: e.toolCallId, expiresAt: new Date(d.deadline).toISOString(), turnId: e.turnId, ended: !!end, call: sd.call }];
   });
 }
-export async function interrupt(api: PluginApi, id: string, p: Principal, r: InputRequest, entry: HistoryEntry, inTurn: boolean, statusOnly = false): Promise<InterruptView | undefined> {
-  if (r.kind === "secret" || !statusOnly && !rights(api, id, p).includes(r.kind === "approval" ? "approve" : "answer") || r.answerers.length && !r.answerers.includes(p.actor.id)) return;
-  const call = object(entry.data) ? entry.data.call as ToolCall | undefined : undefined;
-  if (r.kind === "approval" && (!call || call.id !== r.toolCallId)) return;
-  const wire: Interrupt = { id: r.id, reason: r.kind, message: r.kind === "approval" ? `${r.question}\n${call!.name} ${JSON.stringify(call!.input)}` : r.question,
+export async function interrupt(api: PluginApi, id: string, p: Principal, r: InputRequest, entry: HistoryEntry, inTurn: boolean, { statusOnly = false, reopened = false } = {}): Promise<InterruptView | undefined> {
+  if (entry.erased || r.kind === "secret" || !statusOnly && !rights(api, id, p).includes(r.kind === "approval" ? "approve" : "answer") || r.answerers.length && !r.answerers.includes(p.actor.id)) return;
+  if (r.kind === "approval" || statusOnly) {
+    const opened = await api.gateOutput(id, p.actor.id, "entry", entry, { turnId: entry.turnId, stepId: entry.stepId, toolCallId: entry.toolCallId });
+    if (!same(opened, entry)) return;
+  }
+  const call = r.kind === "approval" && object(entry.data) ? entry.data.call as ToolCall | undefined : undefined;
+  if (r.kind === "approval") {
+    if (!call || call.id !== r.toolCallId) return;
+    // A snapshot or turn end must not recreate an approval hidden at question opening.
+    const opening = r.approvalWait ? { request: r, waiting: true } : { request: r, reopened };
+    const shown = await api.gateOutput(id, p.actor.id, "input.request.opened", opening, { toolCallId: r.toolCallId });
+    if (!same(shown, opening)) return;
+  }
+  const wire: Interrupt = { id: r.id, reason: r.kind, message: call ? `${r.question}\n${call.name} ${JSON.stringify(call.input)}` : r.question,
     ...(r.toolCallId ? { toolCallId: r.toolCallId } : {}), ...(r.timeLimitMs === undefined || r.whenTimeLimit === "leaveOpen" ? {} : { expiresAt: new Date(entry.time + r.timeLimitMs).toISOString() }),
-    ...(r.coversNested ? { metadata: { "modular-agent.coversNested": true } } : {}),
+    ...(call ? { metadata: { "modular-agent.approvalCall": { name: call.name, input: call.input },
+      ...(r.coversNested ? { "modular-agent.coversNested": true } : {}) } } : {}),
     ...(r.kind === "link" && r.details ? { metadata: { "modular-agent.link": r.details } } : {}),
     responseSchema: r.kind === "approval" ? { type: "object", properties: { allow: { type: "boolean" } }, required: ["allow"], additionalProperties: false }
       : r.kind === "choice" ? { type: "string", enum: r.options } : { type: "string" } };

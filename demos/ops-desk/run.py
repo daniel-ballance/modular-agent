@@ -79,10 +79,13 @@ class Desk:
             s = self.state()
             return next((q for q in s['inbox'] if q['answerable']), None)
         q = wait(first, 'coder approval')
-        script = json.loads((DEMO / 'coder/model.json').read_text())[0]['toolCalls'][0]['input']['code']
+        call = json.loads((DEMO / 'coder/model.json').read_text())[0]['toolCalls'][0]
+        metadata = q.get('metadata', {})
+        if 'modular-agent.approvalCall' in metadata:
+            check(metadata['modular-agent.approvalCall'] == call, 'wrong call offered for display')
         check(q['agent'] == 'coder' and q['reason'] == 'approval' and q['toolCallId'] and q['expiresAt'] and
-              q.get('metadata', {}).get('modular-agent.coversNested') is True and
-              'codemode' in q['message'] and json.dumps(script) in q['message'],
+              metadata.get('modular-agent.coversNested') is True and
+              call['name'] in q['message'] and json.dumps(call['input']['code']) in q['message'],
               'approval did not show the complete script and its nested-call coverage')
         return q
 

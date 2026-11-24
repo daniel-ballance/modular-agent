@@ -22,10 +22,8 @@ export class HostRead {
     if (!object(e.data) || !object(e.data.request)) return;
     const request = {...e.data.request, id:e.requestId, answerers:e.data.request.answerers ?? [], turnId:e.turnId, toolCallId:e.toolCallId} as InputRequest;
     if (request.kind === "secret" || request.answerers.length && !request.answerers.includes(this.p.actor.id)) return;
-    const open = await this.entry(e);
-    if (!open || !same(open.data, e.data)) return;
-    // Gate the view, but never deliver it or register this reader as an answer route.
-    return (await interrupt(this.t.api, this.id, this.p, request, e, false, true))?.wire;
+    // Gate the source and view, but never deliver it or register this reader as an answer route.
+    return (await interrupt(this.t.api, this.id, this.p, request, e, false, {statusOnly:true}))?.wire;
   }
   async handoff(entries: HistoryEntry[], callId: string) {
     const checkpoint = entries.find(e => e.kind === "modular-agent.interfaceHandoff" && e.toolCallId === callId);

@@ -28,7 +28,7 @@ interface Host extends AguiProjectionOptions {
   owner(id: string): Target;
   locate(p: Principal, id?: string, memberOnly?:boolean): Promise<Target>; associate(id: string, agent: Agent): void;
 }
-export interface Presence { delivered: Set<string>; response: ServerResponse; questions: Set<string>; rejected: Set<string> }
+export interface Presence { delivered: Set<string>; response: ServerResponse; questions: Set<string>; rejected: Set<string>; reopened: Set<string> }
 export interface Client {
   cursor?: { id: string; digest: string; branch: string; http: boolean }; active?: Exchange; busy?: boolean; presence?: Presence;
   held?: { connection: InterfaceToolConnection; turnId: string; setDeliver(fn: (call: ToolCall) => void): void };
@@ -161,7 +161,7 @@ export class Route {
       const e = records.find(e => e.kind === "inputRequest" && !e.erased && e.requestId === request.id);
       const inTurn = !records.some(e => e.kind === "turnEnd" && e.turnId === request.turnId);
       if (!e || inTurn && !this.c.presence?.questions.has(request.id) || request.kind === "approval" && !inTurn && (!request.approvalWait || !this.c.presence || this.c.presence.response.destroyed)) continue;
-      const view = await interrupt(this.api, this.id, this.p, request, e, inTurn);
+      const view = await interrupt(this.api, this.id, this.p, request, e, inTurn, { reopened: this.c.presence?.reopened.has(request.id) });
       if (view) result.push(view);
       else if (inTurn && this.c.presence) {
         this.c.presence.questions.delete(request.id); this.c.presence.rejected.add(request.id); this.api.presenceChanged(this.id);
@@ -202,14 +202,14 @@ export class Route {
   presence(res: ServerResponse) {
     const { c, id, api, p } = this;
     if (c.presence) fail("conflict");
-    const presence: Presence = { response: res, questions: new Set(), rejected: new Set(), delivered: new Set() };
+    const presence: Presence = { response: res, questions: new Set(), rejected: new Set(), reopened: new Set(), delivered: new Set() };
     c.presence = presence;
     // In-turn offers belong to this exact live route. A replacement never inherits them.
     const off = this.t.h.connectInterface({ id: `agui:${p.clientId}`, actorId: p.actor.id,
       present: (session, q) => session === id && !res.destroyed && this.rights().includes("watch") && (!q || q.kind !== "secret" && !presence.rejected.has(q.id) && this.rights().includes(q.kind === "approval" ? "approve" : "answer") &&
         (presence.questions.has(q.id) || !!c.active && c.active.eligible(q))),
       onInputRequest: q => { if (!presence.rejected.has(q.id)) presence.questions.add(q.id); },
-      onInputRequestClosed: q => { presence.questions.delete(q); presence.rejected.delete(q); presence.delivered.delete(q); } });
+      onInputRequestClosed: q => { presence.questions.delete(q); presence.rejected.delete(q); presence.reopened.delete(q); presence.delivered.delete(q); } });
     this.binding.track(res); sse(res); res.write(": present\n\n");
     const beat = setInterval(() => { void this.current().then(() => { if (!res.write(": present\n\n")) res.destroy(); }, () => res.destroy()); }, 15_000).unref();
     res.once("close", () => { clearInterval(beat); off(); c.presence = undefined; api.presenceChanged(id); if (!c.active) { c.held?.connection.disconnect(); c.held = undefined; } });
