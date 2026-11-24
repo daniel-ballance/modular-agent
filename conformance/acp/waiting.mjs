@@ -320,7 +320,11 @@ for (const target of ['inputRequest', 'inputAnswer']) cases[`erase-${target}`] =
 };
 cases.capacity = async c => {
   const e = await origin(c); await c.crash(); await c.start(true);
+  const attempts = async () => rows((await c.batches()).flat(), 'response').length;
+  const before = await attempts();
   const r = await c.prompt(); assert.equal(meta(r).outcome.kind, 'limit'); assert.equal(meta(r).outcome.limit, 'capacity');
+  // The open call holds the only slot, and the ceiling counts model attempts and calls together.
+  assert.equal(await attempts(), before, 'no model attempt starts while the open call holds the only slot');
   const p = await delivery(c, e); assert.deepEqual(await answer(p, c.sid, e.requestId, 'refuse'), accepted);
   await c.idle(); const es = (await c.batches()).flat(); assert.equal(one(es.filter(x => x.toolCallId === e.toolCallId), 'toolResult').data.status, 'refused');
   assert.equal(c.count(), 0);
