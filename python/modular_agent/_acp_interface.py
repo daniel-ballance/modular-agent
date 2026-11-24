@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
-from ma_acp import ACP, OUTPUT_SESSION, protocol_error
+from ma_acp import ACP, OUTPUT_SESSION, binding, protocol_error
 from ma_core import Plugin as _NativePlugin
-from ma_core.wire import settings_in
+from ma_core.wire import json_equal, settings_in
 from ma_harness.authority import CONNECTION_AUTHORITY
 
 from ._agui_http import AguiServer
@@ -37,10 +37,46 @@ class _AcpProject(_NativePlugin):  # type: ignore[misc]  # Untyped base adapter.
         self.interface.register_project(self.agent, api)
 
 
+def install_poll_route(
+    agent: Agent,
+    route: str,
+    actor: str,
+    kind: str,
+    scope: Mapping[str, Any],
+    ceiling: frozenset[str] | None,
+) -> None:
+    """Recheck operator scope and output policy without retaining a connection."""
+
+    async def check(sid: str, entry: dict[str, Any], answerer: str, principal: str) -> set[str]:
+        state = agent._h.sessions[sid]
+        if (
+            principal != actor
+            or state["actors"].get(actor, {}).get("kind") != kind
+            or answerer != actor
+            and answerer not in scope["represents"]
+            or state.get("tenant") not in scope["tenants"]
+            or Path(state["project"]) not in scope.get("projects", (agent._project,))
+        ):
+            return set()
+        raw = {"requests": [binding.question(entry["data"])]}
+        view = await agent._session(
+            "view",
+            session=sid,
+            recipient=actor,
+            method="_modular-agent/requests",
+            type="reply",
+            value=raw,
+        )
+        return set(agent._h.permissions(state, actor, ceiling)) if json_equal(raw, view) else set()
+
+    agent._h.approval_routes[route] = check
+
+
 class _AcpConnections:
     """One writer per session, with independent views on that writer."""
 
     def __init__(self) -> None:
+        self.poll_policies: list[tuple[str, str, str, Mapping[str, Any], frozenset[str]]] = []
         self.busy: dict[str, tuple[asyncio.Task[Any] | None, asyncio.Event]] = {}
         self.sessions: dict[str, dict[_Interface, Agent]] = {}
         self.projects: dict[Agent, set[_Interface]] = {}
@@ -64,12 +100,14 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
         connections: _AcpConnections | None = None,
         scope: Mapping[str, Any],
         rights: frozenset[str] | None = None,
+        poll_route: str = "acp:stdio",
     ) -> None:
         configured = principal["actor"] if principal else stdio_actor
         actor = configured["id"] if configured else os.environ.get("MODULAR_AGENT_ACTOR", "user")
         super().__init__(agent._project, agent._settings, actor=actor)
         if configured is not None:
             self.principal = configured
+        self.poll_route = poll_route
         self.network = principal is not None
         self.trace_trusted = (
             stdio_trace_trusted if principal is None else principal.get("trace_trusted") is True
@@ -120,6 +158,22 @@ class _Interface(ACP):  # type: ignore[misc]  # Untyped base adapter.
 
     def register_project(self, agent: Agent, api: Any) -> None:
         self._apis[agent] = api
+        if self._connections is not None:
+            for policy in self._connections.poll_policies:
+                install_poll_route(agent, *policy)
+        else:
+            install_poll_route(
+                agent,
+                self.poll_route,
+                self.actor,
+                self.principal["kind"],
+                {
+                    "projects": self._allowed_projects or (agent._project,),
+                    "tenants": self._allowed_tenants,
+                    "represents": self.represents,
+                },
+                self._token_rights,
+            )
 
         def scoped(handler: Callable[[Any], Awaitable[Any]]) -> Callable[[Any], Awaitable[Any]]:
             async def run(payload: Any) -> Any:

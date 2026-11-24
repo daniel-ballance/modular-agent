@@ -105,13 +105,33 @@ class Binding:
                 if clients.setdefault(cid, principal) != principal:
                     raise ValueError()
                 self.scopes[cid] = scope
+                self.agent._h.approval_routes["agui:" + cid] = self.approval_policy(a)
         except (KeyError, ValueError, TypeError) as exc:
             raise AgentError(
                 ErrorCode.INVALID_COMPOSITION,
                 "Invalid or ambiguous AG-UI principal, client or scope",
             ) from exc
 
+    def approval_policy(self, principal: AguiActor) -> Callable[..., Awaitable[set[str]]]:
+        async def check(sid: str, entry: Obj, answerer: str, submitted: str) -> set[str]:
+            view = View(self, principal)
+            view.sid = sid
+            if (
+                submitted != view.actor
+                or answerer != view.actor
+                or "watch" not in view.rights_now()
+                or view.h.sessions[sid]["actors"].get(view.actor, {}).get("kind")
+                != principal["actor"]["kind"]
+            ):
+                return set()
+            q = {**entry["data"], "deadline": entry["data"].get("deadlineAt")}
+            return view.rights_now() if await view.interrupt(q) is not None else set()
+
+        return check
+
     def close(self) -> None:
+        for cid in self.scopes:
+            self.agent._h.approval_routes.pop("agui:" + cid, None)
         for p in self.presence.values():
             if p.executor:
                 p.executor.close()
@@ -183,7 +203,7 @@ class Binding:
                     await view.keep_present(Stream(send, headers))
                     return None
                 self.cursors.pop(view.key, None)
-                reply, cursor = await view.snapshot(http=True)
+                reply, cursor = await view.snapshot(http=True, deliver_waits=True)
                 response = Response(encode(reply), media_type="application/json", headers=headers)
                 view.remember(cursor)
                 return response
@@ -499,7 +519,9 @@ class View:
             ),
         )
 
-    async def questions(self, branch: list[Obj]) -> dict[str, tuple[Obj, Obj]]:
+    async def questions(
+        self, branch: list[Obj], *, offer_waits: bool = False
+    ) -> dict[str, tuple[Obj, Obj]]:
         ended = {e.get("turn") for e in branch if e["kind"] == "turn_end"}
         presence = self.binding.presence.get(self.key)
         qs = await self.agent._call(
@@ -513,25 +535,40 @@ class View:
         result = {}
         for q in qs:
             kind = q["kind"]
+            waiting = q.get("approvalWait") == "untilDeadline"
             late = q.get("turn") in ended and kind != "approval"
             if (
                 not q["answerable"]
                 or kind == "secret"
-                or (not late and (not presence or q["id"] not in presence.delivered))
+                or (
+                    not late
+                    and (
+                        not presence
+                        or not (offer_waits and waiting)
+                        and q["id"] not in presence.delivered
+                    )
+                )
             ):
                 continue
             interrupt = await self.interrupt(q)
             if interrupt is not None and (
-                late or (presence and interrupt == presence.delivered[q["id"]])
+                late
+                or (waiting and offer_waits)
+                or (presence and same_json(interrupt, presence.delivered.get(q["id"])))
             ):
                 result[q["id"]] = q, interrupt
+            elif waiting and presence:
+                presence.delivered.pop(q["id"], None)
+                self.h.remember_wait(
+                    self.sid, presence.route, self.actor, q["entry"], "agui:" + self.client, False
+                )
         return result
 
     async def interrupt(self, q: Obj) -> Obj | None:
         kind = q["kind"]
         i = {"id": q["id"], "reason": kind, "message": q["question"]}
         if q.get("deadline") and not q["park"]:
-            i["expiresAt"] = q["deadline"]
+            i["expiresAt"] = iso(q["deadlineAt"]) if q.get("approvalWait") else q["deadline"]
         if kind == "approval":
             i["toolCallId"] = q["call"]
             i["responseSchema"] = {
@@ -550,7 +587,12 @@ class View:
         return gated if same_json(i, gated) else None
 
     async def snapshot(
-        self, *, http: bool, cursor_id: str | None = None, through: str | None = None
+        self,
+        *,
+        http: bool,
+        cursor_id: str | None = None,
+        through: str | None = None,
+        deliver_waits: bool = False,
     ) -> tuple[Obj, Cursor]:
         rev = await self.h.erasure_revision(self.sid)
         branch = self.branch()
@@ -562,8 +604,11 @@ class View:
         pos = branch[-1]["id"] if branch else None
         messages = await self.messages(branch)
         cursor = cursor_id or uuid4().hex
+        presence = self.binding.presence.get(self.key)
         if http:
-            qs = await self.questions(branch)
+            if presence and deliver_waits:
+                self.h.forget_waits(self.sid, token=presence.route)
+            qs = await self.questions(branch, offer_waits=deliver_waits)
             calls = self.open_calls(branch)
             reply = await self.required(
                 "snapshot",
@@ -611,7 +656,22 @@ class View:
                 "output_withheld",
             )
         require(rev == await self.h.erasure_revision(self.sid), "conflict")
+        if (
+            http
+            and deliver_waits
+            and presence is not None
+            and presence is self.binding.presence.get(self.key)
+        ):
+            self.remember_approvals(presence, qs)
         return reply, Cursor(cursor, len(messages), fingerprint(reply["messages"]), pos, rev, http)
+
+    def remember_approvals(self, presence: Presence, questions: dict[str, tuple[Obj, Obj]]) -> None:
+        for q, interrupt in questions.values():
+            if q.get("approvalWait"):
+                presence.delivered[q["id"]] = interrupt
+                self.h.remember_wait(
+                    self.sid, presence.route, self.actor, q["entry"], "agui:" + self.client, True
+                )
 
     def remember(self, cursor: Cursor) -> None:
         cache = self.binding.cursors
@@ -659,6 +719,7 @@ class View:
             raise
 
     async def detach(self, route: str) -> None:
+        self.h.forget_waits(self.sid, token=route)
         try:
             if self.sid in self.h.sessions:
                 await self.agent._api.call(

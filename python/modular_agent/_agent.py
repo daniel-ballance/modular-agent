@@ -768,13 +768,14 @@ class Agent:
         project_mcp: Callable[[Path], Sequence[JsonObject]] | None,
     ) -> tuple[Sequence[AcpActor], Callable[[Any, AcpActor], Awaitable[None]]]:
         kinds: dict[str, str] = {}
-        from ._acp_interface import _AcpConnections, _Interface
+        from ._acp_interface import _AcpConnections, _Interface, install_poll_route
 
         connections = _AcpConnections()
         principals = actors
         scopes = {}
+        routes = {}
         try:
-            for entry in principals:
+            for index, entry in enumerate(principals):
                 actor = entry["actor"]
                 aid, kind = actor["id"], actor["kind"]
                 if not _actor_id(aid) or kind not in ("user", "host", "agent", "program"):
@@ -783,6 +784,10 @@ class Agent:
                     raise ValueError("Tokens for the same actor id must agree on kind")
                 kinds[aid] = kind
                 scopes[id(entry)] = _acp_scope(entry), _acp_rights(actor["rights"])
+                routes[id(entry)] = f"acp:ws:{index}:{aid}"
+                policy = (routes[id(entry)], aid, kind, *scopes[id(entry)])
+                install_poll_route(self, *policy)
+                connections.poll_policies.append(policy)
             if not principals:
                 raise ValueError("WebSocket ACP requires at least one configured actor")
         except (TypeError, ValueError, KeyError) as exc:
@@ -800,6 +805,7 @@ class Agent:
                 connections=connections,
                 scope=scopes[id(entry)][0],
                 rights=scopes[id(entry)][1],
+                poll_route=routes[id(entry)],
             )
             await self._h.attach_interface(interface)
             try:

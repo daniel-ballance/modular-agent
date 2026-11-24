@@ -431,7 +431,7 @@ class ACP(Plugin):
             else []
         )
         for q in questions:
-            if q["kind"] == "approval" and q["answerable"]:
+            if q["kind"] == "approval" and not q.get("approvalWait") and q["answerable"]:
                 await self.api.call(
                     "questions",
                     "answer",
@@ -544,7 +544,19 @@ class ACP(Plugin):
                     "never",
                 ),
             ),
-        ]
+        ] + (
+            [
+                option(
+                    "approvalWait",
+                    "Approval wait",
+                    "mode",
+                    ["live", "untilDeadline"],
+                    session["settings"].get("approvalWait", "live"),
+                )
+            ]
+            if (await self.declaration(sid)).get("approvalsOutlastTurns")
+            else []
+        )
 
     def new_session_settings(self, project):
         return self.settings
@@ -914,7 +926,7 @@ class ACP(Plugin):
             parked = any(
                 x["kind"] == "turn_end" and x.get("turn") == q.get("turn") for x in entries
             )
-            if not parked and key not in self.requests:
+            if not parked and not q.get("approvalWait") and key not in self.requests:
                 task = asyncio.create_task(self.answer_request(sid, q))
                 self.requests[key] = task
                 task.add_done_callback(lambda done, key=key: self.requests.pop(key, None))
@@ -1307,7 +1319,10 @@ class ACP(Plugin):
                 **({"duplicate": True} if receipt.get("duplicate") else {}),
             }
         if operation == "requests":
-            questions = await self.api.call("questions", "list", base)
+            # A withheld or changed replacement poll invalidates this delivery.
+            if hasattr(self, "poll_route"):
+                self.api._harness.forget_waits(sid, token=self.name)
+            questions = await self.api.call("questions", "list", {**base, "recipientView": True})
             requests = [binding.question(q) for q in questions if q["answerable"]]
             return {"requests": requests}
         if operation == "answer":
@@ -1329,6 +1344,8 @@ class ACP(Plugin):
                 )
                 if question is None:
                     return {"accepted": False, "reason": "not_open"}
+                if question.get("approvalWait") and actor not in self.presence.get(sid, ()):
+                    return {"accepted": False, "reason": "not_open"}
                 if (
                     question["kind"] == "approval"
                     and (sid, question["id"]) not in self.approval_views
@@ -1340,6 +1357,7 @@ class ACP(Plugin):
                     {
                         **answer_base,
                         "authority": await self.api.session("authority", **base),
+                        "delivery_token": self.name,
                         "request": params["requestId"],
                         "value": params.get("value"),
                         "declined": params.get("declined", False),
@@ -1428,7 +1446,21 @@ class ACP(Plugin):
                 after["answerable"] = False
                 continue
             approval = q["kind"] == "approval"
-            after["answerable"] = not approval or before == after == binding.question(q)
+            from ma_core.wire import json_equal
+
+            after["answerable"] = not approval or (
+                json_equal(before, after) and json_equal(before, binding.question(q))
+            )
+            if q.get("approvalWait"):
+                after["answerable"] = bool(
+                    after["answerable"]
+                    and method == "_modular-agent/requests"
+                    and self.actor in self.presence.get(sid, ())
+                )
+                if method == "_modular-agent/requests" and hasattr(self, "poll_route"):
+                    self.api._harness.remember_wait(
+                        sid, self.name, self.actor, q["entry"], self.poll_route, after["answerable"]
+                    )
             if approval and after["answerable"]:
                 self.approval_views.add((sid, q["id"]))
 
@@ -1490,6 +1522,8 @@ class ACP(Plugin):
             self.presence.setdefault(sid, set()).add(actor)
         else:
             self.presence.get(sid, set()).discard(actor)
+            if hasattr(self, "poll_route"):
+                self.api._harness.forget_waits(sid, token=self.name)
 
     @staticmethod
     def guards_frame(method):
