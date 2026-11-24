@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -18,7 +19,11 @@ const files = (dir: string) => readdirSync(dir).filter(f => f.endsWith(".json"))
 const load = <T>(path: string): T => JSON.parse(readFileSync(path, "utf8"));
 export const scenarioFiles = () => {
   const waiting = join(repo, "conformance/sdk/fixtures/waiting-approval");
-  return [...files(join(repo, "conformance/sdk/scenarios")), ...existsSync(waiting) ? files(waiting) : []];
+  const ordinary = files(join(repo, "conformance/sdk/scenarios")), fixtures = files(waiting);
+  const names = load<string[]>(join(repo, "conformance/sdk/waiting-scenarios.json"));
+  assert.ok(ordinary.length && names.length, "SDK fixture group is empty");
+  assert.deepEqual(fixtures, names.map(name => join(waiting, name + ".json")).sort());
+  return [...ordinary, ...fixtures];
 };
 export type Placement = { name: string; command?: string[]; servicePlugins?: ServicePlugin[] };
 export function placements(require = process.env.MODULAR_AGENT_SDK_REQUIRE): Placement[] {
@@ -52,7 +57,6 @@ type Step = ({ prompt: string; as?: string; crashWhen?: Crash } | { reopen: true
   { send: string; timing?: InputTiming } | { answer: Answer } | { wait: true }) & { expect?: Expect };
 export interface Scenario {
   scenario: string;
-  requires?: { approvalsOutlastTurns?: boolean };
   agent: Pick<AgentOptions, "durability" | "approval" | "settings" | "severalActors"> & {
     plugins?: string[]; answers?: Answer[]; actors?: Actor[]; history?: "file" | "service";
   };
@@ -230,7 +234,7 @@ async function crashRun(path: string, dir: string, p: Placement, i: number, when
 
 export async function runScenario(path: string, p: Placement, run?: TelemetryRun): Promise<string[]> {
   const s = loadScenario(path);
-  if (s.requires?.approvalsOutlastTurns) {
+  if (s.scenario.startsWith("waiting-approval")) {
     const driver = await import(new URL("../../../../scripts/waiting-scenarios.mjs", import.meta.url).href);
     return driver.runWaitingScenario(path, p, run);
   }
