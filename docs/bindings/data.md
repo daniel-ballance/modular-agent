@@ -237,29 +237,18 @@ A store with a bare string MUST return it as `{ type: "apiKey", key: <string> }`
 
 A live Entry has `id: Id`, `parentId: Id | null`, `sessionId: Id`, `kind: Id`, `time: Time`, `writer: Id` and `modelVisible: boolean`. `writer` names the component or registered plugin responsible for the record. The kinds table specifies all standard associations, messages and data. An association not listed has no standard meaning for that kind. `sources?: Id[]` lists the earlier entries whose content the record copies, in branch order for summaries. An omitted list means no sources. Fork prefix entries use the [fork mapping](#portable-sessions). The Harness MUST keep the copy relationships required by [Erasure](../contracts.md#erasure).
 
-A tombstone is `{ id: Id, parentId: Id | null, kind: Id | null, erased: true, turnId?: Id, stepId?: Id, toolCallId?: Id, jobId?: Id, inputId?: Id, inputIds?: Id[], requestId?: Id, continuesTurnId?: Id, sources?: Id[], usage?: Usage, writer?: Id, jobKey?: Id }`. The enclosing session supplies the session ID. An opaque [history service](history-http.md#erasure) record allows any string for kind and associations, and null for kind. A portable tombstone has a known or dotted kind and Id associations. Its identities stand; the reader MUST NOT verify links against a tombstoned endpoint.
+A tombstone is `{ id: Id, parentId: Id | null, kind: Id | null, erased: true, turnId?: Id, stepId?: Id, toolCallId?: Id, jobId?: Id, inputId?: Id, requestId?: Id, continuesTurnId?: Id, sources?: Id[], usage?: Usage, writer?: Id, jobKey?: Id }`. The enclosing session supplies the session ID. An opaque [history service](history-http.md#erasure) record allows any string for kind and associations, and null for kind. A portable tombstone has a known or dotted kind and Id associations. Its identities stand; the reader MUST NOT verify links against a tombstoned endpoint.
 
 | Fields | Preserved from |
 |---|---|
 | `id`, `parentId`, `kind`, listed `*Id` associations | The live entry's envelope |
-| `inputIds` | Legacy batch `inputHandedBack.data.inputIds` with no single `inputId`; see [Legacy associations](#legacy-associations) |
 | `sources` | The live entry's source ids; required for a fork-prefix copy, where the single id names its origin |
 | `usage` | `response.message.usage`, `jobEnded.data.usage` or `turnEnd.data.usage`, with only the numeric fields in [Usage](#messages) |
 | `writer`, `jobKey` | For a keyed `jobStarted` only: the owner in `writer` and the key in `data.key` |
 
 The store MUST keep the listed fields when applicable and omit all other fields. The reader MUST use tombstone usage like live usage under [Identities and usage](../contracts.md#identities-and-usage).
 
-#### Legacy associations
-
-If the top-level association is absent, readers and tombstone writers MUST use the first valid legacy value listed for that kind. The fallback accepts an Id or, for `inputIds`, a nonempty array of Ids. A present top-level field takes precedence, even if malformed. The store MUST write a valid fallback at the top level of the tombstone and omit invalid fallbacks. It MUST use the batch fallback only if both single-ID fields are absent. The reader MUST also accept that batch association from a tombstone's top level.
-
-| Kind | Association | Legacy path |
-|---|---|---|
-| `inputAccepted`, `input`, `inputHandedBack` | `inputId` | `data.inputId` |
-| `inputHandedBack` | `inputIds` | `data.inputIds` (legacy batch) |
-| `inputRequest` | `requestId` | `data.requestId`, then `data.request.id` |
-| `inputAnswer` | `requestId` | `data.requestId` |
-| `turnStart` | `continuesTurnId` | `data.continuesTurnId` |
+The envelope alone supplies the associations. On a live `inputRequest`, `requestId` MUST match `data.request.id`. The Harness MUST write one `inputHandedBack` per returned input. When returning several inputs together it MUST append the records in one atomic batch.
 
 ### Standard kinds
 
@@ -268,7 +257,7 @@ The host and Runtime MUST write the shapes and visibility shown. Associations be
 | Kind | Record owner over the plugin binding | Model-visible | Required or optional fields |
 |---|---|---|---|
 | `inputAccepted` | Host | No | `actorId`, `jobId?`, `inputId`; `key?: Id`, `when: "now" \| "steer" \| "after" \| "propose"`, `releasedBy?: Id`, `submittedBy?: Id` (defaults to actor), `parked?: boolean` (initial disposition for job reports; see [Job reports](#job-reports)), `taken?: "now" \| "after" \| "inTurn" \| "proposed"` (original receipt if known), `content: Content`, `authorizers?: Authorizer[]`, `rights?: Rights` |
-| `inputHandedBack` | Host | No | `inputId`; `reason?: "withdrawn" \| "declined" \| "cancelled" \| "restart" \| "conflict" \| "handled" \| "turnEnded"`; legacy batch: `inputIds: Id[]` instead of `inputId` |
+| `inputHandedBack` | Host | No | `inputId`; `reason?: "withdrawn" \| "declined" \| "cancelled" \| "restart" \| "conflict" \| "handled" \| "turnEnded"` |
 | `input` | Host | Yes | `turnId`, `actorId`, `jobId?`, `inputId`; `message: Message` with role `user`, `key?: Id` |
 | `turnStart` | Host | No | `turnId`, `continuesTurnId?`; `startedBy: { kind: "actor" \| "job" \| "plugin" \| "answer" \| "toolResult", id: Id }`, `model: ModelRef \| null`, `system: string`, `context?: Content`, `tools: ToolDefinition[]`, `settings: TurnSettings`, `resultShape?: Schema`, `traceContext?: TraceContext`, `point?: Id`, `authorizers?: Authorizer[]`, `rights?: Rights`, `sources?: Id[]` for history carried in `system` or `context` |
 | `modular-agent.turnTrace` | Host | No | `turnId`; `traceContext: TraceContext` |
@@ -362,7 +351,7 @@ For a newly created empty session, the Harness MUST hold setup entries provision
 2. A normal record MUST have the current head as its parent, even when it records session-level activity about work on an older branch. Each kept entry except `position`, including a tombstone or private entry, becomes the head.
 3. A `position` MUST name the previous head as its parent and an earlier non-position entry or null in `data.to`. The [core target rule](../contracts.md#moving-and-rewinding) governs moves; null is for internal restoration of an empty head, not an ordinary move. Its target becomes the head. The control record is not part of any branch. The current branch is the head and its ancestors, read from root to head.
 4. The reader MUST fold `setting`, `actorJoined`, `actorLeft`, `limit`, `tenant`, `plugins`, `erasure`, `jobStarted`, `jobCleanupUnconfirmed`, `jobEnded`, `inputAccepted` and `inputHandedBack` from all records, not only the current branch. Branch choice selects model context, candidates for recovering interrupted turns and open calls or questions, and rewind points. Terminal facts are global. Consumption of a receipt remains terminal across branches.
-5. The reader MUST refuse malformed fields, duplicate entry IDs, invalid topology, conflicting terminal records, changed tenant or erased authority or topology records. It MUST validate live associations using this table, with the stated legacy exceptions. Tombstone identities follow [Entry fields and tombstones](#entry-fields-and-tombstones).
+5. The reader MUST refuse malformed fields, duplicate entry IDs, invalid topology, conflicting terminal records, changed tenant or erased authority or topology records. It MUST validate live associations using this table. Tombstone identities follow [Entry fields and tombstones](#entry-fields-and-tombstones).
 
 | Identity | Establishing record | Later references |
 |---|---|---|
@@ -385,7 +374,7 @@ Bootstrap actor IDs can name newly configured principals. The reader MUST NOT in
 | Actors | The reader MUST replace a recorded actor on `actorJoined` and mark it departed on `actorLeft`. It MUST enforce the [connection actor and authority rules](../contracts.md#authority) before new work. |
 | Limits and tenant | The reader MUST use the latest limit and the fixed tenant. It MUST refuse to open a tenant session if the tenant or its required policy cannot be enforced. |
 | Input keys | The reader MUST index first admissions and erased reservations across branches. Before tombstoning a keyed admission, the Harness MUST commit its reservation in the erasure record. An erased reservation returns the [core duplicate receipt](../contracts.md#input), never the earlier receipt. |
-| Pending input | A release MUST retain the input ID, actor, content and key, add `releasedBy` and its authority restriction, and take its ready order at release. An `input` or `inputHandedBack` anywhere settles the receipt; a legacy hand-back without a reason remains terminal. A batch hand-back settles every receipt listed in its effective `inputIds`. The first receipt is independent of current disposition. Scheduling follows [Input](../contracts.md#input) and [Jobs](../contracts.md#jobs). |
+| Pending input | A release MUST retain the input ID, actor, content and key, add `releasedBy` and its authority restriction, and take its ready order at release. An `input` or `inputHandedBack` anywhere settles the receipt; a legacy hand-back without a reason remains terminal. The first receipt is independent of current disposition. Scheduling follows [Input](../contracts.md#input) and [Jobs](../contracts.md#jobs). |
 | Job keys | The reader MUST index live keyed starts and keyed start tombstones by owning plugin and key within the session. For a tombstone it uses `writer`, `jobKey` and `jobId`. See [Jobs](../contracts.md#jobs) for the duplicate reply. |
 | Jobs | The reader MUST pair by job ID and treat a start without an end as unfinished. It MUST keep cleanup unconfirmed from `jobCleanupUnconfirmed` until that job's `jobEnded`, regardless of branch or owner connection. Current job and report rights, including the legacy `watch` fallback, are in [Authority](../contracts.md#authority). |
 | Plugins | The Harness MUST compare the recorded plugin set by name and origin, not order. [Plugins and capabilities](../contracts.md#plugins-and-capabilities) defines when to record the active set. [Configuration and trust](../contracts.md#configuration-and-trust) defines which plugins to load. |
