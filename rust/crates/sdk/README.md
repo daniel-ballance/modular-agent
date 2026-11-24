@@ -49,7 +49,7 @@ not on model requests.
 Claude needs Node.js 22 or newer and Claude Code. Set
 `ClaudeOptions::program` to the TypeScript program, or set
 `MODULAR_AGENT_CLAUDE_SIDECAR`. The install location is
-`~/.local/share/modular-agent/sidecars/claude/dist/main.js`.
+`~/.local/share/modular-agent/sidecars/claude/dist/src/main.js`.
 `ClaudeProvider::available().await` checks for a Claude plan sign-in;
 `unavailable_reason().await` explains a refusal. The Rust SDK does not read
 Claude credentials, pass them to the program, or sign in.

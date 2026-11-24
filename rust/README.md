@@ -13,7 +13,7 @@ The base's binary crate is now `crates/agent-base`, package `agent-base`, so tha
 | Part | Crate | What it does |
 |---|---|---|
 | Providers | `modular-agent` | ChatGPT (`chatgpt/…`), Grok (`grok/…`) and Claude (`claude/…`) use the SDK's subscription Providers. |
-| Provider | [`sidecars/claude`](../typescript/sidecars/claude/README.md) | Claude subscription (`claude/...`) through the Claude Agent SDK for TypeScript. A plugin in its own process over the plugin binding, started only when a Claude model is used. |
+| Provider | [`@modular-agent/claude`](../typescript/packages/claude/README.md) | Claude subscription (`claude/...`) through the Claude Agent SDK for TypeScript. A plugin in its own process over the plugin binding, started only when a Claude model is used. |
 | Tools | `modular-agent-files` | `read`, `exec`, `edit`, `write`, `find` and `list`, with Pi's inputs, limits and wording. They work through the session's working environment. |
 | Tool | `tools-code` | `codemode`: Python in a [Monty](https://github.com/pydantic/monty) sandbox. Every other tool is a function on its `tools` object. |
 | MCP client | `modular-agent-mcp`, `standard::mcp` | Servers from `mcp.json`, over stdio and Streamable HTTP. Their tools are `tools.mcp_SERVER__TOOL`. |
@@ -51,7 +51,7 @@ Linux only. Needs [mise](https://mise.jdx.dev) for the pinned Rust toolchain, an
 ```sh
 cd rust
 mise exec -- cargo build --locked --release -p standard        # target/release/ma
-(cd ../typescript/sidecars/claude && npm ci --ignore-scripts && npm run build)
+(cd ../typescript && npm ci --ignore-scripts && npm run build --workspace @modular-agent/claude)
 scripts/install.sh                                    # optional: ~/.local/bin/ma and the sidecar
 ```
 
@@ -114,7 +114,7 @@ For approvals that wait, set a positive integer `approvalWaitMaxMs` in operator 
 | `PROJECT/.mcp.json` | Project MCP servers. Used only after `ma --trust-project`, because it starts programs. |
 | `~/.local/state/modular-agent/rust/` | Sessions, command state and the full output of commands whose output was cut |
 
-`MODULAR_AGENT_DATA_DIR` puts the configuration files directly in that folder and puts the state in its `state/` subfolder. Without it, the XDG configuration and state variables take precedence over the paths above. Set `MODULAR_AGENT_CLAUDE_SIDECAR` to the Claude program's `dist/main.js` if it is not installed at `~/.local/share/modular-agent/sidecars/claude/dist/main.js`.
+`MODULAR_AGENT_DATA_DIR` puts the configuration files directly in that folder and puts the state in its `state/` subfolder. Without it, the XDG configuration and state variables take precedence over the paths above. Set `MODULAR_AGENT_CLAUDE_SIDECAR` to the Claude program's `dist/src/main.js` if it is not installed at `~/.local/share/modular-agent/sidecars/claude/dist/src/main.js`.
 
 The old ids `openai-codex` and `xai` still work in `--model`, `ma login`, `ma logout`, `settings.json`, `models.json` and reopened sessions. `ma` moves old login keys to the new ids the next time it writes `auth.json`. It refuses a login file readable by others. Every write and refresh uses the lock in `auth.lock` beside the file.
 
@@ -209,7 +209,7 @@ Building this turned up seven places where edition 3 was silent. They are now th
 | `modelTools` is a standard setting (`model_tools` in this build's settings files) | `agent-harness`, `agent-api::portable` |
 | An ACP client is told a nested call's parent | `interface-acp` |
 | `env/list` and `host/env/list` | `WorkingEnvironment::list_dir`, `plugin-stdio` |
-| A cancelled Provider request sends no response callback; an unlisted reasoning level is lowered, never raised; `outOfReach` text is for people | `modular-agent`, `sidecars/claude` |
+| A cancelled Provider request sends no response callback; an unlisted reasoning level is lowered, never raised; `outOfReach` text is for people | `modular-agent`, `@modular-agent/claude` |
 
 See the [SDK's checks](crates/sdk/README.md#what-is-checked) for the scenario matrix.
 
@@ -240,7 +240,7 @@ rust/
   scripts/                                     fixtures and install.sh
   docs/clean-room/                             the base build's own notes and gap log
   conformance -> ../conformance                the kits
-typescript/sidecars/claude/                    the Claude Provider, in TypeScript
+typescript/packages/claude/                    the Claude Provider, in TypeScript
 ```
 
 To swap a part, change `builder` in [`crates/standard/src/lib.rs`](crates/standard/src/lib.rs): it is the one place that names the plugins.
