@@ -149,7 +149,11 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 				p.settled = true
 				return nil
 			}
-			_, e := t.IO.Record(settleCtx, api.Entry{Kind: "tool.open", Step: step, Call: p.call.ID})
+			current, e := t.IO.Snapshot()
+			if e != nil {
+				return e
+			}
+			_, e = t.IO.Record(settleCtx, api.Entry{Kind: "tool.open", Step: step, Call: p.call.ID, Data: api.PendingQuestionCheckpoint(current, t.ID, p.call.ID)})
 			p.settled = e == nil
 			return e
 		}

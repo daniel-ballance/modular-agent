@@ -434,6 +434,9 @@ func (f *agFixture) control(ctx context.Context, op, id, name string, ms int64) 
 		}
 		return f.evidence(id), nil
 	case "advance":
+		if strings.HasPrefix(f.Name, "closure-") {
+			return struct{}{}, f.advanceWaits(ctx, id, ms)
+		}
 		f.clock.advance(ms)
 		_, err := f.host.Wait(ctx, id)
 		return struct{}{}, err

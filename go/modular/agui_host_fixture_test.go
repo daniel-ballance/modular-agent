@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/worktime"
 )
 
 func (f *agFixture) checkpoint(name, id, run string) {
@@ -43,6 +44,15 @@ func (f *agFixture) hostReadGate(recipient string, e *api.Event) bool {
 	if mode == "settlement" && e.Kind == "turn.end" || mode == "reply" && e.Method == "agui.runReceipt" {
 		return true
 	}
+	if e.Method == "agui.runReceipt" && (mode == "terminal" || mode == "work") {
+		v := api.Decode[map[string]string](e.Data)
+		if mode == "terminal" {
+			v[mode] = "unknown"
+		} else {
+			v[mode] = "unsettled"
+		}
+		e.Data = api.JSON(v)
+	}
 	if id != "" && e.Kind == "history.added" {
 		v := api.Decode[api.Entry](e.Data)
 		if mode == "opening" && v.ID == id || mode == "decision" && v.Kind == "question.answer" && api.Decode[api.Answer](v.Data).Request == id {
@@ -73,6 +83,53 @@ func (s *kitStore) PendingErasures(fn func(*[]api.ErasureIntent) error) error {
 	}
 	return err
 }
+
+// A free-standing ask has no running turn for host.Wait to join. Wait for
+// each due timer's committed decision or pending checkpoint instead.
+func (f *agFixture) advanceWaits(ctx context.Context, id string, ms int64) error {
+	port := f.host.(interface {
+		CommittedSnapshot(string) (api.Session, <-chan struct{}, error)
+	})
+	snap, _, err := port.CommittedSnapshot(id)
+	if err != nil {
+		return err
+	}
+	p, _ := f.host.Get("questions")
+	due := map[string]bool{}
+	until := worktime.Now().Add(time.Duration(ms) * time.Millisecond)
+	for _, q := range p.(api.Questions).Recorded(snap) {
+		if q.Answerable && q.Deadline != nil && !q.Deadline.After(until) {
+			due[q.ID] = true
+		}
+	}
+	f.clock.advance(ms)
+	for len(due) != 0 {
+		s, next, err := port.CommittedSnapshot(id)
+		if err != nil {
+			return err
+		}
+		for _, e := range s.Branch() {
+			switch e.Kind {
+			case "question.answer":
+				delete(due, api.Decode[api.Answer](e.Data).Request)
+			case "tool.open":
+				for _, q := range api.Decode[struct{ RequestIDs []string }](e.Data).RequestIDs {
+					delete(due, q)
+				}
+			}
+		}
+		if len(due) != 0 {
+			select {
+			case <-next:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	_, err = f.host.Wait(ctx, id)
+	return err
+}
+
 func (f *agFixture) readControl(ctx context.Context, op, id, name, mode, kind, right, request, run string) (any, bool, error) {
 	ctx = api.AsActor(ctx, "kit-owner")
 	k := name + ":" + id

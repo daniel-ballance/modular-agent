@@ -156,28 +156,7 @@ func (w *runtimeWork) leavePending(ctx context.Context, c api.Call) error {
 		w.pending[c.ID] = true
 		return nil
 	}
-	requests := []string{}
-	var latest string
-	for _, e := range snap.Branch() {
-		if e.Turn != w.turn.ID || e.Call != c.ID {
-			continue
-		}
-		switch e.Kind {
-		case "tool.started":
-			latest = e.ID
-			requests = nil
-		case "question.open":
-			q := api.Decode[struct{ Question api.Question }](e.Data).Question
-			if q.ID != "" && q.Defer {
-				requests = append(requests, q.ID)
-			}
-		}
-	}
-	data := object{"requestIds": requests}
-	if latest != "" {
-		data["toolStartedId"] = latest
-	}
-	_, err = w.record(ctx, api.Entry{Kind: "tool.open", Call: c.ID, Step: c.Step, Data: api.JSON(data)})
+	_, err = w.record(ctx, api.Entry{Kind: "tool.open", Call: c.ID, Step: c.Step, Data: api.PendingQuestionCheckpoint(snap, w.turn.ID, c.ID)})
 	if err == nil {
 		w.pending[c.ID] = true
 	}
