@@ -22,7 +22,7 @@ type Options struct {
 
 func Plugin() api.Plugin {
 	return api.Plugin{Name: "terminal", Setup: func(a api.API) error {
-		if err := a.RegisterCommand("cancel", func(ctx context.Context, id string, args []string) (string, error) {
+		if err := a.RegisterCommand("cancel", func(ctx context.Context, id string, args string) (string, error) {
 			return "Cancelled. Queued input is returned below.", a.CancelAs(ctx, id)
 		}); err != nil {
 			return err

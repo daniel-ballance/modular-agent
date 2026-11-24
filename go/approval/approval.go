@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"strings"
 	"time"
 )
 
 func Plugin(requested ...time.Duration) api.Plugin {
 	return api.Plugin{Name: "approval", Setup: func(a api.API) error {
-		if err := a.RegisterCommand("approval", func(ctx context.Context, id string, args []string) (string, error) {
+		if err := a.RegisterCommand("approval", func(ctx context.Context, id string, raw string) (string, error) {
+			args := strings.Fields(raw)
 			if len(args) != 1 {
 				return "", errors.New("usage: /approval off|ask-unless-read-only|ask-always|never")
 			}

@@ -514,8 +514,8 @@ func testHostCallbacks(t *testing.T, mode string) {
 	if mode == "probe-output" {
 		return
 	}
-	text, err := a.Command(context.Background(), id, "fixture one two")
-	if err != nil || text != "external command: [one two]" {
+	text, err := a.Command(context.Background(), id, `fixture  "one  two"  `)
+	if err != nil || text != `external command:  "one  two"  ` {
 		t.Fatal(text, err)
 	}
 	result, err = a.CallTool(context.Background(), id, api.Call{Name: "probe", Input: api.JSON(map[string]any{"lose": true})})

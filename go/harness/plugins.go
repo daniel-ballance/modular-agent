@@ -460,15 +460,15 @@ func (c *client) Command(ctx context.Context, id, line string) (string, error) {
 		_ = s.chargeCommandLocked(-reserved)
 		s.mu.Unlock()
 	}()
-	fields := strings.Fields(strings.TrimPrefix(line, "/"))
-	if len(fields) == 0 {
+	name, args := api.CommandLine(line)
+	if name == "" {
 		return "", errors.New("empty command")
 	}
 	c.h.mu.RLock()
-	r, ok := c.h.commands[fields[0]]
+	r, ok := c.h.commands[name]
 	c.h.mu.RUnlock()
 	if !ok {
-		return "", fmt.Errorf("unknown command /%s", fields[0])
+		return "", fmt.Errorf("unknown command /%s", name)
 	}
 	check := func(right string) error {
 		s.mu.Lock()
@@ -488,7 +488,7 @@ func (c *client) Command(ctx context.Context, id, line string) (string, error) {
 	if err := check("input"); err != nil {
 		return "", err
 	}
-	result, err := r.value.(api.Command)(ctx, id, fields[1:])
+	result, err := r.value.(api.Command)(ctx, id, args)
 	if errors.Is(context.Cause(ctx), api.ErrProcessStopped) {
 		return "", api.ErrSessionLost
 	}

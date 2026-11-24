@@ -40,13 +40,14 @@ func Plugin() api.Plugin {
 		if err := a.Provide("jobs", m); err != nil {
 			return err
 		}
-		if err := a.RegisterCommand("jobs", func(ctx context.Context, id string, _ []string) (string, error) {
+		if err := a.RegisterCommand("jobs", func(ctx context.Context, id string, _ string) (string, error) {
 			list, err := m.List(id)
 			return string(api.JSON(list)), err
 		}); err != nil {
 			return err
 		}
-		if err := a.RegisterCommand("job-cancel", func(ctx context.Context, id string, args []string) (string, error) {
+		if err := a.RegisterCommand("job-cancel", func(ctx context.Context, id string, raw string) (string, error) {
+			args := strings.Fields(raw)
 			if len(args) != 1 {
 				return "", errors.New("usage: /job-cancel job-id")
 			}

@@ -3,7 +3,6 @@ package modular
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync/atomic"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
@@ -73,7 +72,7 @@ func runSDKCommand(ctx context.Context, a api.API, server *pluginrpc.Server, plu
 			return out, err
 		}
 	}
-	return command.Run(ctx, strings.TrimSpace(args), cx)
+	return command.Run(ctx, args, cx)
 }
 
 func (c *CommandContext) History(ctx context.Context, cursor ...string) (HistoryPage, error) {

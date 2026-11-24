@@ -15,7 +15,7 @@ type ModelProcess struct{ *remoteProvider }
 
 func StartModelProcess(ctx context.Context, spec Spec, project, state, id string) (*ModelProcess, error) {
 	r := &remote{exited: make(chan struct{})}
-	if err := r.startProcess(spec, project, false); err != nil {
+	if err := r.startProcess(spec, project); err != nil {
 		return nil, err
 	}
 	r.peer.Handle = r.modelCallback

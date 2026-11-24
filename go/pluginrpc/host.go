@@ -41,13 +41,12 @@ func (s *Spec) UnmarshalJSON(b []byte) error {
 }
 
 type host struct {
-	h                 *harness.Harness
-	a                 api.API
-	project           string
-	toolsMu           sync.Mutex
-	jobOwnersMu       sync.RWMutex
-	jobOwners         map[string]*remote
-	legacyCommandArgs bool
+	h           *harness.Harness
+	a           api.API
+	project     string
+	toolsMu     sync.Mutex
+	jobOwnersMu sync.RWMutex
+	jobOwners   map[string]*remote
 }
 type remote struct {
 	host      *host
@@ -89,7 +88,7 @@ func LoadEnvironment(h *harness.Harness, project, home string) error {
 	if err != nil {
 		return err
 	}
-	return load(context.Background(), h, project, home, specs, true)
+	return Load(context.Background(), h, project, home, specs)
 }
 
 // EnvironmentSpecs parses the operator's configured programs without starting them.
@@ -108,10 +107,6 @@ func EnvironmentSpecs() ([]Spec, error) {
 // Load starts the given programs in order. The caller owns the Harness and
 // must close it if loading any program fails.
 func Load(ctx context.Context, h *harness.Harness, project, home string, specs []Spec) error {
-	return load(ctx, h, project, home, specs, false)
-}
-
-func load(ctx context.Context, h *harness.Harness, project, home string, specs []Spec, legacyCommandArgs bool) error {
 	if len(specs) == 0 {
 		return nil
 	}
@@ -145,7 +140,7 @@ func load(ctx context.Context, h *harness.Harness, project, home string, specs [
 	if err != nil {
 		return err
 	}
-	bridge := &host{h: h, project: project, jobOwners: map[string]*remote{}, legacyCommandArgs: legacyCommandArgs}
+	bridge := &host{h: h, project: project, jobOwners: map[string]*remote{}}
 	if err = h.Load(bridge.plugin()); err != nil {
 		return err
 	}
@@ -168,7 +163,7 @@ func load(ctx context.Context, h *harness.Harness, project, home string, specs [
 			if err := r.startService(ctx, spec); err != nil {
 				return err
 			}
-		} else if err := r.startProcess(spec, project, legacyCommandArgs); err != nil {
+		} else if err := r.startProcess(spec, project); err != nil {
 			return err
 		}
 		r.peer.traceHost = true
@@ -233,19 +228,13 @@ func load(ctx context.Context, h *harness.Harness, project, home string, specs [
 	}
 	return nil
 }
-func (r *remote) startProcess(spec Spec, project string, legacyCommandArgs bool) error {
+func (r *remote) startProcess(spec Spec, project string) error {
 	r.cmd = exec.Command(spec.Command[0], spec.Command[1:]...)
 	r.cmd.Dir = project
 	r.cmd.Stderr = os.Stderr
 	env := map[string]string{}
-	minimal := []string{"PATH"}
-	if legacyCommandArgs {
-		minimal = append(minimal, "LANG", "LC_ALL", "TZ", "TMPDIR")
-	}
-	for _, key := range minimal {
-		if value, ok := os.LookupEnv(key); ok {
-			env[key] = value
-		}
+	if path, ok := os.LookupEnv("PATH"); ok {
+		env["PATH"] = path
 	}
 	for k, v := range spec.Env {
 		env[k] = v
@@ -440,15 +429,11 @@ func (r *remote) plugin(index int) api.Plugin {
 			}
 		}
 		for _, c := range r.reg.Commands {
-			if err := a.RegisterCommand(c.Name, func(ctx context.Context, id string, args []string) (string, error) {
+			if err := a.RegisterCommand(c.Name, func(ctx context.Context, id string, args string) (string, error) {
 				var result struct {
 					Output string `json:"output"`
 				}
-				var wireArgs any = strings.Join(args, " ")
-				if r.host.legacyCommandArgs {
-					wireArgs = args
-				}
-				err := r.call(withWork(ctx, work{session: id, actor: api.Acting(ctx)}), "command/run", object{"name": c.Name, "args": wireArgs, "sessionId": id, "actorId": api.Acting(ctx)}, &result)
+				err := r.call(withWork(ctx, work{session: id, actor: api.Acting(ctx)}), "command/run", object{"name": c.Name, "args": args, "sessionId": id, "actorId": api.Acting(ctx)}, &result)
 				return result.Output, err
 			}); err != nil {
 				return err

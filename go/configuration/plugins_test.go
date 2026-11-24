@@ -39,7 +39,7 @@ func TestConfiguredPluginsTrustAndOptions(t *testing.T) {
 						}
 						loaded[name] = opt
 						return api.Plugin{Name: name, Setup: func(a api.API) error {
-							return a.RegisterCommand(name, func(context.Context, string, []string) (string, error) { return opt["label"].(string), nil })
+							return a.RegisterCommand(name, func(context.Context, string, string) (string, error) { return opt["label"].(string), nil })
 						}}, nil
 					}
 				}

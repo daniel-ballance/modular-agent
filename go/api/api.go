@@ -320,7 +320,7 @@ type Decision struct {
 	Answer, Stop, Refuse bool
 }
 type Handler func(context.Context, any) (Decision, error)
-type Command func(context.Context, string, []string) (string, error)
+type Command func(context.Context, string, string) (string, error)
 type Plugin struct {
 	Name, Replaces string
 	Setup          func(API) error

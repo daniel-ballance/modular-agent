@@ -55,7 +55,7 @@ func Plugin() api.Plugin {
 		if err := a.Provide("tools.questions", m); err != nil {
 			return err
 		}
-		if err := a.RegisterCommand("requests", func(ctx context.Context, id string, _ []string) (string, error) {
+		if err := a.RegisterCommand("requests", func(ctx context.Context, id string, _ string) (string, error) {
 			list, err := m.List(id)
 			return string(api.JSON(list)), err
 		}); err != nil {
