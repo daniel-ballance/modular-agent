@@ -8,7 +8,6 @@ import { isDeepStrictEqual as equal } from "node:util";
 import { codeOf, outcome, rpcError, serve } from "./peer.mjs";
 
 const BINDING = "modular-agent-plugin/1";
-const DATA = "modular-agent-data/1";
 const model = { provider: "kit-probe", id: "scripted" };
 const models = [{ ...model, contextWindow: 4096, maxOutput: 512, input: ["text"], reasoning: false }];
 const PROBE = { name: "probe", description: "Check the host callbacks.", parameters: { type: "object", properties: {} } };
@@ -297,7 +296,7 @@ serve("probe", async (m, ctx) => {
 			return {};
 		case "$/ping": return {};
 		case "plugin/initialize":
-			if (p.binding !== BINDING || p.data !== DATA) throw rpcError("not_supported");
+			if (p.binding !== BINDING) throw rpcError("not_supported");
 			config = p.config ?? {};
 			if (config.role === "project-observer") trace({ projectSetup: p.project });
 			if (config.role === "remote-points") {
@@ -396,7 +395,7 @@ serve("probe", async (m, ctx) => {
 				message.stop = "toolUse";
 				message.content = [1, 2].map((n) => ({ type: "toolCall", id: `capacity-call-${n}`, name: EFFECT.name, arguments: { value: String(n) } }));
 			}
-			// The host asks a Provider: additive-field compatibility probe, not a normal sender fixture.
+			// The host asks a Provider: unknown result fields must be inert, not a normal sender fixture.
 			await hook("provider.response", { message, ...(extra ? { fixtureExtra: { data: "inert" } } : {}) });
 			if (extra) trace({ extraResponseAccepted: p.sessionId, message });
 			return message;

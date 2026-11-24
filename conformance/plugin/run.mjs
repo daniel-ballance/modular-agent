@@ -19,10 +19,9 @@ const dash = args.indexOf("--");
 const argv = dash < 0 ? args : args.slice(0, dash);
 const verbose = argv.includes("--verbose");
 const named = argv.includes("--named-callers");
-const skipNamed = "SKIP  named callers (no named-caller fixture command; use --named-callers -- FIXTURE)";
-if (named && argv.length === 1 && dash < 0) { console.log(skipNamed); process.exit(0); }
 let network, isolation;
 try {
+	if (named && (dash < 0 || dash === args.length - 1)) throw Error("--named-callers requires a fixture launcher");
 	if (named && argv.some(a => !["--named-callers", "--verbose"].includes(a))) throw Error("--named-callers needs a launcher, not another run mode");
 	const options = websocketOptions(argv);
 	network = options && { ...options, protocol: PLUGIN_PROTOCOL };
@@ -532,7 +531,7 @@ const recordedResults = (rt) => rt.records.filter((e) => e.kind === "toolResult"
 const resultFor = (rt, id) => recordedResults(rt).filter((e) => e.toolCallId === id || e.message?.toolCallId === id);
 const statusOf = (e) => e?.data?.status;
 const textOf = (content) => (content ?? []).filter((p) => p.type === "text").map((p) => p.text).join("");
-const initParams = { binding: BINDING, data: "modular-agent-data/1", host: { name: "conformance-kit", version: "1" }, project: work, home, config: {} };
+const initParams = { binding: BINDING, host: { name: "conformance-kit", version: "1" }, project: work, home, config: {} };
 
 if (named) {
 	await attempt("named caller fixture", () => namedCallers(command, safeEnv, check, async (first, configured) => {
@@ -540,7 +539,6 @@ if (named) {
 	}));
 	finish();
 }
-console.log(skipNamed);
 if (isolation) {
 	await attempt("plugin service isolation", checkIsolation);
 	finish();
@@ -762,10 +760,10 @@ await attempt("tools cancel", async () => {
 	check("tools/call: early-arriving cancel gets a cancelled answer within 5 s", (code(earlyAnswer) === "cancelled" || earlyAnswer?.status === "cancelled") && Date.now() - t1 <= 5000);
 });
 
-// Edition 4 draft. Plugin binding: host/tools/call and the fixture tool nest. Runs only if the plugin registers nest.
+// Check the nested call under its parent tools/call request.
 await attempt("nested calls", async () => {
 	const listed = (await p.request("tools/list", { toolSource: "conformance-tools", sessionId: "s1" })).tools ?? [];
-	if (!listed.some((t) => t.name === "nest")) return;
+	if (!listed.some((t) => t.name === "nest")) throw Error("tools fixture did not register nest");
 	const nest = (id, name, input) => p.request("tools/call", { toolSource: "conformance-tools", sessionId: "s1", project: work, call: { id, name: "nest", input: { name, input }, startedBy: "model" } });
 	const before = p.hostCalls.length;
 	const r = nest("n1", "read", { path: "note.txt" });
@@ -792,34 +790,28 @@ await attempt("environment", async () => {
 		missing = e;
 	}
 	check("env/read of a missing file is not_found", code(missing) === "not_found", JSON.stringify(missing));
-	// Edition 4 draft: env/list is optional. An environment without it answers not_supported or method_not_found.
 	mkdirSync(join(work, "listed-dir"), { recursive: true });
-	let listing, listError;
-	try {
-		listing = await p.request("env/list", { cwd: work, sessionId: "s1", path: "." });
-	} catch (e) {
-		listError = e;
-	}
-	if (listing) {
-		const kind = (name) => (listing.entries ?? []).find((e) => e.name === name)?.kind;
-		check("env/list: entries carry a name and a kind", Array.isArray(listing.entries) && kind("w.txt") === "file" && kind("listed-dir") === "directory" && listing.entries.every((e) => typeof e.name === "string" && !e.name.includes("/") && ![".", ".."].includes(e.name) && ["file", "directory", "other"].includes(e.kind)), String(JSON.stringify(listing)).slice(0, 200));
-		const failure = async (path) => {
-			try {
-				await p.request("env/list", { cwd: work, sessionId: "s1", path });
-			} catch (e) {
-				return code(e);
-			}
-		};
-		check("env/list of a missing directory is not_found", (await failure("no-such-dir")) === "not_found");
-		check("env/list of a file is invalid_request", (await failure("w.txt")) === "invalid_request");
-	} else check("env/list: an environment that does not list says so", ["not_supported", "method_not_found"].includes(code(listError)), JSON.stringify(listError));
+	const listing = await p.request("env/list", { cwd: work, sessionId: "s1", path: "." });
+	const kind = (name) => (listing.entries ?? []).find((e) => e.name === name)?.kind;
+	check("env/list: entries carry a name and a kind", Array.isArray(listing.entries) && kind("w.txt") === "file" && kind("listed-dir") === "directory" && listing.entries.every((e) => typeof e.name === "string" && !e.name.includes("/") && ![".", ".."].includes(e.name) && ["file", "directory", "other"].includes(e.kind)), String(JSON.stringify(listing)).slice(0, 200));
+	const failure = async (path) => {
+		try {
+			await p.request("env/list", { cwd: work, sessionId: "s1", path });
+		} catch (e) {
+			return code(e);
+		}
+	};
+	check("env/list of a missing directory is not_found", (await failure("no-such-dir")) === "not_found");
+	check("env/list of a file is invalid_request", (await failure("w.txt")) === "invalid_request");
 	const nb = p.notes.length;
 	const e = p.request("env/exec", { cwd: work, sessionId: "s1", command: "echo env-out" });
 	const er = await e;
 	check("env/exec: exit code and output", er.exitCode === 0 && er.output.includes("env-out"), JSON.stringify(er));
 	check("env/exec: streamed env/output", p.notes.slice(nb).some((n) => n.method === "env/output" && n.params?.parentRequestId === e.id && n.params.chunk.includes("env-out")));
-	const z = await p.request("env/exec", { cwd: work, sessionId: "s1", command: "echo no-limit", timeoutMs: 0 });
-	check("env/exec: timeoutMs 0 means no limit", z.exitCode === 0 && z.output.includes("no-limit") && !z.timedOut, JSON.stringify(z));
+	for (const timeoutMs of [0, null, -1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+		const err = await p.request("env/exec", { cwd: work, sessionId: "s1", command: "echo invalid", timeoutMs }).catch(e => e);
+		check(`env/exec refuses timeoutMs ${timeoutMs}`, code(err) === "invalid_request");
+	}
 	const t1 = Date.now();
 	const tl = await p.request("env/exec", { cwd: work, sessionId: "s1", command: "sleep 20", timeoutMs: 300 }, 20000);
 	check("env/exec: a positive timeoutMs stops the command and reports timedOut", tl.timedOut === true && tl.exitCode === null && Date.now() - t1 <= 5300, `${JSON.stringify(tl)} after ${Date.now() - t1} ms`);

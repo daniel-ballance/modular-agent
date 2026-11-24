@@ -60,7 +60,7 @@ serve(name, async (m, ctx) => {
 	const p = m.params ?? {};
 	switch (m.method) {
 		case "plugin/initialize":
-			if (p.binding !== binding || p.data !== "modular-agent-data/1") throw rpcError("not_supported");
+			if (p.binding !== binding) throw rpcError("not_supported");
 			config = p.config;
 			return { binding, name, replaces: ["runtime"], runtime: { id: name, supports: { continuesAfterRestart: true } },
 				providers: [{ id: name, models, supports: { keepsState: false, runsTools: false } }],
