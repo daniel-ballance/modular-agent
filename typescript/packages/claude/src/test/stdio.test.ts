@@ -60,7 +60,7 @@ function start(fake = "1"): Host {
 	return host;
 }
 
-const INIT = { binding: "modular-agent-plugin/1", data: "modular-agent-data/1", host: { name: "test-host", version: "0" }, project: scratch, home: join(scratch, "home"), config: {} };
+const INIT = { binding: "modular-agent-plugin/1", host: { name: "test-host", version: "0" }, project: scratch, home: join(scratch, "home"), config: {} };
 const TOOL = { name: "get_weather", description: "Weather for a city", parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] } };
 const MODEL = { provider: "claude", id: "claude-haiku-5-5" };
 const ask = (text: string) => ({ provider: "claude", model: MODEL, sessionId: "s1", request: { systemPrompt: "Be terse.", messages: [{ role: "user", content: [{ type: "text", text }] }], tools: [TOOL], settings: { reasoning: "low" } } });

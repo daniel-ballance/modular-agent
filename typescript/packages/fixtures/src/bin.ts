@@ -23,9 +23,7 @@ try {
       // Flush during shutdown, before the response tells the host it can reap us.
       const stop = () => stopped ??= shutdown();
       try {
-        await serve({ ...plugin, stop }, {
-          acceptTraceContext: process.env.MODULAR_AGENT_TELEMETRY_HANDSHAKE !== "no-acceptance",
-        });
+        await serve({ ...plugin, stop });
       } finally { await stop(); }
     }
   }

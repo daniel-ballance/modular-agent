@@ -24,17 +24,17 @@ function bindings(plugin: Plugin, failed?: (error: AgentError) => void) {
   };
 }
 
-async function endpoint(plugin: Plugin, input?: NodeJS.ReadableStream, output?: (line: string) => void, acceptTraceContext?: boolean): Promise<void> {
+async function endpoint(plugin: Plugin, input?: NodeJS.ReadableStream, output?: (line: string) => void): Promise<void> {
   let failure: AgentError | undefined;
-  await servePlugins({ ...bindings(plugin, error => { failure = error; }), input, output, acceptTraceContext });
+  await servePlugins({ ...bindings(plugin, error => { failure = error; }), input, output });
   if (failure) throw failure;
 }
 
 /** Serve on stdio or create a WebSocket listener. Setup runs once per connection. */
-export function serve(plugin: Plugin, options?: { acceptTraceContext: boolean }): Promise<void>;
+export function serve(plugin: Plugin): Promise<void>;
 export function serve(plugin: Plugin | (() => Plugin), options: AnonymousPluginListenOptions): Promise<ServiceServer>;
 export function serve(factory: (caller:NamedCaller) => Plugin, options:NamedPluginListenOptions):Promise<ServiceServer>;
-export async function serve(plugin: Plugin | (() => Plugin) | ((caller:NamedCaller) => Plugin), options?: PluginListenOptions | { acceptTraceContext: boolean }): Promise<void | ServiceServer> {
+export async function serve(plugin: Plugin | (() => Plugin) | ((caller:NamedCaller) => Plugin), options?: PluginListenOptions): Promise<void | ServiceServer> {
   if (options && "callers" in options) {
     if (typeof plugin !== "function") throw new AgentError("invalid_composition","Named callers require a per-connection plugin factory");
     try { return await servePluginService(({callerId}:NamedCaller) => {
@@ -43,12 +43,12 @@ export async function serve(plugin: Plugin | (() => Plugin) | ((caller:NamedCall
     catch (cause) { throw new AgentError("invalid_composition","Invalid named plugin listener",undefined,cause); }
   }
   if (typeof plugin !== "function") checkServable(plugin);
-  if (options && !("acceptTraceContext" in options)) return servePluginService(() => {
+  if (options) return servePluginService(() => {
     const instance = typeof plugin === "function" ? (plugin as () => Plugin)() : plugin;
     checkServable(instance);
     return bindings(instance);
   }, options);
-  if (typeof plugin !== "function") await endpoint(plugin, undefined, undefined, options?.acceptTraceContext);
+  if (typeof plugin !== "function") await endpoint(plugin);
 }
 
 const onWire = new WeakMap<Plugin, Plugin>();

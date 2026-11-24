@@ -93,7 +93,7 @@ export async function scenarioAgent(s: Scenario, dir: string, p: Placement,
       : run && p.name.startsWith("process:") ? { processPlugins: plugins.map(name => {
         const supplied = run.fixtures.find(f => f.name === name);
         if (!supplied) throw new Error(`Missing fixture ${name}`);
-        return { command: supplied.command, env: supplied.env, config, offerTraceContext: run.handshake !== "no-offer" };
+        return { command: supplied.command, env: supplied.env, config };
       }) }
       : p.command ? { processPlugins: plugins.map(name => ({ command: [...p.command!, name], config })) }
       : { plugins: plugins.map(name => fixture(name, config, s.scenario === "question-answered" ? run?.values.answer : undefined)) }),

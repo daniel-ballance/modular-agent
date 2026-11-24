@@ -97,7 +97,7 @@ test("a remote diagnostic passes through the reporting plugin's output gate", { 
 	} finally { await service.close(); }
 });
 
-const init = (dir: string) => ({ binding: PLUGIN_BINDING, data: "modular-agent-data/1", project: dir, home: dir });
+const init = (dir: string) => ({ binding: PLUGIN_BINDING, project: dir, home: dir });
 
 test("plugin service authenticates, isolates instances and closes only the instance on shutdown", async t => {
 	const f = await fixture(t);

@@ -183,7 +183,7 @@ test("setup-discovered in-process registration answers initialize with not_suppo
   const lines = createInterface({ input: child.stdout });
   const reply = once(lines, "line");
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "plugin/initialize", params: {
-    binding: "modular-agent-plugin/1", data: "modular-agent-data/1", project: process.cwd(), home: tmpdir(), config: { enabled: true },
+    binding: "modular-agent-plugin/1", project: process.cwd(), home: tmpdir(), config: { enabled: true },
   } }) + "\n");
   const [line] = await reply;
   assert.deepEqual(JSON.parse(line), { jsonrpc: "2.0", id: 1, error: {

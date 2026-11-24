@@ -3,7 +3,7 @@ import { PassThrough } from "node:stream";
 import { test, type TestContext } from "node:test";
 import type { Plugin, TurnOutcome } from "@modular-agent/harness";
 import { durableRuntime } from "@modular-agent/runtime-durable";
-import { DATA_BINDING, PLUGIN_BINDING, servePlugins, WireError, WirePeer } from "@modular-agent/plugin-wire";
+import { PLUGIN_BINDING, servePlugins, WireError, WirePeer } from "@modular-agent/plugin-wire";
 import { transientRuntime } from "@modular-agent/runtime-transient";
 
 async function wireHost(t: TestContext, runtime: Plugin) {
@@ -11,7 +11,7 @@ async function wireHost(t: TestContext, runtime: Plugin) {
 	const host = new WirePeer((line) => input.write(line));
 	const serving = servePlugins({ name: "runtime-test", plugins: [runtime], input, output: (line) => host.feed(line) });
 	t.after(async () => { input.end(); await serving; host.close(); });
-	await host.request("plugin/initialize", { binding: PLUGIN_BINDING, data: DATA_BINDING, project: "/project", home: "/home", config: {} });
+	await host.request("plugin/initialize", { binding: PLUGIN_BINDING, project: "/project", home: "/home", config: {} });
 	return host;
 }
 

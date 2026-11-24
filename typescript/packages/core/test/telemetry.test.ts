@@ -182,49 +182,46 @@ test("model diagnostics are bounded and a failed exporter does not alter work", 
   assert.ok(attempts.length > 0);
 });
 
-for (const [offer, accept] of [[true, true], [true, false], [false, true]]) {
-  test(`plugin work context: offer=${offer}, accept=${accept}`, async t => {
-    const { spans, provider } = record(t);
-    const harness = new Harness({ project: "/", home: "/" });
-    const sessionId = await harness.startSession();
-    const input = new PassThrough();
-    const toPlugin: any[] = [], toHost: any[] = [];
-    const host = new WirePeer(line => { toPlugin.push(JSON.parse(line)); queueMicrotask(() => input.write(line)); });
-    const done = servePlugins({ name: "fixture", acceptTraceContext: accept, input, output: line => {
-      toHost.push(JSON.parse(line)); queueMicrotask(() => host.feed(line));
-    }, plugins: [{ name: "fixture", setup(api) {
-      api.provide("tool-source", {
-        id: "fixture-tools", tools: () => [{ name: "ask", description: "Ask", parameters: { type: "object" } }],
-        async run(call, ctx) { await ctx.ask({ kind: "text", question: "WIRE_SENTINEL" }); return { callId: call.id, status: "completed", content: [] }; },
-      } satisfies ToolSource);
-    } }] });
-    t.after(async () => { await harness.stop(); input.end(); await done; });
-    const external = await registerExternalPlugin(host, { project: "/", home: "/" }, {}, async () => {}, undefined, offer);
-    await harness.load([external.plugin]);
-    const source = harness.use<ToolSource>("tool-source")!;
-    const op = startOperation("test.operation", { "gen_ai.conversation.id": sessionId });
-    const call = { id: "test-call", name: "ask", input: {}, startedBy: "plugin" as const };
-    await op.observe(async () => {
-      const result = await source.run(call, { call, sessionId, signal: new AbortController().signal,
-        async ask() { assert.ok(currentSpan()); return { requestId: "fixture-answer", declined: true, actorId: "user" }; }, progress() {}, jobs: { async start() { throw new Error("not used"); } } });
-      assert.ok("status" in result && result.status === "completed");
-    });
-    const agreed = offer && accept;
-    assert.equal(toPlugin.find(m => m.method === "plugin/initialize").params.traceContext, offer ? 1 : undefined);
-    assert.equal(toHost.find(m => m.result?.binding).result.traceContext, agreed ? 1 : undefined);
-    assert.equal(!!toPlugin.find(m => m.method === "tools/call").params.traceContext, agreed);
-    assert.equal(!!toHost.find(m => m.method === "host/ask").params.traceContext, agreed);
-    assert.ok([...toPlugin, ...toHost].filter(m => !m.method && !m.result?.binding).every(m => !JSON.stringify(m).includes("traceContext")));
-    await provider.forceFlush();
-    const client = spans().find(s => s.kind === SpanKind.CLIENT && s.attributes["modular_agent.plugin.method"] === "tools/call")!;
-    const server = spans().find(s => s.kind === SpanKind.SERVER && s.attributes["modular_agent.plugin.method"] === "tools/call")!;
-    assert.equal(parent(client), op.spanContext?.spanId);
-    assert.equal(parent(server), agreed ? id(client) : undefined);
-    const callback = spans().find(s => s.kind === SpanKind.SERVER && s.attributes["modular_agent.plugin.method"] === "host/ask")!;
-    assert.equal(callback.spanContext().traceId, client.spanContext().traceId);
-    assert.doesNotMatch(JSON.stringify(spans().map(s => [s.name, s.attributes, s.status, s.events])), /WIRE_SENTINEL/);
+test("plugin work and its host callback carry the current operation", async t => {
+  const { spans, provider } = record(t);
+  const harness = new Harness({ project: "/", home: "/" });
+  const sessionId = await harness.startSession();
+  const input = new PassThrough();
+  const toPlugin: any[] = [], toHost: any[] = [];
+  const host = new WirePeer(line => { toPlugin.push(JSON.parse(line)); queueMicrotask(() => input.write(line)); });
+  const done = servePlugins({ name: "fixture", input, output: line => {
+    toHost.push(JSON.parse(line)); queueMicrotask(() => host.feed(line));
+  }, plugins: [{ name: "fixture", setup(api) {
+    api.provide("tool-source", {
+      id: "fixture-tools", tools: () => [{ name: "ask", description: "Ask", parameters: { type: "object" } }],
+      async run(call, ctx) { await ctx.ask({ kind: "text", question: "WIRE_SENTINEL" }); return { callId: call.id, status: "completed", content: [] }; },
+    } satisfies ToolSource);
+  } }] });
+  t.after(async () => { await harness.stop(); input.end(); await done; });
+  const external = await registerExternalPlugin(host, { project: "/", home: "/" }, {}, async () => {});
+  await harness.load([external.plugin]);
+  const source = harness.use<ToolSource>("tool-source")!;
+  const op = startOperation("test.operation", { "gen_ai.conversation.id": sessionId });
+  const call = { id: "test-call", name: "ask", input: {}, startedBy: "plugin" as const };
+  await op.observe(async () => {
+    const result = await source.run(call, { call, sessionId, signal: new AbortController().signal,
+      async ask() { assert.ok(currentSpan()); return { requestId: "fixture-answer", declined: true, actorId: "user" }; }, progress() {}, jobs: { async start() { throw new Error("not used"); } } });
+    assert.ok("status" in result && result.status === "completed");
   });
-}
+  assert.equal(toPlugin.find(m => m.method === "plugin/initialize").params.traceContext, undefined);
+  assert.equal(toHost.find(m => m.result?.binding).result.traceContext, undefined);
+  assert.equal(!!toPlugin.find(m => m.method === "tools/call").params.traceContext, true);
+  assert.equal(!!toHost.find(m => m.method === "host/ask").params.traceContext, true);
+  assert.ok([...toPlugin, ...toHost].filter(m => !m.method && !m.result?.binding).every(m => !JSON.stringify(m).includes("traceContext")));
+  await provider.forceFlush();
+  const client = spans().find(s => s.kind === SpanKind.CLIENT && s.attributes["modular_agent.plugin.method"] === "tools/call")!;
+  const server = spans().find(s => s.kind === SpanKind.SERVER && s.attributes["modular_agent.plugin.method"] === "tools/call")!;
+  assert.equal(parent(client), op.spanContext?.spanId);
+  assert.equal(parent(server), id(client));
+  const callback = spans().find(s => s.kind === SpanKind.SERVER && s.attributes["modular_agent.plugin.method"] === "host/ask")!;
+  assert.equal(callback.spanContext().traceId, client.spanContext().traceId);
+  assert.doesNotMatch(JSON.stringify(spans().map(s => [s.name, s.attributes, s.status, s.events])), /WIRE_SENTINEL/);
+});
 
 test("restart after SIGKILL uses the committed trace and does not repeat the effect", { timeout: 15_000 }, async t => {
   const { spans, provider } = record(t);

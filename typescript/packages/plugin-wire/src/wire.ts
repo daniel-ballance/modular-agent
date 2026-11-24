@@ -8,8 +8,13 @@ import { carrier, conversation, currentSpan, readTrace, safeName, SpanKind, star
 const workMethod = (method: string) => !method.startsWith("$/") && !method.startsWith("plugin/") && method !== "host/problem";
 const objectParams = (params: unknown): params is Record<string, unknown> => !!params && typeof params === "object" && !Array.isArray(params);
 
+export function execTimeout(value: unknown): number | undefined {
+	if (value === undefined) return;
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) throw new WireError("invalid_request", "timeoutMs must be a positive safe integer");
+	return value;
+}
+
 export const PLUGIN_BINDING = "modular-agent-plugin/1";
-export const DATA_BINDING = "modular-agent-data/1";
 /** The largest message either side sends or accepts. */
 export const MAX_MESSAGE = 64 * 1024 * 1024;
 
@@ -68,7 +73,7 @@ export class WirePeer {
 	private handlers = new Map<string, Handler>();
 	private notes = new Map<string, NoteHandler>();
 	private waiting = new Map<number | string, { resolve(v: unknown): void; reject(e: Error): void }>();
-	private trace?: { name: string; agreed: boolean; callbackScope?: (params: any) => Operation | undefined };
+	private trace?: { name: string; callbackScope?: (params: any) => Operation | undefined };
 	private sent = new Map<number | string, Operation>();
 	private running = new Map<number | string, AbortController>();
 	private nextId = 1;
@@ -83,8 +88,8 @@ export class WirePeer {
 		this.onNotification("$/cancel", (p) => this.running.get(p?.id)?.abort());
 	}
 
-	configureTracing(name: string, agreed: boolean, callbackScope?: (params: any) => Operation | undefined): void {
-		this.trace = { name, agreed, callbackScope };
+	configureTracing(name: string, callbackScope?: (params: any) => Operation | undefined): void {
+		this.trace = { name, callbackScope };
 	}
 
 	requestTrace(id: number | string): Operation | undefined { return this.isWaiting(id) ? this.sent.get(id) : undefined; }
@@ -101,8 +106,7 @@ export class WirePeer {
 	}
 
 	private paramsWithTrace(method: string, params: unknown): unknown {
-		if (method === "plugin/initialize") return params;
-		const traceContext = this.trace?.agreed && workMethod(method) && method !== "host/credentials/read" ? carrier(currentSpan()) : undefined;
+		const traceContext = this.trace && workMethod(method) && method !== "host/credentials/read" ? carrier(currentSpan()) : undefined;
 		if (!objectParams(params)) return params;
 		if (!traceContext && !Object.hasOwn(params, "traceContext")) return params;
 		const { traceContext: _discard, ...clean } = params;
@@ -111,8 +115,8 @@ export class WirePeer {
 
 	private incoming<T>(method: string, params: any, work: (clean: any, parent: ReturnType<typeof readTrace> | null) => T): T {
 		const tracked = workMethod(method) && method !== "host/credentials/read" ? this.trace?.callbackScope?.(params) : undefined;
-		const received = this.trace?.agreed && workMethod(method) && method !== "host/credentials/read" ? readTrace(params?.traceContext) : undefined;
-		const clean = method !== "plugin/initialize" && objectParams(params) && Object.hasOwn(params, "traceContext") ? (({ traceContext: _discard, ...rest }) => rest)(params) : params;
+		const received = this.trace && workMethod(method) && method !== "host/credentials/read" ? readTrace(params?.traceContext) : undefined;
+		const clean = objectParams(params) && Object.hasOwn(params, "traceContext") ? (({ traceContext: _discard, ...rest }) => rest)(params) : params;
 		const run = () => {
 			const authorized = tracked ? currentSpan() : undefined;
 			const parent = this.trace?.callbackScope ? (received && received.traceId === authorized?.traceId ? received : authorized) : received;
