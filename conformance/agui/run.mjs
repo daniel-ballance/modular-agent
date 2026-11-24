@@ -131,6 +131,7 @@ async function managed(command, name, scenario) {
     } finally { lines.close(); }
     const ready = line.startsWith('{') ? JSON.parse(line) : { url: line };
     const base = origin(ready.url);
+    if (scenario.control) assert.ok(ready.control, 'managed fixture must report its control URL');
     const control = scenario.control ? controls(ready.control, controlToken) : undefined;
     return { origin: base, tokens, api: at(base, tokens.owner), control,
       restart: async () => { await cleanup(); return launch(); } };
@@ -154,7 +155,7 @@ async function main() {
       const path = values[role === 'owner' ? 'token-file' : `${role}-token-file`];
       if (path) tokens[role] = await token(path);
     }
-    for (const role of requiredRoles[names[0]] ?? []) assert.ok(tokens[role], `${names[0]} requires --${role}-token-file`);
+    for (const role of [...(requiredRoles[names[0]] ?? []), ...(cases[names[0]].roles ?? [])]) assert.ok(tokens[role], `${names[0]} requires --${role}-token-file`);
     assert.equal(new Set(Object.values(tokens)).size, Object.keys(tokens).length, 'fixture credentials must be distinct');
   }
   let passed = 0;
