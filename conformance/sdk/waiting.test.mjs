@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { skipReason, waitingFixtures, waitingKinds, waitingRecords, waitingStep } from './waiting.mjs';
+import { checkWaitingDeclaration, waitingFixtures, waitingKinds, waitingRecords, waitingStep } from './waiting.mjs';
 
 const fixtures = await waitingFixtures();
 const choices = new Set(['prompt', 'wait', 'reopen', ...waitingKinds]);
 for (const f of fixtures) test(`fixture: ${f.scenario}`, () => {
-  assert.ok(skipReason(f, { questionsOutlastTurns: true, lateAnswersStartTurns: true }));
-  assert.equal(skipReason(f, f.requires), undefined);
-  if (f.agent.severalActors) assert.ok(skipReason(f, { approvalsOutlastTurns: true }));
+  if (!f.expectCreateError) {
+    const declaration = { approvalsOutlastTurns: true, severalActors: true, ...f.expectDeclaration };
+    checkWaitingDeclaration(f, declaration);
+    assert.throws(() => checkWaitingDeclaration(f, { ...declaration, approvalsOutlastTurns: !declaration.approvalsOutlastTurns }));
+    if (f.agent.severalActors) assert.throws(() => checkWaitingDeclaration(f, { ...declaration, severalActors: false }));
+  }
   assert.ok(f.rules.length && f.about); assert.ok(f.agent.plugins.length);
   if (f.expectCreateError) { assert.deepEqual(f.steps, []); assert.equal(f.expectCreateError.code, 'invalid_composition'); return; }
   assert.ok(f.steps.length);
