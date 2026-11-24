@@ -19,10 +19,9 @@ const dash = args.indexOf("--");
 const argv = dash < 0 ? args : args.slice(0, dash);
 const verbose = argv.includes("--verbose");
 const named = argv.includes("--named-callers");
-const skipNamed = "SKIP  named callers (no named-caller fixture command; use --named-callers -- FIXTURE)";
-if (named && argv.length === 1 && dash < 0) { console.log(skipNamed); process.exit(0); }
 let network, isolation;
 try {
+	if (named && (dash < 0 || dash === args.length - 1)) throw Error("--named-callers requires a fixture launcher");
 	if (named && argv.some(a => !["--named-callers", "--verbose"].includes(a))) throw Error("--named-callers needs a launcher, not another run mode");
 	const options = websocketOptions(argv);
 	network = options && { ...options, protocol: PLUGIN_PROTOCOL };
@@ -532,7 +531,7 @@ const recordedResults = (rt) => rt.records.filter((e) => e.kind === "toolResult"
 const resultFor = (rt, id) => recordedResults(rt).filter((e) => e.toolCallId === id || e.message?.toolCallId === id);
 const statusOf = (e) => e?.data?.status;
 const textOf = (content) => (content ?? []).filter((p) => p.type === "text").map((p) => p.text).join("");
-const initParams = { binding: BINDING, data: "modular-agent-data/1", host: { name: "conformance-kit", version: "1" }, project: work, home, config: {} };
+const initParams = { binding: BINDING, host: { name: "conformance-kit", version: "1" }, project: work, home, config: {} };
 
 if (named) {
 	await attempt("named caller fixture", () => namedCallers(command, safeEnv, check, async (first, configured) => {
@@ -540,7 +539,6 @@ if (named) {
 	}));
 	finish();
 }
-console.log(skipNamed);
 if (isolation) {
 	await attempt("plugin service isolation", checkIsolation);
 	finish();
@@ -762,10 +760,10 @@ await attempt("tools cancel", async () => {
 	check("tools/call: early-arriving cancel gets a cancelled answer within 5 s", (code(earlyAnswer) === "cancelled" || earlyAnswer?.status === "cancelled") && Date.now() - t1 <= 5000);
 });
 
-// Edition 4 draft. Plugin binding: host/tools/call and the fixture tool nest. Runs only if the plugin registers nest.
+// Check the nested call under its parent tools/call request.
 await attempt("nested calls", async () => {
 	const listed = (await p.request("tools/list", { toolSource: "conformance-tools", sessionId: "s1" })).tools ?? [];
-	if (!listed.some((t) => t.name === "nest")) return;
+	if (!listed.some((t) => t.name === "nest")) throw Error("tools fixture did not register nest");
 	const nest = (id, name, input) => p.request("tools/call", { toolSource: "conformance-tools", sessionId: "s1", project: work, call: { id, name: "nest", input: { name, input }, startedBy: "model" } });
 	const before = p.hostCalls.length;
 	const r = nest("n1", "read", { path: "note.txt" });
@@ -792,7 +790,6 @@ await attempt("environment", async () => {
 		missing = e;
 	}
 	check("env/read of a missing file is not_found", code(missing) === "not_found", JSON.stringify(missing));
-	// Edition 4 draft: env/list is optional. An environment without it answers not_supported or method_not_found.
 	mkdirSync(join(work, "listed-dir"), { recursive: true });
 	let listing, listError;
 	try {

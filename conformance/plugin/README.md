@@ -39,7 +39,7 @@ For builds that provision several isolated hosts on one listener, omit `--second
 
 ### Named callers on one listener
 
-[ADR 0035](../../docs/adr/0035-host-limits-from-the-ops-desk.md) adds a managed mode to the isolation checks. Ordinary runs skip it with a reason. To opt in, supply a launcher that serves the SDK's per-connection factory with a token table:
+[ADR 0035](../../docs/adr/0035-host-limits-from-the-ops-desk.md) adds a managed mode to the isolation checks. To select it, supply a launcher that serves the SDK's per-connection factory with a token table:
 
 ```sh
 node conformance/plugin/run.mjs --named-callers -- /absolute/path/to/named-caller-fixture [args...]
@@ -79,7 +79,7 @@ What it checks:
 - The fixture Provider: stream order, inference using the `provider.request` hook's answer, the complete-response hook, a valid and an unoffered tool directive, and exact truncation to 200 Unicode code points from the first result after the latest user message.
 - Tool calls through `host/env/*`, parent and session scope, fixture progress and exit text, and cancellation. The early-arrival cancel probe does not prove that dispatch had not started.
 - Environment files, output, deadlines and background process ownership. Platform claims use the binding's spellings for standard systems. Descendant tests use the advertised containment only for an exact platform match. With `points: true`, it checks non-mutating point lookup, in-place restore and `not_found` for unknown points and a point saved by a separate environment.
-- [Edition 4](../../docs/adr/0023-edition-4-draft.md), only where the plugin offers it. If the `tools` part registers `nest`: one `host/tools/call` under its own `tools/call`, the nested result passed on unchanged, including a refusal, and a protocol error turned into a failed result. `env/list` returns named entries with kinds, `not_found` for a missing directory and `invalid_request` for a file; an environment without it must say `not_supported` or `method_not_found`.
+- The full `tools` fixture registers `nest`. The kit checks one `host/tools/call` under its own `tools/call`, the nested result passed on unchanged, including a refusal, and a protocol error turned into a failed result. `env/list` returns named entries with kinds, `not_found` for a missing directory and `invalid_request` for a file.
 - Hook replies for a refusal, a system contribution, and lossless redaction across text events within a stream segment and within one standalone custom event.
 - Scripted Runtime turns: exact dispatch order, refused calls, host-recorded model intent and result, normal and failed attempt order, fresh attempt ids on retry, preparation after context overflow with a scripted host compaction, cancellation and step limits. The Runtime reports only step usage and does not call `step.after` for the scripted auxiliary attempt. It simulates `turn_limit` before preparation or dispatch, and after the host has written a model intent and its bookkeeping abort. The Runtime reports the limit without submitting a response for the undispatched attempt. When steering is advertised, the Runtime makes its final check at the turn boundary. Serial and overlapping scheduling are both allowed for parallel-capable calls.
 - `resumeTurn` against synthetic standard history. An unsafe started call is not repeated. A transient Runtime fails and does not dispatch; a durable one runs the calls it can recover. Neither resubmits a result already settled before resume. This is not an independent second build's history.
