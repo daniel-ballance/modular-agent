@@ -14,7 +14,9 @@ import { at, deadline } from './wire.mjs';
 import { waiting } from './waiting.mjs';
 import { closures } from './closures.mjs';
 
-const cases = { ...basic, ...advanced, ...waiting, ...closures };
+import { receipts } from './receipts.mjs';
+
+const cases = { ...basic, ...advanced, ...waiting, ...closures, ...receipts };
 const here = name => fileURLToPath(new URL(name, import.meta.url));
 const exec = promisify(execFile);
 
@@ -49,10 +51,11 @@ test('undeclared session skips the waiting case before requiring controls or res
   } finally { await server.close(); await rm(folder, { recursive: true, force: true }); }
 });
 
-test('wait feed absent: skip before looking for controls or other credentials', async () => {
+test('host reads absent: skip before looking for controls, restart or other credentials', async () => {
   const server = await fake();
   try {
     const peer = { api: at(server.origin, server.tokens.owner) };
+    for (const c of Object.values(receipts)) assert.deepEqual(await c.run(peer), { skipped: 'thread snapshot does not offer runReceipts' });
     for (const c of Object.values(closures)) assert.deepEqual(await c.run(peer), { skipped: 'thread snapshot does not offer waitCursor' });
   } finally { await server.close(); }
 });
@@ -125,6 +128,32 @@ for (const [name, fault, diagnosis] of [
   ['closure-cursor', 'missing-after', /HTTP status/],
   ['closure-cursor', 'stale-wait-cursor', /cursor_expired/],
   ['closure-cursor', 'foreign-wait-cursor', /cursor_expired/],
+  ['receipt-before-admission', 'early-link', /HTTP status/],
+  ['receipt-before-admission', 'reserve-rejected-id', /run HTTP status/],
+  ['receipt-after-admission', 'late-link', /HTTP status/],
+  ['receipt-after-admission', 'lose-link', /HTTP status/],
+  ['receipt-after-admission', 'infer-error-from-loss', /receipt at this watermark/],
+  ['receipt-after-admission', 'latest-turn', /receipt at this watermark/],
+  ['receipt-durable', 'assume-transient', /receipt at this watermark/],
+  ['receipt-before-terminal', 'infer-success-from-end', /receipt at this watermark/],
+  ['receipt-before-terminal', 'early-terminal', /terminal escaped/],
+  ['receipt-interrupt', 'exchange-is-work', /receipt at this watermark/],
+  ['receipt-interrupt', 'merge-exchanges', /receipt at this watermark/],
+  ['receipt-interrupt', 'retry-decision', /reads and retries leave work unchanged/],
+  ['receipt-result', 'follow-origin', /receipt at this watermark/],
+  ['receipt-result', 'extra-result-input', /one opening input/],
+  ['receipt-result', 'read-rehandoff', /reads and retries leave work unchanged/],
+  ['receipt-visibility', 'read-admits', /reads and retries leave work unchanged/],
+  ['receipt-visibility', 'receipt-body', /receipt at this watermark/],
+  ['receipt-visibility', 'accept-used-id', /HTTP status/],
+  ['receipt-visibility', 'sibling-receipt', /HTTP status/],
+  ['receipt-visibility', 'foreign-receipt', /HTTP status/],
+  ['receipt-visibility', 'tenant-receipt', /HTTP status/],
+  ['receipt-visibility', 'settlement-as-unknown', /HTTP status/],
+  ['receipt-visibility', 'ignore-reply-gate', /HTTP status/],
+  ['receipt-visibility', 'withheld-oracle', /HTTP status/],
+  ['receipt-visibility', 'pending-receipt', /HTTP status/],
+  ['receipt-visibility', 'erased-receipt', /HTTP status/],
   ['listener', 'anonymous', /HTTP status/],
   ['tls', 'tls-client-only', /does not replace bearer/],
   ['listener', 'outside-scope', /HTTP status/],
