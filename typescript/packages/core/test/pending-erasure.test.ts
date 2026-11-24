@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { cp, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
@@ -190,6 +190,14 @@ test("a previously declared HTTP registry does not recreate missing storage", as
   const registry = await fetch(`${restarted.url}/v1/sessions/previous/pending-erasure`, { headers });
   assert.equal(registry.status, 503);
   assert.equal((await registry.json() as { code: string }).code, "unavailable");
+});
+
+test("a new HTTP registry is not created over an unidentified store", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "sdk-http-nonempty-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, "obligations"), "unverified");
+  await assert.rejects(historyService({ dir, token: "fixture" }), /empty directory/);
+  assert.deepEqual(await readdir(dir), ["obligations"]);
 });
 
 test("a registry without publication order stays unavailable and unmodified", async t => {

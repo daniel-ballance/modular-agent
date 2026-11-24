@@ -108,7 +108,10 @@ class Records {
 			this.failed = true;
 			return;
 		}
-		if (path && !existing) closeSync(openSync(path, "wx", 0o600));
+		if (path && !existing) {
+			if (readdirSync(dir!).length) throw new Error("A new history store requires an empty directory");
+			closeSync(openSync(path, "wx", 0o600));
+		}
 		this.db = new DatabaseSync(path ?? ":memory:");
 		try {
 			if (path !== undefined) {
@@ -140,7 +143,7 @@ class Records {
 				this.db.prepare("SELECT session,intent,record,json FROM registry_plans LIMIT 0");
 			}
 			const prior = this.db.prepare("SELECT value FROM settings WHERE key='ttl-bound'").get()?.value;
-			if (prior === undefined && this.db.prepare("SELECT 1 FROM sessions LIMIT 1").get()) throw new Error("Stored TTL bound is missing");
+			if (existing && prior === undefined) throw new Error("Stored TTL bound is missing");
 			if (prior !== undefined && (typeof prior !== "number" || !Number.isSafeInteger(prior) || prior < 0)) throw new Error("Stored TTL bound is invalid");
 			const bound = Math.max(prior ?? 0, ttl);
 			this.db.prepare("INSERT OR REPLACE INTO settings VALUES ('ttl-bound',?)").run(bound);
@@ -456,6 +459,8 @@ export class HistoryArchive {
 		};
 	}
 	store(): HistoryStore {
+		// Establish the archive before creating any other files in its namespace.
+		if (this.dir) { this.db().check(); this.idle(); }
 		const owner = Symbol();
 		const expires = () => false;
 		const read = <T>(operation: (db: Records) => T): T => {
