@@ -33,3 +33,12 @@ The [ops desk](../../demos/ops-desk/DESIGN.md#findings) uses three-minute deadli
 Accepted as recommended on 2026-11-23: the per-session opt-in for the pre-dispatch gate on top-level model calls to server tools; an explicit finite operator maximum, applied through dispatch; and consent only from fresh, unchanged delivery on the answering route. The specification is accepted in 0.2.0; implementations follow in 0.3.0.
 
 This changes no edition to pin. No build implements it yet.
+
+## Amendment: approvals that cover nested calls
+
+Added 2026-11-24 by the owner. `ma` offers the model one top-level tool, `codemode`; its writes and commands are nested calls. Nested calls cannot wait (decision 1), and each passed approval on its own, so an approval given hours later would end with every write asked again live and refused. With the operator's opt-in, an allow for a top-level call now also answers the approval check for the nested calls it makes in that dispatch ([rules](../contracts.md#approvals-that-cover-nested-calls)). The approver is told so in the exact view; each covered call records the allow that covered it. Rights, the other gates, registration and the final dispatch check still apply to each nested call.
+
+The approver approves the code, not a list of effects. A script can read files and decide what to write from what it finds, so its effects depend on the project when it runs. `codemode`'s sandbox has no file, network, clock or entropy of its own, so the script and its tools' results decide what it does.
+
+**Options not taken:** approve each nested call live (it cannot wait); let nested calls wait (a running script would have to pause for hours).
+

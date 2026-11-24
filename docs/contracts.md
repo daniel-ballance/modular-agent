@@ -394,7 +394,7 @@ The operation owner defines its hook points, including points owned by plugins. 
 
 - A tool invocation MAY ask the Harness to run another call, only under its own live, dispatched invocation. A build that does not run nested calls MUST refuse the request and MUST NOT declare `nestedToolCalls`.
 - The Harness MUST make the request a new ToolCall with a fresh id, a tool as its caller, the asking call as its parent, and the parent's actor, turn and step. The asking tool MUST NOT choose any of these.
-- The Harness MUST check a nested call as it checks any call, separately from its parent: the registration's callers MUST include a plugin, and rights, gates, approval and the final dispatch check all apply. The [recorded offer](#recovery-and-repeating-work) governs the calls a model starts. A nested call needs no place in it.
+- The Harness MUST check a nested call as it checks any call, separately from its parent: the registration's callers MUST include a plugin, and rights, gates, approval and the final dispatch check all apply. The one exception is a [covered approval](#approvals-that-cover-nested-calls): its parent's allow answers the approval question, and nothing else. The [recorded offer](#recovery-and-repeating-work) governs the calls a model starts. A nested call needs no place in it.
 - The Harness MUST commit the nested call's start and its terminal result as for any call, keep both out of the model's view, and return the committed terminal result to the asking invocation. Only the parent's own result reaches the model.
 - A nested call MUST NOT be left open. If a gate answers pending for it, the Harness MUST close that call's open questions as `noLongerAnswerable` and settle the call as `refused`.
 - The Harness MUST enforce a finite nesting depth, which the build documents, and refuse a request beyond it.
@@ -423,6 +423,15 @@ The operation owner defines its hook points, including points owned by plugins. 
 - When approval is required, the gate MUST require an explicit eligible allow for the exact call. The Harness MUST record the [approval binding](bindings/data.md#questions) before delivery. It MUST NOT reuse an answer without an exact call and registration match. For a live approval, if the binding is missing or changed and the call can otherwise proceed, it MUST ask with a fresh question ID and key.
 - Every approval route MUST present the exact tool name and input. The Harness MUST track whether a request is answerable and can authorize the call separately for each recipient and route. The Harness MUST treat a route whose view was changed or withheld as unanswerable and grant no approval authority through it. An unchanged request already delivered to the same recipient on another route MUST remain answerable as long as that route is still eligible. The Harness MUST recheck route eligibility when presence, rights, membership, gating or delivery changes. Except for [approvals that wait](#approvals-that-wait), if no present eligible answerer has a route that can deliver an unchanged view, the Harness MUST close any open approval with reason `refused` and settle the call as `refused`. See [ACP Request](bindings/acp.md#request) for the route mapping.
 - Without an approval plugin, the agent MUST apply rights and other gates alone and signal the absence of approval support (no `approval` option in [ACP](bindings/acp.md#configuration-options)). No approval setting bypasses other gates.
+
+#### Approvals that cover nested calls
+
+Accepted in [ADR 0034](adr/0034-approvals-that-wait.md#amendment-approvals-that-cover-nested-calls). Off unless the operator turns it on; the agent declares `approvalCoversNested: true` only then.
+
+- With it on, an explicit allow for a top-level call MUST also answer the approval check for each nested call that call makes during the same dispatch, at any depth. It answers nothing else: rights, every other gate, the nested call's own registration and input validity, the nesting limit and the final dispatch check MUST still apply, and a `never` policy or a gate's refusal still refuses.
+- The approval route MUST tell the approver that the allow covers the nested calls the call makes, as part of the exact view (`coversNested: true` on the [request](bindings/data.md#questions)). A view without it covers nothing.
+- The Harness MUST record on each covered nested call's `toolStarted` the parent call and the request whose allow covered it. A nested call whose parent was not explicitly allowed, including a parent the policy let through without asking, is not covered and is approved as any call.
+- Coverage ends with the dispatch. A repeated or recovered parent needs a new allow; an allow never covers a call made after its parent settles.
 
 #### Approvals that wait
 

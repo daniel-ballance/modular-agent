@@ -44,6 +44,7 @@ ma sessions [--all]          list saved sessions
 | `--listen ADDR` | with `--acp`, serve ACP on a WebSocket instead of stdio ([an agent service](../bindings/websocket.md#an-agent-service)); with `--agui`, serve AG-UI over HTTP; with both, both on one listener. `ADDR` is a loopback `HOST:PORT`, or a `ws:` URL for ACP alone; `ma` has no TLS options. `ma` serves until stopped. |
 | `--agui` | serve the AG-UI HTTP and SSE binding on `--listen ADDR`. It requires a listener and never uses stdio. With `--acp`, the same listener accepts ACP WebSocket upgrades at `/`. `ma` prints the HTTP origin when ready. `ma` has no TLS options; bind to loopback. Use `--token-file FILE` for the local user with client ID `ma-local`, or supply policy `actors` with a nonempty `clientId` on every entry. Tokens that share a client ID must bind the same principal and scope. The operator's `--project` selects the AG-UI creation project; the single-user configuration creates sessions without a tenant. See the [AG-UI binding](../bindings/agui.md). |
 | `--resume-open` | with `--acp` or `--agui`, reopen at start-up every kept session in the operator's project that has an interrupted turn, so durable turns carry on without waiting for a client. See [Resuming at start-up](#resuming-at-start-up). Also the setting `resume_open`. |
+| `--approval POLICY` | load the approval feature with this default policy: `off`, `ask`, `all` or `never`. Overrides the setting `approval`. See [Approval](#approval). |
 | `--token-file FILE` | with `--listen`, shorthand for one token acting as the local user. Do not combine with a policy `actors` list. |
 | `--policy FILE` | read this operator policy instead of `policy.json` in the configuration folder. |
 | `-h`, `--help`; `-V`, `--version` | help; the version, which names the implementation's language |
@@ -54,13 +55,13 @@ With no `--model` and none in settings, `ma` uses the first Provider that is sig
 
 **Interactive mode** is line-based. While the agent works, a line typed steers the running turn; `/after TEXT` queues a new turn; `/cancel` or Ctrl-C stops the turn. Commands: `/commands`, `/model`, `/thinking`, `/compact`, `/skills`, `/skill:NAME`. Model text streams to stdout; calls and diagnostics go to stderr.
 
-**Print mode** (`-p`) runs one prompt and prints the final answer's text to stdout, followed by a newline. Exit status is 0 for a completed turn and 1 otherwise. Approval is not part of the standard set, so print mode never waits for a person.
+**Print mode** (`-p`) runs one prompt and prints the final answer's text to stdout, followed by a newline. Exit status is 0 for a completed turn and 1 otherwise. Without [approval](#approval) configured, print mode never waits for a person. With it, print mode has no one to answer, so a call that needs approval is refused, as the [approval policy](../contracts.md#approval-policy) requires.
 
 ## Files
 
 | File, under the configuration folder | Purpose |
 |---|---|
-| `settings.json` | Session defaults: `model`, `thinking`, `step_limit`, `output_limit`, `model_tools`; and `resume_open` (boolean, default false), read only from the global file, never from a project |
+| `settings.json` | Session defaults: `model`, `thinking`, `step_limit`, `output_limit`, `model_tools`; and `resume_open` (boolean, default false), `approval` (`off`, `ask`, `all` or `never`; absent loads no approval feature) and `approval_wait` (`live` or `untilDeadline`, default `live`), these three read only from the global file, never from a project |
 | `policy.json` | Operator-owned [connection policy and limits](#connection-policy-and-limits). |
 | `auth.json` | Sign-ins, written by `ma login`. Mode 0600. Format below. |
 | `mcp.json` | `{"mcpServers": {...}}` in the form Pi and other clients use. `${NAME}` takes a value from the environment. |
@@ -87,11 +88,13 @@ With no `--model` and none in settings, `ma` uses the first Provider that is sig
 
 ## Connection policy and limits
 
-`ma` reads one operator-owned JSON object for both ACP transports and for limits in all modes. Its optional keys are `stdio`, `actors` and `limits`. The file and referenced token files must be outside project and client control. Relative `tokenFile` paths resolve beside the policy. A malformed, unreadable or inconsistent policy MUST fail startup with a message naming the file and the problem. An explicitly named file must exist; only the default file may be absent.
+`ma` reads one operator-owned JSON object for both ACP transports and for limits in all modes. Its optional keys are `stdio`, `actors`, `limits` and `approvalWaitMaxMs`. The file and referenced token files must be outside project and client control. Relative `tokenFile` paths resolve beside the policy. A malformed, unreadable or inconsistent policy MUST fail startup with a message naming the file and the problem. An explicitly named file must exist; only the default file may be absent.
 
 - `stdio`: `{ actor: { id, kind, rights }, tenants?, projects?, represents?, traceTrusted? }`. Without this entry, stdio acts as the local user with all prospective rights, using `MODULAR_AGENT_ACTOR` if set and retaining the recorded-actor fallback. It serves any project but no named tenant. An explicit `stdio.actor` sets the principal and rights ceiling.
 - `actors`: a list of `{ tokenFile, actor: { id, kind, rights }, tenants?, projects?, represents?, clientId?, traceTrusted? }` as in [SDK placement](../sdk/placement.md#the-whole-agent). A listener requires this list or the single-token shorthand. Every token must be distinct. The shorthand acts as the local user with no named tenant and ignores `MODULAR_AGENT_ACTOR`.
 - `projects` lists exact canonical absolute paths, not subtrees. Omission uses the composition's project scope. `tenants` lists tenant IDs or `null` for no tenant; omission permits only no tenant. An empty list grants no scope. `rights` lists [core rights](../contracts.md#authority) and caps, but does not change, recorded grants. `represents` lists additional actor IDs, empty if omitted. `traceTrusted` puts the connection in the operator's [trace trust scope](../telemetry.md#context-on-the-wire): `ma` then continues the trace context the peer sends on work requests, so a host's trace runs through `ma`'s turns. It defaults to true for `stdio` and false for each `actors` entry and the single-token shorthand. It grants no rights and does not change what the connection may do. `ma` does not declare `severalActors` and MUST reject a nonempty `represents` list.
+
+`approvalWaitMaxMs` is the longest an [approval may wait](#approval), in milliseconds; omitted, approvals are live only.
 
 `limits` has `session`, `tenant` and `agent` objects. Each accepts the nonnegative integer fields below. Omitted fields use finite defaults. The unassigned tenant has its own bucket. `MiB` means 1,048,576 bytes.
 
@@ -175,7 +178,7 @@ Moving back in a session with `rewind` also puts the project's files back as the
 
 ## The parts
 
-Durable Runtime by default, transient with `--runtime transient`; history kept on disk in the state folder; the local working environment; context compaction; model selection; commands; questions; the terminal and ACP Interfaces. Approval, subagents and guardrails are not in the standard set, as in Pi.
+Durable Runtime by default, transient with `--runtime transient`; history kept on disk in the state folder; the local working environment; context compaction; model selection; commands; questions; the terminal and ACP Interfaces. Approval is loaded only when the operator configures it ([Approval](#approval)). Subagents and guardrails are not in the standard set, as in Pi.
 
 ## Telemetry
 
@@ -212,6 +215,8 @@ With the durable Runtime on Linux, every implementation declares the same values
 | `confinesFiles`, `severalActors`, `sessionLimits`, `holdsOutput`, `outputBypassesAgent`, `cancellingTurnCancelsJobs`, `pluginsDuringSession`, `keepsStateAtProvider`, `runsToolsAtProvider`, `liveSessions` | false | | `projectRoot` | omitted |
 | `telemetry` | `1`, independent of export |
 
+With [approval](#approval) configured, the agent also declares `approvalCoversNested: true`, and `approvalsOutlastTurns: true` when `approvalWaitMaxMs` is set. Without it, both are omitted.
+
 `tenants` is false unless the operator's [policy](#connection-policy-and-limits) names tenants; then `ma` enables those tenants' buckets and applies each connection's tenant reach, and a connection with no tenant list still reaches only sessions without a tenant.
 
 These are what the Rust implementation declares. An implementation that cannot meet one declares what it does meet, and the difference is a gap to close, not a choice.
@@ -232,6 +237,15 @@ Each implementation honors these environment variables, so one set of [checks](.
 | `MODULAR_AGENT_SCRIPT_LOG` | With `MODULAR_AGENT_SCRIPT`: a file to which each model request is appended as one JSON line, `{"system": string, "tools": [name], "messages": [message]}`. A message is `{"role": "user", "text"}`, `{"role": "assistant", "text", "toolCalls": [{"name", "input"}]}` or `{"role": "toolResult", "name", "text"}`; `text` joins the message's text parts. |
 | `MODULAR_AGENT_CONFORMANCE` | `1` adds the conformance parts the [ACP kit](../../conformance/acp/README.md) needs ([conformance mode](../bindings/acp.md#conformance-mode)), so the kit can run against `ma --acp`. |
 
+## Approval
+
+Off by default: with no `approval` setting and no `--approval`, `ma` loads no approval feature and behaves as without one. When configured:
+
+- `ma` loads the approval feature with the configured policy as each new session's default. An ACP or AG-UI client with the `settings` right can change it per session through the `approval` option. `ask` asks for every `codemode` call, since `codemode` is not read-only.
+- `ma` turns on [covered approvals](../contracts.md#approvals-that-cover-nested-calls) and declares `approvalCoversNested: true`. An allow for a `codemode` call covers the file and command calls its script makes in that run. The approval view shows the whole script and says that it covers them.
+- With `approvalWaitMaxMs` (a positive number of milliseconds) in [the operator policy](#connection-policy-and-limits), `ma` also supports [approvals that wait](../contracts.md#approvals-that-wait) and declares `approvalsOutlastTurns: true`. A session waits only when its `approval_wait` setting is `untilDeadline`; the default is `live`. Without `approvalWaitMaxMs`, approvals are live only.
+- In interactive mode the terminal asks on stderr and reads `y` or `n`; it is a present answerer for its own session.
+
 ## Resuming at start-up
 
 Off by default: a restart is not an automatic wake service ([Recovery](../contracts.md#recovery-and-repeating-work)). With `--resume-open` or `resume_open: true`, `ma` serving `--acp` or `--agui` MUST, before it accepts connections:
@@ -250,6 +264,8 @@ Each implementation passes:
 - the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp`, and with `--connect` against `ma --acp --listen`;
 - the [AG-UI kit](../../conformance/agui/README.md) against `ma --agui --listen`, including the thread listing;
 - its own tests, including that it depends only on its SDK's public API.
+
+The reference check `approval-covers-script` configures `--approval ask` and a script that writes two files: a denied `codemode` call writes nothing; an allowed one writes both without further questions, and each write's `toolStarted` names the covering request. With `approvalWaitMaxMs` and `approval_wait: untilDeadline` it stops `ma` while the approval waits, answers from a new process, and checks the script runs once.
 
 The reference check `resume-open` starts a durable scripted turn under `ma --agui --listen`, kills `ma` with `SIGKILL` during a tool call, restarts it with `--resume-open`, and checks that the turn finishes and its effect happens once without any client connecting; without the option, the turn stays interrupted until a client opens the session.
 

@@ -31,6 +31,7 @@ The shape of the API, in language-neutral terms. [Languages](languages.md) says 
 | `settings` | default settings for new sessions, by [setting key](../bindings/data.md#setting-keys) | none |
 | `approval` | `off`, `ask`, `all` or `never` | absent: no approval plugin. Any value loads the approval plugin and records that policy for new sessions; `off` means the plugin is loaded and its check does not ask ([Approval policy](../contracts.md#approval-policy)). |
 | `maxApprovalWaitMs` (accepted, not yet implemented) | positive [Duration](../bindings/data.md#general-rules), set by the operator | absent: no `approvalsOutlastTurns` support. An explicit maximum bounds every waiting approval. It does not opt a session in. |
+| `approvalCoversNested` (accepted, not yet implemented) | boolean, set by the operator | false. With the approval plugin, an allow for a top-level call also answers approval for its nested calls ([covered approvals](../contracts.md#approvals-that-cover-nested-calls)). |
 | `onQuestion` | a question handler | none; see [Questions](#questions) |
 | `servicePlugins` | ordered list of `{ url, tokenFile, config? }` | none; see [Placement](placement.md#services) |
 | `pluginHost` | boolean | true if either plugin list is nonempty; otherwise false. A plugin host reads `MODULAR_AGENT_PLUGINS` after both lists. See [Placement](placement.md#a-plugin-in-another-process). |
@@ -104,6 +105,7 @@ An Agent is safe to use from several tasks at once. Sessions have separate work 
 | `erasure` | true only if the history store and the agent implement erasure and can enforce [pending erasure](../contracts.md#cross-session-coordination) across the declared scope. An HTTP history client uses the [pending-erasure registry profile](../bindings/history-http.md#pending-erasure-registry-profile-pendingerasure-1) when the service declares a supported version. Without one, the HTTP composition declares false, even if the service can erase. |
 | `inputKeys` | true |
 | `questionsOutlastTurns`, `lateAnswersStartTurns` | false unless the app enables both |
+| `approvalCoversNested` (accepted, not yet implemented) | true only with the approval plugin and the `approvalCoversNested` option |
 | `approvalsOutlastTurns` (accepted, not yet implemented) | true only with `maxApprovalWaitMs`, the approval plugin, `portableSessions`, `questionsOutlastTurns`, `lateAnswersStartTurns` and a path that enforces the [waiting approval rules](../contracts.md#approvals-that-wait). Omit otherwise. |
 | `startsTurnsUnasked` | `jobReports` if `jobReportsStartTurns`; otherwise `never` |
 | `movingWithUnfinishedWork` | `refused` |

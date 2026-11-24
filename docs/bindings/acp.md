@@ -77,6 +77,7 @@ An agent MUST send every non-optional key and use only the values below. The ses
 | `erasure` | boolean | Implies `erase` is offered and the Harness and deployment can enforce [pending erasure](../contracts.md#cross-session-coordination). |
 | `inputKeys` | `true` | Fixed in this edition. |
 | `questionsOutlastTurns` | boolean | An eligible non-approval question can stay open past its turn. Requires `lateAnswersStartTurns: true`. |
+| `approvalCoversNested` (optional; accepted, not yet implemented) | boolean | An approval's allow also covers the nested calls of the approved call ([covered approvals](../contracts.md#approvals-that-cover-nested-calls)). Default `false`. |
 | `approvalsOutlastTurns` (optional; accepted, not yet implemented) | boolean | Supports [approvals that wait](../contracts.md#approvals-that-wait); not the session opt-in. Default `false`. |
 | `startsTurnsUnasked` | `never`, `jobReports` | Whether job reports start turns. Late answers are separate. |
 | `queuedInputAfterRestart` | `handedBack`, `run` | Recovery policy for queued input. |
@@ -367,7 +368,7 @@ The agent MUST use shared [Content](data.md#content) for `message.content`, `dat
 
 ### Request
 
-The agent MUST project [InputRequest](data.md#questions) as `{ id, kind, question, answerable, options?, details?, toolCallId?, call?, approvalWait?, deadlineAt? }`. `options` is present only for a choice, and `details` only for a link URI. For approval, `call` MUST be `{ name, input }` with the exact approved values. Only for a marked waiting approval, include `approvalWait: "untilDeadline"` and the absolute `deadlineAt` in milliseconds from the recorded request. The view is not answerable until the origin's completed end commits. The agent MUST omit credential names and values. A client MAY poll `requests` even while a permission RPC is open.
+The agent MUST project [InputRequest](data.md#questions) as `{ id, kind, question, answerable, options?, details?, toolCallId?, call?, approvalWait?, coversNested?, deadlineAt? }`. `options` is present only for a choice, and `details` only for a link URI. For approval, `call` MUST be `{ name, input }` with the exact approved values. Only for a marked waiting approval, include `approvalWait: "untilDeadline"` and the absolute `deadlineAt` in milliseconds from the recorded request. The view is not answerable until the origin's completed end commits. The agent MUST omit credential names and values. A client MAY poll `requests` even while a permission RPC is open.
 
 The agent MUST omit `answerable` from each projected request presented to the gate, including nested projections in history. After gating, it MUST set `answerable` per recipient and route from the question's open state, current eligibility and deliverable view. For an approval it MUST set `answerable: false` on a projection that any gate stage changed, comparing without `answerable` by [JSON value](data.md#general-rules). A blocked reply remains withheld.
 
