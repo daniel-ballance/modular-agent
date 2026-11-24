@@ -116,7 +116,7 @@ The ordinary pool cannot use control headroom or outstanding settlement reservat
 | `grok` | The X Subscription's Grok models | `ma login grok` |
 | `claude` | Claude plan models, through the Claude Agent SDK | `ma login claude` runs `claude auth login`, Anthropic's own sign-in; Claude Code keeps it |
 
-These are the SDK's [subscription Providers](../sdk/subscription-providers.md), with their sign-in, login file, refresh, request shapes and model table; `ma` adds none of its own. `auth.json` is their login file. `ma` accepts the former ids `openai-codex` (for `chatgpt`) and `xai` (for `grok`) in `--model`, `ma login`, `ma logout`, settings, `models.json` and reopened sessions, and moves a login stored under a former id to the new id the next time it writes `auth.json` ([ADR 0031](../adr/0031-subscription-providers.md)).
+These are the SDK's [subscription Providers](../sdk/subscription-providers.md), with their sign-in, login file, refresh, request shapes and model table; `ma` adds none of its own. `auth.json` is their login file. For subscriptions, use only `chatgpt`, `grok` and `claude` for selection, configuration, stored sessions and login records ([ADR 0031](../adr/0031-subscription-providers.md)).
 
 **Signing in to ChatGPT** works where the browser is not on the agent's machine, as over SSH:
 
