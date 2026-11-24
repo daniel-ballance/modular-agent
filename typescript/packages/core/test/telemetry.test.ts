@@ -16,6 +16,7 @@ import { currentSpan, readTrace, startOperation, withTrace } from "@modular-agen
 import { registerExternalPlugin, servePlugins, WirePeer } from "@modular-agent/plugin-wire";
 import { definePlugin, fileHistory, tool } from "../src/index.js";
 import { testAgent } from "../src/testing.js";
+import { waitingAgent } from "./fixtures/waiting-approval.js";
 
 function record(t: TestContext, failing = false) {
   const exporter = new InMemorySpanExporter();
@@ -34,6 +35,30 @@ function record(t: TestContext, failing = false) {
 const parent = (span: ReadableSpan) => span.parentSpanContext?.spanId;
 const id = (span: ReadableSpan) => span.spanContext().spanId;
 const remoteContext = { traceparent: "00-12345678901234567890123456789012-1234567890123456-01", baggage: "private=DO_NOT_EXPORT" };
+
+test("waiting approval ends its opening spans and links actual dispatch to a new turn", async t => {
+  const { spans } = record(t);
+  const dir = await mkdtemp(join(tmpdir(),"ma-trace-approval-"));
+  const agent = await waitingAgent(dir,false);
+  t.after(async () => { await agent.close(); await rm(dir,{recursive:true,force:true}); });
+  const session = await agent.session();
+  const origin = await session.prompt("TRACE_PRIVATE_INPUT");
+  await session.waitIdle();
+  const [q] = await session.questions({present:true});
+  const opened = spans().find(s => s.events.some(e => e.name === "modular_agent.question.open" && e.attributes?.["modular_agent.question.id"] === q.id));
+  const originSpan = spans().find(s => s.name === "invoke_agent" && s.attributes["modular_agent.turn.id"] === origin.turnId);
+  assert.ok(opened && originSpan); assert.equal(opened.name,"modular_agent.step"); assert.equal(parent(opened),id(originSpan));
+  assert.ok(!spans().some(s => s.name.startsWith("execute_tool")));
+  await session.answer(q.id,"allow"); await session.waitIdle();
+  const close = spans().find(s=>s.events.some(e=>e.name === "modular_agent.question.close" && e.attributes?.["modular_agent.question.id"]===q.id));
+  assert.equal(close?.name,"modular_agent.question.answer");
+  const next = spans().find(s => s.name === "invoke_agent" && s.links.some(l => l.context.spanId === id(originSpan)));
+  assert.ok(next); assert.notEqual(next.attributes["modular_agent.turn.id"],origin.turnId);
+  const tool = spans().filter(s=>s.name==="execute_tool bump");
+  assert.equal(tool.length,1); assert.equal(tool[0].attributes["modular_agent.turn.id"],next.attributes["modular_agent.turn.id"]);
+  assert.equal(tool[0].attributes["modular_agent.tool.call.id"],origin.openToolCalls[0]);
+  assert.doesNotMatch(JSON.stringify(spans().map(s=>[s.name,s.attributes,s.events])),/TRACE_PRIVATE_INPUT|approvalView|Allow bump|sdk\.local/);
+});
 
 // No provider registration: even a trusted incoming parent is not a turn span.
 test("telemetry support does not require an installed OpenTelemetry SDK", async t => {
