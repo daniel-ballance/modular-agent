@@ -452,6 +452,28 @@ async fn service_factory_creates_and_stops_one_instance_per_connection() -> modu
 }
 
 #[tokio::test]
+async fn served_tool_cancelled_during_its_final_poll_is_not_a_failure() -> modular_agent::Result<()>
+{
+    // The binding reader can deliver cancellation between the executor checking
+    // the token and a callback returning its own cancellation error.
+    let plugin =
+        Plugin::new("cancel-cutoff").tool(Tool::new("finish", "Finish a cancelled callback").run(
+            |_: Value, cx: ToolContext| async move {
+                cx.cancelled().cancel();
+                Err::<String, _>(modular_agent::Error::new(
+                    Code::Cancelled,
+                    "callback cancelled",
+                ))
+            },
+        ));
+    let agent = test_agent().over_wire(plugin).build().await?;
+    let session = agent.session().await?;
+    let result = session.call_tool("finish", json!({})).await?;
+    assert_eq!(result.status, ToolStatus::Cancelled);
+    agent.close().await
+}
+
+#[tokio::test]
 async fn service_registration_and_pending_tool_loss() -> modular_agent::Result<()> {
     use std::{sync::Arc, time::Duration};
     use tokio::{sync::Notify, time::timeout};
