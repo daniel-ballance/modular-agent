@@ -773,6 +773,16 @@ class Session:
                     )
                 if visible is not None:
                     visible = {**visible, "answerable": bool(present and exact)}
+            elif q.get("coversNested"):
+                exact = visible is not None and q["answerable"] and json_equal(q, visible)
+                delivered = self._agent._live_views.setdefault(q["id"], set())
+                key = (self._actor, self._delivery_token)
+                if exact:
+                    delivered.add(key)
+                else:
+                    delivered.discard(key)
+                    if visible is not None:
+                        visible = {**visible, "answerable": False}
             if visible is not None:
                 result.append(_question(self.id, visible))
         return result

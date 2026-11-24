@@ -8,7 +8,7 @@ import re
 import sys
 from typing import cast
 
-from modular_agent import Json, JsonObject, SubscriptionLogins, subscription_logins
+from modular_agent import Approval, Json, JsonObject, SubscriptionLogins, subscription_logins
 from modular_agent.grok import GrokModelInfo
 
 
@@ -183,6 +183,22 @@ class Paths:
             raise ValueError("resume_open must be a boolean in global settings.json")
         return value
 
+    def approval(self, override: Approval | None) -> tuple[Approval | None, str]:
+        path = self.config / "settings.json"
+        settings = read_object(path)
+        policy = override if override is not None else settings.get("approval")
+        if (override is not None or "approval" in settings) and policy not in (
+            "off",
+            "ask",
+            "all",
+            "never",
+        ):
+            raise ValueError(f"{path}: approval must be off, ask, all or never")
+        wait = settings.get("approval_wait", "live")
+        if wait not in ("live", "untilDeadline"):
+            raise ValueError(f"{path}: approval_wait must be live or untilDeadline")
+        return cast(Approval | None, policy), wait
+
     def settings(self, project: Path) -> JsonObject:
         settings: JsonObject = {
             "thinking": "medium",
@@ -200,6 +216,11 @@ class Paths:
                     "plugins",
                     "plugin_settings",
                     "resume_open",
+                    "approval",
+                    "approval_wait",
+                    "approvalWait",
+                    "approvalCoversNested",
+                    "approvalWaitMaxMs",
                     "mcp_servers",
                     "trusted",
                 }:

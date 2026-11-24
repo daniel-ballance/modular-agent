@@ -7,7 +7,6 @@ import hashlib
 import json
 import logging
 import re
-from datetime import UTC, datetime
 from typing import Any
 
 from ma_history.service import check_json
@@ -71,10 +70,6 @@ def fingerprint(value: Any) -> bytes:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     ).digest()
-
-
-def iso(milliseconds: int) -> str:
-    return datetime.fromtimestamp(milliseconds / 1000, UTC).isoformat(timespec="milliseconds")
 
 
 def shape(value: Any, *, strings: str = "", optional: str = "", extra: str = "") -> Obj:

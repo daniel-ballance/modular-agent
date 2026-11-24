@@ -100,6 +100,9 @@ def _parser() -> argparse.ArgumentParser:
         version=f"ma {_package_version('modular-agent-standard')} (Python)",
     )
     parser.add_argument("--model", metavar="PROVIDER/ID")
+    parser.add_argument(
+        "--approval", choices=("off", "ask", "all", "never"), help="default tool approval policy"
+    )
     parser.add_argument("--thinking", choices=("off", "minimal", "low", "medium", "high", "xhigh"))
     parser.add_argument("--session", metavar="ID")
     parser.add_argument("-c", "--continue", dest="resume", action="store_true")
@@ -207,8 +210,31 @@ async def _line(session: Session, args: argparse.Namespace) -> int:
     active = False
     pending: dict[str, tuple[Question, asyncio.Future[Answer]]] = {}
     eof = False
+    approval_lock = asyncio.Lock()
+    approving: asyncio.Future[Answer] | None = None
 
     async def question(q: Question, context: QuestionContext) -> Answer:
+        nonlocal approving
+        if q.kind == "approval":
+            # One displayed view owns y/n, even if two gates ask at once.
+            async with approval_lock:
+                if eof:
+                    return Answer("decline")
+                approving = loop.create_future()
+                try:
+                    print(f"Tool call {q.tool_call_id}: {q.question}", file=sys.stderr)
+                    if isinstance(q.call, dict) and q.call.get("name") == "codemode":
+                        arguments = q.call.get("input")
+                        if isinstance(arguments, dict) and isinstance(
+                            code := arguments.get("code"), str
+                        ):
+                            print(code, file=sys.stderr)
+                    if q.deadline is not None:
+                        print(f"Deadline: {q.deadline}", file=sys.stderr)
+                    print("Allow? [y/n]", file=sys.stderr, flush=True)
+                    return await approving
+                finally:
+                    approving = None
         if eof or (q.kind == "secret" and not sys.stdin.isatty()):
             return Answer("decline")
         reply: asyncio.Future[Answer] = loop.create_future()
@@ -251,6 +277,8 @@ async def _line(session: Session, args: argparse.Namespace) -> int:
             line = await asyncio.to_thread(sys.stdin.readline)
             if not line:
                 eof = True
+                if approving is not None and not approving.done():
+                    approving.set_result(Answer("decline"))
                 for _, outstanding in pending.values():
                     if not outstanding.done():
                         outstanding.set_result(Answer("decline"))
@@ -259,6 +287,12 @@ async def _line(session: Session, args: argparse.Namespace) -> int:
                 break
             line = line.strip()
             if not line:
+                continue
+            if approving is not None and not approving.done() and not line.startswith("/"):
+                if line.lower() in ("y", "n"):
+                    approving.set_result(Answer("allow" if line.lower() == "y" else "decline"))
+                else:
+                    print("Answer y or n.", file=sys.stderr, flush=True)
                 continue
             if line == "/quit":
                 break
@@ -365,6 +399,10 @@ async def _agent(
         if args.acp and not args.agui and not acp_session
         else paths.settings(project)
     )
+    approval, wait = paths.approval(args.approval)
+    maximum = policy.max_approval_wait if approval is not None else None
+    if maximum is not None:
+        settings["approvalWait"] = "live" if args.prompt is not None else wait
     auth = login_file(paths.config / "auth.json")
     providers: list[Provider] = []
     configured_model = settings.pop("model", None)
@@ -484,6 +522,9 @@ async def _agent(
         model=model,
         model_aliases=PROVIDER_ALIASES,
         settings=settings,
+        approval=approval,
+        approval_covers_nested=approval is not None,
+        max_approval_wait=maximum,
         resource_reservations=policy.limits,
         tenants=policy.tenants,
         plugin_host=True,
@@ -684,11 +725,23 @@ async def _run(args: argparse.Namespace) -> int:
         if args.history:
             _json({"sessionId": session.id, "entries": await session.history()})
             return 0
-        return (
-            await _print_turn(session, args)
-            if args.prompt is not None
-            else await _line(session, args)
-        )
+        if args.prompt is None:
+            return await _line(session, args)
+        if (
+            agent.declaration().get("approvalsOutlastTurns")
+            and (await session.settings()).get("approvalWait") == "untilDeadline"
+        ):
+            if any(q.approval_wait for q in await session.questions()):
+                raise ValueError(
+                    "This session has a waiting approval. Answer it before using print mode."
+                )
+            await session.set_setting("approvalWait", "live")
+            try:
+                return await _print_turn(session, args)
+            finally:
+                await session.wait_idle()
+                await session.set_setting("approvalWait", "untilDeadline")
+        return await _print_turn(session, args)
 
 
 def main() -> None:

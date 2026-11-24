@@ -259,7 +259,11 @@ class Questions(Plugin):
             "name": d.get("name"),
             "binding": d.get("binding"),
             **({"details": d["details"]} if d.get("details") is not None else {}),
-            **{k: d[k] for k in ("approval_call", "approval_registration") if k in d},
+            **{
+                k: d[k]
+                for k in ("approval_call", "approval_registration", "coversNested")
+                if k in d
+            },
         }
         signature = json.dumps(
             {
@@ -271,7 +275,22 @@ class Questions(Plugin):
             },
             sort_keys=True,
         )
-        for q in reversed(list((await self._state(sid)).values())):
+        previous = (await self._state(sid)).values()
+        if details.get("coversNested") and d.get("call") and asker == "approval":
+            # Reopen the same unanswered request, but never spend a covering
+            # decision in a repeated or recovered gate attempt.
+            key = "approval:" + d["call"] + ":" + identity()
+            for q in reversed(list(previous)):
+                if (
+                    q.get("call") == d["call"]
+                    and q["asker"] == asker
+                    and not (q.get("closed") or q.get("answer"))
+                ):
+                    if q.get("signature") == signature:
+                        key = q["key"]
+                        break
+                    await self._close_question(sid, q)
+        for q in reversed(list(previous)):
             if q["key"] != key or (not key.startswith("call:") and q["asker"] != asker):
                 continue
             signature_matches = q["signature"] == signature
@@ -462,6 +481,8 @@ class Questions(Plugin):
         if q["kind"] == "secret" and not declined:
             raise AgentError("Secret answers must go directly to the credential store", "forbidden")
         value = "declined" if declined else d.get("value")
+        if q.get("coversNested") and value == "allow" and d.get("exact_cover_view") is False:
+            raise AgentError("This route has not delivered the unchanged approval", "forbidden")
         if not isinstance(value, str) or (
             not declined and q["kind"] in {"approval", "choice"} and value not in q["options"]
         ):

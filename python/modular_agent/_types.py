@@ -153,10 +153,11 @@ class Question:
     options: tuple[Json, ...] = ()
     details: Json = None
     call: Json = None
-    deadline: Json = None
+    deadline: str | None = None
     answerable: bool = True
     approval_wait: str | None = None
     tool_call_id: str | None = None
+    covers_nested: bool = False
 
 
 @dataclass(frozen=True)

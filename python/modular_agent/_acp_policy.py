@@ -44,7 +44,13 @@ class AcpPolicy:
                 if required or path.is_symlink():
                     raise
                 raw = {}
-            _shape(raw, {"stdio", "actors", "limits"}, "policy")
+            _shape(raw, {"stdio", "actors", "limits", "approvalWaitMaxMs"}, "policy")
+            self.max_approval_wait: float | None = None
+            if "approvalWaitMaxMs" in raw:
+                maximum = raw["approvalWaitMaxMs"]
+                if type(maximum) is not int or not 0 < maximum < 2**53:
+                    raise ValueError("approvalWaitMaxMs must be a positive integer in milliseconds")
+                self.max_approval_wait = maximum / 1000
             self.stdio = (
                 cast(StdioPolicy, _principal(raw["stdio"], several_actors=several_actors))
                 if "stdio" in raw

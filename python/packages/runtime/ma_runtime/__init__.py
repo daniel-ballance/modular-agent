@@ -550,7 +550,14 @@ class Runtime(Turns, Plugin):
         return {}
 
     async def dispatch_nested(self, d, emit):
-        return await self._tool(d["session"], d["turn"], d["step"], d["call"], d["definition"])
+        return await self._tool(
+            d["session"],
+            d["turn"],
+            d["step"],
+            d["call"],
+            d["definition"],
+            covered_by=d.get("covered_by"),
+        )
 
     async def run_tool(self, d, emit):
         sid = d["session"]

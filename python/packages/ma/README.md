@@ -23,6 +23,15 @@ Use `ma login chatgpt` to sign in with a browser or add `--device` for a code. U
 
 The Provider ids are `chatgpt`, `grok` and `claude`. `ma` still accepts `openai-codex` and `xai` in `--model`, `login`, `logout`, `settings.json`, `models.json` and saved sessions. On the next write of `auth.json`, it moves logins to their new ids. If both entries exist, it keeps the login under the new id.
 
+## Approval
+
+Without an approval setting or flag, `ma` loads no approval feature. Use `ma --approval ask` or set `"approval": "ask"` in the global `settings.json`. The flag wins. Project files cannot set `approval` or `approval_wait`, even in a trusted project.
+
+- `ask` asks unless the tool is read-only; `codemode` is not read-only. `all` asks for every call. `never` refuses without asking. Explicit `off` loads the feature but does not ask.
+- The terminal shows the whole script on stderr and accepts `y` or `n`. One allow covers the nested calls the script makes in that dispatch, not later runs. Each covered start records the parent call and approval request. Print mode has no answerer: it refuses a call that needs approval rather than parking it.
+- To support waiting approvals, put a positive integer `approvalWaitMaxMs` in the operator's `policy.json`. The default is still live approval. Put `"approval_wait": "untilDeadline"` in global settings to opt new sessions in. A client can later poll and answer on its own authenticated route. An answer is not a dispatch: the continuation checks the call and deadline again.
+- The declaration adds `approvalCoversNested` when configured and `approvalsOutlastTurns` with the maximum. An ACP client with `settings` can select a new policy with the `approval` option. An AG-UI client with `watch` and `settings` can POST, for example, `{"approval":"never"}` to `/agui/v1/threads/{threadId}/settings`. Neither operation changes another session.
+
 ## Serve AG-UI
 
 ```sh
@@ -62,12 +71,12 @@ By default `ma` sends no telemetry. Set `OTEL_EXPORTER_OTLP_ENDPOINT` or a per-s
 
 ## What is checked
 
-- **Reference:** 27 passed before the suite grew to 28, including `trace-trust` and `resume-open`. Startup recovery completed the interrupted turn without a client connecting and without repeating its tool effect.
-- **AG-UI:** 26/26 with the shared thread listing and wait counts.
+- **Reference:** 28/28, including `approval-covers-script`, `trace-trust` and `resume-open`. Startup recovery completed the interrupted turn without a client connecting and without repeating its tool effect.
+- **AG-UI:** 34/34, including the live and waiting approval views and the child start on continuation.
 - **Telemetry:** seven offline checks cover no endpoint, SDK disabled, per-signal overrides, sampling, headers, metadata privacy and the OTLP resource. A scripted turn reached local Phoenix as `invoke_agent ma`, `chat script` and `execute_tool codemode`. The OTLP resource for that trace carried `service.name=ma-python`.
-- **ACP:** 188/188 with `--crash-checks --probe-checks --job-checks`. The standard composition does not declare several actors, tenants or session limits.
-- **WebSocket kits:** 153/153 for the plugin binding, 14/14 for separate-listener isolation and 193/193 for ACP.
-- **Python suites:** 722 passed and five live checks skipped in each Runtime and binding combination (transient/local, transient/process, durable/local and durable/process). The sandbox tests cover memory and active time, waiting on the host, worker death, cancellation, the recursion and nested-call limits, ambient access, UTF-8 output and result rendering.
+- **ACP:** 190/190 with no approval configuration. With `--approval off`, 193/193 with the crash, probe, job and waiting-declaration checks. With an operator maximum, 118/118 public, crash and job checks. The covered continuation uses an actual ACP poll and answer; the probe Runtimes do not support waiting approvals. The standard composition does not declare several actors, tenants or session limits.
+- **WebSocket kits:** 153/153 for the plugin binding, 14/14 for separate-listener isolation and 195/195 for ACP.
+- **Python suites:** 812 passed and five live checks skipped in each Runtime and binding combination (transient/local, transient/process, durable/local and durable/process). The sandbox tests cover memory and active time, waiting on the host, worker death, cancellation, the recursion and nested-call limits, ambient access, UTF-8 output and result rendering.
 - **Subscriptions:** offline SDK checks cover ChatGPT and Grok sign-in, model requests, refresh and reasoning replay, and Claude tool dispatch. Product checks cover client identity and former Provider ids in sign-in, settings, catalog overrides and saved sessions.
 - **Python static checks:** Ruff lint and format checks passed; strict mypy passed.
 

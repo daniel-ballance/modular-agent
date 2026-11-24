@@ -10,6 +10,7 @@ from ma_core import TOOL_RESULT_BYTES, lower_reasoning, AgentError, content, ide
 from ma_core import telemetry as ot
 from ma_core.recovery import HANDOFF, STEP_AFTER
 from ma_core.wire import (
+    json_equal,
     model_out,
     model_request_fields,
     recorded_as,
@@ -1038,7 +1039,7 @@ class Turns:
             },
         )
 
-    async def _tool(self, sid, turn, step, call, definition, *, replay=False):
+    async def _tool(self, sid, turn, step, call, definition, *, replay=False, covered_by=None):
         ran_again = False
         unknown = {"status": "outcome_unknown", "content": content(UNKNOWN)}
         answer = {"call": call["id"], "status": "failed", "content": []}
@@ -1058,6 +1059,7 @@ class Turns:
                     "step": step,
                     "call": call,
                     "definition": definition,
+                    **({"covered_by": covered_by} if covered_by else {}),
                 },
             )
             if terminal := gate.get("wait_terminal"):
@@ -1084,7 +1086,9 @@ class Turns:
             caller = "plugin" if call.get("parentCallId") else call.get("initiator", "model")
             if definition and caller not in definition.get("callers", []):
                 gate = {**gate, "refused": True, "reason": "Tool does not allow this initiator"}
-            if "checked_input" in gate and gate["checked_input"] != gate["call"]["input"]:
+            if "checked_input" in gate and not json_equal(
+                gate["checked_input"], gate["call"]["input"]
+            ):
                 gate = {**gate, "refused": True, "reason": "Tool input changed after approval"}
             if gate.get("pending") and not gate.get("refused"):
                 if replay:
@@ -1134,6 +1138,7 @@ class Turns:
                         "definition": definition,
                         "openWorld": definition.get("hints", {}).get("external", True),
                         "safeToRepeat": await self._safe_to_repeat(sid, definition),
+                        **({"approvalCoveredBy": covered_by} if covered_by else {}),
                         **(await self._save_point(sid) if turn is None else {}),
                     },
                     copies=[
@@ -1158,6 +1163,9 @@ class Turns:
                         **({"content": piece["content"]} if "content" in piece else {}),
                     )
 
+                covering = covered_by
+                if request := gate.get("covering_request"):
+                    covering = {"toolCallId": call["id"], "requestId": request}
                 ran_again = True
                 answer = await self.api.call(
                     "tools",
@@ -1168,6 +1176,7 @@ class Turns:
                         "step": step,
                         "call": changed,
                         "definition": definition,
+                        **({"covering_approval": covering} if covering else {}),
                     },
                     progress,
                 )
