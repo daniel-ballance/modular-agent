@@ -349,7 +349,7 @@ An ACP `Entry` is a recipient projection of a [shared history entry](data.md#his
 
 | Entry kinds | Fields in `data` |
 |---|---|
-| `inputAccepted`, `input`, `inputHandedBack` | `inputIds`, `when`, `content`, `releasedBy`, `reason`, `parked` where present; no input keys |
+| `inputAccepted`, `input`, `inputHandedBack` | `when`, `content`, `releasedBy`, `reason`, `parked` where present; no input keys |
 | `turnStart`, `modelRequest` | `startedBy`, `model` where present |
 | `toolStarted`, `toolResult` | `call`, `status` where present; on a covered nested start, `approvalCoveredBy: { toolCallId, requestId }` |
 | `inputRequest`, `inputAnswer` | `request` using [Request](#request) below, or the shared Answer without `stored` or the private `approvalView` binding |

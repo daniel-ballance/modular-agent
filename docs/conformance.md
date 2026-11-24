@@ -90,7 +90,7 @@ Each binding has a name and a major version, such as `modular-agent-plugin/1`. A
 - **Plugin:** `plugin/initialize` names the plugin binding ([Starting: the handshake](bindings/plugin.md#starting-the-handshake)).
 - **History service:** `GET /v1` reports the binding ([What the service declares](bindings/history-http.md#what-the-service-declares)).
 
-Before 1.0, implement the current specification and kits from the same revision. Changes may break previous revisions. A peer MUST refuse to proceed if a required protocol or feature is unavailable. External protocol requirements still apply. A conformance claim MUST identify the revision tested and the bindings it covers.
+Before 1.0, implement the current specification and kits from the same revision. Changes may break previous revisions. A peer MUST refuse to proceed if a required protocol or feature is unavailable. External protocol requirements still apply. Fence writers that use an incompatible private schema. Keep their state and outstanding erasure obligations inaccessible; start new work in fresh isolated state, never by replacing the authority for an existing store. A conformance claim MUST identify the revision tested and the bindings it covers.
 
 ## Reporting a defect
 

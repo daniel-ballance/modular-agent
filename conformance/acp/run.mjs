@@ -5,7 +5,7 @@
 // official ACP client library. No external model. Service options use a disposable history service.
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { isDeepStrictEqual as equal } from "node:util";
+import { isDeepStrictEqual as equal, parseArgs } from "node:util";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -23,8 +23,17 @@ import { ACP_PROTOCOL, checkUpgrades, CONTROL_MS, readToken, socketPeer, websock
 const args = process.argv.slice(2);
 const dash = args.indexOf("--");
 const argv = dash < 0 ? args : args.slice(0, dash);
-let network, serviceCommand, expectedActor, otherToken;
+let network, serviceCommand, expectedActor, otherToken, group;
+const coreOptions = ["plugin-checks", "crash-checks", "probe-checks", "job-checks", "portable-checks"];
+const production = { isolation, capacity, erasure };
 try {
+	const { values } = parseArgs({ args: argv, options: {
+		...Object.fromEntries(["connect", "token-file", "service-command", "actor", "other-token-file", "group"].map(k => [k, { type: "string" }])),
+		...Object.fromEntries(["verbose", ...coreOptions].map(k => [k, { type: "boolean" }])),
+	} });
+	group = values.group ?? "core";
+	if (!["core", "covered", "waiting", ...Object.keys(production)].includes(group)) throw Error("unknown ACP group: " + group);
+	if (group !== "core" && coreOptions.some(k => values[k])) throw Error("core check options require --group core");
 	const options = websocketOptions(argv);
 	network = options && { ...options, tokenFile: resolve(options.tokenFile), protocol: ACP_PROTOCOL };
 	const option = (key) => {
@@ -34,6 +43,9 @@ try {
 		return argv[i + 1];
 	};
 	serviceCommand = option("--service-command");
+	option("--group");
+	if (network && !serviceCommand && (group === "waiting" || Object.hasOwn(production, group) || coreOptions.filter(k => k !== "plugin-checks").some(k => values[k]))) throw Error("selected checks need a managed fixture: pass --service-command");
+	if (values["plugin-checks"] && !process.env.MODULAR_AGENT_PLUGINS) throw Error("--plugin-checks needs MODULAR_AGENT_PLUGINS");
 	expectedActor = option("--actor");
 	const otherFile = option("--other-token-file");
 	if (network ? dash >= 0 : serviceCommand || expectedActor || otherFile || dash < 0 || dash === args.length - 1) throw new Error("choose a stdio command or a WebSocket URL");
@@ -49,38 +61,10 @@ const canConfigure = !network || !!serviceCommand;
 const verbose = argv.includes("--verbose");
 // With --plugin-checks, also check the conformance plugin's hooks are in force (docs/bindings/plugin.md).
 const pluginChecks = argv.includes("--plugin-checks");
-// With --crash-checks, also kill the agent with SIGKILL during a bash call, reopen the session in a new
-// process, and check the turn ends as the agent declared: carried on (continuesAfterRestart) or failed.
-const crashChecks = argv.includes("--crash-checks") && canConfigure;
-if (argv.includes("--crash-checks") && !crashChecks) console.log("SKIP  --crash-checks (killing and restarting a service requires --service-command)");
-// With --probe-checks, also load the probe plugin (../plugin/probe.mjs), which checks the host side of the plugin binding.
-const probeChecks = argv.includes("--probe-checks") && canConfigure;
-if (argv.includes("--probe-checks") && !probeChecks) console.log("SKIP  --probe-checks (injecting fixture plugins and collecting their traces requires --service-command)");
-// With --job-checks, also load the jobs plugin (../plugin/jobs.mjs): jobs recorded in the standard kinds, reported,
-// cancelled, and taken up after a kill -9 by whichever agent reopens the session (with --then, the second).
-const jobChecks = argv.includes("--job-checks") && canConfigure;
-if (argv.includes("--job-checks") && !jobChecks) console.log("SKIP  --job-checks (injecting the jobs fixture requires --service-command)");
-// With --portable-checks, sample the persisted fixture sessions against the shared shapes
-// (docs/bindings/data.md#portable-sessions). It needs MODULAR_AGENT_HISTORY_URL and MODULAR_AGENT_HISTORY_TOKEN_FILE.
+const crashChecks = argv.includes("--crash-checks");
+const probeChecks = argv.includes("--probe-checks");
+const jobChecks = argv.includes("--job-checks");
 const portableChecks = argv.includes("--portable-checks");
-const productionChecks = [
-	["--isolation-checks", isolation], ["--capacity-checks", capacity], ["--erasure-checks", erasure],
-].filter(([flag]) => argv.includes(flag));
-const waitingOnly = argv.includes("--waiting-approval-only");
-const waiting = waitingOnly || argv.includes("--waiting-approval-checks");
-async function runWaiting() {
-	if (!canConfigure) { console.log("SKIP  waiting approvals (clock and restart controls require --service-command)"); return; }
-	await waitingChecks({ root: probeDir, project, command, second, connect, stop, crash, check, attempt, within });
-}
-const productionOnly = argv.includes("--production-only");
-if (productionOnly && !productionChecks.length) {
-	console.error("--production-only needs an ADR 0030 check option");
-	process.exit(2);
-}
-if (productionChecks.length && !canConfigure) {
-	console.error("ADR 0030 checks on WebSocket require --service-command");
-	process.exit(2);
-}
 // With --then, load and recovery reopenings use the second stdio agent.
 const rest = network ? [] : args.slice(dash + 1);
 const then = rest.indexOf("--then");
@@ -109,7 +93,7 @@ const otherActor = "kit-portable-reopener";
 const home = mkdtempSync(join(tmpdir(), "ma-conf-home-"));
 const env = Object.fromEntries(["PATH", "MODULAR_AGENT_HISTORY_URL", "MODULAR_AGENT_HISTORY_TOKEN_FILE", "MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS"].filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
 let store, observer;
-if (env.MODULAR_AGENT_HISTORY_URL || env.MODULAR_AGENT_HISTORY_TOKEN_FILE || portableChecks || then >= 0 || argv.includes("--erasure-checks")) {
+if (env.MODULAR_AGENT_HISTORY_URL || env.MODULAR_AGENT_HISTORY_TOKEN_FILE || portableChecks || then >= 0 || group === "erasure") {
 	try { store = historyService(env.MODULAR_AGENT_HISTORY_URL, env.MODULAR_AGENT_HISTORY_TOKEN_FILE); }
 	catch (e) { console.error(e.message); process.exit(2); }
 	if (jobChecks) observer = await store.observe();
@@ -342,9 +326,10 @@ function validateDeclaration(label, d) {
 }
 let decl = {};
 let extensions = [];
-if (waitingOnly) { await runWaiting(); await finish(); }
-if (productionOnly) {
-	await runProduction();
+if (group !== "core") {
+	if (group === "waiting") await waitingChecks({ root: probeDir, project, command, second, connect, stop, crash, check, attempt, within });
+	else if (group === "covered") await runCovered();
+	else await runProduction();
 	await finish();
 }
 let agent = connect();
@@ -376,7 +361,6 @@ await attempt("initialize", async () => {
 
 if (network) {
 	await checkUpgrades(network, check, attempt);
-	if (!canConfigure && portableChecks) console.log("SKIP  portable fork and reopen-hold wire interception (requires a managed service)");
 }
 
 await attempt("session/new", async () => {
@@ -465,17 +449,9 @@ if (agent.state.hasApproval) await attempt("approval", async () => {
 	await setOption(agent, sessionId, "approval", "off");
 });
 
-await attempt("covered approval", async () => {
-	const skipped = await coveredApproval(decl, { sessionId, waitHistory: predicate => waitFor(agent, sessionId, predicate),
-		rpc: (method, params) => within(15000, agent.ctx.request(method, params), method),
-		duringPermission: handler => { agent.state.permissionHandler = handler; return () => { delete agent.state.permissionHandler; }; },
-	});
-	if (skipped) console.log("SKIP  covered approval (" + skipped + ")");
-	else check("covered approval: one permission, exact poll and bound child start", true);
-});
-
-// Edition 4 draft. Contracts: Nested calls. ACP: Updates and Conformance mode. Runs only for an agent that declares it.
-if (decl.nestedToolCalls === true) await attempt("nested calls", async () => {
+// The full conformance fixture offers nest. Ordinary agents need not offer it.
+await attempt("nested calls", async () => {
+	if (decl.nestedToolCalls !== true) throw Error("fixture must declare nestedToolCalls");
 	writeFileSync(join(project, "nested.txt"), "nested-harbour\n");
 	const before = agent.updates.length;
 	const r = await within(15000, prompt(agent, sessionId, 'tool:nest {"name":"read","input":{"path":"nested.txt"}}'), "nested prompt");
@@ -1653,7 +1629,7 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 			if (mode === "approval") rows.push({ kind: "setting", data: { key: "approval", value: "kit-unrecognized-policy" } });
 			if (mode === "rights") rows.push({ kind: "actorJoined", actorId: "kit-granter", data: { actor: { ...actor, rights: ["watch", "input"] } } });
 			if (mode === "revoked") rows.push({ kind: "actorLeft", actorId: "kit-granter", data: { actorId: actor.id } });
-			if (mode === "cleanup") {
+			if (mode === "cleanup" || mode === "incomplete-report") {
 				const jobId = randomUUID(), reported = randomUUID(), report = [{ type: "text", text: "parked fixture report" }];
 				const start = (jobId) => ({ kind: "jobStarted", jobId, actorId: actor.id, writer: "kit-absent-job-owner", data: { kind: "fixture", detail: null, rights: ["watch", "input"], authorizers: [{ sessionId, actorId: actor.id }] } });
 				rows.push(
@@ -1665,7 +1641,14 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 			if (mode === "queue") rows.push({ kind: "inputAccepted", inputId: "older-ready", actorId: actor.id, data: {
 				when: "after", taken: "after", key: "fixture-ready", content: [{ type: "text", text: "older ready input" }], authorizers: [{ sessionId, actorId: actor.id }], rights: actor.rights,
 			} });
-			rows.push({ kind: "position", data: { to: `${sessionId}-e3` } });
+			if (mode === "incomplete-report") rows.pop(); // A reported end with no admission.
+			if (mode === "nested-id") {
+				rows[4].data.inputId = rows[4].inputId;
+				delete rows[4].inputId;
+			}
+			if (mode === "missing-ceiling") delete rows[3].data.rights;
+			if (mode === "missing-disposition") delete rows[3].data.taken;
+			rows.push({ kind: "position", data: { to: `${sessionId}-e3`, ...(mode === "failed-position" && { failed: true }) } });
 			const entries = rows.map((e, i) => ({ ...e, id: `${sessionId}-e${i}`, parentId: i ? `${sessionId}-e${i - 1}` : null, sessionId, time: Date.now(), writer: e.writer ?? "kit-history-fixture", modelVisible: false }));
 			const base = store.path(sessionId);
 			await store.json(base, "PUT", { project, created: Date.now() });
@@ -1677,6 +1660,13 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 		};
 		const load = async (sessionId) => within(await reopenWatchdog(), s.ctx.request(methods.agent.session.load, { sessionId, cwd: project, mcpServers: [] }), "seeded portable load").catch((e) => e);
 		const forbidden = (r) => r?.code === -32602 && r?.data?.code === "forbidden";
+		for (const mode of ["incomplete-report", "nested-id", "missing-ceiling", "missing-disposition", "failed-position"]) {
+			const sid = await seed(mode), before = await store.pages(sid);
+			const reply = await load(sid);
+			check(`portable: refuse ${mode} without scheduling work or rewriting history`,
+				Number.isInteger(reply?.code) && equal(await store.pages(sid), before));
+			if (!reply?.code && !(reply instanceof Error)) await closeSession(s, sid);
+		}
 		const revoked = await seed("revoked");
 		const denied = await load(revoked);
 		check("portable: a revoked configured actor cannot reopen on another branch", forbidden(denied));
@@ -1981,9 +1971,29 @@ if (portableChecks) {
 }
 
 
-if (productionChecks.length) await runProduction();
-if (waiting) await runWaiting();
 await finish();
+
+async function runCovered() {
+	const policy = join(dataDir, "policy.json");
+	writeFileSync(policy, JSON.stringify({ approvalWaitMaxMs: 60000 }), { mode: 0o600 });
+	for (const version of [1, 2]) await attempt(`ACP/${version} covered approval`, async () => {
+		const a = connect(command, { MODULAR_AGENT_CONFORMANCE_POLICY: policy });
+		const rpc = (method, params) => within(15000, a.ctx.request(method, params), method);
+		try {
+			const binding = `modular-agent-acp/${version}`;
+			const h = await rpc("initialize", { protocolVersion: 1, clientCapabilities: {}, _meta: { [NS]: { binding } } });
+			if (meta(h)?.binding !== binding) throw Error("wrong ACP binding");
+			const session = await rpc("session/new", { cwd: project, mcpServers: [] });
+			const { sessionId } = session;
+			await setOption(a, sessionId, "model", "conformance/echo");
+			await coveredApproval(meta(session)?.declaration, { sessionId, rpc, waitHistory: pred => waitFor(a, sessionId, pred),
+				duringPermission: handler => { a.state.permissionHandler = handler; return () => { delete a.state.permissionHandler; }; },
+			});
+			await closeSession(a, sessionId);
+			check(`ACP/${version}: covered live and continued child starts`, true);
+		} finally { await stop(a); }
+	});
+}
 
 async function runProduction() {
 	const root = join(probeDir, "production");
@@ -2020,7 +2030,7 @@ async function runProduction() {
 			return { code, stderr };
 		} finally { if (service) await managed.stop(service); else await stop({ child }); }
 	};
-	for (const [flag, run] of productionChecks) await attempt(flag, () => run({
+	await attempt(group, () => production[group]({
 		root, project, command, second, store, network, managed, profile, invalid, connect, stop, crash,
 		within, check, attempt, reopenWatchdog, prompt, history, closeSession, probePlugin,
 	}));

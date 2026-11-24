@@ -30,7 +30,7 @@ const valid = {
 	inputHandedBack: (e, d) => id(e.inputId) && ["withdrawn", "declined", "cancelled", "restart", "conflict", "handled", "turnEnded"].includes(d.reason),
 	input: (e) => id(e.actorId) && id(e.turnId) && id(e.inputId) && e.message?.role === "user" && content(e.message.content),
 	turnStart: (e, d) => authority(d) && id(e.turnId) && id(d.startedBy?.id) && ["actor", "job", "plugin", "answer", "toolResult"].includes(d.startedBy.kind) && (d.model === null || model(d.model)) && typeof d.system === "string" && Array.isArray(d.tools) && obj(d.settings) && opt(d, "context", content) && opt(d, "point", id),
-	modelRequest: (e, d) => id(e.stepId) && model(d.model) && typeof d.safeToRepeat === "boolean" && ids(d.tools) && Object.hasOwn(d, "request") === d.safeToRepeat && opt(d, "request", (r) => obj(r) && Array.isArray(r.tools) && r.tools.length === d.tools.length && r.tools.every((t, i) => t?.name === d.tools[i])),
+	modelRequest: (e, d) => id(e.stepId) && model(d.model) && typeof d.safeToRepeat === "boolean" && ids(d.tools) && Object.hasOwn(d, "request") === d.safeToRepeat && opt(d, "request", (r) => obj(r) && typeof r.systemPrompt === "string" && Array.isArray(r.messages) && obj(r.settings) && Array.isArray(r.tools) && r.tools.length === d.tools.length && r.tools.every((t, i) => t?.name === d.tools[i])),
 	response: (e) => id(e.stepId) && e.message?.role === "assistant" && content(e.message.content) && id(e.message.stop) && opt(e.message, "usage", usage),
 	toolStarted: (e, d) => authority(d) && registration(d) && d.definition.name === d.call?.name && id(e.toolCallId) && id(e.actorId) && d.call?.actorId === e.actorId && d.call?.id === e.toolCallId && id(d.call.name) && obj(d.call.input) && typeof d.safeToRepeat === "boolean",
 	toolPending: (e, d) => id(e.toolCallId) && id(e.turnId) && e.modelVisible === false && someIds(d.requestIds) && opt(d, "toolStartedId", id),
@@ -148,9 +148,10 @@ export function portableProblems(sessionId, entries) {
 	}
 	for (const [i, e] of entries.entries()) {
 		if (e?.kind !== "jobEnded" || e.erased || e.data?.report !== true) continue;
-		const a = entries[i + 1];
-		if (a?.kind !== "inputAccepted" || a.jobId !== e.jobId || !id(a.inputId) ||
-			!a.erased && (a.data?.key !== `job:${e.jobId}` || typeof a.data?.parked !== "boolean" || !isDeepStrictEqual(a.data?.content, e.data.result)))
+		// Atomicity is checked against observed append batches in the jobs transcript.
+		const a = entries.slice(i + 1).find(x => x?.kind === "inputAccepted" && x.jobId === e.jobId);
+		if (!a || !id(a.inputId) ||
+			!a.erased && (a.data?.key !== `job:${e.jobId}` || a.data?.releasedBy !== undefined || typeof a.data?.parked !== "boolean" || !isDeepStrictEqual(a.data?.content, e.data.result)))
 			say(e, "missing or inconsistent report admission");
 	}
 	return out;
