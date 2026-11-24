@@ -14,7 +14,7 @@ node run.mjs rust -- /absolute/path/to/built/adapter
 ```
 
 The command takes a built SDK adapter. This kit does not build or wire the four adapters.
-Run it once per host SDK: 26 unconditional and up to eight waiting cases per host. A missing fixture for an applicable case is a failure,
+Run it once per host SDK: 14 ordinary and eight waiting cases per host. A missing fixture for an applicable case is a failure,
 not a skip. The commands and build hints come from the [fixture registry](../sdk/fixtures/).
 A failed case leaves its workspace and runner log on disk and prints their location.
 The kit never retries a case. The library entry points are `startReceiver` in
@@ -23,7 +23,7 @@ The kit never retries a case. The library entry points are `startReceiver` in
 
 ## Waiting approval checks
 
-Opt in by declaring `approvalsOutlastTurns: true` on a supported kept session with an approval gate and finite operator maximum. The runner discovers support from the ordinary `first-turn` report. If that test uses an ephemeral composition, also report `declarations.waitingSession` from a separate, compatible session probe (with several actors enabled if supported). Do not change the first-turn test's session or invent declaration values. Without a positive declaration the CLI prints a skip reason and does not launch waiting cases. Library callers pass the same observed `{declaration}` as the third argument to `runCase`.
+Build the waiting session with kept history, an approval gate and a finite operator maximum. The kit checks the actual case’s session declaration, including with export disabled. Missing support fails the case.
 
 Four [SDK fixtures](../sdk/README.md#waiting-approval-scenarios) run in process, each with and without an OpenTelemetry SDK: allow, decline, expire while stopped and revoke the approver after allow. Revocation uses the fixture's second member and also requires `severalActors`. All four still check the records and counter with export off. Do not use telemetry to decide when work is ready.
 
@@ -45,7 +45,7 @@ scripted Provider and generated fixture data. Never read real credentials or use
 
 - Read `MODULAR_AGENT_TELEMETRY_RUN`, the absolute path to a JSON request with
   `host`, `scenario`, `placement`, `sdk` (boolean), `agentName`, `scenarioPath`,
-  `workDir`, `reportPath`, `fixtures`, `values` and, for process cases, `handshake`.
+  `workDir`, `reportPath`, `fixtures` and `values`.
   Run the scenario from `scenarioPath` with its existing outcome, effect and history
   assertions. Use `workDir` for the scratch data and counter. Set the SDK agent name
   to `agentName`.
@@ -61,10 +61,7 @@ scripted Provider and generated fixture data. Never read real credentials or use
   name); set the process plugin's explicit `env` to the supplied values. The Node prefix
   records both directions before forwarding each frame. Keep stdout reserved for binding
   messages. Do not log reconstructed messages in place of the wire capture.
-- In `agreed` mode both sides support propagation. For `no-offer` suppress the host's
-  offer, and for `no-acceptance` suppress only the fixture's acceptance. The fixture sees
-  the mode in `MODULAR_AGENT_TELEMETRY_HANDSHAKE`. Change the actual peer behavior,
-  not the captured messages. Work and callbacks must still settle.
+- Send valid context for the current operation on trusted work and scoped callbacks. Keep it off control messages and responses.
 - The scenario copy includes distinct synthetic content values. Keep the existing
   fixture behavior except that the `confirm` fixture for `question-answered` uses
   `values.answer` in place of the `yes` choice value (keep the other choice).

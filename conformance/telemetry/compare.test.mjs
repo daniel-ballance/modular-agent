@@ -81,35 +81,34 @@ const wire = (direction, msg) => ({ direction, raw: JSON.stringify({ jsonrpc: "2
 const host = msg => wire("hostToPlugin", msg);
 const peer = msg => wire("pluginToHost", msg);
 
-function toolCall(handshake = "agreed", nested = false) {
+function toolCall(placement = "process:go", nested = false) {
   const calls = nested ? [
     { id: "call-1", stepId: "step-1", name: "pilot", status: "completed" },
     { id: "call-2", stepId: "step-1", name: "tide", status: "completed", parentCallId: "call-1" },
   ] : [{ id: "call-1", stepId: "step-1", name: "tide", status: "completed" }];
   const spans = [makeSpan(1, null, "invoke_agent", invoke), ...modelStep("step-1", 2), ...modelStep("step-2", 4)];
   const s = sample(nested ? "nested-call" : "tool-call", spans, { calls, steps: ["step-1", "step-2"].map(id => ({ id, model: "script" })) },
-    handshake === "inProcess" ? {} : { placement: "process:go", handshake });
+    { placement });
   const rpc = (number, parent, name, method, kind, scope = session) => makeSpan(number, parent, "modular_agent.plugin.request", {
     ...scope, "modular_agent.plugin.method": method, "modular_agent.plugin.name": name,
   }, kind);
-  const agreed = handshake === "agreed";
   s.connections = [];
   for (const [index, call] of calls.entries()) {
     const tool = 6 + 3 * index;
     spans.push(execute(tool, call.parentCallId ? 6 : 2, call.name, call.id, call.parentCallId));
-    if (handshake === "inProcess") continue;
+    if (placement === "inProcess") continue;
     spans.push(rpc(tool + 1, tool, call.name, "tools/call", 3, step("step-1")));
-    if (agreed) spans.push(rpc(tool + 2, tool + 1, call.name, "tools/call", 2));
+    spans.push(rpc(tool + 2, tool + 1, call.name, "tools/call", 2));
     const frames = [
-      host({ id: 1, method: "plugin/initialize", params: handshake === "no-offer" ? {} : { traceContext: 1 } }),
-      peer({ id: 1, result: { name: call.name, ...(agreed && { traceContext: 1 }) } }),
+      host({ id: 1, method: "plugin/initialize", params: {} }),
+      peer({ id: 1, result: { name: call.name } }),
       host({ id: 2, method: "tools/call", params: { sessionId: "session-1", call: { id: call.id, name: call.name },
-        ...(agreed && { traceContext: context(tool + 1) }) } }),
+        traceContext: context(tool + 1) } }),
     ];
     if (call.name === "pilot") {
-      if (agreed) spans.push(rpc(12, tool + 2, "pilot", "host/tools/call", 3));
+      spans.push(rpc(12, tool + 2, "pilot", "host/tools/call", 3));
       frames.push(peer({ id: 2, method: "host/tools/call", params: { parentRequestId: 2, name: "tide", input: {},
-        ...(agreed && { traceContext: context(12) }) } }),
+        traceContext: context(12) } }),
       host({ id: 2, result: { callId: "call-2", status: "completed" } }));
     }
     frames.push(peer({ id: 2, result: { status: "completed" } }));
@@ -151,10 +150,10 @@ function crash(kept = false) {
   });
 }
 
-for (const handshake of ["inProcess", "agreed", "no-offer", "no-acceptance"]) {
-  test(`accepts tool and scoped nested calls (${handshake})`, () => {
-    compareTrace(toolCall(handshake));
-    compareTrace(toolCall(handshake, true));
+for (const placement of ["inProcess", "process:go"]) {
+  test(`accepts tool and scoped nested calls (${placement})`, () => {
+    compareTrace(toolCall(placement));
+    compareTrace(toolCall(placement, true));
   });
 }
 for (const name of ["gate-refusal", "question-answered"]) {
@@ -199,12 +198,12 @@ const violations = [
     msg.result.traceContext = context(7);
     record.raw = JSON.stringify(msg);
   }, /traceContext on a response/],
-  ["unagreed context on a callback", () => toolCall("no-acceptance", true), s => {
-    const record = s.connections[0].frames[3];
+  ["context on initialize", () => toolCall(), s => {
+    const record = s.connections[0].frames[0];
     const msg = JSON.parse(record.raw);
     msg.params.traceContext = context(12);
     record.raw = JSON.stringify(msg);
-  }, /traceContext sent without agreement/],
+  }, /control message/],
   ["resumed span lacking a link", () => crash(), s => { s.received.spans.at(-1).links = []; }, /Link to saved segment/],
   ["checkpoint committed after an effect", () => crash(), s => { s.report.crash.afterRestart.reverse(); }, /before resumed effects/],
 ];
