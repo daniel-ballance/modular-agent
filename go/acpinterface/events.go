@@ -386,6 +386,12 @@ func (s *server) askActor(st *attachment, q api.Question, who string) bool {
 			ToolCall:  acp.ToolCallUpdate{ToolCallId: acp.ToolCallId(call.ID), Name: acp.Ptr(call.Name), RawInput: call.Input, Title: acp.Ptr(q.Prompt)},
 			Options:   []acp.PermissionOption{{OptionId: "allow", Name: "Allow", Kind: acp.PermissionOptionKindAllowOnce}, {OptionId: "refuse", Name: "Refuse", Kind: acp.PermissionOptionKindRejectOnce}},
 		}
+		if q.CoversNested {
+			view["requestId"], view["actorId"] = q.ID, who
+			permission.ToolCall.Title = acp.Ptr(call.Name)
+			permission.ToolCall.Content = []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(q.Prompt))}
+			permission.Meta[Namespace] = api.JSON(view)
+		}
 		original := api.JSON(permission)
 		if gate, ok := s.a.(outputGate); ok {
 			event, err := gate.OutputValue(api.AsActor(st.ctx, who), api.Event{Kind: "interface.request", Session: q.Session, Method: "session/request_permission", Data: original})

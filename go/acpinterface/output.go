@@ -95,6 +95,20 @@ func (s *server) gateAnswer(ctx context.Context, session, method string, result 
 		if before.NextEntryID != after.NextEntryID || !slices.Equal(before.Entries, after.Entries) {
 			return nil, api.ErrOutputWithheld
 		}
+		// A history read is not the polling route and cannot deliver consent.
+		if h, ok := s.a.(interface{ SupportsCoveredApprovals() bool }); ok && h.SupportsCoveredApprovals() {
+			result := api.Decode[portable.Object](event.Data)
+			entries, _ := result["entries"].([]any)
+			for _, v := range entries {
+				entry, _ := v.(map[string]any)
+				d, _ := entry["data"].(map[string]any)
+				req, _ := d["request"].(map[string]any)
+				if entry["kind"] == "inputRequest" && req["coversNested"] == true {
+					req["answerable"] = false
+				}
+			}
+			return result, nil
+		}
 	}
 	return event.Data, nil
 }
