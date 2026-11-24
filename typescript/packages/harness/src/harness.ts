@@ -3679,6 +3679,17 @@ export class Harness {
 		const origin = branch.find(e => e.kind === "turnStart" && e.turnId === turnId)?.continuesTurnId;
 		if (!origin || branch.some(e => e.kind === "response" && e.turnId === turnId && e.stepId === call.stepId)) return true;
 		const pending = branch.find(e => e.kind === "toolPending" && e.turnId === origin && e.toolCallId === call.id && !e.erased && !s.copied.has(e.id));
+		// Older portable histories have question-backed ends but no pending checkpoint.
+		// Do not reinterpret them as ADR 0034. A marked request, an opting-in setting,
+		// or a tombstoned checkpoint is not evidence for the legacy convention.
+		if (!pending && !s.hasWaitingApprovals && !branch.some(e => {
+			if (e.kind === "toolPending" && e.toolCallId === call.id) return true;
+			const setting = e.data as { key?: string; value?: unknown } | undefined;
+			return e.kind === "setting" && !e.erased && (setting?.key === "approvalWait" && setting.value === "untilDeadline" ||
+				setting?.key === "settings" && (setting.value as {approvalWait?: string} | null)?.approvalWait === "untilDeadline");
+		})) {
+			return branch.some(e => e.kind === "inputRequest" && !e.erased && e.turnId === origin && e.toolCallId === call.id);
+		}
 		const ids = (pending?.data as {requestIds?: string[]})?.requestIds;
 		return Array.isArray(ids) && ids.length > 0 && ids.every(id => {
 			const entry = branch.find(e => e.kind === "inputRequest" && e.requestId === id && !e.erased && e.turnId === origin && e.toolCallId === call.id);
