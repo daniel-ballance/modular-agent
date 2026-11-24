@@ -42,7 +42,7 @@ func TestServeHistoryKit(t *testing.T) {
 		t.Skip("history kit requires Node.js")
 	}
 	kit := filepath.Join("..", "..", "conformance", "history", "run.mjs")
-	regex := regexp.MustCompile(`(?m)^40/40 checks passed$`)
+	regex := regexp.MustCompile(`(?m)^41/41 checks passed$`)
 	for _, placement := range []string{"memory", "files", "relay"} {
 		t.Run(placement, func(t *testing.T) {
 			t.Parallel()

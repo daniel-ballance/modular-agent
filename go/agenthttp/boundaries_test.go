@@ -44,6 +44,7 @@ func TestHTTPGateAndApprovalPresence(t *testing.T) {
 			t.Fatal(err)
 		}
 		id := out.Session
+		runtimetest.Publish(t, h.API(), id)
 		snap, _ := h.API().Snapshot(id)
 		snap.Settings.Approval = "ask-always"
 		if _, err = call(agenthttp.Request{Op: "settings", Session: id, Settings: snap.Settings}); err != nil {

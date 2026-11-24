@@ -166,8 +166,11 @@ func decodeSnapshot(id string, b []byte) (api.Session, error) {
 		return api.Session{}, errors.New("unsupported or mismatched history snapshot")
 	}
 	for _, raw := range disk.Entries {
-		e, err := portable.ReadEntry(raw)
-		if err != nil {
+		var e api.Entry
+		var err error
+		if len(snap.HistoryMeta) > 0 {
+			e = portable.StoreEntry(raw)
+		} else if e, err = portable.ReadEntry(raw); err != nil {
 			return api.Session{}, err
 		}
 		snap.Entries = append(snap.Entries, e)

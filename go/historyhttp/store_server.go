@@ -131,12 +131,7 @@ func (s *Server) saveStore(d document, erasing bool) (err error) {
 	}
 	snap.Entries = make([]api.Entry, 0, len(d.Entries))
 	for _, row := range d.Entries {
-		e, err := portable.ReadEntry(row)
-		if err != nil {
-			return err
-		}
-		e.Wire = row
-		snap.Entries = append(snap.Entries, e)
+		snap.Entries = append(snap.Entries, portable.StoreEntry(row))
 	}
 	if erasing {
 		erase, ok := l.(interface{ SaveErasure(api.Session) error })

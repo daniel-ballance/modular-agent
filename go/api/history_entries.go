@@ -1,5 +1,8 @@
 package api
 
+// InvalidHistoryKind marks an opaque service row that a Harness cannot execute.
+const InvalidHistoryKind = "wire:invalid-work"
+
 func (e Entry) AuthorityRecord() bool {
 	switch e.Kind {
 	case "tenant", "limit", "actor.set", "actor.left", "job.cleanup":

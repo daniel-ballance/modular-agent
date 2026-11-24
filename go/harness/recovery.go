@@ -20,6 +20,9 @@ func recovery(s api.Session) (*api.Entry, []api.Input) {
 func validateIntake(s api.Session) error {
 	started := map[string]bool{}
 	for _, e := range s.LiveEntries() {
+		if e.Kind == api.InvalidHistoryKind {
+			return fmt.Errorf("unusable history entry %s", e.ID)
+		}
 		if e.WasKind("turn.start") && e.Turn != "" {
 			started[e.Turn] = true
 		}

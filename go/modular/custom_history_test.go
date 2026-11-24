@@ -125,7 +125,7 @@ func TestCustomHistoryBackendPassesHistoryKit(t *testing.T) {
 		}
 	})
 	out, err := exec.CommandContext(t.Context(), node, "../../conformance/history/run.mjs", svc.URL, token).CombinedOutput()
-	result := regexp.MustCompile(`(?m)^40/40 checks passed$`).Find(out)
+	result := regexp.MustCompile(`(?m)^41/41 checks passed$`).Find(out)
 	if err != nil || result == nil {
 		t.Fatalf("history kit: %v\n%s", err, out)
 	}
