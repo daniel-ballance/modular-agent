@@ -148,7 +148,7 @@ from ._provider import (
     ProviderContext as ProviderContext,
     ProviderSupports as ProviderSupports,
 )
-from ._serve import serve as serve
+from ._serve import CallerContext as CallerContext, PluginCaller as PluginCaller, serve as serve
 from ma_plugin.websocket import WebSocketServer as WebSocketServer, WebSocketTLS as WebSocketTLS
 from ._runtime_port import (
     RuntimeContext as RuntimeContext,

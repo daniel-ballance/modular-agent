@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextvars import ContextVar
 from copy import deepcopy
 from os import PathLike
 from pathlib import Path
-from typing import Any, cast, overload
+from typing import Any, TypedDict, cast, overload
+from inspect import signature
 
 from ma_plugin.host import External
 from ma_plugin.rpc import MAX_FRAME, Peer, WireError
@@ -47,6 +48,7 @@ async def _serve(
     *,
     frames: WebSocketFrames | None = None,
     projects: frozenset[Path] = frozenset(),
+    restrict_projects: bool = False,
     trace_context: bool = True,
 ) -> None:
     environment_project: Path | None = None
@@ -693,6 +695,14 @@ async def _serve(
         async def dispatch(self, method: str, params: dict[str, Any], key: str | int) -> Any:
             nonlocal attempted
             task = asyncio.current_task()
+            if restrict_projects and "project" in params:
+                project = params["project"]
+                if (
+                    not isinstance(project, str)
+                    or not Path(project).is_absolute()
+                    or Path(project).resolve() not in projects
+                ):
+                    raise WireError("Project is outside caller scope", "invalid_request", -32602)
             if method == "plugin/initialize":
                 if attempted:
                     raise WireError("Already initialized", "invalid_request")
@@ -799,6 +809,15 @@ def _check_servable(plugin: Plugin) -> None:
         raise AgentError(ErrorCode.NOT_SUPPORTED, "Cannot serve " + ", ".join(items))
 
 
+class PluginCaller(TypedDict):
+    caller_id: str
+    token_file: str | PathLike[str]
+
+
+class CallerContext(TypedDict):
+    caller_id: str
+
+
 @overload
 def serve(plugin: Plugin) -> None: ...
 
@@ -814,15 +833,34 @@ def serve(
 ) -> Coroutine[Any, Any, WebSocketServer]: ...
 
 
+@overload
 def serve(
-    plugin: Plugin | Callable[[], Plugin],
+    plugin: Callable[[CallerContext], Plugin],
     *,
+    listen: str,
+    callers: Sequence[PluginCaller],
+    tls: WebSocketTLS | None = None,
+    projects: Mapping[str, Sequence[str | PathLike[str]]] | Sequence[str | PathLike[str]] = (),
+) -> Coroutine[Any, Any, WebSocketServer]: ...
+
+
+def serve(
+    plugin: Plugin | Callable[[], Plugin] | Callable[[CallerContext], Plugin] | None = None,
+    *,
+    callers: Sequence[PluginCaller] | None = None,
     listen: str | None = None,
     token_file: str | PathLike[str] | None = None,
     tls: WebSocketTLS | None = None,
-    projects: Sequence[str | PathLike[str]] = (),
+    projects: Mapping[str, Sequence[str | PathLike[str]]] | Sequence[str | PathLike[str]] = (),
 ) -> None | Coroutine[Any, Any, WebSocketServer]:
     """Serve on stdio, or await a WebSocket listener with a fresh instance per host."""
+    if callers is not None and (
+        not listen or token_file is not None or not callable(plugin) or isinstance(plugin, Plugin)
+    ):
+        raise AgentError(
+            ErrorCode.INVALID_COMPOSITION,
+            "Named callers need a listener and a per-connection factory, not a single token",
+        )
     if isinstance(plugin, Plugin):
         _check_servable(plugin)
     if listen is None:
@@ -830,22 +868,74 @@ def serve(
             raise ValueError("WebSocket options require listen")
         asyncio.run(_serve(plugin))
         return None
-    if token_file is None:
-        raise ValueError("WebSocket serving requires token_file")
 
-    try:
-        roots = frozenset(Path(p).resolve(strict=True) for p in projects)
-        if isinstance(projects, (str, bytes)) or any(
-            not Path(p).is_absolute() or not Path(p).is_dir() for p in projects
-        ):
-            raise ValueError("Expected absolute project directories")
-    except (OSError, ValueError, RuntimeError, TypeError) as exc:
-        raise AgentError(ErrorCode.INVALID_COMPOSITION, "Invalid plugin service projects") from exc
+    def directories(paths: Sequence[str | PathLike[str]]) -> frozenset[Path]:
+        try:
+            if isinstance(paths, (str, bytes)) or any(
+                not Path(p).is_absolute() or not Path(p).is_dir() for p in paths
+            ):
+                raise ValueError()
+            return frozenset(Path(p).resolve(strict=True) for p in paths)
+        except (OSError, ValueError, RuntimeError, TypeError) as exc:
+            raise AgentError(
+                ErrorCode.INVALID_COMPOSITION, "Invalid plugin service projects"
+            ) from exc
+
+    if callers is not None:
+        try:
+            assert callable(plugin)
+            signature(plugin).bind({"caller_id": "caller"})
+            table = [(row["token_file"], row["caller_id"]) for row in callers]
+            ids = {cid for _, cid in table}
+            if (
+                not table
+                or len(ids) != len(table)
+                or not all(isinstance(cid, str) and cid for cid in ids)
+            ):
+                raise ValueError()
+            if isinstance(projects, Mapping) and projects.keys() - ids:
+                raise ValueError()
+            roots_by_id = {
+                cid: directories(
+                    projects.get(cid, ()) if isinstance(projects, Mapping) else projects
+                )
+                for cid in ids
+            }
+        except (TypeError, ValueError, KeyError) as exc:
+            raise AgentError(
+                ErrorCode.INVALID_COMPOSITION, "Invalid named caller table or factory"
+            ) from exc
+
+        async def named(frames: WebSocketFrames, cid: str) -> None:
+            instance = cast(Callable[[CallerContext], Plugin], plugin)({"caller_id": cid})
+            _check_servable(instance)
+            await _serve(
+                instance, frames=frames, projects=roots_by_id[cid], restrict_projects=bool(projects)
+            )
+
+        async def listener() -> WebSocketServer:
+            try:
+                return await listen_websocket(listen, table, PLUGIN_PROTOCOL, named, tls)
+            except (ValueError, TypeError, OSError) as exc:
+                raise AgentError(
+                    ErrorCode.INVALID_COMPOSITION, "Invalid named plugin listener"
+                ) from exc
+
+        return listener()
+    if token_file is None or plugin is None:
+        raise ValueError("WebSocket serving requires a plugin and token_file")
+    if isinstance(projects, Mapping):
+        raise AgentError(
+            ErrorCode.INVALID_COMPOSITION, "Per-caller project bounds need named callers"
+        )
+    roots = directories(projects)
 
     async def connected(frames: WebSocketFrames, _: None) -> None:
         # Ordinary Plugin values can keep per-connection state in setup's
         # registrar. Use a factory for external resources or stateful closures.
-        instance = deepcopy(plugin) if isinstance(plugin, Plugin) else plugin()
+        instance = (
+            deepcopy(plugin) if isinstance(plugin, Plugin) else cast(Callable[[], Plugin], plugin)()
+        )
         _check_servable(instance)
         await _serve(instance, frames=frames, projects=roots)
 
