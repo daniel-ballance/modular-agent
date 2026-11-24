@@ -2001,7 +2001,7 @@ async function runProduction() {
 	const profile = (policy, extraEnv = {}, dir = mkdtempSync(join(root, "profile-"))) => {
 		const path = join(dir, "policy.json");
 		writeFileSync(path, JSON.stringify(policy), { mode: 0o600 });
-		return { MODULAR_AGENT_DATA_DIR: dir, MODULAR_AGENT_CONFORMANCE_POLICY: path, ...extraEnv };
+		return { HOME: dir, XDG_CONFIG_HOME: dir, XDG_DATA_HOME: dir, MODULAR_AGENT_DATA_DIR: dir, MODULAR_AGENT_CONFORMANCE_POLICY: path, ...extraEnv };
 	};
 	const invalid = async (policy) => {
 		const extraEnv = profile(policy);
