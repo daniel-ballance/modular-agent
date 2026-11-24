@@ -22,7 +22,10 @@ from .output import SEGMENT_BYTES, OutputOverflow, encoded_size, gate, project
 from .reservations import Reservations, size
 
 
-class Harness(Authority, Erasure, InterfaceTools):
+from .waiting_approvals import WaitingApprovals, marked, waiting_entries
+
+
+class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
     MAX_TOOL_DEPTH = 4
 
     def __init__(
@@ -71,6 +74,7 @@ class Harness(Authority, Erasure, InterfaceTools):
         self.agent_name = agent_name
         self.provider_trace_ids = {}
         self.init_interface_tools()
+        self.init_waiting_approvals()
         self.define_hook("@harness", "plugin.load", "gate")
         self.define_hook("@harness", "session.prepare", "observe")
         self.define_hook("@harness", "session.join", "observe")
@@ -245,6 +249,7 @@ class Harness(Authority, Erasure, InterfaceTools):
             self.followers = [f for f in self.followers if f[0] != name]
 
     async def suspend_session(self, sid):
+        self.forget_waits(sid)
         self.forget_interface_session(sid)
         self.sessions[sid]["suspending"] = True
         try:
@@ -263,6 +268,7 @@ class Harness(Authority, Erasure, InterfaceTools):
             elif sid in self.sessions:
                 await self.fire("@harness", "session.suspend", {"session": sid})
         for sid in list(self.sessions):
+            self.forget_waits(sid)
             self.forget_interface_session(sid)
             if "history" in self.capabilities:
                 await self.call("@harness", "history", "close", {"session": sid})
@@ -364,6 +370,22 @@ class Harness(Authority, Erasure, InterfaceTools):
                 value = answer
             if rule == "gate" and value.get("refused"):
                 break
+        if (
+            name == "tool.before"
+            and not value.get("gate_checkpoint")
+            and (s := self.sessions.get(data["session"]))
+            and self.waiting_request(s, data["call"]["id"])
+        ):
+            status, _ = await self.check_wait_dispatch(
+                s["id"], data["turn"], data["step"], value["call"], value.get("definition")
+            )
+            if status or value.get("pending"):
+                return {
+                    **value,
+                    "refused": True,
+                    "wait_status": status or "refused",
+                    "reason": "Waiting approval does not authorize this call",
+                }
         return answers if rule == "collect" else (None if rule == "first" else value)
 
     async def call(self, caller, target, operation, data, emit=silent):
@@ -461,6 +483,35 @@ class Harness(Authority, Erasure, InterfaceTools):
         provider_id = ot.name(self.provider_trace_ids.pop((sid, call["id"]), None))
         if provider_id:
             attributes["gen_ai.tool.call.id"] = provider_id
+        if self.waiting_request(self.sessions[sid], call["id"]):
+
+            async def handoff():
+                status, _ = await self.check_wait_dispatch(
+                    sid, data.get("turn"), data.get("step"), call, data["definition"], started=True
+                )
+                if status:
+                    self.tool_dispatches.pop(token, None)
+                    result = {"call": call["id"], "status": status, "content": []}
+                    ot.tool_disposition(
+                        sid, data.get("turn"), data.get("step"), call, data["definition"], result
+                    )
+                    return result
+                return await self._execute_tool(
+                    sid,
+                    method,
+                    {**data, "_checked_definition": True},
+                    emit,
+                    token,
+                    scope,
+                    attributes,
+                )
+
+            return await self._effect(sid, handoff)
+        return await self._effect(
+            sid, self._execute_tool, sid, method, data, emit, token, scope, attributes
+        )
+
+    async def _execute_tool(self, sid, method, data, emit, token, scope, attributes):
         tool_name = attributes.get("gen_ai.tool.name")
         with ot.span(
             "execute_tool " + tool_name if tool_name else "execute_tool", attributes
@@ -469,7 +520,7 @@ class Harness(Authority, Erasure, InterfaceTools):
 
     async def _dispatch_tool(self, sid, method, data, emit, token, scope, operation):
         try:
-            result = clone(await self._effect(sid, method, {**data, "dispatch": token}, emit))
+            result = clone(await method({**data, "dispatch": token}, emit))
             status = ot.tool_status(result)
             ot.set_attrs(operation, {"modular_agent.tool.status": status})
             if status == "failed":
@@ -896,8 +947,47 @@ class Harness(Authority, Erasure, InterfaceTools):
         # An entry may attribute an effect to a historical actor who has left.
         s = self._session(d, check_actor=False)
         sid = s["id"]
+        if d["kind"] == "tool_started" and (wait := self.waiting_request(s, d["call"])):
+            current = next(
+                (
+                    t
+                    for t in await self.call(
+                        "@harness", "tools", "definitions", {"session": sid, "turn": d["turn"]}
+                    )
+                    if t["name"] == d["data"]["call"]["name"]
+                ),
+                None,
+            )
+            status, sources = await self.check_wait_dispatch(
+                sid, d["turn"], d["step"], d["data"]["call"], current
+            )
+            if status:
+                return [{"denied": status}]
+            registration = wait["data"]["approval_registration"]
+            d = {
+                **d,
+                "copies": [*d.get("copies", []), *sources],
+                "data": {
+                    **d["data"],
+                    "source": registration["source"],
+                    "definition": registration["definition"],
+                },
+            }
+        if d["kind"] == "tool_result" and (wait := self.waiting_request(s, d["call"])):
+            decision, _, result = self.wait_state(s, wait)
+            if result:
+                return [result]
+            d = {
+                **d,
+                "copies": list(
+                    dict.fromkeys(
+                        [*d.get("copies", []), wait["id"], *([decision["id"]] if decision else [])]
+                    )
+                ),
+            }
         if d["kind"] == "turn_end" and (listed := d["data"].get("open_calls")):
             settled = {cid for cid, (_, _, result) in handoff_fold(s["entries"]).items() if result}
+            settled.update(e["call"] for e in waiting_entries(s) if self.wait_state(s, e)[2])
             if settled.intersection(listed):
                 data = {**d["data"], "open_calls": [cid for cid in listed if cid not in settled]}
                 if "shared_result" in data:
@@ -1042,6 +1132,22 @@ class Harness(Authority, Erasure, InterfaceTools):
                         if kind == "input"
                         else {"job": e["job"], "copies": [e["id"]]}
                     ),
+                }
+            )
+        if d.get("gate_pending") or d.get("wait_result"):
+            if d.get("approval_time"):
+                e["time"] = d["approval_time"]
+            batch.append(
+                {
+                    **{k: e[k] for k in ("session", "time", "writer", "turn", "step", "call")},
+                    "id": identity(),
+                    "parent": e["id"],
+                    "kind": "tool_deferred",
+                    "visible": False,
+                    "content": [],
+                    "copies": [*d.get("copies", []), e["id"]],
+                    "data": {"requestIds": [e["data"].get("id")]},
+                    **d.get("wait_result", {}),
                 }
             )
         if handoff := d.get("interface_handoff"):
@@ -1255,6 +1361,7 @@ class Harness(Authority, Erasure, InterfaceTools):
                 and history is not None
                 and self.plugins[history[0]].declarations.get("retention") != "process"
             )
+            self.validate_wait_setting({**settings, **d.get("settings", {})})
             s = {
                 "id": d.get("id", identity()),
                 "project": project,
@@ -1265,7 +1372,12 @@ class Harness(Authority, Erasure, InterfaceTools):
                     else {}
                 ),
                 **({"provisional": True} if provisional else {}),
-                "settings": {"approval": "off", **settings, **d.get("settings", {})},
+                "settings": {
+                    "approval": "off",
+                    **({"approvalWait": "live"} if self.max_approval_wait_ms else {}),
+                    **settings,
+                    **d.get("settings", {}),
+                },
                 "actor": d.get("actor", "user"),
                 "entries": [],
                 "position": None,
@@ -1335,6 +1447,7 @@ class Harness(Authority, Erasure, InterfaceTools):
                     connection_host=bool(d.get("connection_host") and d.get("actor")),
                 )
                 if recover:
+                    await self.reconcile_waits(sid, kick=False)
                     await self.interface_recover(sid)
                     await self._settle_nested(sid)
                     if "runtime" in self.capabilities:
@@ -1397,7 +1510,7 @@ class Harness(Authority, Erasure, InterfaceTools):
                 return await self.erasure_revision(d["session"])
             return 0
         if op == "view":
-            if d.get("type") == "entry" and d["value"].get("kind") == HANDOFF:
+            if d.get("type") == "entry":
                 d = {**d, "value": ot.project_entry(d["value"])}
             delivery_sid = d.get("session")
             guarded = delivery_sid in self.sessions and d.get("method") != "_modular-agent/erase"
@@ -1474,7 +1587,9 @@ class Harness(Authority, Erasure, InterfaceTools):
             ]
         if op == "pending_inputs":
             ready = []
-            if not d.get("proposals") and any(e["kind"] == HANDOFF for e in s["entries"]):
+            if not d.get("proposals") and any(
+                e["kind"] == HANDOFF or marked(e) for e in s["entries"]
+            ):
                 ready = await self.interface_ready(sid)
             return pending_inputs(s["entries"], d.get("proposals"), ready)
         if op == "input_outcome":
@@ -1550,6 +1665,8 @@ class Harness(Authority, Erasure, InterfaceTools):
             return {}
         if op == "branch":
             return select_entries(branch_entries(s), d)
+        if op == "waiting_gate":
+            return await self.waiting_gate(d["gate"], d["ask"])
         if op == "interface_dispatch":
             return await self.interface_dispatch(d)
         if op == "interface_settle":
@@ -1562,10 +1679,23 @@ class Harness(Authority, Erasure, InterfaceTools):
         if op == "append":
             async with self.append_locks.setdefault(sid, asyncio.Lock()):
                 entries = await self._append(d)
+            if entries[0].get("denied"):
+                return entries[0]
             for entry in entries:
                 await self._emit({"kind": "history_entry", "session": sid, "entry": entry})
+            if d["kind"] in {"limit", "authority", "actor_left", "setting"} and waiting_entries(
+                self.sessions[sid]
+            ):
+                # Once a principal loses eligibility, restoring rights needs a fresh delivery.
+                for key in list(self.approval_deliveries):
+                    if key[0] == sid:
+                        self.approval_deliveries.pop(key)
+                await self.reconcile_waits(sid)
+            if d["kind"] == "turn_end" and d["data"].get("outcome") != "completed":
+                await self.reconcile_waits(sid, reason="cancelled", turn=d["turn"], kick=False)
             return entries[0]
         if op == "settings":
+            self.validate_wait_setting(d["changes"])
             if s.get("busy"):
                 raise AgentError("Settings may change only between turns")
             e = await self.handle("append", {**d, "kind": "setting", "data": d["changes"]}, emit)
@@ -1579,6 +1709,8 @@ class Harness(Authority, Erasure, InterfaceTools):
             s["busy"] = d["value"]
             return {}
         if op == "move":
+            if any(not self.wait_state(s, e)[2] for e in waiting_entries(s)):
+                raise AgentError("Cannot move with a waiting approval", "conflict")
             self._require_materialized(s)
             if s.get("busy") or any(
                 not ended for _, _, ended in handoff_fold(s["entries"]).values()
@@ -1802,6 +1934,7 @@ class Harness(Authority, Erasure, InterfaceTools):
             if "history" in self.capabilities:
                 await self.call("@harness", "history", "close", {"session": sid})
             self.forget_interface_session(sid)
+            self.forget_waits(sid)
             del self.sessions[sid]
             return {}
         if op == "declaration":

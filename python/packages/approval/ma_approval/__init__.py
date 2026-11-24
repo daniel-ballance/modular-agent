@@ -18,6 +18,13 @@ class Approval(Plugin):
         s = await self.api.session("get", session=d["session"], include_entries=False)
         policy = s["settings"].get("approval", "off")
         tool = d.get("definition") or {}
+        if s["settings"].get("approvalWait") == "untilDeadline":
+            ask = policy == "ask always" or (
+                policy == "ask unless read-only" and not tool.get("hints", {}).get("read_only")
+            )
+            waiting = await self.api.session("waiting_gate", gate=d, ask=ask, session=d["session"])
+            if waiting is not None:
+                return waiting
         if policy == "off" or (
             policy == "ask unless read-only" and tool.get("hints", {}).get("read_only")
         ):

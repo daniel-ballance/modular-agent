@@ -601,7 +601,10 @@ class Turns:
 
     async def _recovered_handoffs(self, sid, turn):
         calls = [
-            e["call"] for e in await self._entries(sid, turn=turn, kind=HANDOFF, fields=["call"])
+            e["call"]
+            for e in await self._entries(
+                sid, turn=turn, kinds=[HANDOFF, "tool_deferred"], fields=["call"]
+            )
         ]
         if not calls:
             return []
@@ -859,7 +862,7 @@ class Turns:
         return step
 
     async def _result(self, sid, turn, step, call, answer):
-        if answer.get("interface"):
+        if answer.get("interface") or answer.get("gate_checkpoint"):
             return  # The Harness owns the checkpoint and terminal result.
         if answer.get("open"):
             pending = answer
@@ -1052,7 +1055,15 @@ class Turns:
             if "tools" not in authority:
                 gate = {**gate, "refused": True, "reason": "Actor lacks authority: tools"}
             if gate.get("open") and not gate.get("refused") and not gate.get("pending"):
-                return unknown if replay else {"open": True, "request": gate["request"]}
+                return (
+                    unknown
+                    if replay
+                    else {
+                        "open": True,
+                        "request": gate["request"],
+                        **({"gate_checkpoint": True} if gate.get("gate_checkpoint") else {}),
+                    }
+                )
             caller = "plugin" if call.get("parentCallId") else call.get("initiator", "model")
             if definition and caller not in definition.get("callers", []):
                 gate = {**gate, "refused": True, "reason": "Tool does not allow this initiator"}
@@ -1072,10 +1083,11 @@ class Turns:
                     if reply.get("declined"):
                         gate = {**gate, "refused": True, "reason": reply.get("reason", "Declined")}
             if gate.get("refused"):
-                ot.tool_disposition(sid, turn, step, call, definition, {"status": "refused"})
+                status = gate.get("wait_status", "refused")
+                ot.tool_disposition(sid, turn, step, call, definition, {"status": status})
                 if replay:
                     return unknown
-                answer.update(status="refused", content=content(gate.get("reason", "Refused")))
+                answer.update(status=status, content=content(gate.get("reason", "Refused")))
             elif definition is None:
                 if call.get("parentCallId"):
                     answer["status"] = "refused"
@@ -1111,6 +1123,11 @@ class Turns:
                         e["id"] for e in await self._entries(sid, call=call["id"], kind="tool_call")
                     ],
                 )
+
+                if invocation.get("denied"):
+                    answer = {"status": invocation["denied"], "content": []}
+                    ot.tool_disposition(sid, turn, step, call, definition, answer)
+                    return answer
 
                 async def progress(piece):
                     await self.api.event(

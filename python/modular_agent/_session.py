@@ -11,6 +11,7 @@ from uuid import uuid4
 from ma_core.wire import (
     entry_in,
     entry_out,
+    json_equal,
     result_out,
     settings_in,
     settings_out,
@@ -247,6 +248,7 @@ class Session:
         self._streams: set[_Stream] = set()
         self._closed = False
         self._root = self
+        self._delivery_token = uuid4().hex
         self._actor = "user"
 
     def _actor_id(self, actor: str) -> str:
@@ -260,6 +262,7 @@ class Session:
         """Use the named actor's current rights on the same session."""
         view = copy(self)
         view._actor = self._actor_id(actor_id)
+        view._delivery_token = uuid4().hex
         return view
 
     async def join(self, actor: Actor, granted_by: str | None = None) -> None:
@@ -725,10 +728,16 @@ class Session:
     async def answer(self, question_id: str, answer: AnswerInput) -> None:
         if self._root._closed:
             raise AgentError(ErrorCode.NOT_OPEN, "Session is not open")
-        await self._agent._answer(self.id, question_id, _answer(answer), self._actor)
+        await self._agent._answer(
+            self.id, question_id, _answer(answer), self._actor, delivery_token=self._delivery_token
+        )
 
-    async def questions(self) -> list[Question]:
+    async def questions(self, *, present: bool = False) -> list[Question]:
         await self._state()
+        if present and not self._agent._h.max_approval_wait_ms:
+            raise AgentError(
+                ErrorCode.NOT_SUPPORTED, "This agent does not support waiting approval"
+            )
         from ._native import _question
 
         questions = await self._agent._call(
@@ -750,6 +759,19 @@ class Session:
                 method="questions",
                 value=q,
             )
+            if q.get("approvalWait"):
+                exact = q["answerable"] and json_equal(q, visible)
+                if present or not exact:
+                    self._agent._h.remember_wait(
+                        self.id,
+                        self._delivery_token,
+                        self._actor,
+                        q["entry"],
+                        "sdk",
+                        present and exact,
+                    )
+                if visible is not None:
+                    visible = {**visible, "answerable": bool(present and exact)}
             if visible is not None:
                 result.append(_question(self.id, visible))
         return result

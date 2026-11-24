@@ -501,6 +501,9 @@ class Runtime(Turns, Plugin):
             if e["kind"] == "turn_end"
             and interface_calls.intersection(e["data"].get("open_calls", ()))
         }
+        interface_origins.update(
+            q.get("turn") for q in qs if q.get("approvalWait") == "untilDeadline"
+        )
         groups = {}
         for cid, entry in deferred.items():
             groups.setdefault(entry.get("turn"), []).append(cid)
@@ -628,7 +631,15 @@ class Runtime(Turns, Plugin):
 
     async def _close(self, d):
         sid = d["session"]
-        await self.cancel(d, None)
+        state = await self.api.session("get", session=sid)
+        if not state.get("busy") and any(
+            e["kind"] == "question_open" and e["data"].get("approvalWait") == "untilDeadline"
+            for e in state["entries"]
+        ):
+            # Detaching from an idle kept wait is not cancellation.
+            await self._suspend(d)
+        else:
+            await self.cancel(d, None)
         if closing := self.closing_history.get(sid):
             # Waiting prompts may wake after the Harness removes the session.
             closing.set_result(await self.api.session("input_outcomes", session=sid))

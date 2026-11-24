@@ -1012,8 +1012,14 @@ class TurnHost:
                 else:
                     a = {**a, "open": False}
             if a.get("refused"):
-                return await self.refuse_tool(value, call, d["step"], a.get("reason", "Refused"))
-            if a.get("open") and a.get("request"):
+                return await self.refuse_tool(
+                    value,
+                    call,
+                    d["step"],
+                    a.get("reason", "Refused"),
+                    a.get("wait_status", "refused"),
+                )
+            if a.get("open") and a.get("request") and not a.get("gate_checkpoint"):
                 await self.append(
                     "tool_deferred", step=d["step"], call=cid, data={"requestIds": [a["request"]]}
                 )
@@ -1077,8 +1083,9 @@ class TurnHost:
                 result["refused"] = saved["decision"]["refuse"]
             return result
 
-    async def refuse_tool(self, value, call, step, reason):
-        result = {"status": "refused", "content": content(reason)}
+    async def refuse_tool(self, value, call, step, reason, status="refused"):
+        ot.tool_disposition(self.sid, self.turn, step, call, None, {"status": status})
+        result = {"status": status, "content": content(reason)}
         if self.unrepeated(call["id"]):
             result = {"status": "outcome_unknown", "content": content(UNKNOWN)}
         terminal = await self.finish_tool(call, step, result)
@@ -1200,6 +1207,11 @@ class TurnHost:
                 ],
             )
 
+            if started.get("denied"):
+                result = {"status": started["denied"], "content": []}
+                ot.tool_disposition(self.sid, self.turn, step, call, definition, result)
+                return await self.finish_tool(call, step, result)
+
             rights = await self.runtime._turn_authority(self.sid, self.turn, call["actor"])
             if "tools" not in set(rights) & set(
                 call["authority"]
@@ -1304,7 +1316,9 @@ class TurnHost:
                 return prior
             sources = [expected[1]]
             data = response_in(message)
-        elif kind == "tool_result" and data.get("status") == "notStarted":
+        elif (
+            kind == "tool_result" and data.get("status") == "notStarted" and cid not in self.results
+        ):
             raise WireError("Only the host can settle an abandoned call", "invalid_request")
         elif kind == "tool_result" and cid in self.results:
             result = self.results[cid]

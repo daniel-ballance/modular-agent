@@ -148,6 +148,8 @@ def _question(sid: str, q: dict[str, Any]) -> Question:
         q.get("approval_call"),
         q.get("deadline"),
         q.get("answerable", True),
+        q.get("approvalWait"),
+        q.get("call"),
     )
 
 

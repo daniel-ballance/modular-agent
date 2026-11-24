@@ -754,11 +754,12 @@ class InterfaceTools:
         return "accepted"
 
     async def interface_ready(self, sid):
-        if not self.interface_enabled():
-            return []
+        from .waiting_approvals import waiting_entries
+
         s = self.sessions[sid]
+        waiting = {e.get("call") for e in waiting_entries(s)}
         handoffs = handoff_fold(s["entries"])
-        if not handoffs or s.get("closing") or s.get("moving"):
+        if not (handoffs or waiting) or s.get("closing") or s.get("moving"):
             return []
         branch = branch_entries(s)
         order = {e["id"]: index for index, e in enumerate(s["entries"])}
@@ -771,7 +772,9 @@ class InterfaceTools:
             if (
                 end["kind"] != "turn_end"
                 or origin in consumed
-                or not any(cid in handoffs for cid in ids)
+                or end.get("fork_source")
+                or end["data"].get("outcome") != "completed"
+                or not any(cid in handoffs or cid in waiting for cid in ids)
             ):
                 continue
             start = next(
@@ -798,6 +801,11 @@ class InterfaceTools:
                     triggers.append((order[result["id"]], "toolResult", result["id"]))
                     lineage.extend([*(cp["id"] for cp in checkpoints), result["id"]])
                 else:
+                    if any(
+                        e.get("call") == cid and e.get("data", {}).get("continuationUnavailable")
+                        for e in s["entries"]
+                    ):
+                        break
                     questions = [
                         e["data"]["id"]
                         for e in branch
@@ -812,6 +820,7 @@ class InterfaceTools:
                     if not questions or len(closed) != len(questions):
                         break
                     triggers.extend((order[e["id"]], "answer", q) for q, e in closed.items())
+                    lineage.extend(e["id"] for e in closed.values())
                     if not any(
                         recorded_as(e, "tool_result") and e.get("call") == cid for e in s["entries"]
                     ):

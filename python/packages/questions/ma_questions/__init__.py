@@ -35,7 +35,9 @@ def question_state(entries):
     for entry in entries:
         if entry["kind"] == "question_open":
             q = {**entry["data"], "entry": entry["id"]}
-            if q.get("timeout") is not None:
+            if q.get("approvalWait") == "untilDeadline":
+                q["deadline"] = q.get("deadlineAt")
+            elif q.get("timeout") is not None:
                 q["deadline"] = (
                     datetime.fromisoformat(entry["time"]) + timedelta(seconds=q["timeout"])
                 ).isoformat()
@@ -108,7 +110,8 @@ class Questions(Plugin):
                 del self.connected[sid][actor]
         for q in (await self._state(sid)).values():
             if (
-                not q.get("answer")
+                not q.get("approvalWait")
+                and not q.get("answer")
                 and not q.get("closed")
                 and (
                     q["kind"] == "approval"
@@ -138,6 +141,9 @@ class Questions(Plugin):
     async def list(self, d, emit):
         sid = d["session"]
         qs = await self._state(sid)
+        if d.get("recipientView") and any(q.get("approvalWait") for q in qs.values()):
+            await self.api._harness.reconcile_waits(sid)
+            qs = await self._state(sid)
         ceiling = d.get("authority")
         if acting := d.get("acting_for"):
             ceiling = await self.api.session(
@@ -153,6 +159,28 @@ class Questions(Plugin):
                 or "actor" not in d
                 or await self._eligible(sid, q, d["actor"], ceiling)
             )
+            if q.get("approvalWait"):
+                h = self.api._harness
+                s = h.sessions[sid]
+                entry = h.waiting_request(s, q["call"])
+                answerable = bool(
+                    answerable
+                    and entry
+                    and not any(h.wait_state(s, entry))
+                    and h.wait_ended(await self.api.session("branch", session=sid), entry)
+                    and h.wait_eligible(
+                        s,
+                        q,
+                        d.get("actor", s["actor"]),
+                        d.get("acting_for") or d.get("actor", s["actor"]),
+                        ceiling,
+                    )
+                )
+                if "answer" in q:
+                    q = {
+                        **q,
+                        "answer": {k: v for k, v in q["answer"].items() if k != "approvalView"},
+                    }
             result.append({**q, "answerable": answerable})
         return result
 
@@ -408,6 +436,8 @@ class Questions(Plugin):
             raise AgentError("Unknown question", "not_found")
         if q.get("answer") or q.get("closed") or q.get("selected"):
             raise AgentError("Question is closed or no longer answerable", "conflict")
+        if q.get("approvalWait"):
+            raise AgentError("Use the delivered approval route", "forbidden")
         if not q["park"] and (remaining := self._remaining(q)) is not None and remaining <= 0:
             await self._accept(d["session"], q, q["actor"], "declined", "timeLimit")
             raise AgentError("Question is closed: time limit", "conflict")
@@ -423,6 +453,9 @@ class Questions(Plugin):
         return q
 
     async def answer(self, d, emit):
+        waiting = (await self._state(d["session"])).get(d["request"])
+        if waiting and waiting.get("approvalWait"):
+            return await self.api._harness.waiting_answer(d, waiting)
         q = await self.validate(d, emit)
         declined = d.get("declined", d.get("value") in (None, "declined"))
         if q["kind"] == "secret" and not declined:
@@ -603,6 +636,7 @@ class Questions(Plugin):
             if (
                 not q.get("answer")
                 and not q.get("closed")
+                and not q.get("approvalWait")
                 and (q.get("child") or q.get("call") in deferred)
             ):
                 await self._publish(d["session"], q)
@@ -614,6 +648,8 @@ class Questions(Plugin):
         es = await self.api.session("branch", session=sid)
         deferred = {e["call"] for e in es if e["kind"] == "tool_deferred"}
         for q in (await self._state(sid)).values():
+            if q.get("approvalWait"):
+                continue
             if (
                 not durable
                 and not q.get("answer")
@@ -662,12 +698,16 @@ class Questions(Plugin):
 
     async def close(self, d):
         for q in (await self._state(d["session"])).values():
-            if not q.get("answer") and not q.get("closed"):
+            if not q.get("approvalWait") and not q.get("answer") and not q.get("closed"):
                 await self._close_question(d["session"], q, "cancelled")
         self.connected.pop(d["session"], None)
 
     async def invalidate(self, d):
         if d.get("reason") == "cancelled":
+            if any(q.get("approvalWait") for q in (await self._state(d["session"])).values()):
+                await self.api._harness.reconcile_waits(
+                    d["session"], reason="cancelled", kick=False
+                )
             for q in (await self._state(d["session"])).values():
                 if q.get("call") and not q.get("answer") and not q.get("closed"):
                     await self._close_question(d["session"], q)

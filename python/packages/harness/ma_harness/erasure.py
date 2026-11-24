@@ -53,6 +53,10 @@ class Erasure:
             calls = {e.get("call") for e in entries if e["kind"] == "tool_deferred"}
             calls -= {e.get("call") for e in entries if e["kind"] == "tool_result"}
             affected = {p["id"] for p in pending}
+            await self.reconcile_waits(sid, reason="cancelled", affected=affected, kick=False)
+            calls -= {
+                e.get("call") for e in self.sessions[sid]["entries"] if e["kind"] == "tool_result"
+            }
             if any(
                 e["id"] in affected and (e.get("job") in jobs or e.get("call") in calls)
                 for e in entries

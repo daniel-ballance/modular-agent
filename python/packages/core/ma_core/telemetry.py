@@ -79,6 +79,10 @@ def segment(span, parent):
 
 
 def project_entry(entry):
+    if entry["kind"] in {"inputAnswer", "question_answer"} and "approvalView" in entry.get(
+        "data", {}
+    ):
+        return {**entry, "data": {k: v for k, v in entry["data"].items() if k != "approvalView"}}
     if entry["kind"] in {TURN_TRACE, "modular-agent.interfaceHandoff"}:
         return {k: v for k, v in entry.items() if k not in {"data", "content", "message"}}
     if entry["kind"] in {"turnStart", "turn_start"} and "traceContext" in (entry.get("data") or {}):

@@ -155,6 +155,8 @@ class Question:
     call: Json = None
     deadline: Json = None
     answerable: bool = True
+    approval_wait: str | None = None
+    tool_call_id: str | None = None
 
 
 @dataclass(frozen=True)
