@@ -39,7 +39,7 @@ The kit writes `policy.json` beside the isolated `ma` configuration. A base agen
 
 With `--connect`, these checks require `--service-command`. For the test policy variants that contain `actors`, start `ma --acp --listen "$MODULAR_AGENT_CONFORMANCE_URL"` without the single-token shorthand. For ordinary variants (where `MODULAR_AGENT_CONFORMANCE_POLICY` is unset), also pass `--token-file "$MODULAR_AGENT_CONFORMANCE_TOKEN_FILE"`. The kit uses multiple credentials on the same policy listener. A bridge which starts a new process per connection does not test the same listener's attachment and authorization rules.
 
-With `approvalCoversNested` and `nestedToolCalls`, the kit selects `all` and calls `nest`. It checks the permission RPC and polling view, then checks that the child's one start names the parent's request. Without the declarations it prints a skip reason.
+With `approvalCoversNested` and `nestedToolCalls`, the kit selects `all` and calls `nest`. It checks the permission RPC and polling view, then checks that the child's one start names the parent's request. With an operator maximum and `approvalsOutlastTurns`, it also selects `approvalWait: untilDeadline` and checks the covered child in the continuation. This public check needs no fixture clock. Without covered approvals it prints a skip reason.
 
 ## Waiting approval checks
 

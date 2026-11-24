@@ -466,7 +466,7 @@ if (agent.state.hasApproval) await attempt("approval", async () => {
 });
 
 await attempt("covered approval", async () => {
-	const skipped = await coveredApproval(decl, { sessionId,
+	const skipped = await coveredApproval(decl, { sessionId, waitHistory: predicate => waitFor(agent, sessionId, predicate),
 		rpc: (method, params) => within(15000, agent.ctx.request(method, params), method),
 		duringPermission: handler => { agent.state.permissionHandler = handler; return () => { delete agent.state.permissionHandler; }; },
 	});
