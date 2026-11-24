@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The plugin and ACP kits in --connect mode against one language's own WebSocket servers:
 # its conformance plugin served with --listen (with each Runtime tier as a separate service),
+# its named-caller fixture (one listener, several tokens; ADR 0035),
 # and `ma --acp --listen`, which the ACP kit starts, kills and restarts itself.
 #
 #   scripts/websocket-kits.sh rust|typescript|go|python
@@ -11,10 +12,14 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 language="${1:?usage: websocket-kits.sh rust|typescript|go|python}"
 case "$language" in
-  rust) plugin=("$repo/rust/target/debug/modular-agent" --serve-plugin) ;;
-  typescript) plugin=(node "$repo/typescript/packages/plugin-wire/dist/src/serve-cli.js") ;;
-  go) plugin=("$repo/go/.bin/modular" --serve-plugin) ;;
-  python) plugin=("$repo/python/.venv/bin/modular-agent-plugin") ;;
+  rust) plugin=("$repo/rust/target/debug/modular-agent" --serve-plugin)
+    named=("$repo/rust/target/debug/examples/named_callers") ;;
+  typescript) plugin=(node "$repo/typescript/packages/plugin-wire/dist/src/serve-cli.js")
+    named=("$(command -v node)" "$repo/typescript/scripts/named-callers.mjs") ;;
+  go) plugin=("$repo/go/.bin/modular" --serve-plugin)
+    named=("$repo/go/.bin/modular-agent-fixtures" named-callers) ;;
+  python) plugin=("$repo/python/.venv/bin/modular-agent-plugin")
+    named=("$repo/python/.venv/bin/python" "$repo/python/scripts/named_caller_fixture.py") ;;
   *) echo "unknown language: $language" >&2; exit 2 ;;
 esac
 ma=$(node -e "const a=require('$repo/conformance/reference/agents/$language.json');console.log(a.command.map(x=>x.replaceAll('{repo}',process.argv[1])).join(' '))" "$repo")
@@ -72,6 +77,8 @@ service "" b "$work/second-token" "$work/project-b" "$work/state-b"; second=$ser
 (cd "$repo/conformance/plugin" && node run.mjs --connect "$first" --token-file "$work/token" \
   --second-connect "$second" --isolation-checks "$work/second-token" \
   "$work/project-a" "$work/project-b" "$work/fixture-home")
+
+(cd "$repo/conformance/plugin" && node run.mjs --named-callers -- "${named[@]}")
 
 port=$(node -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')
 (cd "$repo/conformance/acp" && MODULAR_AGENT_CONFORMANCE=1 node run.mjs --crash-checks --probe-checks --job-checks \

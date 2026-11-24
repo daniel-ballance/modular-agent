@@ -122,7 +122,7 @@ plan() {
   # The reference checks use the telemetry kit's receiver, so --quick needs it too.
   step setup "kits: npm ci (acp, tools, telemetry)" bash -c 'for kit in acp tools telemetry; do npm ci --silent --prefix "conformance/$kit" || exit; done'
 
-  step rust "rust: build ma and fixture program" bash -c "cd rust && mise exec -- cargo build -q -p standard --bin ma && mise exec -- cargo build -q -p agent-base && mise exec -- cargo build -q -p sdk-scenarios --bin modular-agent-fixtures"
+  step rust "rust: build ma and fixture program" bash -c "cd rust && mise exec -- cargo build -q -p standard --bin ma && mise exec -- cargo build -q -p agent-base && mise exec -- cargo build -q -p sdk-scenarios --bin modular-agent-fixtures && mise exec -- cargo build -q -p sdk-scenarios --example named_callers"
   step typescript "typescript: npm ci and build" bash -c "cd typescript && npm ci --silent && npm run -s build"
   step go "go: build ma and fixture program" bash -c "cd go && ./scripts/build-monty.sh && mise exec -- go build -o .bin/ma ./cmd/ma && mise exec -- go build -o .bin/modular ./cmd/modular && mise exec -- go build -o .bin/modular-agent-fixtures ./modular/cmd/fixtures"
   step python "python: uv sync" bash -c "cd python && uv sync --python 3.13 -q"
