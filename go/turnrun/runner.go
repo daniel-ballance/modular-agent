@@ -598,6 +598,11 @@ func (r *Runner) repairTransient(ctx context.Context, t api.Turn) error {
 	if err != nil {
 		return err
 	}
+	if len(t.Reopen) > 0 {
+		if _, err := r.calls(ctx, t, "", "", t.Reopen, true); err != nil {
+			return err
+		}
+	}
 	for _, e := range snap.Branch() {
 		if e.Turn != t.ID || e.Kind != "model" {
 			continue

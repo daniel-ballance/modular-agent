@@ -92,7 +92,7 @@ func (w *runtimeWork) beforeTool(ctx context.Context, p object) (any, error) {
 	t := w.turn
 	w.mu.Unlock()
 	p["call"], p["definition"] = callOut(c), toolOut(def)
-	value, err := t.IO.Hook(ctx, "runtime.tool.before", api.ToolCheck{Session: t.Session, Turn: t.ID, Call: c, Definition: def})
+	value, err := t.IO.Hook(w.traceStep(ctx, c.Step), "runtime.tool.before", api.ToolCheck{Session: t.Session, Turn: t.ID, Call: c, Definition: def})
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	delete(w.gating, c.ID)

@@ -1630,7 +1630,9 @@ func (p *turnPorts) Hook(ctx context.Context, name string, v any) (any, error) {
 					return err
 				}
 			}
-			if _, err := p.checkWaiting(ctx, call, true); err != nil {
+			// A served Runtime's before-gate RPC ends before it requests handoff.
+			// The start write and RunTool check the live dispatch context separately.
+			if _, err := p.checkWaiting(context.WithoutCancel(ctx), call, true); err != nil {
 				return err
 			}
 			if !p.canRunTools(call.Actor) {
