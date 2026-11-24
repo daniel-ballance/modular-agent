@@ -81,6 +81,39 @@ impl Provider for Echo {
         Ok(Arc::new(Self))
     }
 }
+fn echo(request: &ModelRequest) -> Result<ModelResponse> {
+    let Some(user) = request.messages.iter().rposition(|m| m.role == "user") else {
+        return Ok(ModelResponse::text("echo: "));
+    };
+    let text = request.messages[user].text_content();
+    let failed = |message: &str| {
+        wire::parse_response(json!({"role":"assistant","stop":"failed","content":[],
+            "error":{"kind":"other","message":message}}))
+    };
+    if let Some(reason) = text.strip_prefix("fail:") {
+        return failed(reason);
+    }
+    let Some(tool) = text.strip_prefix("tool:") else {
+        return Ok(ModelResponse::text(&format!("echo: {text}")));
+    };
+    let directive = tool.split_once(' ').and_then(|(name, args)| {
+        let input: Value = serde_json::from_str(args).ok()?;
+        (input.is_object() && !name.is_empty() && request.tools.iter().any(|t| t.name == name))
+            .then_some((name, input))
+    });
+    let Some((name, input)) = directive else {
+        return failed("Invalid tool directive");
+    };
+    if let Some(result) = request.messages[user + 1..]
+        .iter()
+        .find(|m| m.role == "tool")
+    {
+        let text: String = result.text_content().chars().take(200).collect();
+        return Ok(ModelResponse::text(&format!("done: {text}")));
+    }
+    Ok(ModelResponse::calls(vec![ToolCall::new(name, input)]))
+}
+
 #[async_trait]
 impl ModelAccess for Echo {
     fn info(&self) -> ModelInfo {
@@ -90,55 +123,12 @@ impl ModelAccess for Echo {
         &self,
         api: Api,
         scope: Scope,
-        _request: ModelRequest,
+        request: ModelRequest,
         cancel: CancellationToken,
     ) -> std::result::Result<ModelResponse, ModelFailure> {
-        let result = (|| -> Result<ModelResponse> {
-            ensure!(!cancel.is_cancelled(), "cancelled");
-            let branch = api.snapshot(&scope.session)?.branch();
-            let text = branch
-                .iter()
-                .rev()
-                .find(|e| e.kind == "input")
-                .and_then(|e| e.content.as_ref())
-                .and_then(|c| c["text"].as_str())
-                .unwrap_or("");
-            if let Some(reason) = text.strip_prefix("fail:") {
-                bail!("{reason}");
-            }
-            if let Some(tool) = text.strip_prefix("tool:") {
-                let origin = branch
-                    .iter()
-                    .rev()
-                    .find(|e| e.kind == "turn.start" && e.scope.turn == scope.turn)
-                    .and_then(|start| start.content.as_ref()?.get("continuesTurnId")?.as_str());
-                if let Some(result) = branch.iter().rev().find(|e| {
-                    e.kind == "tool.result"
-                        && (e.scope.turn == scope.turn
-                            || origin.is_some_and(|id| e.scope.turn.as_deref() == Some(id)))
-                }) {
-                    let text = result
-                        .content
-                        .as_ref()
-                        .and_then(|c| c["text"].as_str())
-                        .unwrap_or("");
-                    return Ok(ModelResponse::text(&format!(
-                        "done: {}",
-                        text.chars().take(200).collect::<String>()
-                    )));
-                }
-                let (name, input) = tool
-                    .split_once(' ')
-                    .ok_or_else(|| anyhow!("expected tool:<name> <json>"))?;
-                return Ok(ModelResponse::calls(vec![ToolCall::new(
-                    name,
-                    serde_json::from_str(input)?,
-                )]));
-            }
-            Ok(ModelResponse::text(&format!("echo: {text}")))
-        })();
         let result = async {
-            let mut response = result?;
+            ensure!(!cancel.is_cancelled(), "cancelled");
+            let mut response = echo(&request)?;
             // The conformance model meters zero tokens.
             response.usage_reported = true;
             let text = response.text_content();
