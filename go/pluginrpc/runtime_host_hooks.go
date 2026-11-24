@@ -28,12 +28,7 @@ func (w *runtimeWork) hook(ctx context.Context, hook string, p object) (any, err
 	gate := object{"value": p}
 	switch hook {
 	case "turn.start":
-		if t.Resume {
-			// The original turn already started. Older Runtimes can observe
-			// the resumed request without replaying the host's observers.
-			return nil, nil
-		}
-		if w.started || w.active != nil || w.prepared != nil {
+		if t.Resume || w.started || w.active != nil || w.prepared != nil {
 			return nil, fault("invalid_request", "turn.start is out of phase")
 		}
 		w.started = true

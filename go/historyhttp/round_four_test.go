@@ -23,8 +23,9 @@ func TestClientWaitsForHeldLease(t *testing.T) {
 		missingHint   bool
 	}{
 		{"live owner with declared TTL", `{"binding":"modular-agent-history/1","ttlMs":75}`, true, false},
-		{"crashed owner with no declared TTL", `{"binding":"modular-agent-history/1"}`, false, false},
-		{"supplied service omits retry hint", `{"binding":"modular-agent-history/1","ttlMs":50}`, false, true},
+		{"available after expiry", `{"binding":"modular-agent-history/1","ttlMs":1000}`, false, false},
+		{"missing declared TTL", `{"binding":"modular-agent-history/1"}`, false, false},
+		{"missing retry hint", `{"binding":"modular-agent-history/1","ttlMs":50}`, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
@@ -68,6 +69,14 @@ func TestClientWaitsForHeldLease(t *testing.T) {
 			c := historyhttp.NewClient(servicehttp.NewClient(ts.URL, "token"))
 			defer c.Close()
 			l, err := c.Acquire("s")
+			if tc.missingHint || tc.name == "missing declared TTL" {
+				mu.Lock()
+				defer mu.Unlock()
+				if err == nil || len(attempts) != 1 {
+					t.Fatal("retried an invalid lease declaration", err, len(attempts))
+				}
+				return
+			}
 			if tc.staysHeld {
 				var held *servicehttp.ResponseError
 				if !errors.As(err, &held) || held.Code != "held" {
