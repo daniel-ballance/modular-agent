@@ -45,6 +45,7 @@ type ServeAGUIOptions struct {
 }
 
 type agPrincipal struct {
+	approvalRoute string
 	acpinterface.Principal
 	client string
 	tools  map[string]api.Tool
@@ -70,8 +71,9 @@ type agClient struct {
 	delivered map[string]agDelivery
 }
 type agPresence struct {
-	ctx    context.Context
-	detach map[string]func()
+	instance string
+	ctx      context.Context
+	detach   map[string]func()
 }
 type agDelivery struct {
 	presence *agPresence
@@ -160,6 +162,25 @@ func (a *Agent) serveAGUI(ctx context.Context, opt ServeAGUIOptions, wrap func(h
 		}
 		if _, dup := tokens[token]; dup {
 			return bad("duplicate AG-UI bearer token")
+		}
+		if a.h.SupportsWaitingApprovals() {
+			if opt.ACP {
+				acpinterface.InstallApprovalRoute(a.a, a.project, p)
+			}
+			principal.approvalRoute = fmt.Sprintf("agui:%x", sha256.Sum256(api.JSON([]any{a.project, e.ClientID, p.Actor, p.Projects, p.Tenants})))
+			policy := principal
+			a.h.RegisterApprovalRoute(principal.approvalRoute, func(ctx context.Context, v api.Question, _ string) bool {
+				if api.Acting(ctx) != policy.Actor.ID || !slices.Contains(policy.Actor.Rights, "watch") || !slices.Contains(policy.Actor.Rights, "approve") {
+					return false
+				}
+				q := &agRequest{agServer: srv, agPrincipal: &policy, id: v.Session, ctx: ctx}
+				snap, err := a.a.Snapshot(v.Session)
+				if err != nil || !q.scope(snap.Project, snap.Tenant) {
+					return false
+				}
+				_, err = q.encode("agui.interrupt", agInterrupt(v))
+				return err == nil
+			})
 		}
 		tokens[token] = principal
 	}
@@ -430,7 +451,7 @@ func (q *agRequest) encode(method string, v any) ([]byte, error) {
 	if len(gated.Data) > wswire.MaxFrame {
 		return nil, tooLarge
 	}
-	if !agSameBytes(b, gated.Data) {
+	if gated.OutputChanged || !agSameBytes(b, gated.Data) {
 		return nil, withheld
 	}
 	return b, nil
@@ -523,7 +544,8 @@ func (q *agRequest) present() error {
 		s.mu.Unlock()
 		return stale
 	}
-	p := &agPresence{ctx: q.ctx}
+	p := &agPresence{ctx: q.ctx, instance: api.ID()}
+	defer q.a.a.(api.WaitingApprovalHost).ForgetApprovalRoute(q.id, p.instance)
 	s.presence = p
 	defer q.a.q.manager().ConnectClient(q.id, q.Actor.ID, q.client)()
 	s.mu.Unlock()

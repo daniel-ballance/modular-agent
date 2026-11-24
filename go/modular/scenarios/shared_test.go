@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,16 +31,20 @@ import (
 )
 
 type scenario struct {
-	Name  string `json:"scenario"`
-	Agent struct {
-		Durability    modular.Durability
-		Plugins       []string
-		Approval      modular.Approval
-		Answers       []json.RawMessage
-		Settings      modular.Settings
-		SeveralActors bool
-		Actors        []modular.Actor
-		History       string
+	Requires          map[string]bool
+	ExpectDeclaration map[string]bool
+	Fixture           struct{ RequestedApprovalMs int64 }
+	Name              string `json:"scenario"`
+	Agent             struct {
+		MaxApprovalWaitMs *int64
+		Durability        modular.Durability
+		Plugins           []string
+		Approval          modular.Approval
+		Answers           []json.RawMessage
+		Settings          modular.Settings
+		SeveralActors     bool
+		Actors            []modular.Actor
+		History           string
 	}
 	ExpectCreateError *struct {
 		Code            modular.Code
@@ -94,6 +99,7 @@ func (p placement) applies(s scenario) bool {
 }
 
 type run struct {
+	waiting   *waitFixture
 	dir       string
 	placement placement
 	services  []modular.ServicePlugin
@@ -149,7 +155,23 @@ func (r run) agent(ctx context.Context, s scenario, checkAnswers func(*modularte
 		return nil, fmt.Errorf("unknown history fixture %q", s.Agent.History)
 	}
 	config := map[string]any{"path": r.countPath()}
+	if r.waiting != nil {
+		config["waitingCounter"] = true
+	}
 	for i, name := range s.Agent.Plugins {
+		if r.waiting != nil && name == "counter" && r.placement.SDK != "" && r.placement.SDK != "go" && (s.Name == "waiting-approval-changed-source" || s.Name == "waiting-approval-changed-definition") {
+			_, file, _, _ := runtime.Caller(0)
+			args := []string{"node", filepath.Join(filepath.Dir(file), "counter-catalog.mjs")}
+			if r.placement.Service {
+				svc := r.services[i]
+				args = append(args, "--service", svc.URL, svc.TokenFile)
+			} else {
+				args = append(args, r.placement.Command...)
+				args = append(args, name)
+			}
+			opts = append(opts, modular.WithProcessPlugin(modular.ProcessPlugin{Command: args, Config: config}))
+			continue
+		}
 		if r.placement.Service {
 			opts = append(opts, modular.WithServicePlugin(r.services[i]))
 		} else if r.placement.SDK == "" {
@@ -173,6 +195,12 @@ func (r run) agent(ctx context.Context, s scenario, checkAnswers func(*modularte
 		} else {
 			opts = append(opts, modular.WithProcessPlugin(modular.ProcessPlugin{Command: append(slices.Clone(r.placement.Command), name), Config: config}))
 		}
+	}
+	if r.waiting != nil {
+		opts = append(opts, r.waiting.options(s)...)
+	}
+	if s.Agent.MaxApprovalWaitMs != nil {
+		opts = append(opts, modular.WithMaxApprovalWaitMs(*s.Agent.MaxApprovalWaitMs))
 	}
 	if s.Agent.Approval != "" {
 		opts = append(opts, modular.WithApproval(s.Agent.Approval))
@@ -317,14 +345,29 @@ func TestShared(t *testing.T) {
 			t.Errorf("required SDK %q has no fixture registry", name)
 		}
 	}
-	for _, path := range files {
+	waitDir := os.Getenv("MODULAR_AGENT_GO_WAITING_FIXTURES")
+	if waitDir == "" {
+		waitDir = filepath.Join(root, "conformance/sdk/fixtures/waiting-approval")
+	}
+	extra, err := filepath.Glob(filepath.Join(waitDir, "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range append(files, extra...) {
 		s, err := load[scenario](path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, p := range placements {
 			if p.applies(s) {
-				t.Run(s.Name+"/"+p.name(), func(t *testing.T) { run{dir: t.TempDir(), placement: p}.check(t, path, s) })
+				t.Run(s.Name+"/"+p.name(), func(t *testing.T) {
+					r := run{dir: t.TempDir(), placement: p}
+					if s.Requires["approvalsOutlastTurns"] {
+						r.checkWaiting(t, path, s)
+					} else {
+						r.check(t, path, s)
+					}
+				})
 			}
 		}
 	}

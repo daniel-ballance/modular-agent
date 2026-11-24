@@ -37,21 +37,23 @@ func Plugin(project string) api.Plugin {
 }
 
 type attachment struct {
-	actor      string
-	ctx        context.Context
-	cancel     context.CancelFunc
-	disconnect func()
-	joined     map[string]func()
-	busy       bool
-	loading    bool
-	pending    []api.BufferedEvent
-	streamed   map[string]bool
-	models     map[string]api.BufferedEvent
-	progress   map[string]api.BufferedEvent
-	requests   map[questionRecipient]context.CancelFunc
-	polled     map[questionRecipient]bool
+	approvalInstance string
+	actor            string
+	ctx              context.Context
+	cancel           context.CancelFunc
+	disconnect       func()
+	joined           map[string]func()
+	busy             bool
+	loading          bool
+	pending          []api.BufferedEvent
+	streamed         map[string]bool
+	models           map[string]api.BufferedEvent
+	progress         map[string]api.BufferedEvent
+	requests         map[questionRecipient]context.CancelFunc
+	polled           map[questionRecipient]bool
 }
 type server struct {
+	approvalRoute    string
 	declared         func() map[string]any
 	projects         *projectHosts
 	resources        Projects
@@ -132,6 +134,7 @@ func (i *Interface) serve(ctx context.Context, in io.ReadCloser, out io.Writer, 
 		represented[id] = true
 	}
 	s := &server{declared: declared, a: i.a, project: project, actor: who, principal: principal, ctx: ctx, represents: represented, sessions: map[string]*attachment{}, resources: config}
+	s.approvalRoute = InstallApprovalRoute(i.a, project, *principal)
 	if config.Compose != nil {
 		s.projects = &projectHosts{compose: config.Compose, hosts: map[projectKey]*server{}}
 	}
@@ -313,7 +316,7 @@ func (s *server) attach(id string, loading bool, identity ...string) *attachment
 		s.connectionRights.LoadOrStore(id, rights)
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
-	st := &attachment{actor: who, ctx: s.acting(ctx, id, who), cancel: cancel, loading: loading, streamed: map[string]bool{}, models: map[string]api.BufferedEvent{}, progress: map[string]api.BufferedEvent{}, requests: map[questionRecipient]context.CancelFunc{}, polled: map[questionRecipient]bool{}, joined: map[string]func(){}}
+	st := &attachment{approvalInstance: api.ID(), actor: who, ctx: s.acting(ctx, id, who), cancel: cancel, loading: loading, streamed: map[string]bool{}, models: map[string]api.BufferedEvent{}, progress: map[string]api.BufferedEvent{}, requests: map[questionRecipient]context.CancelFunc{}, polled: map[questionRecipient]bool{}, joined: map[string]func(){}}
 	st.disconnect = s.questions().Connect(id, who)
 	s.mu.Lock()
 	s.sessions[id] = st
@@ -327,6 +330,9 @@ func (s *server) detach(id string, st *attachment) bool {
 	st.releaseBuffers()
 	s.mu.Unlock()
 	st.disconnect()
+	if h, ok := s.a.(api.WaitingApprovalHost); ok {
+		h.ForgetApprovalRoute(id, st.approvalInstance)
+	}
 	s.connectionRights.Delete(id)
 	for _, disconnect := range st.joined {
 		disconnect()

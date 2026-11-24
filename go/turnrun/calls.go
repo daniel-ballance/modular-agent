@@ -13,13 +13,13 @@ import (
 const interrupted = "Call did not finish; its outcome is unknown. Check outside state before relying on it. Do not assume its effects did or did not happen."
 
 type pending struct {
-	call                   api.Call
-	entry                  string
-	started, settled, open bool
-	recoveredStart, ran    bool
-	interfacePending       bool
-	safeToRepeat           *bool
-	result                 *api.ToolResult
+	call                          api.Call
+	entry                         string
+	started, settled, open        bool
+	recoveredStart, ran           bool
+	interfacePending, gatePending bool
+	safeToRepeat                  *bool
+	result                        *api.ToolResult
 }
 
 func definition(tools []api.Tool, name string) (api.Tool, bool) {
@@ -106,6 +106,9 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 					batch[i].interfacePending = true
 				}
 			case "tool.open":
+				if e.Turn == t.ID && api.WaitingApprovals(snap)[call.ID] != nil {
+					batch[i].gatePending = true
+				}
 				if !isBound {
 					batch[i].started = false
 				}
@@ -130,7 +133,7 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 			p.open = false
 			p.result = &api.ToolResult{Status: "unknown", Content: api.Text(interrupted)}
 		}
-		if !repair && !p.ran {
+		if !repair && !p.ran && !p.gatePending && api.WaitingApprovals(snap)[p.call.ID] == nil {
 			status := "not_started"
 			if p.result != nil {
 				status = p.result.Status
@@ -142,7 +145,7 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 		}
 		if p.open || (p.result != nil && p.result.Status == "open") {
 			p.open = true
-			if isBound || p.interfacePending {
+			if isBound || p.interfacePending || p.gatePending {
 				p.settled = true
 				return nil
 			}
@@ -243,7 +246,7 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 		}
 		launched := false
 		switch {
-		case p.interfacePending:
+		case p.interfacePending || p.gatePending:
 			p.open = !repair
 			p.settled = true
 			continue
@@ -257,16 +260,23 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 			p.result = &api.ToolResult{Status: "refused", Content: api.Text("tool was not offered to the model")}
 		case known && !api.CanCall(def, p.call.Origin):
 			p.result = &api.ToolResult{Status: "refused", Content: api.Text("tool does not allow this caller")}
+		case !known && api.WaitingApprovals(snap)[p.call.ID] != nil:
+			p.result = &api.ToolResult{Status: "refused", Content: api.Text("approved tool no longer registered")}
 		case !known:
 			p.result = &api.ToolResult{Status: "failed", Content: api.Text("unknown or unavailable tool: " + p.call.Name)}
 		default:
 			checked, hookErr := t.IO.Hook(ctx, "runtime.tool.before", api.ToolCheck{Session: t.Session, Turn: t.ID, Call: p.call, Definition: def})
 			if errors.Is(hookErr, api.ErrQuestionOpen) {
+				if !isBound {
+					if now, e := t.IO.Snapshot(); e == nil {
+						p.gatePending = api.WaitingApprovals(now)[p.call.ID] != nil
+					}
+				}
 				p.open = true
 				break
 			}
 			if hookErr != nil {
-				p.result = &api.ToolResult{Status: "refused", Content: api.Text(hookErr.Error())}
+				p.result = &api.ToolResult{Status: api.GateFailureStatus(hookErr), Content: api.Text(hookErr.Error())}
 				break
 			}
 			check := checked.(api.ToolCheck)
@@ -283,7 +293,7 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 			check.Call.Reference = p.call.Reference
 			if check.Validate != nil {
 				if err := check.Validate(check.Call); err != nil {
-					p.result = &api.ToolResult{Status: "refused", Content: api.Text(err.Error())}
+					p.result = &api.ToolResult{Status: api.GateFailureStatus(err), Content: api.Text(err.Error())}
 					break
 				}
 			}
@@ -300,6 +310,11 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 			if !isBound {
 				safeToRepeat := def.SafeRepeat && t.CanRepeat
 				_, err = t.IO.Record(ctx, api.Entry{Kind: "tool.started", Step: p.call.Step, Call: p.call.ID, Copies: []string{p.entry}, Data: api.JSON(check.Call), SafeToRepeat: &safeToRepeat})
+				if errors.Is(err, api.ErrApprovalExpired) || errors.Is(err, api.ErrAnswerAuthority) {
+					p.result = &api.ToolResult{Status: api.GateFailureStatus(err), NotDispatched: true}
+					err = nil
+					break
+				}
 				if err != nil {
 					return nil, err
 				}
@@ -324,7 +339,7 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 				}()
 				if check.Validate != nil {
 					if err := check.Validate(check.Call); err != nil {
-						p.result = &api.ToolResult{Status: "refused", Content: api.Text(err.Error())}
+						p.result = &api.ToolResult{Status: api.GateFailureStatus(err), Content: api.Text(err.Error())}
 						return
 					}
 				}

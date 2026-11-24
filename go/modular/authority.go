@@ -80,7 +80,7 @@ func (s *Session) As(actorID string) (*Session, error) {
 	if _, ok := snap.Actors[actorID]; !ok && !(snap.Actors == nil && actorID == snap.Actor) {
 		return nil, &Error{Code: Forbidden, Message: "actor is not a session member"}
 	}
-	return &Session{agent: s.agent, id: s.id, actor: actorID}, nil
+	return &Session{agent: s.agent, id: s.id, actor: actorID, approvalInstance: api.ID()}, nil
 }
 
 func (s *Session) require(ctx context.Context, right string) error {
@@ -161,7 +161,16 @@ func (s *Session) SetLimit(ctx context.Context, rights []string) error {
 	}).Limit(s.ctx(ctx), s.id, slices.Clone(rights)), Forbidden)
 }
 
-func (s *Session) Questions(ctx context.Context) ([]Question, error) {
+type QuestionsOptions struct{ Present bool }
+
+func (s *Session) Questions(ctx context.Context, options ...QuestionsOptions) ([]Question, error) {
+	if len(options) > 1 {
+		return nil, &Error{Code: InvalidParams, Message: "at most one QuestionsOptions value"}
+	}
+	present := len(options) == 1 && options[0].Present
+	if present && !s.agent.h.SupportsWaitingApprovals() {
+		return nil, &Error{Code: NotSupported, Message: "waiting approvals are not supported"}
+	}
 	if err := s.require(ctx, "watch"); err != nil {
 		return nil, err
 	}
@@ -172,7 +181,8 @@ func (s *Session) Questions(ctx context.Context) ([]Question, error) {
 	visible := map[string]bool{}
 	for _, entry := range view.Entries {
 		if entry.Kind == "question.open" {
-			visible[entry.ID] = true
+			raw := api.Decode[struct{ Question api.Question }](entry.Data)
+			visible[raw.Question.ID] = true
 		}
 	}
 	list, err := s.agent.q.manager().List(s.id)
@@ -182,6 +192,16 @@ func (s *Session) Questions(ctx context.Context) ([]Question, error) {
 	out := []Question{}
 	for _, q := range list {
 		if q.Answerable && visible[q.ID] {
+			if q.ApprovalWait != "" {
+				if present {
+					if !s.agent.a.(api.WaitingApprovalHost).PresentApproval(s.ctx(ctx), q, "sdk", s.approvalInstance) {
+						continue
+					}
+				} else if !s.agent.sdkApprovalView(s.ctx(ctx), q, "sdk") {
+					continue
+				}
+			}
+
 			out = append(out, sdkQuestion(q))
 		}
 	}
@@ -198,7 +218,17 @@ func (s *Session) Answer(ctx context.Context, id string, answer Answer) error {
 	a := api.Answer{Request: id, Value: answer.Value, Declined: answer.Declined, Reason: answer.Reason}
 	m := s.agent.q.manager()
 	var err error
-	if s.actorID() == localActor {
+	snap, _ := s.agent.a.Snapshot(s.id)
+	waiting := false
+	for _, w := range api.WaitingApprovals(snap) {
+		if w.Question.ID == id {
+			waiting = true
+			break
+		}
+	}
+	if waiting {
+		err = s.agent.a.(api.WaitingApprovalHost).AnswerWaiting(s.ctx(ctx), s.id, s.approvalInstance, a)
+	} else if s.actorID() == localActor {
 		err = m.Answer(s.ctx(ctx), s.id, a)
 	} else {
 		err = m.AnswerFor(api.AsActor(ctx, localActor), s.id, s.actorID(), a)

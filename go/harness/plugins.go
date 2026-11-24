@@ -28,34 +28,36 @@ type handler struct {
 	fn    api.Handler
 }
 type Harness struct {
-	interfaceTools  map[string]*interfaceSource
-	agentName       string
-	localActor      string
-	providerAliases map[string]string
-	deferHistory    bool
-	handBackOnOpen  bool
-	parkJobReports  bool
-	refuseSettings  bool
-	inTurnQuestions bool
-	tenants         map[string]tenantConfig
-	tenantConfigErr error
-	capacity        *Capacity
-	mu              sync.RWMutex
-	plugins         map[string]api.Plugin
-	external        map[string]bool
-	externalPlugins map[string]bool
-	order           []string
-	caps            map[string]registration
-	hooks           map[string]*hook
-	commands        map[string]registration
-	sessions        map[string]*session
-	projectGate     sync.Mutex        // serializes session registration with rewind
-	blockedProjects map[string]string // canonical project -> session with unresolved rewind
-	checkedProjects map[string]bool   // initial journal scan done
-	listeners       map[int]outputListener
-	nextListener    int
-	outputMu        sync.Mutex
-	outputStreams   map[outputStream]*heldStream
+	maxApprovalWaitMs int64
+	approvalRoutes    map[string]api.ApprovalRouteCheck
+	interfaceTools    map[string]*interfaceSource
+	agentName         string
+	localActor        string
+	providerAliases   map[string]string
+	deferHistory      bool
+	handBackOnOpen    bool
+	parkJobReports    bool
+	refuseSettings    bool
+	inTurnQuestions   bool
+	tenants           map[string]tenantConfig
+	tenantConfigErr   error
+	capacity          *Capacity
+	mu                sync.RWMutex
+	plugins           map[string]api.Plugin
+	external          map[string]bool
+	externalPlugins   map[string]bool
+	order             []string
+	caps              map[string]registration
+	hooks             map[string]*hook
+	commands          map[string]registration
+	sessions          map[string]*session
+	projectGate       sync.Mutex        // serializes session registration with rewind
+	blockedProjects   map[string]string // canonical project -> session with unresolved rewind
+	checkedProjects   map[string]bool   // initial journal scan done
+	listeners         map[int]outputListener
+	nextListener      int
+	outputMu          sync.Mutex
+	outputStreams     map[outputStream]*heldStream
 }
 type client struct {
 	h     *Harness
@@ -334,6 +336,12 @@ func (c *client) Invoke(ctx context.Context, name string, v any) (any, error) {
 	var collected []any
 	for _, h := range handlers {
 		d, err := safeHandle(ctx, h.fn, v)
+		if before, ok := v.(api.Output); ok {
+			if after, ok := d.Value.(api.Output); ok {
+				after.Event.OutputChanged = before.Event.OutputChanged || !portable.EqualJSON(before.Event.Data, after.Event.Data)
+				d.Value = after
+			}
+		}
 		if rule == api.Observe {
 			if err != nil {
 				c.h.API().Emit(ctx, api.Event{Kind: "plugin.problem", Data: api.JSON(map[string]string{"where": name, "plugin": h.owner, "message": err.Error()})})

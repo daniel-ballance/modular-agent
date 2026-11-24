@@ -92,7 +92,7 @@ func (w *runtimeWork) beforeTool(ctx context.Context, p object) (any, error) {
 	t := w.turn
 	w.mu.Unlock()
 	p["call"], p["definition"] = callOut(c), toolOut(def)
-	value, err := t.IO.Hook(ctx, "runtime.tool.before", api.ToolCheck{Session: t.Session, Turn: t.ID, Call: c, Definition: def})
+	value, err := t.IO.Hook(w.traceStep(ctx, c.Step), "runtime.tool.before", api.ToolCheck{Session: t.Session, Turn: t.ID, Call: c, Definition: def})
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	delete(w.gating, c.ID)
@@ -125,9 +125,20 @@ func (w *runtimeWork) beforeTool(ctx context.Context, p object) (any, error) {
 	return answer, nil
 }
 
+func (w *runtimeWork) preDisposition(ctx context.Context, c api.Call, status string) {
+	// A waiting call can be settled concurrently by the writer at its deadline
+	// or on revocation. The writer emits its disposition once at result commit.
+	if w.waitingApprovals {
+		if s, err := w.turn.IO.Snapshot(); err == nil && api.WaitingApprovals(s)[c.ID] != nil {
+			return
+		}
+	}
+	api.ObserveToolDisposition(ctx, c, status)
+}
+
 func (w *runtimeWork) refuseTool(ctx context.Context, c api.Call, answer object, reason string) (any, error) {
 	ctx = w.traceStep(ctx, c.Step)
-	api.ObserveToolDisposition(ctx, c, "refused")
+	w.preDisposition(ctx, c, "refused")
 	result, err := w.settleTool(context.WithoutCancel(ctx), c, api.ToolResult{Status: "refused", Content: api.Text(reason)})
 	if err != nil {
 		return nil, err
@@ -140,6 +151,10 @@ func (w *runtimeWork) leavePending(ctx context.Context, c api.Call) error {
 	snap, err := w.turn.IO.Snapshot()
 	if err != nil {
 		return err
+	}
+	if wApproval := api.WaitingApprovals(snap)[c.ID]; wApproval != nil && wApproval.Request.Turn == w.turn.ID && wApproval.Pending.ID != "" {
+		w.pending[c.ID] = true
+		return nil
 	}
 	requests := []string{}
 	var latest string
@@ -200,12 +215,16 @@ func (w *runtimeWork) runTool(ctx context.Context, submitted api.Call) (any, err
 		}
 	}
 	delete(w.approved, c.ID)
-	reason := ""
+	reason, status := "", "refused"
 	registration := w.registrations[c.ID]
 	switch {
 	case submitted.Name != check.Call.Name || !sameJSON(submitted.Input, check.Call.Input):
 		reason = "submitted call differs from allowance"
 	case w.registration != nil && !sameJSON(registration, w.registration(c.Name)):
+		if snap, err := w.turn.IO.Snapshot(); err == nil && api.WaitingApprovals(snap)[c.ID] != nil {
+			reason = "approved tool registration changed"
+			break
+		}
 		w.mu.Unlock()
 		return nil, fault("invalid_request", "tool registration changed; obtain a fresh allowance")
 	case w.priorInputs[c.ID] != nil && !sameJSON(w.priorInputs[c.ID], check.Call.Input):
@@ -217,11 +236,12 @@ func (w *runtimeWork) runTool(ctx context.Context, submitted api.Call) (any, err
 	}
 	if reason == "" && check.Validate != nil {
 		if err := check.Validate(check.Call); err != nil {
-			reason = err.Error()
+			reason, status = err.Error(), api.GateFailureStatus(err)
 		}
 	}
 	if reason != "" {
-		out, err := w.settleTool(context.WithoutCancel(ctx), c, api.ToolResult{Status: "refused", Content: api.Text(reason)})
+		w.preDisposition(w.traceStep(ctx, c.Step), c, status)
+		out, err := w.settleTool(context.WithoutCancel(ctx), c, api.ToolResult{Status: status, Content: api.Text(reason)})
 		w.mu.Unlock()
 		return resultOut(out), err
 	}
@@ -264,6 +284,13 @@ func (w *runtimeWork) runTool(ctx context.Context, submitted api.Call) (any, err
 		return nil, fault("result_too_large", "tool checkpoint cannot fit history")
 	}
 	if _, err := w.record(ctx, e); err != nil {
+		if errors.Is(err, api.ErrAnswerAuthority) || errors.Is(err, api.ErrApprovalExpired) {
+			status := api.GateFailureStatus(err)
+			w.preDisposition(w.traceStep(ctx, c.Step), c, status)
+			out, err := w.settleTool(context.WithoutCancel(ctx), c, api.ToolResult{Status: status, Content: api.Text(err.Error())})
+			w.mu.Unlock()
+			return resultOut(out), err
+		}
 		w.mu.Unlock()
 		return nil, err
 	}

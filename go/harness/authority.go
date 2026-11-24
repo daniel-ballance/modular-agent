@@ -106,6 +106,8 @@ func (s *session) updateActorsLocked(next api.Session, event api.Entry, writer s
 	_, err := s.recordLocked(event, writer, true)
 	if err != nil {
 		s.data = old
+	} else if s.h != nil {
+		err = s.h.afterApprovalChangeLocked(context.Background(), s)
 	}
 	return err
 }

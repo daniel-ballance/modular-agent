@@ -207,6 +207,7 @@ func (c *client) gateBatch(ctx context.Context, session, recipient string, event
 				if v.Kind != before.Kind || v.Session != before.Session || v.Turn != before.Turn || v.Step != before.Step || v.Call != before.Call || !portable.ValidOutputEdit(portable.ProjectOutput(before), wire) {
 					return nil, release, api.ErrOutputWithheld
 				}
+				after.Events[i].OutputChanged = before.OutputChanged || !portable.EqualJSON(before.Data, v.Data)
 				if i > 0 {
 					size++
 				}

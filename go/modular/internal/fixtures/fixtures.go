@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/daniel-ballance/modular-agent/go/modular"
 )
@@ -87,21 +88,54 @@ func PluginWithChoice(name, yes string) (modular.Plugin, error) {
 			if !ok || path == "" {
 				return &modular.Error{Code: modular.InvalidParams, Message: "counter needs a config path"}
 			}
-			return r.Tool(modular.NewTool("bump", "Add one to a count kept in a file.", func(ctx context.Context, in counterInput, _ *modular.ToolContext) (string, error) {
-				next := strconv.Itoa(Count(path) + 1)
-				tmp := path + ".tmp"
-				if err := os.WriteFile(tmp, []byte(next), 0600); err != nil {
-					return "", err
+			makeTool := func(description string) modular.Tool {
+				return modular.NewTool("bump", description, func(ctx context.Context, in counterInput, _ *modular.ToolContext) (string, error) {
+					next := strconv.Itoa(Count(path) + 1)
+					tmp := path + ".tmp"
+					if err := os.WriteFile(tmp, []byte(next), 0600); err != nil {
+						return "", err
+					}
+					if err := os.Rename(tmp, path); err != nil {
+						return "", err
+					}
+					if in.Hold {
+						<-ctx.Done()
+						return "", ctx.Err()
+					}
+					return next, nil
+				})
+			}
+			const description = "Add one to a count kept in a file."
+			if r.Config()["waitingCounter"] != true {
+				return r.Tool(makeTool(description))
+			}
+			var mode atomic.Value
+			mode.Store("")
+			changes := [2]modular.ToolChanges{}
+			for i, id := range []string{"counter", "replacement"} {
+				if err := r.Tools(modular.ToolSource{ID: id, Changes: &changes[i], Tools: func(string) []modular.Tool {
+					v := mode.Load().(string)
+					if (i == 1) != (v == "source") {
+						return nil
+					}
+					d := description
+					if v == "definition" {
+						d = "Changed counter description."
+					}
+					return []modular.Tool{makeTool(d)}
+				}}); err != nil {
+					return err
 				}
-				if err := os.Rename(tmp, path); err != nil {
-					return "", err
+			}
+			return r.Command(modular.Command{Name: "changeCounter", Description: "Change the counter registration.", Run: func(ctx context.Context, arg string, _ *modular.CommandContext) (string, error) {
+				mode.Store(strings.TrimSpace(arg))
+				for i := range changes {
+					if err := changes[i].Changed(ctx); err != nil {
+						return "", err
+					}
 				}
-				if in.Hold {
-					<-ctx.Done()
-					return "", ctx.Err()
-				}
-				return next, nil
-			}))
+				return "changed", nil
+			}})
 		}
 	default:
 		return modular.Plugin{}, fmt.Errorf("no fixture named %q", name)

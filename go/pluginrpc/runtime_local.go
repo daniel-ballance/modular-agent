@@ -25,6 +25,8 @@ func LocalRuntime(host api.API, impl BindingRuntime) api.Runtime {
 	return localRuntime{impl, host}
 }
 
+func (r localRuntime) SupportsEmptyContinuation() bool { return r.Declaration().InterfaceTools }
+
 func (r localRuntime) Run(ctx context.Context, t api.Turn) api.Outcome {
 	return runRuntimeHost(ctx, t, r.host, r.Declaration(), func(ctx context.Context, w *runtimeWork, method string, params object) (object, error) {
 		var active atomic.Bool

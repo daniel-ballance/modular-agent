@@ -24,10 +24,10 @@ import (
 const telemetryRunEnv = "MODULAR_AGENT_TELEMETRY_RUN"
 
 type telemetryRequest struct {
-	Host, Scenario, Placement, AgentName, ScenarioPath, WorkDir, ReportPath, Handshake string
-	SDK                                                                                bool
-	Fixtures                                                                           []fixtureSpec
-	Values                                                                             struct{ Answer string }
+	Host, Scenario, Placement, AgentName, ScenarioPath, WorkDir, ReportPath, Handshake, ParkedURL string
+	SDK                                                                                           bool
+	Fixtures                                                                                      []fixtureSpec
+	Values                                                                                        struct{ Answer string }
 }
 
 type fixtureSpec struct {
@@ -115,7 +115,11 @@ func TestTelemetryScenario(t *testing.T) {
 		t.Fatal("telemetry request does not match the shared scenario")
 	}
 	r := run{dir: runCase.WorkDir, placement: p, telemetry: runCase}
-	r.check(t, runCase.ScenarioPath, sc)
+	if sc.Requires["approvalsOutlastTurns"] {
+		r.checkWaiting(t, runCase.ScenarioPath, sc)
+	} else {
+		r.check(t, runCase.ScenarioPath, sc)
+	}
 }
 
 func (r run) telemetryOptions(sc scenario, durability modular.Durability) ([]modular.Option, error) {
@@ -307,7 +311,21 @@ func (r run) writeEvidence(ctx context.Context, a *modular.Agent, s *modular.Ses
 		if err != nil {
 			return err
 		}
-		report["declarations"] = map[string]any{"agent": a.Declaration(), "session": declaration}
+		// Probe a compatible kept session separately; the first-turn case itself
+		// remains ephemeral. Only report a real session's ACP declaration.
+		probe, err := modular.New(ctx, modular.WithProject(filepath.Join(r.dir, "project")), modular.WithDataDir(filepath.Join(r.dir, "probe")), modular.WithDurability(modular.Kept), modular.WithLateAnswersStartTurns(true), modular.WithMaxApprovalWaitMs(5000), modular.WithApproval(modular.All), modular.WithSeveralActors(true), modular.WithPluginHost(true), modulartest.Script(`[{"text":"probe"}]`))
+		if err != nil {
+			return err
+		}
+		defer probe.Close(ctx)
+
+		// A separate writer can be live on this unused provisional session;
+		// no prompt, model work, or trace-bearing admission is needed.
+		waitingDecl, err := r.sessionDeclaration(ctx, probe, "")
+		if err != nil {
+			return err
+		}
+		report["declarations"] = map[string]any{"agent": a.Declaration(), "session": declaration, "waitingSession": waitingDecl}
 		if o.SDK {
 			report["commits"] = o.commits
 		}
@@ -396,10 +414,16 @@ func (r run) sessionDeclaration(ctx context.Context, a *modular.Agent, id string
 	enc, dec := json.NewEncoder(client), json.NewDecoder(client)
 	// Use the real session projection on the ACP binding, not a copy of
 	// the Agent declaration. Resume attaches the settled session without replay.
+	method := "session/resume"
+	params := map[string]any{"sessionId": id, "cwd": filepath.Join(r.dir, "project"), "mcpServers": []any{}}
+	if id == "" {
+		method = "session/new"
+		delete(params, "sessionId")
+	}
 	for i, req := range []struct {
 		method string
 		params any
-	}{{"initialize", map[string]any{"protocolVersion": 1}}, {"session/resume", map[string]string{"sessionId": id, "cwd": filepath.Join(r.dir, "project")}}} {
+	}{{"initialize", map[string]any{"protocolVersion": 1}}, {method, params}} {
 		if err := enc.Encode(map[string]any{"jsonrpc": "2.0", "id": i + 1, "method": req.method, "params": req.params}); err != nil {
 			return nil, err
 		}

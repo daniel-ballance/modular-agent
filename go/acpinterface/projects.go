@@ -225,6 +225,7 @@ func (s *server) projectHost(cwd, id string, extra []string, prompt *acp.SystemP
 	host := &server{declared: part.Declaration, a: part.API, project: project, actor: s.actor, principal: s.principal, ctx: s.ctx, shared: shared,
 		peer: s.peer, initialized: true, binding: s.binding, capabilities: s.capabilities,
 		represents: s.represents, sessions: map[string]*attachment{}, resources: s.resources}
+	host.approvalRoute = InstallApprovalRoute(part.API, project, *s.principal)
 	unsubscribe := host.subscribe()
 	h.hosts[key] = host
 	h.cleanups = append(h.cleanups, func() {

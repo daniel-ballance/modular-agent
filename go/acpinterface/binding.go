@@ -72,6 +72,9 @@ func Declaration(a api.API, project, id string) map[string]any {
 	if store, ok := a.(interface{ SupportsErasure() bool }); ok {
 		d["erasure"] = store.SupportsErasure()
 	}
+	if h, ok := a.(interface{ SupportsWaitingApprovals() bool }); ok && h.SupportsWaitingApprovals() {
+		d["approvalsOutlastTurns"] = true
+	}
 	if tools, ok := a.(interface{ SupportsInterfaceTools() bool }); ok && tools.SupportsInterfaceTools() {
 		d["interfaceTools"] = true
 	}
@@ -210,8 +213,8 @@ func entryValue(e api.Entry) map[string]any {
 	}
 	role := ""
 	switch e.Kind {
-	case "limit", "tenant", "actor.set", "actor.left", "input.accepted", "input.returned", "job.start", "job.end", "job.cleanup", "model.request", "question.open", "question.answer", "plugins.set", "resultFeedback":
-		return portable.Entry(e)
+	case "tool.open", "limit", "tenant", "actor.set", "actor.left", "input.accepted", "input.returned", "job.start", "job.end", "job.cleanup", "model.request", "question.open", "question.answer", "plugins.set", "resultFeedback":
+		return portable.EntryWithoutTrace(e)
 	case "input":
 		role = "user"
 		shared := portable.Entry(e)
@@ -250,6 +253,10 @@ func entryValue(e api.Entry) map[string]any {
 }
 func requestValue(q api.Question) map[string]any {
 	out := map[string]any{"id": q.ID, "kind": q.Kind, "question": q.Prompt}
+	if q.ApprovalWait == api.UntilDeadline && q.Deadline != nil {
+		out["approvalWait"] = q.ApprovalWait
+		out["deadlineAt"] = q.Deadline.UnixMilli()
+	}
 	if q.Kind == "choice" {
 		out["options"] = q.Options
 	}

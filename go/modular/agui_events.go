@@ -122,7 +122,11 @@ func (x *agExchange) project(e api.Event) error {
 		if err != nil {
 			return err
 		}
-		id := api.Decode[api.Question](e.Data).ID
+		opened := api.Decode[api.Question](e.Data)
+		if opened.ApprovalWait != "" {
+			return nil
+		}
+		id := opened.ID
 		if d, ok := open[id]; ok && d.presence != nil && d.q.Turn == x.turn {
 			return x.finish(api.Outcome{Status: "completed"}, []agObject{d.view})
 		}
@@ -143,7 +147,7 @@ func (x *agExchange) project(e api.Event) error {
 		if !same {
 			return withheld
 		}
-		open, err := x.waitingQuestions()
+		open, err := x.questionViews(true)
 		if err != nil {
 			return err
 		}

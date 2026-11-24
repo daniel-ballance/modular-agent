@@ -113,6 +113,7 @@ func (a *Agent) ListenACP(ctx context.Context, opt ServeACPOptions) (*Service, e
 		}
 		policy.Actor.ID, policy.Actor.Kind = entry.Actor.ID, entry.Actor.Kind
 		policy.TrustTrace = entry.TrustTrace
+		acpinterface.InstallApprovalRoute(a.a, a.project, policy)
 		token, err := wswire.ReadToken(entry.TokenFile)
 		if err != nil {
 			return nil, appError(err, InvalidParams)

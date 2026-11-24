@@ -65,7 +65,7 @@ func Plugin() api.Plugin {
 			snap, e := a.Snapshot(id)
 			if e == nil {
 				for _, st := range states(snap) {
-					if st.answer == nil && !st.closed {
+					if st.answer == nil && !st.closed && st.q.Question.ApprovalWait == "" {
 						_ = m.decline(st.q.Question, "noLongerAnswerable")
 					}
 				}
@@ -137,7 +137,9 @@ func states(s api.Session) map[string]*state {
 			if q.Question.Session != s.ID {
 				continue
 			}
-			q.Question.Deadline = questionDeadline(e.Time, q.Question.Wait)
+			if q.Question.ApprovalWait == "" {
+				q.Question.Deadline = questionDeadline(e.Time, q.Question.Wait)
+			}
 			out[q.Question.ID] = &state{q: q}
 		case "question.secret":
 			if st := out[api.Decode[string](e.Data)]; st != nil {
@@ -216,9 +218,14 @@ func (m *Manager) List(id string) ([]api.Question, error) {
 // Recorded reads question state without opening the session or connecting a route.
 func (m *Manager) Recorded(s api.Session) []api.Question {
 	var out []api.Question
+	waits := api.WaitingApprovals(s)
 	for _, st := range states(s) {
 		q := st.q.Question
 		q.Answerable = !st.closed && st.answer == nil && st.selected == "" && !expired(q)
+		if q.ApprovalWait != "" {
+			w := waits[q.Call]
+			q.Answerable = q.Answerable && w != nil && w.Listed && w.Pending.ID != "" && w.Terminal.ID == "" && w.Start.ID == ""
+		}
 		out = append(out, q)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -228,6 +235,7 @@ func signature(q api.Question) string {
 	return fmt.Sprintf("%x", sha256.Sum256(api.JSON([]any{q.Call, q.Actor, q.Kind, q.Prompt, q.Options, q.Allowed, q.Credential, q.Details, q.Wait, q.Defer})))
 }
 func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
+	q.ApprovalWait = "" // Only the Harness can mark a waiting gate.
 	if q.Session == "" {
 		e := api.Executing(ctx)
 		q.Session, q.Turn, q.Call, q.Actor = e.Session, e.Turn, e.Call.ID, e.Call.Actor
@@ -242,6 +250,7 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 	if q.Kind != "approval" && q.Kind != "choice" && q.Kind != "text" && q.Kind != "link" && q.Kind != "secret" {
 		return api.Answer{}, errors.New("invalid question kind")
 	}
+	q.ApprovalIntervalMs = 0
 	if q.Kind == "approval" {
 		q.Options = []string{"allow", "refuse"}
 	}
@@ -303,7 +312,7 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 		}
 	}
 	if found != nil {
-		if signature(found.q.Question) != signature(q) {
+		if found.q.Question.ApprovalWait != "" || signature(found.q.Question) != signature(q) {
 			m.mu.Unlock()
 			return api.Answer{}, errors.New("question key reused with different request")
 		}
@@ -452,7 +461,7 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 	}
 }
 func (m *Manager) RefuseUndeliverableApproval(q api.Question) {
-	if q.Kind == "approval" {
+	if q.Kind == "approval" && q.ApprovalWait == "" {
 		_ = m.decline(q, "refused")
 	}
 }
@@ -487,7 +496,7 @@ func (m *Manager) decline(q api.Question, reason string) error {
 		return err
 	}
 	settled := false
-	if st := states(s)[q.ID]; st != nil && st.answer == nil && st.selected == "" {
+	if st := states(s)[q.ID]; st != nil && st.answer == nil && st.selected == "" && st.q.Question.ApprovalWait == "" {
 		_, err = m.a.Record(context.Background(), q.Session, api.Entry{Kind: "question.answer", Turn: q.Turn, Step: st.q.Question.Step, Call: q.Call, Actor: q.Actor, Copies: []string{q.ID}, Data: api.JSON(api.Answer{Request: q.ID, Declined: true, Reason: reason})})
 		settled = err == nil
 		if err == nil && q.Kind == "secret" {
@@ -598,6 +607,10 @@ func (m *Manager) accept(ctx context.Context, id string, a api.Answer, sanitized
 		return api.ErrQuestionNotFound
 	}
 	q := st.q.Question
+	if q.ApprovalWait != "" {
+		m.mu.Unlock()
+		return api.ErrAnswerAuthority
+	}
 	if expired(q) {
 		m.mu.Unlock()
 		_ = m.decline(q, "timeLimit")
@@ -696,6 +709,7 @@ func (m *Manager) resume(id string) {
 	}
 	pending := api.OpenCalls(s)
 	handoffs := api.InterfaceHandoffs(s)
+	waits := api.WaitingApprovals(s)
 	sts := states(s)
 	for _, e := range s.Branch() {
 		out := api.Outcome{}
@@ -710,7 +724,7 @@ func (m *Manager) resume(id string) {
 		} else {
 			continue
 		}
-		if len(out.Open) == 0 || slices.ContainsFunc(out.Open, func(c api.Call) bool { return handoffs[c.ID].ID != "" }) {
+		if len(out.Open) == 0 || slices.ContainsFunc(out.Open, func(c api.Call) bool { return handoffs[c.ID].ID != "" || waits[c.ID] != nil }) {
 			continue
 		}
 		var ready []api.Call

@@ -25,6 +25,8 @@ type BoundPorts interface {
 	CanRepeatCall(string) bool
 }
 
+func (*Runner) SupportsEmptyContinuation() bool { return true }
+
 func (r *Runner) Declaration() api.RuntimeDeclaration {
 	return api.RuntimeDeclaration{Durable: r.Durable, Steering: true, Parallel: true, WaitingThroughRestart: r.Durable, NestedToolCalls: true, InterfaceTools: true}
 }
@@ -196,7 +198,29 @@ func (r *Runner) Run(ctx context.Context, t api.Turn) (out api.Outcome) {
 		}
 	}
 	if len(t.Reopen) > 0 {
-		open, err := r.calls(ctx, t, "", "", t.Reopen, false)
+		var open []api.Call
+		var err error
+		for i := 0; i < len(t.Reopen); {
+			j := i + 1
+			for j < len(t.Reopen) && t.Reopen[j].Step == t.Reopen[i].Step {
+				j++
+			}
+			stepCtx := ctx
+			var span trace.Span
+			if !isBound && t.Reopen[i].Step != "" {
+				stepCtx, span = telemetry.Start(telemetry.Step(ctx, t.Reopen[i].Step), "modular_agent.step")
+			}
+			calls, e := r.calls(stepCtx, t, "", "", t.Reopen[i:j], false)
+			if span != nil {
+				span.End()
+			}
+			if e != nil {
+				err = e
+				break
+			}
+			open = append(open, calls...)
+			i = j
+		}
 		if err != nil {
 			return fail(err)
 		}
@@ -595,6 +619,11 @@ func (r *Runner) repairTransient(ctx context.Context, t api.Turn) error {
 	snap, err := t.IO.Snapshot()
 	if err != nil {
 		return err
+	}
+	if len(t.Reopen) > 0 {
+		if _, err := r.calls(ctx, t, "", "", t.Reopen, true); err != nil {
+			return err
+		}
 	}
 	for _, e := range snap.Branch() {
 		if e.Turn != t.ID || e.Kind != "model" {

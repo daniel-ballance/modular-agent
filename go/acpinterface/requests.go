@@ -64,7 +64,7 @@ func (s *server) projectRequests(ctx context.Context, st *attachment, id, who st
 	if err != nil {
 		return nil, err
 	}
-	result := api.Decode[struct{ Requests []map[string]any }](api.JSON(gated))
+	result := api.Decode[struct{ Requests []portable.Object }](api.JSON(gated))
 	if result.Requests == nil || len(result.Requests) != len(out) {
 		return nil, api.ErrOutputWithheld
 	}
@@ -82,6 +82,9 @@ func (s *server) projectRequests(ctx context.Context, st *attachment, id, who st
 		answerable := q.ID != "" && s.eligible(st, q, who)
 		if view["kind"] == "approval" {
 			answerable = answerable && portable.EqualJSON(original[ref], api.JSON(view))
+			if remember && answerable && q.ApprovalWait == api.UntilDeadline {
+				answerable = s.a.(api.WaitingApprovalHost).PresentApproval(s.approvalContext(ctx, st, id, who), q, s.approvalRoute, st.approvalInstance)
+			}
 			if remember {
 				s.mu.Lock()
 				st.polled[questionRecipient{ref, who}] = answerable

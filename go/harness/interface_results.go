@@ -19,8 +19,9 @@ func unfinishedBesidesInterfaces(s api.Session) bool {
 		return true
 	}
 	handoffs := api.InterfaceHandoffs(s)
+	waits := api.WaitingApprovals(s)
 	for _, call := range api.OpenCalls(s) {
-		if handoffs[call.ID].ID == "" {
+		if handoffs[call.ID].ID == "" && waits[call.ID] == nil {
 			return true
 		}
 	}
@@ -200,7 +201,8 @@ func (c *client) WatchContinuation(id, origin string) (<-chan struct{}, func(), 
 // readiness from committed records; an in-memory queue entry is not admission.
 func (h *Harness) queueInterfaceContinuationsLocked(s *session) {
 	cps := api.InterfaceHandoffs(s.data)
-	if s.closing || s.opening || len(cps) == 0 || len(h.interfaceTools) == 0 || s.writerFailure != nil {
+	waits := api.WaitingApprovals(s.data)
+	if s.closing || s.opening || (len(cps) == 0 || len(h.interfaceTools) == 0) && len(waits) == 0 || s.writerFailure != nil {
 		return
 	}
 	type ready struct {
@@ -235,7 +237,7 @@ func (h *Harness) queueInterfaceContinuationsLocked(s *session) {
 			results[e.Call] = e
 		case "question.open":
 			q := api.Decode[struct{ Question api.Question }](e.Data).Question
-			if q.ID != "" && q.Defer && q.Kind != "approval" {
+			if q.ID != "" && (q.Defer && q.Kind != "approval" || q.ApprovalWait == api.UntilDeadline) {
 				questions[q.ID] = question{call: q.Call, entry: e.ID}
 			}
 		case "question.answer":
@@ -278,6 +280,21 @@ func (h *Harness) queueInterfaceContinuationsLocked(s *session) {
 				}
 				add(result, "toolResult", result.ID)
 				continue
+			}
+			if w := waits[c.ID]; w != nil {
+				hasInterface = true
+				if w.Terminal.ID == "" {
+					if w.Question.ApprovalCall == nil || w.Start.ID != "" {
+						eligible = false
+						break
+					}
+					_, orig := approvalResponse(s.data, end.Turn, api.Call{ID: c.ID, Name: w.Question.ApprovalCall.Name, Step: w.Request.Step})
+					if orig.ID == "" {
+						eligible = false
+						break
+					}
+					c = orig
+				}
 			}
 			hasQuestion := false
 			for requestID, q := range questions {

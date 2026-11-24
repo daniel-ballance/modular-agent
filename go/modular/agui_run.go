@@ -114,7 +114,7 @@ func (q *agRequest) plan(in agInput, suffix []agObject, c *InterfaceToolConnecti
 		}
 		seen[id] = true
 		p.origin = d.q.Turn
-		if d.presence == nil {
+		if d.presence == nil || d.q.ApprovalWait == api.UntilDeadline {
 			p.continued = true
 		}
 		a := api.Answer{Request: id, Declined: ans["status"] == "cancelled"}
@@ -310,7 +310,12 @@ func (q *agRequest) run(r *http.Request, in agInput) error {
 				return stale
 			}
 			s.mu.Unlock()
-			if err = q.a.q.manager().AnswerOnClient(q.ctx, q.id, q.client, a); err != nil {
+			if live[a.Request].q.ApprovalWait == api.UntilDeadline {
+				err = q.a.a.(api.WaitingApprovalHost).AnswerWaiting(q.ctx, q.id, d.presence.instance, a)
+			} else {
+				err = q.a.q.manager().AnswerOnClient(q.ctx, q.id, q.client, a)
+			}
+			if err != nil {
 				return err
 			}
 			s.mu.Lock()
@@ -635,9 +640,10 @@ func (x *agExchange) finish(out api.Outcome, interrupts []agObject) error {
 			return err
 		}
 	}
+	var deliveries []agQuestion
 	for i, b := range frames {
 		if i == len(frames)-1 && len(interrupts) > 0 {
-			live, err := x.waitingQuestions()
+			live, err := x.questionViews(true)
 			if err != nil {
 				return err
 			}
@@ -646,6 +652,7 @@ func (x *agExchange) finish(out api.Outcome, interrupts []agObject) error {
 				if !ok || !agEqual(v, d.view) {
 					return stale
 				}
+				deliveries = append(deliveries, d)
 			}
 		}
 		if i == len(frames)-1 && len(calls) > 0 {
@@ -661,6 +668,9 @@ func (x *agExchange) finish(out api.Outcome, interrupts []agObject) error {
 		}
 	}
 	s.cursor, s.digest = cursor, h.digest
+	for _, d := range deliveries {
+		x.rememberWaiting(d)
+	}
 	x.terminal = true
 	x.interrupted = len(interrupts) > 0 && len(out.Open) == 0
 	return nil
