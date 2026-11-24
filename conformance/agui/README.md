@@ -16,14 +16,22 @@ node run.mjs --only history --url http://127.0.0.1:39211 --token-file /path/to/d
 
 The first invocation of `run.mjs` with a command runs every case, with a fresh fixture per case. Use `--only case,case` to select cases. A URL selects one case and assumes the listener is already configured for it. The URL is the origin, not `/agui/v1/run`. Cleartext is allowed only on numeric loopback. The kit uses normal certificate and hostname verification for HTTPS. Use `NODE_EXTRA_CA_CERTS` when launching the runner to trust a test CA. Never disable verification. Supply token files, not token values. Use `--rotated-token-file`, `--sibling-token-file`, `--foreign-token-file`, `--watch-token-file`, `--tenant-token-file` and `--project-token-file` as required by the case.
 
-## Planned checks for ADR 0034
+## Waiting approval checks
 
-For [approvals that wait](../../docs/bindings/agui.md#interrupts-and-frontend-tools), extend the real adapter fixture, not the fake agent. These checks have not run.
+Eight `waiting-*` cases run by default; use `--list` or select cases with `--only`. Each case creates a thread, reads its declaration and skips with a reason unless `approvalsOutlastTurns` is true. The two mixed cases also require `interfaceTools`. In the SDK fixture set a finite `maxApprovalWaitMs`, keep history, load the approval gate and opt the session in with `approvalWait: "untilDeadline"` in trusted setup. Use the same composition but `live` for `waiting-live`. Never set the lifetime from a run POST.
 
-- With a declared, opted-in kept session, start the run without a presence stream. It finishes with the call unstarted. No actionable interrupt on that client, executable triad, `pendingToolCallIds` for this call or tool result. With otherwise identical live-only policy, the call is refused. Check the listing for an eligible watcher after turn end: one question, zero Interface calls, `turn: "none"`; no content or presence grant.
-- Restart the service. Open a **new** presence stream, then GET the thread snapshot. Check the request/interrupt ID, exact gated name and arguments, call ID and original `expiresAt` in `waiting.questions`. POST reconciled history and `resume` on that route. One accepted allow produces one continuation, not a second input or a result report. A cancelled response declines; expiry gives `notStarted`. The existing history and interrupt coverage checks still apply.
-- Try without presence, with only a listing or old snapshot, from a sibling client, after replacing the presence stream, with missing `approve`, with a changed output view, and after expiry. None can dispatch. A discarded route does not close a waiting request. Another eligible client with its own unchanged view may answer. Race that POST against a valid ACP poll/answer: one decision, never two effects. Re-read the snapshot after a conflict.
-- Mix an unstarted approval with a sibling frontend tool already handed off. Report the frontend result first, then answer the interrupt; try the reverse order too. Only the last closure/result makes the origin ready. One continuation may dispatch the approved call but never repeats the frontend handoff. A snapshot alone executes neither.
+Register the server-side `bump` counter. Use a stopped test clock and a 5,000 ms approval limit. Ask about the exact name and complete input in the approval prompt. For mixed cases use `ask`, with a trusted read-only definition for the frontend fixture: only the server counter needs consent. The model calls `bump` before `pick_color`. For other waiting cases use `all`. Keep the ordinary `kit-primary` and sibling routes eligible on return; neither is present before it opens presence.
+
+| Case | What the kit observes |
+|---|---|
+| `waiting-live` | A forged setting on the POST does not enable waiting. The call is refused without presence. |
+| `waiting-restart` | No early start, result, counter effect or executable ID. The offline listing counts one question and no running turn. After process loss the old view has no authority. A new presence and snapshot give the same request, call, prompt, arguments and deadline. A reconciled resume starts one continuation without another input. |
+| `waiting-decline`, `waiting-expiry` | Cancelled resume gives one refusal. At the saved deadline the system closes the question and settles the call as not started. Neither path increments the counter. |
+| `waiting-routes` | A listing, missing presence, a replaced stream, another client's delivery, missing approve or a changed view cannot authorize the call. An independently eligible sibling can still answer. |
+| `waiting-race` | A real ACP connection polls on the same listener and races a decline against the AG-UI allow. Refresh after conflict. Check the winning decision, result and counter. |
+| `waiting-mixed-report-first`, `waiting-mixed-answer-first` | Report the one released frontend call and answer the parked approval on different clients, in both orders. The first commitment cannot start a turn. The last makes exactly one continuation ready; it does not repeat the handoff. |
+
+Use the [fixture control endpoint](#fixture-controls). For waiting cases `inspect` also returns the integer `counter` read from the tool's file (zero if absent), and `project`, the absolute project for ACP resume. Implement latch names `answerCommitted`, `reportCommitted`, `continuationEnded` and `presenceLost`. `approvalGate` with `client: "kit-primary", mode: "redact"` changes the approval output gate for just that route. Keep the clock, records and counter across restart, but no delivered views. The in-kit fake and its faulty variants test the checks, not an SDK.
 
 ## Launching a fixture
 

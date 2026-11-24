@@ -8,9 +8,10 @@ import { WebSocketServer } from 'ws';
 import { dispatch, offer, simple, transformed } from './cases.mjs';
 import { MAX, PATH, parse } from './wire.mjs';
 import { fakeFixture, makeSession } from './fake-fixture.mjs';
+import { fakeWaiting } from './fake-waiting.mjs';
 
 export const fixtureTokens = () => Object.fromEntries(['owner', 'rotated', 'watch', 'sibling', 'foreign', 'tenant', 'project'].map(key => [key, randomUUID()]));
-const declaration = { interfaceTools: true, telemetry: 1 };
+
 const json = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(body)); };
 const error = (res, status, code) => json(res, status, { code });
 const conflict = res => error(res, 409, 'conflict');
@@ -26,7 +27,9 @@ const known = message => Object.fromEntries(Object.entries(message).filter(([key
 export async function fake({ model = simple, tokens = fixtureTokens(), fault, scenario } = {}) {
   const sessions = new Map(), pages = new Map();
   let clock = Date.now();
-  const fixture = scenario && fakeFixture(scenario, fault, model);
+  const waits = scenario?.startsWith('waiting-');
+  const fixture = waits ? fakeWaiting(scenario, fault, model) : scenario && fakeFixture(scenario, fault, model);
+  const declaration = { interfaceTools: true, telemetry: 1, ...(waits && { approvalsOutlastTurns: true, portableSessions: true, questionsOutlastTurns: true, lateAnswersStartTurns: true }) };
   const sockets = new WebSocketServer({ noServer: true, handleProtocols: protocols => protocols.has('modular-agent-acp-1') ? 'modular-agent-acp-1' : false });
   const peer = request => Object.keys(tokens).find(key => request.headers.authorization === `Bearer ${tokens[key]}`);
   const tls = scenario === 'tls' ? await disposableTls() : undefined;
@@ -108,7 +111,8 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault, sc
         if (scenario === 'output-size' && client === 'sibling') return error(res, 413, 'result_too_large');
         if (scenario === 'state-and-gate' && client === 'sibling') return error(res, 403, 'output_withheld');
         if (fault === 'keep-presence' && scenario === 'approval-lost' && client === 'owner') return json(res, 200, { threadId, declaration, ...snapshot(), waiting: { questions: [session.question], toolCalls } });
-        const questions = fixture?.eligible(session, client) ? [session.question] : [];
+        if (fault === 'wait-snapshot-tool' && session.question) toolCalls.push({ toolCallId: session.question.toolCallId, expiresAt: session.question.expiresAt });
+        const questions = fixture?.questions?.(session, client) ?? (fixture?.eligible(session, client) ? [session.question] : []);
         return json(res, 200, { threadId, declaration, ...snapshot(), waiting: { questions, toolCalls } });
       }
       if (req.method !== 'POST' || path !== '/run') return missing(res);
@@ -221,7 +225,8 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault, sc
     sockets.handleUpgrade(request, socket, head, ws => {
       ws.on('message', bytes => {
         const msg = JSON.parse(bytes);
-        if (msg.method === '$/ping') ws.send(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }));
+        const result = msg.method === '$/ping' ? {} : fixture?.acp?.(ws, peer(request), msg, sessions);
+        if (result !== undefined) ws.send(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }));
       });
     });
   });

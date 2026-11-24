@@ -13,7 +13,9 @@ import { advanced } from './advanced.mjs';
 import { cases as basic, offer } from './cases.mjs';
 import { at, deadline } from './wire.mjs';
 
-const cases = { ...basic, ...advanced };
+import { waiting } from './waiting.mjs';
+
+const cases = { ...basic, ...advanced, ...waiting };
 const roles = ['owner', 'rotated', 'sibling', 'foreign', 'watch', 'tenant', 'project'];
 const usage = `node run.mjs [--only CASE[,CASE...]] -- /absolute/path/to/fixture [args...]
 node run.mjs --only CASE --url ORIGIN --token-file FILE [--ROLE-token-file FILE ...]
@@ -128,7 +130,7 @@ async function managed(command, name, scenario) {
     } finally { lines.close(); }
     const ready = line.startsWith('{') ? JSON.parse(line) : { url: line };
     const base = origin(ready.url);
-    const control = scenario.control ? controls(ready.control, controlToken) : undefined;
+    const control = scenario.control && (ready.control || !scenario.requires) ? controls(ready.control, controlToken) : undefined;
     return { origin: base, tokens, api: at(base, tokens.owner), control,
       restart: async () => { await cleanup(); return launch(); } };
   }
@@ -154,7 +156,7 @@ async function main() {
     for (const role of requiredRoles[names[0]] ?? []) assert.ok(tokens[role], `${names[0]} requires --${role}-token-file`);
     assert.equal(new Set(Object.values(tokens)).size, Object.keys(tokens).length, 'fixture credentials must be distinct');
   }
-  let passed = 0;
+  let passed = 0, skipped = 0;
   let current;
   const stop = signal => {
     void (async () => {
@@ -171,19 +173,19 @@ async function main() {
       try {
         let peer;
         if (direct) {
-          assert.ok(!scenario.restart, 'crash cases require a managed fixture command');
-          assert.ok(!scenario.control || (values.control && values['control-token-file']), 'case requires --control and --control-token-file');
+          assert.ok(!scenario.restart || scenario.requires, 'crash cases require a managed fixture command');
+          assert.ok(!scenario.control || scenario.requires || (values.control && values['control-token-file']), 'case requires --control and --control-token-file');
           const base = origin(values.url);
           peer = { origin: base, tokens, api: at(base, tokens.owner),
-            control: scenario.control ? controls(values.control, await token(values['control-token-file'])) : undefined };
+            control: scenario.control && values.control ? controls(values.control, await token(values['control-token-file'])) : undefined };
         } else {
           current = await managed(positionals, name, scenario);
           peer = await current.launch();
         }
-        await scenario.run(peer);
+        const result = await scenario.run(peer);
         failed = false;
-        passed++;
-        console.log(`PASS  ${name}`);
+        if (result?.skipped) { skipped++; console.log(`SKIP  ${name} (${result.skipped})`); }
+        else { passed++; console.log(`PASS  ${name}`); }
       } catch (error) {
         // Never print arbitrary server payloads, assertion actuals, or a token.
         console.error(`FAIL  ${name}: ${error.message.split('\n')[0]}`);
@@ -198,8 +200,8 @@ async function main() {
     process.off('SIGINT', stop);
     process.off('SIGTERM', stop);
   }
-  console.log(`${passed}/${names.length} AG-UI cases passed`);
-  if (passed !== names.length) process.exitCode = 1;
+  console.log(`${passed}/${names.length - skipped} AG-UI cases passed${skipped ? `; ${skipped} skipped` : ''}`);
+  if (passed + skipped !== names.length) process.exitCode = 1;
 }
 
 main().catch(error => { console.error(error.message); process.exitCode = 1; });
