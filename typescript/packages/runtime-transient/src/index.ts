@@ -285,7 +285,10 @@ export class TransientRuntime implements Runtime {
 		const committed = prepared.result ?? ran as ToolResult | undefined;
 		if (host.hostSettlesTools && !committed) throw new Error("Missing committed tool result");
 		let result: ToolResult = committed ?? { callId: call.id, status: "refused", content: [text(`Refused: ${prepared.refused}`)] };
-		if (host.hostSettlesTools && result.status === "notStarted") throw new Error("The host abandoned the tool call");
+		if (host.hostSettlesTools && result.status === "notStarted" && !(await host.history()).some(e =>
+			e.kind === "inputRequest" && e.toolCallId === call.id && (e.data as {request?:{approvalWait?:string}})?.request?.approvalWait === "untilDeadline")) {
+			throw new Error("The host abandoned the tool call");
+		}
 		try {
 			const after = await host.hook<{ result: ToolResult }>("tool.after", { call, result });
 			result = after?.result ?? result;

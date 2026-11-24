@@ -68,6 +68,39 @@ function request(socket: Awaited<ReturnType<typeof connectWebSocket>>, method: s
   });
 }
 
+test("ACP parks even with a client attached and accepts an unchanged poll only on that connection", async t => {
+  const { dir, tokenFile } = await token(t);
+  let effects = 0, permissionRpcs = 0;
+  const agent = await testAgent({project:dir,dataDir:dir,durability:"kept",approval:"all",questionsOutlastTurns:true,maxApprovalWaitMs:60_000,
+    tools:[tool({name:"bump",description:"Increment",input:{type:"object"},run:()=>String(++effects)})],
+    script:[{toolCalls:[{name:"bump",input:{amount:1}}]},{text:"Done"}]});
+  t.after(()=>agent.close());
+  const server = await agent.serveAcp({listen:"127.0.0.1:0",actors:[{tokenFile,actor:{id:"worker",kind:"user",rights:["watch","approve","input","tools","settings"]}}]});
+  const connect = async () => {
+    const ws = await connectWebSocket(server.url,tokenFile,ACP_PROTOCOL,5000);
+    t.after(()=>ws.close());
+    ws.on("message", raw=>{ const m=JSON.parse(raw.toString()); if(m.method==="session/request_permission") {
+      permissionRpcs++; ws.send(JSON.stringify({jsonrpc:"2.0",id:m.id,result:{outcome:{outcome:"selected",optionId:"refuse"}}}));
+    }});
+    const init = await request(ws,"initialize",{protocolVersion:1}); assert.equal(init._meta["modular-agent"].declaration.approvalsOutlastTurns,true);
+    return ws;
+  };
+  const first = await connect();
+  const opened = await request(first,"session/new",{cwd:dir,mcpServers:[]}), id=opened.sessionId;
+  assert.equal(opened.configOptions.find((o:{id:string})=>o.id==="approvalWait").currentValue,"live");
+  await request(first,"session/set_config_option",{sessionId:id,configId:"approvalWait",value:"untilDeadline"});
+  const origin = await request(first,"session/prompt",{sessionId:id,prompt:[{type:"text",text:"Increment"}]});
+  assert.equal(origin.stopReason,"end_turn"); assert.equal(effects,0); assert.equal(permissionRpcs,0);
+  const later = await connect(); await request(later,"session/resume",{sessionId:id,cwd:dir,mcpServers:[]});
+  const [q]=(await request(later,"_modular-agent/requests",{sessionId:id})).requests;
+  assert.equal(q.answerable,true); assert.equal(q.approvalWait,"untilDeadline"); assert.ok(Number.isSafeInteger(q.deadlineAt));
+  assert.deepEqual(q.call,{name:"bump",input:{amount:1}}); assert.deepEqual(origin._meta["modular-agent"].openToolCalls,[q.toolCallId]);
+  const args={sessionId:id,requestId:q.id,value:"allow"};
+  assert.deepEqual(await request(first,"_modular-agent/answer",args),{accepted:false,reason:"not_open"});
+  assert.deepEqual(await request(later,"_modular-agent/answer",args),{accepted:true});
+  await (await agent.openSession(id)).waitIdle(); assert.equal(effects,1); assert.equal(permissionRpcs,0);
+});
+
 for (const reason of ["commitFailed", "writerLost"] as const) {
   test(`ACP broadcasts ${reason} to both followers and fails the waiting prompt with lost`, { timeout: 10_000 }, async t => {
     const { dir, tokenFile } = await token(t);

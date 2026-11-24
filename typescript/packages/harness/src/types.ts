@@ -388,6 +388,8 @@ export interface InputRequest {
 	/** Actor ids that may answer. Empty means any actor with "answer" authority. */
 	answerers: string[];
 	timeLimitMs?: number;
+	approvalWait?: "untilDeadline";
+	deadlineAt?: number;
 	/** A stable key. Asking again with the same key reopens the same question, or reuses its recorded answer. */
 	key?: string;
 	/** When the time limit passes: decline (the default), or leave the question open past its turn. */
@@ -397,7 +399,7 @@ export interface InputRequest {
 	/** Secret requests only: the name the credential store keeps the answer under. The asker never sees the value. */
 	credential?: string;
 }
-export type InputRequestDraft = Omit<InputRequest, "id" | "sessionId" | "askedBy" | "answerers" | "turnId"> & { answerers?: string[] };
+export type InputRequestDraft = Omit<InputRequest, "id" | "sessionId" | "askedBy" | "answerers" | "turnId" | "approvalWait" | "deadlineAt"> & { answerers?: string[] };
 export interface Answer {
 	requestId: string;
 	delegatedBy?: string;

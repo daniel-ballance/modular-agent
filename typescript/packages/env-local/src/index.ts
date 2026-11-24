@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import type { Writable } from "node:stream";
 import { access, lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { join } from "node:path";
@@ -107,8 +108,18 @@ export class LocalEnvironment implements WorkingEnvironment {
 		if (this.processes.groups) return this.processes.groups.exec(cwd, command, this.sessionId, options);
 		return new Promise((done) => {
 			const commandId = randomUUID();
-			const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...this.processes.env(), [COMMAND_MARKER]: commandId } });
-			if (child.pid) this.processes.started(child.pid, commandId, this.sessionId);
+			// The launcher owns the process group but cannot start bash until the
+			// owner has saved its identity and started the cleanup watcher. Owner
+			// loss before that boundary closes fd 3 without releasing the command.
+			const launch = 'read -r start <&3 && [ "$start" = start ] || exit 1; exec 3<&-; exec bash -c "$1"';
+			const child = spawn("/bin/sh", ["-c", launch, "ma-launch", command], { cwd, stdio: ["ignore", "pipe", "pipe", "pipe"], detached: true, env: { ...this.processes.env(), [COMMAND_MARKER]: commandId } });
+			const control = child.stdio[3] as Writable;
+			control.on("error", () => {}); // A killed launcher cannot execute the command.
+			if (child.pid) {
+				try { this.processes.started(child.pid, commandId, this.sessionId); }
+				catch (error) { control.destroy(); throw error; }
+				control.end("start\n");
+			}
 			let output = "";
 			let timedOut = false;
 			const kill = () => {
@@ -134,8 +145,8 @@ export class LocalEnvironment implements WorkingEnvironment {
 				output += text;
 				options.onOutput?.(text);
 			};
-			child.stdout.on("data", collect);
-			child.stderr.on("data", collect);
+			child.stdout!.on("data", collect);
+			child.stderr!.on("data", collect);
 			let finished = false;
 			const finish = (code: number | null) => {
 				if (finished) return;
@@ -143,8 +154,8 @@ export class LocalEnvironment implements WorkingEnvironment {
 				if (child.pid) this.processes.ended(child.pid, commandId);
 				if (timer) clearTimeout(timer);
 				options.signal.removeEventListener("abort", onAbort);
-				child.stdout.destroy();
-				child.stderr.destroy();
+				child.stdout!.destroy();
+				child.stderr!.destroy();
 				done({ exitCode: code, output, timedOut });
 			};
 			child.on("close", (code) => finish(code));

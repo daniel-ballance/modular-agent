@@ -94,6 +94,7 @@ export class Session {
 	reopening = false;
 	erasing = false;
 	moving = false;
+	hasWaitingApprovals = false;
 	outsideTools = 0;
 	recoveredInput: QueuedInput[] = [];
 	/** The process stopped its part in this session; nothing more is recorded here. */
@@ -124,6 +125,7 @@ export class Session {
 			return;
 		}
 		this.forkSetup = true;
+		if (entry.kind === "inputRequest" && (entry.data as { request?: { approvalWait?: string } })?.request?.approvalWait === "untilDeadline") this.hasWaitingApprovals = true;
 		// A key is remembered for the session's life, across restarts, so it is rebuilt from the record.
 
 		if (entry.erased) {

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { definePlugin, type Agent, type HistoryEntry, type Provider, type Session, type ToolCall, type WriterHistoryStore } from "@modular-agent/core";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { JsonlHistoryStore } from "@modular-agent/history-jsonl";
 import { HistoryArchive } from "@modular-agent/services";
 
@@ -16,6 +18,7 @@ export interface TelemetryRun {
   reportPath: string;
   fixtures: { name: string; command: string[]; env: Record<string, string>; build: string; wire: string }[];
   values: { answer: string };
+  parkedUrl?: string;
   handshake?: "agreed" | "no-offer" | "no-acceptance";
 }
 
@@ -84,12 +87,23 @@ export class ScenarioEvidence {
     const { entries } = await this.store.load(id);
     const end = entries.findLast(e => e.kind === "turnEnd");
     assert(end?.turnId);
+    let waitingSession;
+    if (this.run.scenario === "first-turn") {
+      // Probe in a process with no exporter: its setup is not part of the first turn's trace.
+      const probe = await promisify(execFile)(process.execPath, ["--input-type=module", "-e", `
+        import {testAgent} from ${JSON.stringify(import.meta.resolve("@modular-agent/core/testing"))};
+        const a = await testAgent({dataDir:process.argv[1], durability:"kept", approval:"all", maxApprovalWaitMs:100,
+          questionsOutlastTurns:true, severalActors:true, script:[]});
+        try { console.log(JSON.stringify((await a.session()).declaration())); } finally { await a.close(); }
+      `, join(this.run.workDir,"probe")]);
+      waitingSession = JSON.parse(probe.stdout);
+    }
     const report = {
       scenario: this.run.scenario, placement: this.run.placement, passed: true,
       sessionId: id, turnId: end.turnId,
       outcome: (end.data as { outcome: { kind: string } }).outcome.kind,
       historyKinds: entries.map(e => e.kind),
-      ...(this.run.scenario === "first-turn" ? { declarations: { agent: agent.declaration(), session: session.declaration() } } : {}),
+      ...(this.run.scenario === "first-turn" ? { declarations: { agent: agent.declaration(), session: session.declaration(), waitingSession } } : {}),
     };
     if (!this.run.sdk) return report;
     const question = (entries.find(e => e.kind === "inputRequest")?.data as { request: { id: string; kind: string } } | undefined)?.request;

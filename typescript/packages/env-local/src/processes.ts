@@ -22,7 +22,7 @@ const alive = (pid: number) => {
 };
 
 /** Whether the process can still run. A zombie (killed, not yet reaped by its parent) cannot, though kill(pid, 0) still succeeds. */
-const running = (pid: number) => {
+export const running = (pid: number) => {
 	if (!alive(pid)) return false;
 	if (process.platform !== "linux") return true;
 	try {

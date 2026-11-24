@@ -563,6 +563,7 @@ interface Attempt {
 	after?: boolean;
 }
 interface CallState {
+	waitingApproval?: boolean;
 	original: ToolCall;
 	offered: boolean;
 	phase: "unstarted" | "checking" | "allowed" | "dispatched" | "pending" | "settled";
@@ -734,6 +735,7 @@ class WireRuntime implements Runtime {
 			const call = t.calls.get(candidate?.id);
 			if (!call || call.phase !== "allowed") throw invalidState("No unused allowance for this call");
 			if (!wireEqual(call.registration, t.host.registration?.(call.original.name))) {
+				if (call.waitingApproval) return toWire(await this.settle(t, call, { callId:call.original.id, status:"refused", content:[text("The approved registration changed")] }));
 				call.phase = "unstarted";
 				call.allowed = undefined;
 				throw invalidState("Tool registration has changed; a new gate is required");
@@ -850,9 +852,12 @@ class WireRuntime implements Runtime {
 				t.usage = addUsage(t.usage, row?.message?.role === "assistant" ? row.message.usage : row?.usage);
 			}
 		}
-		for (const call of interrupted?.calls ?? (extra.calls as InterruptedTurn["calls"] | undefined) ?? []) {
+		const inherited = interrupted?.calls ?? (extra.calls as InterruptedTurn["calls"] | undefined) ?? [];
+		const approvals = new Set(inherited.length ? (await host.history()).filter(e => e.kind === "inputRequest" && !e.erased &&
+			(e.data as {request?:{approvalWait?:string}})?.request?.approvalWait === "untilDeadline").map(e => e.toolCallId) : []);
+		for (const call of inherited) {
 			const original: ToolCall = { id: call.id, name: call.name, input: call.input, startedBy: "model", actorId: host.callActor?.(), stepId: call.stepId };
-			t.calls.set(call.id, { original, offered: true, phase: "unstarted" });
+			t.calls.set(call.id, { original, offered: true, phase: "unstarted", waitingApproval: approvals.has(call.id) });
 		}
 		const req = this.peer.request<TurnOutcome>(method, { turn, ...toWire(extra) }, signal);
 		this.turns.set(req.id, t);
@@ -868,7 +873,8 @@ class WireRuntime implements Runtime {
 			if (!wireEqual(reply.result.openToolCalls, pending)) {
 				// Expiry can commit after the Runtime received pending. Permit only that
 				// stale disposition, not a claim that any other call was left open.
-				const handoffs = new Set(branch.filter(e => e.kind === "modular-agent.interfaceHandoff" && e.turnId === input.turnId).map(e => e.toolCallId));
+				const handoffs = new Set(branch.filter(e => e.turnId === input.turnId && (e.kind === "modular-agent.interfaceHandoff" ||
+					e.kind === "inputRequest" && (e.data as {request?:{approvalWait?:string}})?.request?.approvalWait === "untilDeadline")).map(e => e.toolCallId));
 				const reported = new Set(reply.result.openToolCalls);
 				const possible = pendingToolCalls(branch, input.turnId, kept.filter(e =>
 					e.kind !== "toolResult" || e.turnId !== input.turnId || !handoffs.has(e.toolCallId)));

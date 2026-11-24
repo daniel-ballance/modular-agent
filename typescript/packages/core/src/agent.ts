@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { ALL_AUTHORITY, Harness, parseModel, type CredentialStore, type Runtime, type ListingViewer, type SessionSummary, type InterfaceToolSource, type InterfaceToolConnection, type InterfaceToolConnectionOptions as HarnessToolConnection, type PluginApi, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider, type ReservationOptions, type ReservationLimits } from "@modular-agent/harness";
@@ -9,10 +10,12 @@ import { approval } from "@modular-agent/approval";
 import { transientRuntime } from "@modular-agent/runtime-transient";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { startExternalPlugin, startPluginService, pluginSpecsFromEnv, conformanceProvider, conformanceTools, ACP_PROTOCOL, listenWebSocket, receiveMessages, type ListenOptions, type ServiceServer, type ExternalPluginSpec, type PluginSpec, type ServicePluginSpec } from "@modular-agent/plugin-wire";
-import { acpInterface, localAcpActor } from "@modular-agent/interface-acp";
+import { acpInterface, localAcpActor, unchangedAcpApproval } from "@modular-agent/interface-acp";
 import { HistoryArchive, historyClientOptions, historyRelay, historyService, HttpHistoryStore, type HistoryServiceStore } from "@modular-agent/services";
+import { interrupt, messages, pending as pendingFrontend, reply as aguiReply, type Principal } from "./agui-view.js";
+import { createHash } from "node:crypto";
 import { AguiBinding, type AguiProjectionOptions, type Target } from "./agui.js";
-import { fail } from "./agui-wire.js";
+import { fail, same } from "./agui-wire.js";
 import { AgentError, checked, messageOf } from "./errors.js";
 import { collect, definePlugin, type AgentInterface, type Plugin } from "./plugin.js";
 import { type Provider } from "./provider.js";
@@ -51,6 +54,7 @@ export interface AgentOptions {
   /** Enable the official context compaction plugin and /compact command. */
   compaction?: boolean;
   questionsOutlastTurns?: boolean;
+  maxApprovalWaitMs?: number;
   jobReportsStartTurns?: boolean;
   settingsDuringTurn?: "nextTurn" | "refused";
   /** Former Provider ids to resolve when reopening saved model settings and attempts. */
@@ -334,6 +338,12 @@ export class Agent {
         await effectiveStore?.list();
         agent.#portable = effectiveStore?.supports.portableSessions === true;
       }
+      if (options.maxApprovalWaitMs !== undefined) {
+        if (!agent.#approval || !agent.declaration().portableSessions || durability === "ephemeral" || !options.questionsOutlastTurns) {
+          throw new AgentError("invalid_composition", "Waiting approvals need approval, portable kept history and late-answer continuations");
+        }
+        h.enableWaitingApprovals(options.maxApprovalWaitMs);
+      }
       await h.rebuildReservations();
       const env = h.use<WorkingEnvironment>("working-environment");
       if (!options.dataDir && (env?.requiresDataDir || effectiveRuntime?.supports.requiresDataDir === true ||
@@ -422,12 +432,20 @@ export class Agent {
   }
   #localInterface(): BasePlugin {
     return { name: "sdk.local", setup: api => {
+      api.registerApprovalRoute({ id: "sdk.local", ceiling: (id, actor, principal) =>
+        api.session(id).project === this.#project && principal === local.id && (actor === local.id || this.#authority.severalActors) ? ALL_AUTHORITY : [],
+        unchanged: async (entry, actor) => {
+          const request = (entry.data as { request: import("@modular-agent/harness").InputRequest }).request;
+          const q = await questionOf(api, { ...request, answerers: request.answerers ?? [] });
+          const view = await api.gateOutput(entry.sessionId, actor, "input.request.opened", structuredClone(q));
+          return isDeepStrictEqual(view, q);
+        } });
       const capability: InterfaceCapability = {
         id: "sdk.local", actorId: local.id,
         present: id => (!this.#acp || this.#agui) && !!(this.#handlers.get(id) ?? this.#defaultHandler),
         onInputRequest: request => {
           const handler = this.#handlers.get(request.sessionId) ?? this.#defaultHandler;
-          if (!handler) return;
+          if (!handler || this.#questions.has(request.id)) return;
           const { id, sessionId } = request;
           if (!api.session(sessionId).actors.find(a => a.id === local.id)?.authority.includes(request.kind === "approval" ? "approve" : "answer") ||
               request.answerers.length && !request.answerers.includes(local.id)) return;
@@ -435,12 +453,14 @@ export class Agent {
           this.#questions.set(request.id, controller);
           void questionOf(api, request).then(async q => {
             await api.checkPending(sessionId);
+            if (request.approvalWait && !await api.presentApproval(sessionId, id, { routeId: "sdk.local", handle: controller,
+              actorId: local.id, submittedBy: local.id, present: () => !controller.signal.aborted && (this.#handlers.get(sessionId) ?? this.#defaultHandler) === handler })) return;
             if (!controller.signal.aborted) return handler(q, { sessionId, actorId: local.id, cancelled: controller.signal });
           })
             .catch(() => undefined).then(async answer => {
-              if (!controller.signal.aborted) await submitAnswer(api, request, local.id, answer ?? "decline");
+              if (!controller.signal.aborted) await submitAnswer(api, request, local.id, answer ?? "decline", undefined, controller);
             }).catch(async () => {
-              if (!controller.signal.aborted) await submitAnswer(api, request, local.id, "decline").catch(() => {});
+              if (!controller.signal.aborted) await submitAnswer(api, request, local.id, "decline", undefined, controller).catch(() => {});
             }).finally(() => { this.#questions.delete(id); });
         },
         onInputRequestClosed: id => this.#questions.get(id)?.abort(),
@@ -455,7 +475,7 @@ export class Agent {
     const s = makeSession(id, this.#api, {
       interruption: this.#interruption.signal,
       enabled: this.#authority,
-      isOpen: () => this.#open.has(id),
+      isOpen: () => this.#open.get(id) === s,
       fork: async entry => {
         this.#check();
         const at = entry ?? this.#api.session(id).position;
@@ -472,6 +492,7 @@ export class Agent {
         if (handler) this.#handlers.set(id, handler);
         else this.#handlers.delete(id);
         this.#api.presenceChanged(id);
+        if (handler) for (const r of this.#api.openRequests(id)) if (r.approvalWait) this.#h.useAll<InterfaceCapability>("interface").find(i => i.id === "sdk.local")?.onInputRequest?.(r);
       },
     });
     this.#open.set(id, s);
@@ -640,6 +661,47 @@ export class Agent {
         allowTenant: (tenant: string | null) => tenants.has(tenant),
         allowProject: (project: string) => (!!options.compose || project === this.#project) && (!projects || projects.has(project)) };
     };
+    const installers: ((agent: Agent) => void)[] = [];
+    const cleanRoutes: (() => void)[] = [];
+    const acpRouteId = (scope: Awaited<ReturnType<typeof makeScope>>) => "acp:" + createHash("sha256").update(JSON.stringify([scope.scopeKey, [...scope.represents].sort()])).digest("hex");
+    const installRoutes = (scope: Awaited<ReturnType<typeof makeScope>> & { clientId?: string }) => {
+      const install = (agent: Agent) => {
+        if (!agent.declaration().approvalsOutlastTurns) return;
+        const api = agent.#api;
+        const ceiling = (id: string, actor: string, principal: string) => {
+          const session = api.session(id);
+          return principal === scope.actor.id && (actor === principal || scope.represents.has(actor)) &&
+            scope.allowProject(session.project) && scope.allowTenant(session.tenant ?? null) ? scope.actor.authority : [];
+        };
+        if (!agui || agui.acp) cleanRoutes.push(api.registerApprovalRoute({ id: acpRouteId(scope), ceiling,
+          unchanged: entry => unchangedAcpApproval(api, entry, scope.actor.id) }));
+        if (agui && scope.clientId) {
+          const p = scope as Principal;
+          for (const surface of ["run", "snapshot"] as const) cleanRoutes.push(api.registerApprovalRoute({ id: "agui:" + surface + ":" + p.clientId, ceiling: (id, actor, principal) =>
+            actor === principal ? ceiling(id, actor, principal) : [],
+            unchanged: async entry => {
+              const raw = (entry.data as { request: import("@modular-agent/harness").InputRequest }).request;
+              const request = { ...raw, answerers: raw.answerers ?? [], turnId: entry.turnId };
+              const id = entry.sessionId, view = await interrupt(api, id, p, request, entry, false);
+              if (!view) return false;
+              // Check the binding envelope too, even when the old stream is gone. Compare
+              // the approval content, not the set of currently open requests.
+              if (surface === "snapshot") {
+                const records = await api.readHistory(id);
+                const copy = await messages(api, id, p, records, new Set());
+                const snapshot = { threadId:id, declaration:agent.declaration(), cursor:"approval-recheck", messages:copy,
+                  lastMessageId:copy.at(-1)?.id ?? null, waiting:{questions:[view.wire],
+                    toolCalls:pendingFrontend(records,p).filter(c=>c.ended).map(({toolCallId,expiresAt})=>({toolCallId,expiresAt}))} };
+                const out = await aguiReply(api,id,p,"snapshot",structuredClone(snapshot));
+                return out.threadId === id && same(out.waiting?.questions,[view.wire]);
+              }
+              const terminal = [{ type:"RUN_FINISHED", threadId:id, runId:"approval-recheck", outcome:{type:"interrupt",interrupts:[view.wire]} }];
+              return same(await aguiReply(api,id,p,"events",structuredClone(terminal)),terminal);
+            } }));
+        }
+      };
+      installers.push(install); install(this);
+    };
     const selectProject = async (project: string, id?: string, saved?: SessionInfo) => {
       const key = JSON.stringify([project, saved?.id]);
       let selected = id ? sessions.get(id) : undefined;
@@ -654,6 +716,7 @@ export class Agent {
               agent.#h.shareReservations(this.#h);
               agent.#acp = true;
               await installMcp(agent);
+              for (const install of installers) install(agent);
               return agent;
             } catch (error) { await agent.close(); throw error; }
           })();
@@ -689,7 +752,7 @@ export class Agent {
       };
       const binding = acpInterface({
         actor,
-        represents: scope.represents,
+        represents: scope.represents, approvalRouteId: acpRouteId(scope),
         connectionScope: run => scope.ceiling ? this.#h.withConnectionActor(actor, run) : run(),
         allowTenant: scope.allowTenant,
         allowAttached: (project, tenant) => !disconnected && scope.allowProject(project) && scope.allowTenant(tenant ?? null),
@@ -758,6 +821,7 @@ export class Agent {
           rights: list(options.rights, r => ALL_AUTHORITY.includes(r), "rights") ?? [...ALL_AUTHORITY] };
         const scope = await makeScope(localActor, options, options.actor !== undefined || options.rights !== undefined);
         await installMcp(this);
+        installRoutes(scope);
         await resumeOpen(scope);
         const { binding, detach } = prepareConnection(scope, false);
         try { await binding.acp.serveStdio(); } finally { detach(); }
@@ -799,6 +863,7 @@ export class Agent {
             return target(agent);
           } });
       }
+      for (const { value } of actors) installRoutes(value);
       await installMcp(this);
       const server = await listenWebSocket(options, ACP_PROTOCOL, actors, agui && !agui.acp ? undefined : async (ws, scope) => {
         const { binding, detach } = prepareConnection(scope, true);
@@ -811,7 +876,7 @@ export class Agent {
           });
         } finally { detach(); if (ws.readyState === ws.OPEN) ws.close(1000); }
       }, http, options.resumeOpen ? () => resumeOpen() : undefined);
-      const stopListener = async () => { http?.close(); await server.close(); };
+      const stopListener = async () => { for (const off of cleanRoutes.splice(0)) off(); http?.close(); await server.close(); };
       this.#stopAcp = async () => { await stopListener(); await disposeProjects(); };
       if (agui) { serving = true; return { url: new URL(server.url.replace(/^ws/, "http")).origin, close: stopListener }; }
       serving = true;

@@ -11,15 +11,21 @@ export function startTelemetry(endpoint: string) {
     throw new Error("Expected a loopback OTLP/HTTP traces endpoint");
   }
   const exporter = new OTLPTraceExporter({ url: url.href });
-  const provider = new TracerProvider({ sampler: new AlwaysOnSampler(), spanProcessors: [new BatchSpanProcessor({ exporter })] });
+  const active = new Map<string, {name:string; sessionId:unknown}>();
+  const provider = new TracerProvider({ sampler: new AlwaysOnSampler(), spanProcessors: [{
+    onStart(span) { active.set(span.spanContext().spanId, {name:span.name, sessionId:span.attributes["gen_ai.conversation.id"]}); },
+    onEnd(span) { active.delete(span.spanContext().spanId); },
+    async forceFlush() {}, async shutdown() {},
+  }, new BatchSpanProcessor({ exporter })] });
   const manager = new AsyncLocalStorageContextManager().enable();
   trace.setGlobalTracerProvider(provider);
   context.setGlobalContextManager(manager);
-  return async () => {
+  return Object.assign(async () => {
     try { await provider.forceFlush(); }
     finally {
       try { await provider.shutdown(); }
       finally { manager.disable(); }
     }
-  };
+  }, { flush: () => provider.forceFlush(), activeWork: (id: string) => [...active.values()].filter(s => s.sessionId === id &&
+    /^(invoke_agent|execute_tool|modular_agent\.(step|question\.|job))/.test(s.name)).map(s=>s.name) });
 }

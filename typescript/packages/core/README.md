@@ -16,9 +16,13 @@ try {
 
 ## What is checked
 
+The [waiting approval tests](test/waiting-approval.test.ts) use a scripted Provider, a file counter and a clock controlled by the test. They run with the Runtime embedded and served. They check the default, the maximum, the bound view, refusal after changes to input, registration or rights, expiry on either side of an allow, erasure, and refusal to fork or move. Twelve process-group kills cover three cutoffs (ended origin, committed allow, counter effect) in both placements with kept and durable history. Reopen never increments the counter twice. The listener tests check fresh ACP polling and AG-UI presence opened after the turn.
+
+The ADR 0034 shared runner supports `poll`, `decide`, `clock`, `barrier`, `change` and `stop`. With the incoming shared definitions, all 28 scenarios passed with TypeScript tools embedded, on stdio and on WebSocket (84 runs). The extended AG-UI kit passed 34/34, including a race against ACP and mixed waits in both settlement orders. The in-process telemetry check passed 16/16 with the extended kit, including the eight waiting cases with and without export.
+
 The Interface tool tests use the public SDK with embedded and served Runtimes. They check exact offers, denied approval, output withholding, delayed release, reconnect, racing reports, early reports, expiry before and after turn end, checked results, cancellation, erasure, branch and close guards, and metadata-only spans. The crash tests kill the agent process group with `SIGKILL` before or after the originating turn ends and reopen kept or durable history. No Runtime executes the same handoff twice. The existing shared-scenario format has no operations for advertising or reporting through an authenticated executor route, so these tests are TypeScript-only.
 
-The Interface tool change passed all 26 feature tests. With thread discovery and startup recovery, the full suite passed 490 tests with 5 skipped in each of the default and `MA_REMOTE` builds. The Claude sidecar passed 51 tests with 1 skipped. The current `ma` passes all 27 reference checks. The stdio ACP kit passed 188/188. The WebSocket kits passed 153/153 plugin checks, 14/14 separate-listener checks and 193/193 ACP checks. The project-notes demo passed both the scripted and crash-and-reopen runs.
+With waiting approvals, the full suite passed 540 tests with 5 live tests skipped in each of the default and `MA_REMOTE` configurations. The Claude sidecar passed 51 tests with 1 skipped. `ma` passed 27/27 reference checks and 190/190 stdio ACP checks. The WebSocket kits passed 153/153 plugin checks, 14/14 separate-listener checks and 195/195 ACP checks. The AG-UI kit at the branch base passed 26/26. The ops-desk demo passed all six cases. The project-notes demo passed its scripted and crash-and-reopen cases.
 
 The telemetry tests use an OpenTelemetry in-memory span exporter and metric reader. They check the span tree, overlapping nested calls, question and refusal events, one measurement per inference, metadata-only export, both plugin handshake omissions, exporter failure, and a `SIGKILL` over durable history. The crash check matches the resumed trace, parent, link and checkpoint against the saved segment. A turn also completes with no registered OpenTelemetry SDK.
 
@@ -36,7 +40,7 @@ The history deployment profile passed **42/42**. The TypeScript conformance plug
 
 Earlier ADR 0030 check runs: The SDK tests race the last tenant slot, settle a rejected call list with its usage intact, reopen with a lower count limit, check configured representation over ACP, and reopen a fork of a fork whose erasure was pending. They also check loss of the registry and refusal without disclosure. The stdio ACP kit with crash, probe, job, isolation and capacity checks passed **231/231**. The WebSocket ACP isolation and capacity profile passed **141/141**. The HTTP erasure profile passed **106/106**, including withheld replies after bookkeeping and tombstone commits. The history kit against two services passed **42/42**. The reference checks passed **23/23**. The WebSocket kits passed **153/153** for plugins and **193/193** for ACP. The Claude sidecar passed **44/44**.
 
-Run from `typescript/` with Node 26. Install kit dependencies with `npm ci --prefix ../conformance/acp` and `npm ci --prefix ../conformance/tools`.
+Run from `typescript/` with Node 26. Install kit dependencies with `npm ci --prefix ../conformance/acp`, `npm ci --prefix ../conformance/tools` and `npm ci --prefix ../conformance/telemetry`.
 
 ```sh
 npm ci
@@ -86,7 +90,7 @@ The SDK adds Ajv 8 (its [2020-12 entry point](https://ajv.js.org/json-schema.htm
 |---|---|
 | 1. Agent composition | Checks the effective Runtime and history store. Ephemeral persistent history raises `invalid_composition` naming `kept`. Ephemeral local command bookkeeping goes in agent-owned scratch; recoverable bookkeeping needs `dataDir`. Nonempty process and service lists enable hosting; empty lists do not. `credentials` defaults to read-only environment credentials; `fileCredentials(path)` stages secret answers in a private file and publishes only the stored name after activation and commit. |
 | 2. Sessions | Create, reopen, inspect `lastTurn()`, prompt or send Content, follow typed events, call tools directly, fork, move, erase and close. Actor views can list and withdraw proposals or release them with a timing or `{ declined: true }`; a second settlement raises `conflict`. Bounded streams fail with `lost` and the last delivered kept entry cursor (or null); replay starts strictly after the cursor. A failed commit or lost writer cancels running work and emits live-only `sessionInterrupted` to followers; waiting prompts fail with `lost`. Reopen to recover from the last committed state. Structured results are checked at `turn.result`; refusal records feedback before retry. |
-| 3. Questions and authority | `session.questions()` lists open questions and `session.answer()` settles them by ID. `session.onQuestion()` overrides the agent handler. A decline is not the text `declined`. The local `user` is present with a handler; approvals otherwise refuse if nobody else can answer. Opt into `severalActors`, `sessionLimits` and `tenants` to use actor views, join and leave, proposals, ceilings and tenant selection. |
+| 3. Questions and authority | `session.questions()` lists open questions and `session.answer()` settles them by ID. `session.onQuestion()` overrides the agent handler. A decline is not the text `declined`. The local `user` is present with a handler. Live approvals refuse if nobody present can answer. Opt into `severalActors`, `sessionLimits` and `tenants` to use actor views, join and leave, proposals, ceilings and tenant selection. |
 | 4. Tools | Standard Schema JSON Schema export and plain JSON Schema. The Harness checks `parameters` before dispatch, and `returns` after `tool.after`; `hints` are nested on the wire. Local and served tools share result wording. `toolOutput` includes the text `chunk` and preserves the reported Content, including images. Job progress also retains Content. `context.history(cursor)` reads raw pages and `context.emit(type, data)` sends custom events through the output gate in both placements. `context.credential(name)` is in-process only. `PromptResult.toolResults()` lists only the model's calls. |
 | 5. Errors | `AgentError` with a string-union code and structured data. Known history, state and authority failures have stable codes, including `held` with `data.retryAfterMs` and `turn_limit` with `data.limit`. Unclassified plugin failures use `internal`. |
 | 6. Plugins | Registrar adapters for Runtime, environment, history, credentials, configuration and Interfaces. `defineToolSource` supplies `changed()`. Job owners register cancel and resume. Typed core hooks include local pending gates and Provider pieces; plugin-defined points use `defineHook`, `onHook` and the handle's `call()`. Commands have a scoped environment, can ask questions in process, and can declare `usesModel` with `inProcessOnly` to send auxiliary requests through the session Provider. Those attempts are recorded and metered under a command step, without a turn or tool dispatch. |
@@ -104,6 +108,32 @@ The SDK adds Ajv 8 (its [2020-12 entry point](https://ajv.js.org/json-schema.htm
 | 18. ma policy | `ma` reads the default `policy.json` or `--policy FILE` before protected project setup, applies principals and exact scope on both ACP transports, and keeps the one-token shorthand. `ma --declaration` prints operator byte bounds under `limits`. |
 | 19. Telemetry | The Harness declares `telemetry: 1` on the agent and session. It records metadata only through `@opentelemetry/api`. Set `createAgent({ agentName })` to a stable, non-sensitive name. The app registers its tracer and meter providers and an async context manager before composition, and owns export and shutdown. The SDK installs none of them. |
 | 20. Interface-run tools | `createAgent({ interfaceTools })` registers model-only sources for configured actors and routes. An embedded Interface attaches to an open session, advertises exact definitions and receives executable calls only after the Harness commits the start and checkpoint. A valid report settles once through `tool.after` and queues a continuation without a new input. Embedded and served Runtimes opt in. ACP projects `interfaceTools: true` when supported but has no executor or reporting methods. AG-UI uses the deferred connection at run end. |
+| 21. Approvals that wait | An opted-in session can leave an unstarted server tool call open after its turn. The answer binds the exact delivered view. Only the continuation can dispatch, before the original deadline. |
+
+### Approvals that wait
+
+Pass `durability: "kept"`, `dataDir`, `approval: "all"`, `questionsOutlastTurns: true` and `maxApprovalWaitMs: 60_000` to `createAgent` with a portable history store. `"durable"` also works. The operator maximum is a positive safe integer in milliseconds, not a project setting. An incompatible composition raises `invalid_composition`. Look for `agent.declaration().approvalsOutlastTurns === true`. This does not opt a session in.
+
+```ts
+const session = await agent.session({ settings: { approvalWait: "untilDeadline" } });
+// Or: await session.setSetting("approvalWait", "untilDeadline");
+const result = await session.prompt(input);
+// result.openToolCalls identifies unstarted calls. No provisional tool result.
+await session.waitIdle();
+await session.close();
+
+// Later, possibly in a new process with the same store and operator policy:
+const reopened = await agent.openSession(session.id);
+const [question] = await reopened.questions({ present: true });
+if (question?.approvalWait === "untilDeadline") {
+  // Present question.question, question.call (including id, name and input),
+  // and question.deadline (absolute milliseconds). Use the person's decision.
+  await reopened.answer(question.id, decision); // "allow" or "decline"
+  await reopened.waitIdle();
+}
+```
+
+With several actors, retain the handle returned by `session.as(actorId)` for both delivery and answer. A plain `questions()` listing does not authorize a decision. ACP uses `_modular-agent/requests` and `_modular-agent/answer` on the same connection, never `session/request_permission` for a parked call. An AG-UI client opens presence, fetches the thread snapshot and sends `resume`. No tool report is needed. The default is `approvalWait: "live"`. Nested, direct and already started calls keep their existing rules. `ma` has no approval plugin and does not declare this feature.
 
 ### Interface-run tools
 
@@ -188,6 +218,8 @@ The base Harness `PluginApi.history()` is synchronous and refuses reads of publi
 Use `encodeHistoryJson`, `parseHistoryJson` and `equalHistoryJson` to preserve opaque fields and exact numeric values, and `historyTombstone` for the standard erasure projection. Throw `HistoryServiceError` for a confirmed refusal; include the remaining `retryAfterMs` for `held`. If a mutation's commit is uncertain, throw another error so the adapter closes the request without an acknowledgement.
 
 ## Findings
+
+**Empty continuation over the plugin binding.** The current served Runtime registers `interfaceTools: true` to accept an empty inherited call list. There need not be an Interface tool in the session. The approval deadline or a decline can settle the only call before the continuation starts. In [the plugin binding](../../../docs/bindings/plugin.md#the-host-asks-the-runtime), replace “An empty `calls` does not skip the continuation's model work.” with: “An empty `calls` does not skip the continuation's model work. When the session declares `approvalsOutlastTurns`, the host also sends an empty list if all waiting calls have already settled. It does not need to offer Interface tools to do this.”
 
 These are proposed documentation replacements, not changes to the specification.
 
