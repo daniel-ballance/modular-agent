@@ -554,7 +554,7 @@ await attempt("initialize", async () => {
 	check("register: provider conformance with model echo", !!provider?.models?.some((m) => m.id === "echo" && m.provider === "conformance"), JSON.stringify(reg.providers));
 	const ts = (reg.toolSources ?? []).find((x) => x.id === "conformance-tools");
 	const names = (ts?.tools ?? []).map((t) => t.name);
-	check("register: tool source conformance-tools with bash and read", names.includes("bash") && names.includes("read"), JSON.stringify(names));
+	check("register: conformance-tools offers bash, read and nest", ["bash", "read", "nest"].every(name => names.includes(name)), JSON.stringify(names));
 	// Shared data: Tools. This checks the schema container, not the 2020-12 vocabulary.
 	check("register: tool parameter schemas are objects or booleans", (ts?.tools ?? []).every((t) => typeof t.parameters === "boolean" || (t.parameters && typeof t.parameters === "object" && !Array.isArray(t.parameters))));
 	// Plugin binding: The host asks a Provider.
@@ -726,7 +726,8 @@ await attempt("tools", async () => {
 	// Plugin binding: The conformance plugin. Progress forwarding here is a Bash fixture rule.
 	const progress = p.notes.slice(beforeProgress).filter((n) => n.method === "tools/progress" && n.params?.parentRequestId === b.id);
 	check("fixture bash: forwards output as progress and includes the exit line", progress.map((n) => textOf(n.params.content)).join("").includes("kit-out") && textOf(bres.content).endsWith("\n[exit code 0]"));
-	check("tools/call bash: used host/env/exec", p.hostCalls.some((c) => c.method === "host/env/exec" && c.params?.parentRequestId === b.id));
+	const exec = p.hostCalls.find(c => c.method === "host/env/exec" && c.params?.parentRequestId === b.id);
+	check("tools/call bash: host/env/exec omits an unrequested deadline", !!exec && !Object.hasOwn(exec.params, "timeoutMs"));
 	check("tools/call bash: host/env/exec carries the call's sessionId", p.hostCalls.some((c) => c.method === "host/env/exec" && c.params?.parentRequestId === b.id && c.params?.sessionId === "s1"), String(JSON.stringify(p.hostCalls.find((c) => c.method === "host/env/exec" && c.params?.parentRequestId === b.id)?.params ?? null)).slice(0, 200));
 
 	const lst = await p.request("tools/list", { toolSource: "conformance-tools" });

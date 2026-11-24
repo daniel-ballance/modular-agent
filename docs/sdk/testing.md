@@ -2,9 +2,9 @@
 
 Each SDK ships a testing kit for developers, and runs a shared set of scenarios against itself and the other SDKs. Both work offline, with no real model and no credentials.
 
-## Planned AG-UI kit
+## AG-UI kit
 
-The [AG-UI kit](../../conformance/agui/README.md) uses a scripted Provider, a controlled clock and store, and disposable tokens. It needs no real model or external tools. It targets these checks:
+The [AG-UI kit](../../conformance/agui/README.md) uses a scripted Provider, a controlled clock and store, and disposable tokens. It needs no real model or external tools. All four fixtures test the binding on their configured sessions, including the [wait-closure and kept-receipt reads](../bindings/agui.md#wait-closures). Each fixture must supply the required controls and declarations. The checks include:
 
 - Discovery, explicit AG-UI version, request and event limits, SSE framing, lifecycle validation and coexistence with ACP WebSocket on one listener. Check TLS, actor and client scope, tenant and project filters, and no setup on an unauthorized request.
 - Initial prompt, one turn per run, stable message IDs, message snapshots, duplicate input keys, mismatched copies, history with and without a cursor, stale cursors, branch moves and erasure. Reconnect must not replay live chunks or execute work.
