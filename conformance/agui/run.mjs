@@ -17,7 +17,9 @@ import { waiting } from './waiting.mjs';
 
 import { closures } from './closures.mjs';
 
-const cases = { ...basic, ...advanced, ...waiting, ...closures };
+import { receipts } from './receipts.mjs';
+
+const cases = { ...basic, ...advanced, ...waiting, ...closures, ...receipts };
 const roles = ['owner', 'rotated', 'sibling', 'foreign', 'watch', 'tenant', 'project'];
 const usage = `node run.mjs [--only CASE[,CASE...]] -- /absolute/path/to/fixture [args...]
 node run.mjs --only CASE --url ORIGIN --token-file FILE [--ROLE-token-file FILE ...]
