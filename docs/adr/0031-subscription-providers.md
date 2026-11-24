@@ -17,7 +17,7 @@ Each SDK ships three [subscription Providers](../sdk/subscription-providers.md):
 
 The SDK owns sign-in (`signIn`, `signOut`), the login file shared across languages and processes (`subscriptionLogins`), token refresh under a kernel lock, the client identity option, and one shared model table. `ma` uses these Providers and keeps none of its own.
 
-The ids are the names people know the plans by. `ma` accepts `openai-codex` and `xai` as aliases in `--model`, `ma login`, settings, `models.json` and reopened sessions, and moves logins stored under them to the new ids on the next write of `auth.json`, so existing sign-ins keep working. The aliases are removed in a later release.
+The only subscription Provider ids are `chatgpt`, `grok` and `claude`. Selection, stored models and login records use these ids directly.
 
 `claude()` never offers a sign-in and never reads or stores a Claude credential, because Anthropic's terms forbid third-party apps to offer Claude.ai login or to intermediate its credentials ([Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)). The person signs in with Claude Code, through Anthropic's own flow; Anthropic states that the Agent SDK then draws on that person's plan ([Use the Claude Agent SDK with your Claude plan](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)). Anthropic publishes the Agent SDK for TypeScript and Python only, so Rust and Go run the TypeScript SDK's Claude program as a process plugin.
 

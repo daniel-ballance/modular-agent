@@ -60,7 +60,7 @@ func modelOptions() ([]modular.Option, error) {
 	if id == "" {
 		return []modular.Option{modular.WithProvider(scriptedModel()), modular.WithModel(modulartest.ScriptedModel)}, nil
 	}
-	logins := subscription.SubscriptionLogins(os.Getenv("DESK_LOGINS")).WithAliases(map[string]string{"openai-codex": "chatgpt"})
+	logins := subscription.SubscriptionLogins(os.Getenv("DESK_LOGINS"))
 	p, err := subscription.ChatGPT(subscription.ChatGPTOptions{Logins: logins})
 	if err != nil {
 		return nil, err
