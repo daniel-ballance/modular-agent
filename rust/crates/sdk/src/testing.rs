@@ -26,6 +26,15 @@ pub fn fixture_host(agent: &crate::Agent) -> crate::native::RuntimeHost {
     agent.inner.harness.clone()
 }
 
+/// Withdraw the operator's authorization of a particular waiting-approval route.
+pub fn revoke_fixture_route(agent: &crate::Agent, route: String, principal: String) {
+    agent.inner.harness.register_approval_audience(
+        route,
+        principal,
+        Arc::new(|_, _| Some(Default::default())),
+    );
+}
+
 /// Add the offline fixtures required by the ACP kit.
 pub fn acp_conformance(mut builder: crate::AgentBuilder) -> crate::AgentBuilder {
     builder.acp_conformance = true;
@@ -381,7 +390,6 @@ pub async fn restart(agent: Agent) -> Result<Agent> {
 
 /// The fixture plugins every SDK implements identically (docs/sdk/testing.md#the-fixture-plugins).
 /// Each is an ordinary plugin, so the same code runs in process and served.
-
 pub mod fixtures {
     use super::*;
     use crate::{
