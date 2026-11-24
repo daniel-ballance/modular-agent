@@ -77,7 +77,7 @@ test("HTTP erasure refuses a history delivery waiting at its output gate", async
   for (const [path, id] of [[source, "source-target"], [dest, "dest-target"]]) {
     await request(path, "PUT", { created: Date.now(), project: dir });
     const { lease } = await request<{ lease: string }>(path + "/lease", "POST", { owner: "wire-writer" });
-    await request(path + "/entries", "POST", { lease, entries: [{ id, parentId: null, kind: "input", content: [{ type: "text", text: "private input" }] }] });
+    await request(path + "/entries", "POST", { lease, entries: [{ id, parentId: null, kind: "fixture.note", data: { text: "private input" } }] });
     await request(`${path}/lease/${lease}`, "DELETE");
   }
   // This checks the history delivery fence, not a model turn. Seed before opening the writer.

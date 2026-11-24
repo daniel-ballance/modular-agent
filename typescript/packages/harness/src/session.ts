@@ -119,6 +119,8 @@ export class Session {
 			return;
 		}
 		this.forkSetup = true;
+		if (["inputAccepted", "input", "inputHandedBack"].includes(entry.kind) && (typeof entry.inputId !== "string" || !entry.inputId)) throw new Error("Missing input identity");
+		if (["inputRequest", "inputAnswer", "secretAnswerAccepted"].includes(entry.kind) && (typeof entry.requestId !== "string" || !entry.requestId)) throw new Error("Missing question identity");
 		if (entry.kind === "inputRequest" && (entry.data as { request?: { approvalWait?: string } })?.request?.approvalWait === "untilDeadline") this.hasWaitingApprovals = true;
 		// A key is remembered for the session's life, across restarts, so it is rebuilt from the record.
 
@@ -137,7 +139,8 @@ export class Session {
 					key?: string; content: ContentPart[]; when: InputTiming; releasedBy?: string; submittedBy?: string; delegatedBy?: string; taken?: InputReceipt["taken"]; parked?: boolean;
 				};
 				const inputId = entry.inputId;
-				if (!inputId || !Array.isArray(content) || !entry.jobId && !taken) throw new Error("Incomplete input admission");
+				if (!inputId || !Array.isArray(content) || (releasedBy ? !this.proposals.has(inputId) :
+					entry.jobId ? typeof parked !== "boolean" : !["now", "after", "inTurn", "proposed"].includes(taken!))) throw new Error("Incomplete input admission");
 				const actorId = entry.actorId!;
 				const startedBy = entry.jobId ? { kind: "job" as const, id: entry.jobId } : { kind: "actor" as const, id: actorId };
 				const queued = { id: inputId, actorId, key, content, when, releasedBy, delegatedBy, time: entry.time, kind: "input", startedBy, connectionRights, startingRights: rights };
@@ -145,7 +148,7 @@ export class Session {
 				if (when === "propose" || parked === true && !releasedBy) this.proposals.set(inputId, queued);
 				else this.proposals.delete(inputId);
 				const scoped = key && inputKeyScope(key, actorId, submittedBy ?? delegatedBy);
-				if (scoped && !this.keys.has(scoped) && !this.erasedKeys.has(scoped)) this.keys.set(scoped, { inputId, taken: taken ?? (parked ? "proposed" : "after") });
+				if (!releasedBy && scoped && !this.keys.has(scoped) && !this.erasedKeys.has(scoped)) this.keys.set(scoped, { inputId, taken: taken ?? (parked ? "proposed" : "after") });
 				break;
 			}
 			case "inputHandedBack":

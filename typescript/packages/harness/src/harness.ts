@@ -1426,6 +1426,7 @@ export class Harness {
 				}
 				entry.data = setting;
 			}
+			if (pluginRecord && (entry.kind === "toolPending" || entry.kind === INTERFACE_HANDOFF)) throw failure("invalid_request", "Only the Harness records pending calls");
 			if (entry.kind === "inputRequest") {
 				const request = (entry.data as { request?: InputRequest })?.request;
 				if (pluginRecord && request?.coversNested !== undefined) throw failure("invalid_request", "Only the approval gate sets coverage");
@@ -3758,9 +3759,11 @@ export class Harness {
 		const own = branch.filter(e => !e.erased && e.sessionId === s.id && !s.copied.has(e.id) && e.turnId === origin && e.toolCallId === callId);
 		const checkpoints = own.filter(e => e.kind === "toolPending");
 		const pending = checkpoints[0];
-		const ids = (pending?.data as { requestIds?: string[] })?.requestIds;
+		const data = pending?.data as { requestIds?: string[]; toolStartedId?: string } | undefined;
+		const ids = data?.requestIds;
 		if (checkpoints.length !== 1 || !pending.stepId || stepId && stepId !== pending.stepId || !Array.isArray(ids) || !ids.length) return;
 		const scope = own.filter(e => e.stepId === pending.stepId);
+		if (data?.toolStartedId !== undefined && !scope.some(e => e.kind === "toolStarted" && e.id === data.toolStartedId)) return;
 		for (const id of ids) {
 			const entry = scope.find(e => e.kind === "inputRequest" && e.requestId === id);
 			const request = (entry?.data as { request?: InputRequest })?.request;
@@ -4077,7 +4080,7 @@ export class Harness {
 			requestId: request.id, toolCallId: request.toolCallId, actorId: answer.actorId };
 		let kept = answer;
 		if (request.kind === "secret" && !answer.declined) {
-			if (acceptSecret) await this.commit(s, [{ ...fields, kind: "secretAnswerAccepted" }]);
+			if (acceptSecret && !(await this.commit(s, [{ ...fields, kind: "secretAnswerAccepted" }])).length) throw failure("lost", "Secret acceptance did not commit");
 			let outcome;
 			try { outcome = await this.secretStore()!.activate(this.secretScope(s, request.id)); }
 			catch { throw new Error("Could not confirm secret activation"); }
@@ -4086,8 +4089,9 @@ export class Harness {
 		}
 		const record = async () => {
 			const systemClosure = kept.actorId === "harness" && kept.declined;
-			await this.commit(s, [{ ...fields, kind: "inputAnswer", actorId:systemClosure ? undefined : kept.actorId,
+			const [entry] = await this.commit(s, [{ ...fields, kind: "inputAnswer", actorId:systemClosure ? undefined : kept.actorId,
 				data:systemClosure ? {requestId:kept.requestId, declined:true, reason:kept.reason, ...(kept.cause && {cause:kept.cause})} : kept }]);
+			if (!entry) throw failure("lost", "Answer did not commit");
 			const system = kept.actorId === "harness" && kept.reason &&
 				["cancelled", "noLongerAnswerable", "restart", "timeLimit", "superseded", "refused", "erased"].includes(kept.reason) ? kept.reason : undefined;
 			telemetryEvent("modular_agent.question.close", { "modular_agent.question.id": request.id,
