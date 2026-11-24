@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -37,7 +38,8 @@ type TLSOptions struct{ CertFile, KeyFile, ClientCAFile string }
 // ReadToken does not include a token or file contents in diagnostics. Length is
 // only a sanity check; the operator must generate at least 128 bits of entropy.
 func ReadToken(path string) (string, error) {
-	f, err := os.Open(path)
+	// Opening a FIFO must not stall startup before the regular-file check.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return "", err
 	}

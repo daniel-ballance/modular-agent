@@ -5,8 +5,10 @@ import (
 	"errors"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/internal/wswire"
@@ -40,7 +42,16 @@ type TLSOptions = wswire.TLSOptions
 // for the connection instances to stop. URL includes the bound port.
 type Service = wswire.Server
 
+// PluginCaller names the Harness authenticated by an operator token file.
+// Projects, when set, narrows the listener's environment project scope.
+type PluginCaller struct {
+	CallerID  string   `json:"callerId"`
+	TokenFile string   `json:"tokenFile"`
+	Projects  []string `json:"projects,omitempty"`
+}
+
 type ServeOptions struct {
+	Callers           []PluginCaller
 	Listen, TokenFile string
 	TLS               *TLSOptions
 	// Projects is the exact operator-assigned reach of a served environment.
@@ -57,6 +68,9 @@ func ServeService(ctx context.Context, plugin Plugin, options ServeOptions) (*Se
 // ServeServiceFactory also gives the plugin's Setup and Stop closures their
 // own instance, for plugins that share state between those two functions.
 func ServeServiceFactory(ctx context.Context, factory func() Plugin, options ServeOptions) (*Service, error) {
+	if options.Callers != nil {
+		return nil, &Error{Code: InvalidComposition, Message: "callers require a named plugin factory"}
+	}
 	if factory == nil {
 		return nil, &Error{Code: InvalidParams, Message: "plugin factory required"}
 	}
@@ -68,9 +82,58 @@ func ServeServiceFactory(ctx context.Context, factory func() Plugin, options Ser
 	if err != nil {
 		return nil, err
 	}
-	service, err := wswire.Listen(ctx, options.Listen, options.TLS, wswire.Plugin, map[string]struct{}{token: {}}, func(ctx context.Context, conn *wswire.Conn, _ struct{}) {
-		_ = servePlugin(factory(), func(s *pluginrpc.Server) error {
-			s.Projects = policy.Projects
+	return listenPlugins(ctx, options, map[string]pluginPeer{token: {projects: policy.Projects}}, func(string) Plugin { return factory() })
+}
+
+type pluginPeer struct {
+	id       string
+	projects []string
+}
+
+// ServeNamedServiceFactory invokes factory only after a successful upgrade.
+// The ID comes from the listener, not the host's initialization or calls.
+func ServeNamedServiceFactory(ctx context.Context, factory func(callerID string) Plugin, options ServeOptions) (*Service, error) {
+	if factory == nil || len(options.Callers) == 0 || options.TokenFile != "" {
+		return nil, &Error{Code: InvalidComposition, Message: "named service requires a factory and callers instead of tokenFile"}
+	}
+	common, err := acpPolicy(options.Projects, nil, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	tokens, ids := map[string]pluginPeer{}, map[string]bool{}
+	for _, c := range options.Callers {
+		if c.CallerID == "" || !utf8.ValidString(c.CallerID) || ids[c.CallerID] {
+			return nil, &Error{Code: InvalidComposition, Message: "each caller needs a distinct nonempty ID"}
+		}
+		token, err := wswire.ReadToken(c.TokenFile)
+		if err != nil {
+			return nil, &Error{Code: InvalidComposition, Message: "invalid caller token file"}
+		}
+		if _, exists := tokens[token]; exists {
+			return nil, &Error{Code: InvalidComposition, Message: "each caller needs a distinct token"}
+		}
+		projects := common.Projects
+		if c.Projects != nil {
+			p, err := acpPolicy(c.Projects, nil, nil, nil)
+			if err != nil {
+				return nil, err
+			}
+			for _, project := range p.Projects {
+				if common.Projects != nil && !slices.Contains(common.Projects, project) {
+					return nil, &Error{Code: InvalidComposition, Message: "caller project outside listener scope"}
+				}
+			}
+			projects = p.Projects
+		}
+		tokens[token], ids[c.CallerID] = pluginPeer{c.CallerID, projects}, true
+	}
+	return listenPlugins(ctx, options, tokens, factory)
+}
+
+func listenPlugins(ctx context.Context, options ServeOptions, tokens map[string]pluginPeer, factory func(string) Plugin) (*Service, error) {
+	service, err := wswire.Listen(ctx, options.Listen, options.TLS, wswire.Plugin, tokens, func(ctx context.Context, conn *wswire.Conn, peer pluginPeer) {
+		_ = servePlugin(factory(peer.id), func(s *pluginrpc.Server) error {
+			s.Projects = peer.projects
 			s.RequireEnvironmentScope = true
 			return s.ServeServiceConnection(ctx, conn)
 		})
