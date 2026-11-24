@@ -33,6 +33,9 @@ fn ma_reads_only_the_selected_subscription_slot() {
     assert!(catalog.contains("chatgpt/custom"));
     assert!(!catalog.contains("grok/custom"));
 
+    let unknown = run(&["--model", "xai/grok-4.7", "-p", "offline"]);
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("xai/grok-4.7"));
     let login = json!({"type":"api_key","key":"fixture"});
     let file =
         json!({"logins":{"openai-codex":login,"grok":login},"answers":{"example":"fixture"}});
