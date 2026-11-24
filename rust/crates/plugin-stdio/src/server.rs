@@ -655,7 +655,7 @@ fn environment_cwd(p: &Value, key: &str) -> std::result::Result<PathBuf, Fault> 
 }
 
 // Check the nearest existing ancestor, including for a file that will be created.
-fn service_path_in_project(project: &Path, path: &Path) -> bool {
+pub fn service_path_in_project(project: &Path, path: &Path) -> bool {
     use std::{fs, io::ErrorKind, path::Component};
     path.starts_with(project)
         && !path.components().any(|part| part == Component::ParentDir)

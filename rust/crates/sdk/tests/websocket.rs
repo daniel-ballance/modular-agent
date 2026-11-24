@@ -25,6 +25,39 @@ fn token(dir: &Path, name: &str, value: &str) -> PathBuf {
     path
 }
 
+#[tokio::test]
+async fn named_listener_rejects_invalid_tables_before_creating_a_plugin() {
+    use modular_agent::{NamedServeOptions, PluginCaller, serve_websocket_named};
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let file = token(dir.path(), "private", "disposable-named-test-credential");
+    let unsafe_file = token(
+        dir.path(),
+        "readable",
+        "another-disposable-named-credential",
+    );
+    std::fs::set_permissions(&unsafe_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    for callers in [
+        vec![],
+        vec![PluginCaller::new("", file.clone())],
+        vec![PluginCaller::new("other", unsafe_file)],
+        vec![PluginCaller::new("missing", dir.path().join("absent"))],
+    ] {
+        let err = serve_websocket_named(
+            |_| panic!("factory ran before authentication"),
+            NamedServeOptions {
+                listen: "127.0.0.1:0".into(),
+                callers,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("invalid caller table accepted");
+        assert_eq!(err.code(), Code::InvalidComposition);
+    }
+}
+
 async fn inspect(url: &str, token: &Path, project: &Path, allowed: bool) -> Value {
     let socket = transport_websocket::connect(url, token, transport_websocket::ACP)
         .await
