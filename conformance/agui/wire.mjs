@@ -15,7 +15,7 @@ export const input = (view, suffix = [], extra = {}) => ({
   messages: [...view.messages, ...suffix], tools: [], context: [], state: {}, forwardedProps: {}, ...extra,
 });
 
-function responseType(response, type) {
+export function responseType(response, type) {
   assert.equal(response.headers.get('content-type')?.split(';')[0].trim(), type, 'Content-Type');
   assert.match(response.headers.get('cache-control') ?? '', /\bno-(store|cache)\b/, 'response must not be cached');
   for (const key of ['traceparent', 'tracestate', 'baggage', 'set-cookie']) {
@@ -149,7 +149,7 @@ export async function* sse(response) {
         assert.ok(size + segment.length <= MAX + 6, 'encoded SSE event exceeds 64 MiB');
         const line = decoder.decode(Buffer.concat(parts));
         parts = [];
-        if (line.startsWith(':')) { size = 0; yield { comment: true }; }
+        if (line.startsWith(':')) { size = 0; yield { comment: true, text: line.slice(1) }; }
         else {
           assert.ok(line.startsWith('data: '), 'only SSE comments and data lines are allowed (no SSE id)');
           const data = parse(line.slice(6));
