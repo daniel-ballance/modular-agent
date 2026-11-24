@@ -60,6 +60,12 @@ A history service credential has raw access to the whole service. Use [separate 
 
 Agents in any language that share a history service and the same actor ids can reopen and continue each other's [portable sessions](../bindings/data.md#portable-sessions).
 
+### Proposed: serving named callers
+
+[ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md) proposes `serve(factory, { listen, callers, tls? })` for a plugin service. `callers` is a nonempty operator list of `{ callerId, tokenFile }`. Each `callerId` is a nonempty, case-sensitive string. The token files must be readable only by their owner, as in the [WebSocket rules](../bindings/websocket.md#connecting). This form requires a factory. Reject a missing factory, empty list or ID, unsafe or unreadable file, duplicate ID or duplicate token value, even in different files. Reject options with both `callers` and `tokenFile`. These are `invalid_composition` errors before listening.
+
+On each successful upgrade, call `factory({ callerId })` with the ID from the matched entry, never the token. The factory can bind the desk's `post` handler to that caller and select its storage and project limits. Run setup on the fresh instance; `plugin/initialize.config` cannot replace the ID. The operator can rotate a credential by replacing its file and restarting the listener with the same ID for the same caller. There is no live reassignment of an instance. The single-token form and its existing factories still work. Stdio and the agent's `{ url, tokenFile, config? }` load entry do not change.
+
 ## The whole agent
 
 - **Embedded.** The app holds the Agent and calls it.
@@ -79,6 +85,8 @@ Use the same token files and actor entries as for `serveAcp`, adding a distinct 
 To let a client run a tool such as `pick_color`, include its definition in `createAgent({ interfaceTools: [...] })`. Set a unique `sourceId`, the client's configured `actorId`, and `routeId` equal to its AG-UI `clientId`. Set a finite positive `resultTimeoutMs` on each source and `callers: ["model"]` on each definition. Do not pass a tool handler: the Interface is the executor. The SDK rejects a conflicting registration, a nonpositive timeout or an incompatible Runtime at composition. Serving rejects a route that matches a different actor or is ambiguous. The SDK does not register tools from a browser request.
 
 The app advertises the exact definitions it can run. On a live, eligible terminal event it runs or declines the named calls, then supplies the results in a later run. It does not execute from replay or use a tool message to approve a call. For a JSON result, send it as text or use a declared content part; this binding does not fill shared `ToolResult.value`. An application that needs durable result delivery can retain a report under the call ID until it is accepted or expires, subject to its own erasure policy.
+
+**Proposed host reads ([ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md)).** An app can use the [wait cursor](../bindings/agui.md#proposed-wait-closures) from a thread snapshot without holding presence. On kept history it can look up its own [run receipt](../bindings/agui.md#proposed-run-receipts) if the snapshot offers it. Neither read changes the answer or handoff API. There is no SDK object for an inbox spanning agents.
 
 ## Durability
 

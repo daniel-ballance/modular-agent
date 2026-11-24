@@ -201,6 +201,8 @@ The Interface uses the plugin API. Authority comes from the authenticated connec
 
 The Harness delivers authorized question views and events through the [output gate](#the-output-gate). [ACP](bindings/acp.md#extension-methods) defines the subset available through that binding and its errors.
 
+**Proposed ([ADR 0035](adr/0035-host-limits-from-the-ops-desk.md)).** An Interface that identifies a run may offer its client a read-only receipt. Bind it to the accepted work, not just the session. Distinguish the end of the exchange from the outcome of the turn it followed. Expose only committed facts permitted by the source views and the reply gate at read time. A receipt is not input, an answer route or permission to execute a call. See [AG-UI run receipts](bindings/agui.md#proposed-run-receipts).
+
 ### Harness and Runtime
 
 | Harness asks | Carrying | Answers |
@@ -561,6 +563,8 @@ A commit is a successful write to the session's store. For an ephemeral session 
 - The Interface MUST clear a connection's presence on disconnect. An actor counts as present while at least one open connection acts for it and marks it present. Following events alone is not presence.
 - The agent SHOULD keep grants, revocations, limits, tenant assignment, approval answers, gate refusals, secret storage by name, erasure and plugin loading reachable to the operator for as long as history is kept. These are existing entries or standard events, not a new audit channel.
 
+**Proposed ([ADR 0035](adr/0035-host-limits-from-the-ops-desk.md)).** A plugin listener may name the Harness that authenticated the connection. That name is not an actor in the session. It adds no rights to the original work and cannot stand in for the scope or live parent a callback requires.
+
 ### Limits and tenants
 
 - The Harness MUST require `administer` to set a session limit. The replacement set MUST fit within the administrator's own rights narrowed by its tenant, not by the limit being replaced.
@@ -677,6 +681,8 @@ A commit is a successful write to the session's store. For an ephemeral session 
 - A follower with an authorized cursor MUST receive visible committed entries in recording order after it, then authorized live events. The Harness MUST establish a single catch-up watermark so that entries are not lost or repeated at cutover. The ACP branch history page is not this subscription.
 - The Harness MUST refuse a cursor it cannot resolve for that viewer, including after expiry. It MUST recheck delivery rights and apply the output gate on replay. Replay covers recorded content, not missed live chunks.
 - The Harness MUST bound follower queues and disconnect a follower that cannot keep up with committed entries, allowing it to resume from its last visible cursor. Live pieces can be dropped.
+
+**Proposed ([ADR 0035](adr/0035-host-limits-from-the-ops-desk.md)).** An Interface may follow just the committed closures of waits in one session. A question closes with its `inputAnswer`; an open Interface call settles with its terminal `toolResult`. A revocation may cause a closure, but loss of answerability for one recipient is not itself a closure. Gate both the source facts and the notice for the current recipient. Following closures never establishes presence or delivers an actionable view. See [AG-UI wait closures](bindings/agui.md#proposed-wait-closures).
 
 ### Deliberate limits
 

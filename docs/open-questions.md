@@ -100,7 +100,7 @@ See [Erasure](#erasure) under Settled.
 
 ### A host driving several agents
 
-The [ops desk](../demos/ops-desk/DESIGN.md#findings) drove three agents from one host. These limits remain; each has a workaround the desk uses.
+The [ops desk](../demos/ops-desk/DESIGN.md#findings) drove three agents from one host. These limits remain; each has a workaround the desk uses. [ADR 0035](adr/0035-host-limits-from-the-ops-desk.md) proposes answers to the first three: a per-thread closure feed, a read-only run receipt, and authenticated callers on one plugin listener. Its [owner decisions](adr/0035-host-limits-from-the-ops-desk.md#owner-decisions) are still open.
 
 **Limit: no feed of closed waits.** An AG-UI client learns that a question or approval closed only by reading a fresh snapshot; presence carries no events and a snapshot does not say why a wait ended. Default: recheck the snapshot before showing or sending an answer.
 

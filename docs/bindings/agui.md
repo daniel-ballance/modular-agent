@@ -112,6 +112,48 @@ Reconnect with a fresh authenticated request, not an SSE offset. The snapshot ro
 
 For example, an approved browser tool can be left open by turn `t1`. Run `r1` finishes with that call in `pendingToolCallIds`. A new authenticated connection of the same client sends the result in `r2`. The Harness records it against `t1`; `r2` follows the continuation `t2`. If the browser disappears before reporting, `t1`'s deadline settles the call instead. Neither path starts the tool again.
 
+## Proposed wait closures
+
+[ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md) proposes an optional `waitCursor` string in the thread snapshot. If supplied, use it with `GET /agui/v1/threads/{threadId}/wait-closures?after={waitCursor}`. If absent, recheck the snapshot as today. This read and the proposed receipt below use the same [HTTP authentication and origin rules](#listener-and-authentication) as the snapshot. The cursor covers exactly the snapshot's committed watermark. It is opaque, scoped to that client, actor, thread and view. It is not a message history cursor or an SSE offset.
+
+This GET returns `text/event-stream`. It uses the [framing and bounds](#framing-and-versions) above, not the AG-UI run lifecycle. Each `data` item is one of the following. There are no prompts, answer values, arguments, results or executable handoffs in the stream.
+
+| Item | When to send it |
+|---|---|
+| `{ cursor, requestId, reason }` | The first committed `inputAnswer` closes that question. Use `answered` for a value, `declined` for an actor's decline and `expired` for `timeLimit`. Use `revoked` only for the [recorded revocation cause](data.md#questions). Otherwise keep the system reason: `cancelled`, `noLongerAnswerable`, `refused` or `superseded`. |
+| `{ cursor, toolCallId, reason: "settled", status }` | A terminal `toolResult` closes an open Interface tool wait on this client's executor route. `status` is the shared tool result status. An approval answer is not this result. |
+
+Apply [Following a session](../contracts.md#following-a-session). Replay visible closures strictly after `after` in commit order, then follow live at one cutover. A closure that commits during catch-up appears once. A `leaveOpen` timeout, a lost presence route or a change of answerers is not a terminal record. Do not publish a closure for a question someone else can still answer. Do not infer one from an absent snapshot row.
+
+Require current membership, `watch`, and project and tenant scope. Respect the question's answerer restriction and the Interface call's bound actor and client ID. Exclude secret questions. Use the ordinary gated views of the opening wait and its closing decision or result. Gate the final item as the [output event](data.md#output-events) `{ type: "modular-agent.waitClosed", data: item }`. This event reports a fact, not an AG-UI interrupt. Send it only if the visible source facts support every field and the notice passed unchanged. Otherwise omit it, including its cursor.
+
+At delivery, including after buffering, recheck rights, scope, gate policy and pending erasure. Do not expose skipped IDs or counts in cursors or heartbeats. On loss of `watch`, close without a final notice. This GET neither joins nor marks presence. It cannot count as delivery for `resume` or for a tool report.
+
+A client can save the cursor after applying each item. Disconnect a slow reader rather than drop a committed closure. On reconnect, authenticate again. A missing `after` is 400 `invalid_request`. After masking inaccessible threads, reject an expired, foreign or otherwise unresolvable cursor with 409 `cursor_expired`. On a branch move that invalidates the view, close the stream and invalidate its cursor. Read a new snapshot to reset the inbox; this recovers current waits, not missing reasons. Presence remains comments only. The feed never appends to a closed run.
+
+## Proposed run receipts
+
+[ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md) proposes a separate optional read. A thread snapshot with `runReceipts: 1` offers `GET /agui/v1/threads/{threadId}/run-receipt?runId={runId}`. Encode the run ID as one query value. Offer the read only for sessions configured to keep history. With the field absent, reconnect by snapshot as today. The GET requires the original authenticated principal and client ID, current membership, `watch` and the thread's project and tenant scope. It does not open a writer, start recovery, mark presence or attach to a run.
+
+Return HTTP 200 with `{ terminal, work }` at one committed watermark. These strings answer different questions:
+
+| Field | Source and values |
+|---|---|
+| `terminal` | The terminal class recorded for this exchange: `success`, `interrupt` or `cancelled` for the corresponding `RUN_FINISHED` outcome, or `error` for `RUN_ERROR`. Use `unknown` until the adapter has a committed record of releasing the gated terminal group to its transport. A crash between release and recording leaves `unknown`. A release does not prove the client received the group. |
+| `work` | `handled` or `handedBack` for a committed no-turn disposition. Otherwise use the linked turn's committed `turnEnd.data.outcome.kind`: `completed`, `cancelled`, `failed` or `limit`. Use `unsettled` when no such disposition has committed. This is not a liveness test. Do not substitute a later turn's outcome. |
+
+Bind `(threadId, authenticated principal, clientId, runId)` to the work in the same commit as its first accepted operation. For new input reuse the admission key. Follow only the turn that takes its `inputId`. For an answer or tool report, bind the decision to the live turn or to the ended origin whose continuation this exchange follows. Find that continuation by `continuesTurnId`, even if it starts after restart. Do not create an input admission for it.
+
+In a batch, the first commit establishes the link; it says nothing about the remaining decisions. A repeated POST for that run ID returns `conflict`. Refresh before submitting any remaining decisions with a fresh ID. A refusal before the first commit does not claim the ID.
+
+For example, a run can have `{ terminal: "interrupt", work: "completed" }` after someone answers on another exchange. A lost exchange can have `{ terminal: "unknown", work: "failed" }` after normal recovery. Do not synthesize `RUN_FINISHED` from a `turnEnd`, infer failure from EOF, or expose a result, interrupt or `pendingToolCallIds` through this read.
+
+Reserve space for the link and terminal class before accepting the first operation. Retain them across restart on this deployment for as long as the source records are kept. Do not store event bodies or copy receipts to forks, model context or ordinary history. Include links, terminal markers and buffers in the sources' erasure. After erasure keep only the content-free key reservation needed to reject reuse, not the disposition. Reuse the existing reservation for a new input's key.
+
+Derive each fact from source views the output gate would allow **now** for this recipient, including the settlement gate for an ended turn. A stored class does not bypass a withheld question, handoff, terminal group or outcome. If its source can no longer be shown safely, do not return the receipt. Gate the complete reply as a [reply event](data.md#output-events) with method `agui.runReceipt`. Withhold it if the gate changes either status. Recheck authority, gate policy and erasure at delivery. If freshness cannot be established, refuse with 503 `unavailable`. Do not report a hidden disposition as `unknown` or `unsettled`.
+
+Give the same 404 `not_found` for a missing, foreign, off-branch, erased or undisclosable receipt or thread. Use `output_withheld` for a blocked reply only if the recipient can already see that the receipt exists. A 404 is not proof of non-admission; in particular, a saved provisional thread may never have been kept. Repeated reads do not admit, answer, dispatch or replay anything.
+
 ## Trace context
 
 Use [the telemetry profile](../telemetry.md#context-on-the-wire). Extract W3C HTTP `traceparent` and operator-allowed `tracestate` per authenticated work request and only from a trusted peer. No baggage. A starting input carries its context even if queued. A question answer in a live turn or a result report does not reparent that existing turn; a later continuation has its own operation context and can link to its origin. Use the stored parent for crash recovery. A presence stream, snapshot read or connection upgrade does not determine a turn's trace. SSE responses carry no W3C context fields; do not put context in AG-UI metadata, `CUSTOM`, `RAW`, history projections, errors or tokens.

@@ -134,7 +134,8 @@ Triage and the verifier shared the event trace in both runs. Both runs predate t
 | Someone must start the processes | Deployment's job, by design ([ADR 0012](../../docs/adr/0012-one-agent-is-the-scope.md)) |
 | Posts during a turn | Kept as plugin tools; Interface-run tools suit client actions |
 | One trace across agents | Resolved: `traceTrusted` in `ma`'s policy; a span link to the `hand_off` call waits for a later [telemetry version](../../docs/telemetry.md#what-later-versions-add) |
-| Approval in stock `ma`; closure feed; run receipt; one token per service | [Open questions](../../docs/open-questions.md#a-host-driving-several-agents) |
+| Approval in stock `ma` | [Open questions](../../docs/open-questions.md#a-host-driving-several-agents) |
+| Closure feed; run receipt; one token per service | [ADR 0035](../../docs/adr/0035-host-limits-from-the-ops-desk.md), proposed; the desk still uses the workarounds above |
 | Rust approval answers | Fixed |
 | AG-UI status text | Fixed |
 

@@ -99,6 +99,9 @@ A session stored in the [shared format](docs/bindings/data.md#portable-sessions)
 One period of work by the Runtime, with zero or more steps. Waiting in place for an answer is part of the turn.
 _Avoid_: Run, agent run, task, prompt turn
 
+**Run receipt** (proposed in [ADR 0035](docs/adr/0035-host-limits-from-the-ops-desk.md)):
+A read-only account of how one AG-UI exchange ended, if known, and how the work it followed settled. It is not proof that the client received a terminal event.
+
 **Step**:
 One model request and its response, plus any calls it asks for, until each call settles or is left open. In a live session a step can be one stretch of the connection.
 _Avoid_: Turn (Pi's word for it), iteration
