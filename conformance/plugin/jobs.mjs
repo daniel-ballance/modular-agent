@@ -74,7 +74,7 @@ const peer = serve("jobs", async (m, { ask, signal }) => {
 	if (stopping) throw rpcError("invalid_request");
 	switch (m.method) {
 		case "plugin/initialize":
-			if (p.binding !== binding || p.data !== "modular-agent-data/1") throw rpcError("not_supported");
+			if (p.binding !== binding) throw rpcError("not_supported");
 			config = p.config ?? {};
 			return { binding, name, toolSources: [{ id: toolSource, tools }], hooks: [{ hook: "session.start", handlerId: 1 }] };
 		case "plugin/shutdown":

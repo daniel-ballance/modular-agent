@@ -432,7 +432,7 @@ The fixture MUST select the last user message and concatenate its text parts wit
 | Valid `tool:<name> <json>` with a tool result after the latest user message | The model MUST return `stop: "finished"` and `done: ` followed by the first 200 Unicode code points of the first such result's text parts, concatenated without separators. |
 | Other text | The model MUST return `stop: "finished"` and one text part `echo: <text>`. |
 
-An agent that declares `nestedToolCalls` MUST also offer the fixture tool `nest` (`{ name: string, input: object }`). `nest` MUST start one nested call with that name and input and settle with the nested result's status and content unchanged.
+The full conformance fixture MUST declare `nestedToolCalls` and offer the fixture tool `nest` (`{ name: string, input: object }`). `nest` MUST start one nested call with that name and input and settle with the nested result's status and content unchanged.
 
 For the opt-in production checks, a conformance launcher without `ma`'s policy file MUST accept `MODULAR_AGENT_CONFORMANCE_POLICY` as an absolute path to an operator file in the [reference policy format](../reference/standard-configuration.md#connection-policy-and-limits). It MUST apply the policy and limits through the normal serving options and fail startup with a diagnostic for an invalid file. The launcher MUST NOT honor this test option outside conformance mode. `ma` uses its normal policy path or `--policy`.
 
