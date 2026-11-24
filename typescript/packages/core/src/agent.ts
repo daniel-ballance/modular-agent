@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { ALL_AUTHORITY, Harness, parseModel, type CredentialStore, type Runtime, type ListingViewer, type SessionSummary, type InterfaceToolSource, type InterfaceToolConnection, type InterfaceToolConnectionOptions as HarnessToolConnection, type PluginApi, type WorkingEnvironment, type InterfaceCapability, type HistoryStore, type Plugin as BasePlugin, type Provider as BaseProvider, type ReservationOptions, type ReservationLimits } from "@modular-agent/harness";
 import { JsonlHistoryStore } from "@modular-agent/history-jsonl";
@@ -273,7 +273,9 @@ export class Agent {
       if (!(await stat(project)).isDirectory()) throw new Error("Project must be a directory");
       const home = options.dataDir ? resolve(options.dataDir) : scratch;
       await mkdir(home, { recursive: true });
-      const h = new Harness({ project, home, agentName: options.agentName, approvalCoversNested: options.approvalCoversNested, questionsOutlastTurns: options.questionsOutlastTurns ?? false,
+      const receiptDir = options.dataDir ? home : options.history instanceof FileHistory ? fileArchive(options.history).dir :
+        join(process.env.XDG_STATE_HOME ?? join(homedir(),".local","state"), "modular-agent", "receipts");
+      const h = new Harness({ project, home, receiptDir, agentName: options.agentName, approvalCoversNested: options.approvalCoversNested, questionsOutlastTurns: options.questionsOutlastTurns ?? false,
         jobReportsStartTurns: options.jobReportsStartTurns ?? false, settingsDuringTurn: options.settingsDuringTurn ?? "nextTurn",
         rejectUnknownModel: true, reopenModelAliases: options.reopenModelAliases, resourceReservations: options.resourceReservations, tenants: options.tenants ?? (options.conformance ? undefined : null) });
       const settings = structuredClone(options.settings ?? {});

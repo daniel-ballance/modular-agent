@@ -6,6 +6,8 @@ import type { Actor, Declaration, Harness, HistoryEntry, InputRequest, Interface
 import type { Agent } from "./agent.js";
 import { PATH, body, encode, errorCode, fail, frame, hash, httpError, json, object, parts, runInput, same, sse, type Code, type WireEvent } from "./agui-wire.js";
 import { checkedMessages, current, interrupt, messages, pending, reply, rights, watch, type InterruptView, type Principal } from "./agui-view.js";
+import { receiptId } from "@modular-agent/harness";
+import { runReceipt } from "./agui-receipt.js";
 import { HostRead, WaitClosures } from "./agui-host-reads.js";
 import { ThreadListing } from "./agui-list.js";
 import { Exchange } from "./agui-exchange.js";
@@ -77,11 +79,16 @@ export class AguiBinding {
       }
       const input = path === PATH + "/run" && method === "POST" ? runInput(await body(req), this.warn) : undefined;
       const match = method === "GET" && /^\/agui\/v1\/threads\/([\w-]+)(\/presence)?$/.exec(path ?? "");
-      const read = method === "GET" && /^\/agui\/v1\/threads\/([\w-]+)\/wait-closures(?:\?(.*))?$/.exec(path ?? "");
+      const read = method === "GET" && /^\/agui\/v1\/threads\/([\w-]+)\/(wait-closures|run-receipt)(?:\?(.*))?$/.exec(path ?? "");
       if (read) {
         const t = await this.host.locate(p, read[1]);
+        const reader = new HostRead(t, read[1], p), query = new URLSearchParams(read[3]);
+        if (read[2] === "run-receipt") {
+          try { return json(res, 200, await runReceipt(reader, query) ?? fail("output_withheld")); }
+          catch (e) { if ((e as {pendingErasure?:boolean}).pendingErasure) fail("not_found"); throw e; }
+        }
         this.track(res);
-        return this.waits.serve(new HostRead(t, read[1], p), res, new URLSearchParams(read[2]));
+        return this.waits.serve(reader, res, query);
       }
       const settings = method === "POST" && this.host.root.agent.declaration().approvalCoversNested === true && /^\/agui\/v1\/threads\/([\w-]+)\/settings$/.exec(path ?? "");
       const id = input?.threadId ?? (settings ? settings[1] : match && match[1]);
@@ -115,7 +122,7 @@ export class AguiBinding {
         const reader = new HostRead(t, id, p);
         await t.api.refreshApprovals(id);
         const watermark = await reader.view(), waitCursor = randomUUID();
-        const snap = await route.snapshot(true, undefined, undefined, undefined, {records:watermark.records, waitCursor});
+        const snap = await route.snapshot(true, undefined, undefined, undefined, {records:watermark.records, waitCursor, kept:watermark.kept});
         if (res.destroyed) fail("conflict");
         await route.deliverApprovals(presence, snap.view.waiting.questions);
         const check = await reader.view();
@@ -162,11 +169,11 @@ export class Route {
     }
     return result.filter(q => this.api.openRequests(this.id).some(r => r.id === q.wire.id));
   }
-  async snapshot(http: boolean, through?: string, cursor = randomUUID() as string, inclusive?: string, host?: {records:HistoryEntry[]; waitCursor:string}) {
+  async snapshot(http: boolean, through?: string, cursor = randomUUID() as string, inclusive?: string, host?: {records:HistoryEntry[]; waitCursor:string; kept:boolean}) {
     const branch = await this.branchGeneration();
     const records = host?.records ?? await this.records();
     const copy = await messages(this.api, this.id, this.p, inclusive ? records.slice(0, records.findIndex(e => e.id === inclusive) + 1) : records, this.c.hidden, through);
-    const view = { ...(host && {waitCursor:host.waitCursor}), threadId: this.id, declaration: this.t.agent.declaration(), messages: copy, cursor, lastMessageId: copy.at(-1)?.id ?? null,
+    const view = { ...(host && {waitCursor:host.waitCursor, ...(host.kept && {runReceipts:1})}), threadId: this.id, declaration: this.t.agent.declaration(), messages: copy, cursor, lastMessageId: copy.at(-1)?.id ?? null,
       waiting: { questions: (await this.questions(records)).map(q => q.wire), toolCalls: this.pending(records).filter(c => c.ended).map(({toolCallId, expiresAt}) => ({ toolCallId, expiresAt })) } };
     const gated = http ? await reply(this.api, this.id, this.p, "snapshot", view) : view;
     encode(gated);
@@ -175,7 +182,7 @@ export class Route {
     gated.messages = checkedMessages(copy, gated.messages);
     if (await this.branchGeneration() !== branch) fail("conflict");
     await this.current();
-    return { view: gated, cursor: { id: cursor, digest: hash(gated.messages), branch, http } };
+    return { view: gated, records, cursor: { id: cursor, digest: hash(gated.messages), branch, http } };
   }
   async deliverApprovals(presence: Presence | undefined, views: Interrupt[], surface: "snapshot" | "run" = "snapshot") {
     for (const q of views) {
@@ -221,6 +228,9 @@ export class Route {
     let conn: InterfaceToolConnection | undefined, exchange: Exchange | undefined;
     const scope = Symbol("AG-UI offer");
     try { await this.t.h.withInterfaceOffer(scope, async () => {
+      const watermark = await new HostRead(this.t,id,p).view();
+      const operationId = receiptId(id,p.actor.id,p.clientId,input.runId);
+      if (watermark.kept && watermark.order.includes(operationId)) fail("conflict");
       if (c.needsSnapshot) fail("cursor_expired");
       const seen = c.cursor;
       const echoed = req.headers["ma-history-cursor"];
@@ -279,15 +289,18 @@ export class Route {
         conn = this.t.agent.connectInterfaceTools(id, { actor: { id: p.actor.id, kind: p.actor.kind as "user", rights: p.actor.authority }, routeId: p.clientId, defer: true, onHandoff: request => deliver(request.call) });
         conn.advertise(offers);
       }
-      const x = exchange = new Exchange(this, res, input.runId, conn, fn => { deliver = fn; });
+      const key = "agui:" + JSON.stringify([p.clientId,input.runId]);
+      const claim = watermark.kept ? {id:operationId, thread:id, actor:p.actor.id, key,
+        answers:new Set(answers.map(a=>a.q.wire.id)), reports:new Set(reports.map(r=>r.call.toolCallId))} : undefined;
+      const x = exchange = new Exchange(this, res, input.runId, conn, fn => { deliver = fn; }, claim);
       c.active = x; this.binding.track(res); x.follow(); await x.readState();
       const parent = p.traceTrusted ? readTrace(req.headers, this.binding.host.traceStateVendors) : undefined;
-      await withTrace(parent, async () => {
+      const accept = () => withTrace(parent, async () => {
         if (content) {
           // The binding has no command or administration route, even for a direct operator.
           const text = content.filter(p => p.type === "text").map(p => p.text).join("").trim();
           if (text.startsWith("/") && api.commands().some(command => text.split(/\s/, 1)[0] === "/" + command.name)) fail("refused");
-          const receipt = await api.input(id, { content, key: "agui:" + JSON.stringify([p.clientId, input.runId]), when: "now", actorId: p.actor.id });
+          const receipt = await api.input(id, { content, key, when: "now", actorId: p.actor.id });
           if (receipt.duplicate) fail("conflict"); x.inputId = receipt.inputId; x.handled = receipt.handled;
         } else {
           const origin = [...origins][0];
@@ -298,8 +311,13 @@ export class Route {
           for (const { report } of reports) if ((await conn?.reportInterfaceToolResult(report))?.status !== "accepted") fail("conflict");
         }
       });
+      if (claim) await this.t.h.receiptOperation.run(claim, accept); else await accept();
       c.runs.add(input.runId); if (c.runs.size > 2048) c.runs.delete(c.runs.values().next().value!);
-      await x.start(); await x.done;
+      try { await x.start(); } catch (error) {
+        if (!res.headersSent) throw error;
+        x.error(error);
+      }
+      await x.done;
     }); } finally {
       exchange?.stop(); c.active = undefined; c.busy = false;
       if (c.held?.connection !== conn) conn?.disconnect();

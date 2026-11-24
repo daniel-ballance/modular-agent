@@ -1,5 +1,5 @@
 import type { ServerResponse } from "node:http";
-import { inputIdOf, isText, textOf, type AgentEvent, type HistoryEntry, type InputRequest, type InterfaceToolConnection, type ToolCall } from "@modular-agent/harness";
+import { inputIdOf, isText, textOf, type AgentEvent, type HistoryEntry, type InputRequest, type InterfaceToolConnection, type ReceiptOperation, type TerminalClass, type ReleaseProof, type ToolCall } from "@modular-agent/harness";
 import type { Interrupt } from "@ag-ui/core";
 import type { Route } from "./agui.js";
 import { assistantId, content, displayEntry, toolId } from "./agui-view.js";
@@ -28,7 +28,7 @@ export class Exchange {
   private stateSerial = 0; private lastStateSerial = 0;
   inputId?: string; turn?: string; origin?: string; handled?: boolean;
   constructor(readonly r: Route, readonly res: ServerResponse, readonly runId: string, readonly connection: InterfaceToolConnection | undefined,
-    readonly setDeliver: (fn: (call: ToolCall) => void) => void) {}
+    readonly setDeliver: (fn: (call: ToolCall) => void) => void, readonly claim?:ReceiptOperation) {}
   get boundary() { return { threadId: this.r.id, runId: this.runId }; }
   eligible(q: InputRequest) { return this.turn !== undefined && q.turnId === this.turn; }
   private include = (e: AgentEvent) => {
@@ -97,13 +97,23 @@ export class Exchange {
     if (this.closed || this.failing || this.res.destroyed || this.res.writableLength + Buffer.byteLength(data) > MAX * 2) fail("busy");
     this.res.write(data);
   }
-  private error(error: unknown) {
+  private prepareRelease(terminal:TerminalClass, proof:ReleaseProof) {
+    if (!this.claim?.bound) return;
+    const {id} = this.claim, {receipts} = this.r.t.h;
+    receipts.stage(id, proof);
+    return () => { try { receipts.released(id,terminal); } catch { /* Without a committed marker, report unknown. */ } };
+  }
+  error(error: unknown) {
     if (this.closed || this.failing) return;
     this.failing = true; this.r.c.cursor = undefined; this.r.c.needsSnapshot = true;
     const terminal = { type: "RUN_ERROR", code: errorCode(error), message: "Run could not be delivered." };
     void this.r.events([terminal]).catch(() => frame({ ...terminal, code: "output_withheld" })).then(frames => {
-      if (this.res.headersSent && !this.res.destroyed && !this.res.writableEnded) this.res.end(frames);
-    }).finally(() => this.stop());
+      if (this.res.headersSent && !this.res.destroyed && !this.res.writableEnded) {
+        const mark = this.prepareRelease("error",{error:JSON.parse(frames.slice(6)).code,sources:[]});
+        if (mark) this.res.once("finish",mark);
+        this.res.end(frames);
+      }
+    }).catch(() => this.res.destroy()).finally(() => this.stop());
   }
   stop() {
     if (this.closed) return; this.closed = true;
@@ -129,7 +139,7 @@ export class Exchange {
   private async event(e: AgentEvent) {
     const { r } = this; await this.select();
     const turn = e.turnId ?? e.data?.request?.turnId;
-    if (e.type === "entry.added" && e.data.kind === "inputHandedBack" && inputIdOf(e.data) === this.inputId) fail("conflict");
+    if (e.type === "entry.added" && e.data.kind === "inputHandedBack" && inputIdOf(e.data) === this.inputId && !this.handled) fail("conflict");
     if (!this.turn || turn && turn !== this.turn) return;
     const { stepId: step, data: d } = e;
     if (e.type.startsWith(statePrefix)) {
@@ -230,7 +240,11 @@ export class Exchange {
     const tail = terminal.map(frame).join("");
     const frames = groups.map(group => group.map(frame).join(""));
     const end = () => {
-      this.write(tail); this.finishedNormally = true; this.res.end(); r.remember(snap); r.c.delivered = new Set(questions.map(q => q.id)); this.stop();
+      const sources = snap.records.filter(e => !e.erased && (["input","response","toolResult"].includes(e.kind) ||
+        e.turnId === this.turn && ["turnEnd","inputRequest","toolStarted","modular-agent.interfaceHandoff"].includes(e.kind))).map(e=>e.id);
+      const mark = this.prepareRelease(outcome.type as TerminalClass, {through:snap.records.at(-1)?.id,cursor:snap.view.cursor,
+        questions:questions.map(q=>q.id), calls:calls.map(c=>c.toolCallId), sources});
+      this.write(tail); if (mark) this.res.once("finish",mark); this.finishedNormally = true; this.res.end(); r.remember(snap); r.c.delivered = new Set(questions.map(q => q.id)); this.stop();
     };
     if (kind === "interrupt" && connection && this.turn && !owned) r.c.held = { connection, turnId: this.turn, setDeliver: this.setDeliver };
     if (!calls.length) { if (owned && kind !== "interrupt") { owned.connection.disconnect(); r.c.held = undefined; } end(); return; }

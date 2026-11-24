@@ -109,7 +109,7 @@ export class WaitClosures {
         if (res.destroyed) return;
         this.remember(item.cursor, r, v, v.order.indexOf(close.id) + 1);
         if (!res.write(`data: ${encode(item)}\n\n`)) disconnect();
-      } catch { disconnect(); }
+      } catch { res.end(); }
     });
     const beat = setInterval(() => { void current().then(() => { if (!res.write(": waiting\n\n")) disconnect(); }, disconnect); }, 15_000).unref();
     res.once("close", () => { clearInterval(beat); off(); });

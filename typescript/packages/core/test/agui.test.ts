@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { fork } from "node:child_process";
+import { once } from "node:events";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -157,6 +159,32 @@ test("a closure cursor replays a decision to its own client without delivering a
     assert.deepEqual(item,{cursor:item.cursor,requestId:opened.requestId,reason:"revoked"});
     assert.notEqual(item.cursor,snap.waitCursor);
   } finally { await reader.cancel(); }
+});
+
+for (const stop of ["before-marker","after-marker"]) test(`SIGKILL ${stop}: read the released exchange after restart without reopening`, async t => {
+  const dir = await mkdtemp(join(tmpdir(),"receipt-flush-")); t.after(()=>rm(dir,{recursive:true,force:true}));
+  const token = randomUUID(); await writeFile(join(dir,"token"),token,{mode:0o600});
+  async function writer(stop:string) {
+    const child = fork(new URL("../../../../scripts/receipt-writer.mjs",import.meta.url),[dir,stop],{stdio:["ignore","ignore","inherit","ipc"]});
+    const ended = once(child,"exit"); t.after(()=>{ if (child.exitCode===null && child.signalCode===null) child.kill("SIGKILL"); });
+    const [origin] = await once(child,"message");
+    const http = (path:string,body?:unknown)=>fetch(`${origin}/agui/v1`+path,{method:body?"POST":"GET",headers:{authorization:"Bearer "+token,"content-type":"application/json"},body:body===undefined ? undefined : JSON.stringify(body)});
+    return {child,ended,http};
+  }
+  const first = await writer(stop), {threadId} = await (await first.http("/threads",{})).json() as any;
+  const runId = randomUUID(), post = first.http("/run",{threadId,runId,protocolVersion:"1.0",messages:[prompt("Begin")]});
+  await post.then(r=>r.text()).catch(()=>{}); assert.deepEqual(await first.ended,[null,"SIGKILL"]);
+  const second = await writer("read");
+  try { assert.deepEqual(await (await second.http(`/threads/${threadId}/run-receipt?runId=${runId}`)).json(),
+    {terminal:stop==="before-marker"?"unknown":"success",work:"completed"}); }
+  finally { second.child.send("stop"); await second.ended; }
+});
+
+test("a handled input binds its no-turn disposition before release",async t=>{
+  const dataDir=await mkdtemp(join(tmpdir(),"handled-receipt-")); t.after(()=>rm(dataDir,{recursive:true,force:true}));
+  const {request,thread,run} = await setup(t,{dataDir,durability:"kept",plugins:[definePlugin({name:"handler",hooks:{input:()=>({handle:true})}})]});
+  const id=await thread(), runId=randomUUID(); await events(await run(id,[prompt("Handle")],{runId}));
+  assert.deepEqual(await (await request(`/threads/${id}/run-receipt?runId=${runId}`)).json(),{terminal:"success",work:"handled"});
 });
 
 test("a withheld HTTP snapshot retires its cursor, even if the gate later opens",async t=>{
