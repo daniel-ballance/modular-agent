@@ -56,7 +56,11 @@ class WaitingApprovals:
         name = definition["name"]
         owner, source = getattr(self, "external_tool_names", {}).get(name, ("local", "files"))
         plugin = self.plugins.get(owner)
-        if plugin and source in getattr(plugin, "sources", {}):
+        if (
+            plugin
+            and definition.get("target") == owner + ":tools:" + source
+            and source in getattr(plugin, "sources", {})
+        ):
             cache = plugin.sources[source]["cache"]
             for item in cache.get(sid, cache.get(None, [])):
                 if item["name"] == name:
@@ -343,6 +347,8 @@ class WaitingApprovals:
                     "turn": e["turn"],
                     "step": e["step"],
                 }
+                if not allow and isinstance(d.get("reason"), str):
+                    decision["reason"] = d["reason"]
                 if allow:
                     decision["approvalView"] = {
                         "requestEntryId": e["id"],
@@ -418,8 +424,10 @@ class WaitingApprovals:
             for record in records:
                 d = record["data"]
                 if record["kind"] in ("question_answer", "question_closed"):
-                    disposition = d.get("reason") or (
-                        "declined" if d.get("declined") else "answered"
+                    disposition = (
+                        d["reason"]
+                        if record["kind"] == "question_closed"
+                        else ("declined" if d.get("declined") else "answered")
                     )
                     ot.question_event("close", sid, e["data"], disposition)
                     for key in list(self.approval_deliveries):

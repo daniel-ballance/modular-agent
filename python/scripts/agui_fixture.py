@@ -23,9 +23,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from modular_agent._agui_http import listen_asgi
 from ma_core.wire import entry_out
-from ma_harness import interface_tools
+from ma_harness import interface_tools, waiting_approvals
 from ma_questions import Questions
 from ma_standard.cli import Script
+from modular_agent.fixtures import count, fixture as sdk_fixture
 from modular_agent import ACP_RIGHTS, Plugin, create_agent, file_history, read_service_token
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -104,6 +105,8 @@ class Fixture:
         self.erasure = {}
         self.script = Script(json.loads(Path(os.environ["MODULAR_AGENT_SCRIPT"]).read_text()))
         self.control_tls = {}
+        self.waiting = self.name.startswith("waiting-")
+        self.redact_approval = None
         self.actors = []
         for role, token in config["tokenFiles"].items():
             other = self.project.parent if role == "project" else self.project
@@ -122,6 +125,8 @@ class Fixture:
                 }
             )
         self.offer = {**config["offer"], "callers": ["model"]}
+        if self.name.startswith("waiting-mixed"):
+            self.offer["hints"] = {"readOnly": True}
         self.exporter = InMemorySpanExporter()
         self.telemetry = TracerProvider()
         self.telemetry.add_span_processor(SimpleSpanProcessor(self.exporter))
@@ -198,6 +203,7 @@ class Fixture:
             hooks["step.after"] = mixed
         if self.name in (
             "approval-redacted",
+            "waiting-routes",
             "state-and-gate",
             "output-size",
             "error-gate",
@@ -216,6 +222,8 @@ class Fixture:
                 }
 
             self.script.request = private
+        if self.waiting:
+            plugins.append(sdk_fixture("counter", config={"path": str(self.root / "count")}))
         self.agent = await create_agent(
             project=self.project,
             data_dir=self.root,
@@ -226,8 +234,21 @@ class Fixture:
             several_actors=True,
             session_limits=True,
             plugins=plugins,
-            approval="all" if self.name.startswith("approval") else "off",
-            settings={"approval_timeout": 5},
+            approval="ask"
+            if self.name.startswith("waiting-mixed")
+            else "all"
+            if self.waiting or self.name.startswith("approval")
+            else "off",
+            max_approval_wait_ms=5000 if self.waiting else None,
+            late_answers_start_turns=self.waiting,
+            settings={
+                "approval_timeout": 5,
+                **(
+                    {"approvalWait": "live" if self.name == "waiting-live" else "untilDeadline"}
+                    if self.waiting
+                    else {}
+                ),
+            },
             interface_tools=[
                 {
                     "actor_id": "kit-owner",
@@ -334,6 +355,17 @@ class Fixture:
                 await self.pause(sid, "beforeHandoff")
             result = await original_keep(d, emit)
             log(self.batches, [sid, [e["id"] for e in entries]])
+            if self.waiting:
+                for e in entries:
+                    marker = {
+                        "question_answer": "answerCommitted",
+                        "tool_result": "reportCommitted",
+                        "turn_end": "continuationEnded",
+                    }.get(e["kind"])
+                    if marker and (
+                        marker != "continuationEnded" or not e["data"].get("open_calls")
+                    ):
+                        self.latch[sid, marker].set()
             if self.name == "crash-after-result" and any(
                 e["kind"] == "tool_result" and e.get("actor") for e in entries
             ):
@@ -401,7 +433,11 @@ class Fixture:
                 and value.get("type") == "TOOL_CALL_START"
             ):
                 await self.pause(payload["sessionId"], "beforeRelease")
-            if self.name == "approval-redacted" and method == "agui.interrupt":
+            if (
+                self.name == "approval-redacted"
+                or self.redact_approval
+                and self.redact_approval == d.get("clientId")
+            ) and method == "agui.interrupt":
                 value["message"] = "Redacted approval"
                 changed = True
             if self.name == "error-gate" and (
@@ -453,6 +489,8 @@ class Fixture:
                             if s == sid
                         ],
                         "model": rows(Path(os.environ["MODULAR_AGENT_SCRIPT_LOG"])),
+                        "project": str(self.project),
+                        "counter": count(self.root / "count"),
                         "dispatches": [cid for s, cid in rows(self.dispatches) if s == sid],
                         "warnings": self.warnings.fields,
                         "spans": [
@@ -488,8 +526,12 @@ class Fixture:
                     actor="kit-owner",
                     rights=sorted(set(ACP_RIGHTS) - {"tools"}),
                 )
+            case "approvalGate":
+                self.redact_approval = d["client"] if d["mode"] == "redact" else None
             case "advance":
                 self.timers.advance(d["milliseconds"] / 1000)
+                if self.waiting:
+                    await h.reconcile_waits(sid)
                 # Yield to the timer queue at the new instant, then wait for its
                 # recorded settlement and all runnable work, not a real timeout.
                 for (s, _), task in list(h.interface_timers.items()):
@@ -527,6 +569,11 @@ async def main():
         return (datetime.fromisoformat(deadline) - now).total_seconds() if deadline else None
 
     with (
+        patch.object(
+            waiting_approvals,
+            "clock_ms",
+            lambda: 1800000000000 + round(fixture.timers.elapsed * 1000),
+        ),
         patch.object(ma_questions, "asyncio", fixture.timers),
         patch.object(interface_tools, "asyncio", fixture.timers),
         patch.object(

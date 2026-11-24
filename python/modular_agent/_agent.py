@@ -351,7 +351,7 @@ class Agent:
             else "declined"
         )
         acting = {"acting_for": "user"} if actor != "user" else {}
-        if answer.kind == "value" and self._credentials.stage is not None and value != "allow":
+        if answer.kind == "value" and self._credentials.stage is not None:
             try:
                 question = await self._h.call(
                     "embedding",

@@ -290,6 +290,7 @@ def tool_status(result):
         "cancelled": "cancelled",
         "refused": "refused",
         "outcome_unknown": "outcomeUnknown",
+        "not_started": "notStarted",
     }.get(result.get("status"), "failed")
 
 

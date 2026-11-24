@@ -455,7 +455,8 @@ class Questions(Plugin):
     async def answer(self, d, emit):
         waiting = (await self._state(d["session"])).get(d["request"])
         if waiting and waiting.get("approvalWait"):
-            return await self.api._harness.waiting_answer(d, waiting)
+            with ot.question_answer(d["session"], waiting):
+                return await self.api._harness.waiting_answer(d, waiting)
         q = await self.validate(d, emit)
         declined = d.get("declined", d.get("value") in (None, "declined"))
         if q["kind"] == "secret" and not declined:
