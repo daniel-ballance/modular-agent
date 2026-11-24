@@ -182,7 +182,7 @@ async function main(argv: string[]) {
   const settingsPath = join(p.config, "settings.json");
   const global = await optionalJson(settingsPath);
   const approval = opts.approval ?? (global.approval === undefined ? undefined : approvalPolicy(global.approval, settingsPath));
-  const wait = global.approval_wait ?? "live";
+  const wait = global.approval_wait === undefined ? "live" : global.approval_wait;
   if (wait !== "live" && wait !== "untilDeadline") throw new Error(settingsPath + ": approval_wait must be live or untilDeadline");
   const maxApprovalWaitMs = approval === undefined ? undefined : policy.approvalWaitMaxMs;
   const script = await loadScript(process.env.MODULAR_AGENT_SCRIPT, process.env.MODULAR_AGENT_SCRIPT_LOG);

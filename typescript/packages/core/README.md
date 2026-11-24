@@ -16,6 +16,8 @@ try {
 
 ## What is checked
 
+The covered-approval run passed 640 workspace tests in each of the default and remote-parts configurations. Five live tests were skipped in each. Both demos passed without a model service. The [ma results](../ma/README.md#what-is-checked) give the binding counts and fixture limits.
+
 The [waiting approval tests](test/waiting-approval.test.ts) use a scripted Provider, a file counter and a clock controlled by the test. They run with the Runtime embedded and served. They check the default, the maximum, the bound view, refusal after changes to input, registration or rights, expiry on either side of an allow, erasure, and refusal to fork or move. Twelve process-group kills cover three cutoffs (ended origin, committed allow, counter effect) in both placements with kept and durable history. Reopen never increments the counter twice. The listener tests check fresh ACP polling and AG-UI presence opened after the turn.
 
 The ADR 0034 shared runner supports `poll`, `decide`, `clock`, `barrier`, `change` and `stop`. With the incoming shared definitions, all 28 scenarios passed with TypeScript tools embedded, on stdio and on WebSocket (84 runs). The extended AG-UI kit passed 34/34, including a race against ACP and mixed waits in both settlement orders. The in-process telemetry check passed 16/16 with the extended kit, including the eight waiting cases with and without export.
@@ -110,6 +112,14 @@ The SDK adds Ajv 8 (its [2020-12 entry point](https://ajv.js.org/json-schema.htm
 | 20. Interface-run tools | `createAgent({ interfaceTools })` registers model-only sources for configured actors and routes. An embedded Interface attaches to an open session, advertises exact definitions and receives executable calls only after the Harness commits the start and checkpoint. A valid report settles once through `tool.after` and queues a continuation without a new input. Embedded and served Runtimes opt in. ACP projects `interfaceTools: true` when supported but has no executor or reporting methods. AG-UI uses the deferred connection at run end. |
 | 21. Approvals that wait | An opted-in session can leave an unstarted server tool call open after its turn. The answer binds the exact delivered view. Only the continuation can dispatch, before the original deadline. |
 
+### Approvals that cover nested calls
+
+Pass `{ approval: "ask", approvalCoversNested: true }` to `createAgent`. The option is operator-set, not a session setting. The default is false. Without the approval plugin or without the option, the declaration omits `approvalCoversNested`.
+
+A top-level approval question has `coversNested: true` and the exact call. Show both to the approver. An explicit allow answers the approval check for all nested calls in that dispatch. Each child's `toolStarted.data.approvalCoveredBy` records the top-level `toolCallId` and its `requestId`. A read-only parent that ran without asking grants no coverage. A refusal, `never`, missing rights, invalid input and a refusal from another gate still stop the call. Recovery of a live parent needs a fresh allow.
+
+This also works for an approval that waits. Only the original request's view counts: enabling the option on reopen cannot upgrade a request that omitted `coversNested`. The [covered approval tests](test/covered-approval.test.ts) check children, grandchildren, unmarked views and interrupted dispatch.
+
 ### Approvals that wait
 
 Pass `durability: "kept"`, `dataDir`, `approval: "all"`, `questionsOutlastTurns: true` and `maxApprovalWaitMs: 60_000` to `createAgent` with a portable history store. `"durable"` also works. The operator maximum is a positive safe integer in milliseconds, not a project setting. An incompatible composition raises `invalid_composition`. Look for `agent.declaration().approvalsOutlastTurns === true`. This does not opt a session in.
@@ -133,7 +143,7 @@ if (question?.approvalWait === "untilDeadline") {
 }
 ```
 
-With several actors, retain the handle returned by `session.as(actorId)` for both delivery and answer. A plain `questions()` listing does not authorize a decision. ACP uses `_modular-agent/requests` and `_modular-agent/answer` on the same connection, never `session/request_permission` for a parked call. An AG-UI client opens presence, fetches the thread snapshot and sends `resume`. No tool report is needed. The default is `approvalWait: "live"`. Nested, direct and already started calls keep their existing rules. `ma` has no approval plugin and does not declare this feature.
+With several actors, retain the handle returned by `session.as(actorId)` for both delivery and answer. A plain `questions()` listing does not authorize a decision. ACP uses `_modular-agent/requests` and `_modular-agent/answer` on the same connection, never `session/request_permission` for a parked call. An AG-UI client opens presence, fetches the thread snapshot and sends `resume`. No tool report is needed. The default is `approvalWait: "live"`. Nested, direct and already started calls keep their existing rules. `ma` loads the plugin only when the operator configures [approval](../ma/README.md#approval).
 
 ### Interface-run tools
 
@@ -221,6 +231,11 @@ Use `encodeHistoryJson`, `parseHistoryJson` and `equalHistoryJson` to preserve o
 
 
 These are proposed documentation replacements, not changes to the specification.
+
+- **SDK Question.** In the [Questions](../../../docs/sdk/api.md#questions) field table, replace the `call` row with: “`call`: for an approval, the exact tool call, name and input. `coversNested?: true`: this allow also answers approval for nested calls in this dispatch. Omission grants no such coverage.”
+- **ACP permission and history.** In [Approvals](../../../docs/bindings/acp.md#approvals), replace “A valid `allow` permits only the displayed call” with “A valid `allow` permits the displayed call. If the bound request has `coversNested: true`, include `_meta["modular-agent"].coversNested: true` in the permission RPC and tell the approver the allow covers its nested calls in this dispatch”. In the history projection table, replace the `toolStarted`, `toolResult` data cell with: “`call`, `status` where present; on a covered nested start, `approvalCoveredBy: { toolCallId, requestId }`.”
+- **AG-UI interrupt.** In [Questions](../../../docs/bindings/agui.md#interrupts-and-frontend-tools), replace “For approvals include `toolCallId` and an exact unchanged name and arguments in the prompt.” with “For approvals include `toolCallId` and an exact unchanged name and arguments in the prompt. When the request has `coversNested: true`, include `metadata["modular-agent.coversNested"]: true` and tell the approver the allow covers the call's nested calls.”
+- **AG-UI settings.** The reference configuration requires a session approval option, but the AG-UI route table has no settings operation. Replace “This binding does not offer session close, cancellation, steering, rewind, administration or erasure methods.” with “For an agent that declares `approvalCoversNested`, `POST /agui/v1/threads/{threadId}/settings` takes exactly `{"approval": POLICY}` and returns the same object on success. Require `watch` and `settings` on that session. Accept only `off`, `ask`, `all` or `never`. This is not a run POST. The binding has no other administration, session close, cancellation, steering, rewind or erasure method.”
 
 
 - **Availability diagnostics.** In [Providers](../../../docs/sdk/api.md#providers), replace the `available` description with: “Whether the Provider can take requests now, for example whether it has credentials. A Provider may expose a separate diagnostic in process. The `/1` plugin binding reports only a boolean.” Claude can name an API-key source locally without extending the wire reply.

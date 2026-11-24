@@ -52,6 +52,8 @@ test("approval is global, the command line wins, and print has no answerer", asy
   await assert.rejects(readFile(join(p.work, "effect")), {code:"ENOENT"});
   await p.run("--approval", "off", "-p", "Write");
   assert.equal(await readFile(join(p.work, "effect"), "utf8"), "done");
+  await p.put(join(p.config, "settings.json"), '{"approval_wait":null}');
+  await assert.rejects(declare(), /settings.json.*approval_wait/);
   await p.put(join(p.config, "policy.json"), '{"approvalWaitMaxMs":0}');
   await assert.rejects(declare(), /policy.json.*approvalWaitMaxMs/);
   await assert.rejects(p.run("--approval", "sometimes"), /--approval.*approval/);

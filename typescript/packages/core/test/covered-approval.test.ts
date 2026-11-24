@@ -50,6 +50,39 @@ for (const reason of ["parent declined", "never", "read-only parent", "child gat
   });
 }
 
+test("never still refuses a child after the parent received an allow", async t => {
+  const questions: string[] = [];
+  let forbid!: () => Promise<void>, effects = 0;
+  const agent = await testAgent({ approval: "all", approvalCoversNested: true, script: [{ text: "Ready" }],
+    onQuestion(q) { questions.push(q.call!.name); return "allow"; },
+    tools: [tool({ name: "parent", description: "Parent", input, async run(_, c) {
+      await forbid(); return c.tools.call("child", {});
+    } }), tool({ name: "child", description: "Child", input, run: () => String(++effects) })] });
+  t.after(() => agent.close());
+  const session = await agent.session();
+  await session.prompt("Ready");
+  forbid = () => session.setSetting("approval", "never");
+  assert.equal((await session.callTool("parent", {})).status, "refused");
+  assert.deepEqual(questions, ["parent"]);
+  assert.equal(effects, 0);
+});
+
+test("a live SDK route cannot allow a request after a gate removes coversNested", async t => {
+  let effects = 0, delivered = 0;
+  const agent = await testAgent({ script, approval: "all", approvalCoversNested: true,
+    tools: [tool({ name: "parent", description: "Parent", input, run: () => String(++effects) })],
+    onQuestion() { delivered++; return "allow"; },
+    plugins: [definePlugin({ name: "redact-coverage", hooks: { output({ events }) {
+      if (events.some(e => (e.data as Question)?.coversNested)) {
+        return { redact: events.map(e => ({ ...e, data: { ...(e.data as Question), coversNested: undefined } })) };
+      }
+    } } })] });
+  t.after(() => agent.close());
+  const session = await agent.session();
+  assert.equal((await session.prompt("Run")).toolResults()[0].status, "refused");
+  assert.equal(delivered, 0); assert.equal(effects, 0);
+});
+
 test("the option without an approval plugin declares no coverage", async t => {
   const agent = await testAgent({ script: [], approvalCoversNested: true });
   t.after(() => agent.close());
