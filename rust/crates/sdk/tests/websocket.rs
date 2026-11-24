@@ -474,6 +474,103 @@ async fn served_tool_cancelled_during_its_final_poll_is_not_a_failure() -> modul
 }
 
 #[tokio::test]
+async fn served_tool_waits_for_its_exec_reply_before_answering_cancel() -> modular_agent::Result<()>
+{
+    use transport_websocket::{Connection, PLUGIN};
+
+    async fn send(conn: &Connection, frame: Value) {
+        conn.outgoing.send(frame.to_string()).await.unwrap();
+    }
+    async fn receive(conn: &mut Connection) -> Value {
+        let frame = conn
+            .incoming
+            .recv()
+            .await
+            .expect("plugin connection closed");
+        serde_json::from_str(&frame).unwrap()
+    }
+
+    let dir = tempfile::tempdir()?;
+    let bearer = token(dir.path(), "plugin", "disposable-callback-test-credential");
+    let plugin = Plugin::new("cancel-exec").tool(Tool::new("exec", "Call the host.").run(
+        |_: Value, cx: ToolContext| async move {
+            Ok(cx.environment().exec("echo unused", None).await?.output)
+        },
+    ));
+    let service = serve_websocket(
+        plugin,
+        ServeOptions {
+            listen: "127.0.0.1:0".into(),
+            token_file: bearer.clone(),
+            tls: None,
+            projects: vec![],
+        },
+    )
+    .await?;
+    let socket = transport_websocket::connect(&service.url, &bearer, PLUGIN).await?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        transport_websocket::run(socket, CancellationToken::new(), |mut conn| async move {
+            send(
+                &conn,
+                json!({"jsonrpc":"2.0","method":"plugin/initialize","id":1,"params":{
+                    "binding":"modular-agent-plugin/1","host":{"name":"test","version":"1"},
+                    "project":dir.path(),"home":dir.path(),"config":{}
+                }}),
+            )
+            .await;
+            let init = receive(&mut conn).await;
+            assert!(init["result"].is_object(), "{init}");
+            send(
+                &conn,
+                json!({"jsonrpc":"2.0","method":"tools/call","id":2,"params":{
+                    "toolSource":"tools","project":dir.path(),"sessionId":"s1",
+                    "call":{"id":"call","name":"exec","startedBy":"model","input":{}}
+                }}),
+            )
+            .await;
+            let exec = receive(&mut conn).await;
+            assert_eq!(exec["method"], "host/env/exec", "{exec}");
+            assert_eq!(exec["params"]["parentRequestId"], 2);
+            send(
+                &conn,
+                json!({"jsonrpc":"2.0","method":"$/cancel","params":{"id":2}}),
+            )
+            .await;
+
+            // The callback cancel is the barrier: release the reply only after
+            // the plugin has acted on the parent cancel. Ping while it is held.
+            assert_eq!(
+                receive(&mut conn).await,
+                json!({"jsonrpc":"2.0","method":"$/cancel","params":{"id":exec["id"]}})
+            );
+            send(&conn, json!({"jsonrpc":"2.0","method":"$/ping","id":3})).await;
+            let before = receive(&mut conn).await;
+            send(
+                &conn,
+                json!({"jsonrpc":"2.0","id":exec["id"],"result":{
+                    "exitCode":0,"output":"","timedOut":false
+                }}),
+            )
+            .await;
+            send(&conn, json!({"jsonrpc":"2.0","method":"$/ping","id":4})).await;
+            // The normal exec answer is not unsolicited. The connection must
+            // survive it and reply to both the cancelled parent and the ping.
+            let mut after = [receive(&mut conn).await, receive(&mut conn).await];
+            after.sort_by_key(|frame| frame["id"].as_u64());
+            assert_eq!(before, json!({"jsonrpc":"2.0","id":3,"result":{}}));
+            assert_eq!(after[0]["id"], 2);
+            assert_eq!(after[0]["error"]["data"]["code"], "cancelled");
+            assert_eq!(after[1], json!({"jsonrpc":"2.0","id":4,"result":{}}));
+        }),
+    )
+    .await
+    .expect("served tool did not settle");
+    service.close().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn service_registration_and_pending_tool_loss() -> modular_agent::Result<()> {
     use std::{sync::Arc, time::Duration};
     use tokio::{sync::Notify, time::timeout};
