@@ -280,7 +280,7 @@ The agent MUST use exactly the following options in `session/request_permission`
 ]
 ```
 
-The permission request MUST show the exact current call name as `toolCall.title` and input as `toolCall.rawInput`, bound to its `toolCallId` and question id. Neither a separate call notice nor a previous gate pass supplies that view. The agent MUST obey [core approval view and route rules](../contracts.md#approval-policy). A valid `allow` permits only the displayed call; valid `refuse` or explicit permission cancellation declines. A failed route cannot displace a valid answer, and this method offers no persistent approval.
+The permission request MUST show the exact current call name as `toolCall.title` and input as `toolCall.rawInput`, bound to its `toolCallId` and question id. Neither a separate call notice nor a previous gate pass supplies that view. The agent MUST obey [core approval view and route rules](../contracts.md#approval-policy). A valid `allow` permits the displayed call. If the bound request has `coversNested: true`, include `_meta["modular-agent"].coversNested: true` in the permission RPC and tell the approver the allow covers its nested calls in this dispatch; valid `refuse` or explicit permission cancellation declines. A failed route cannot displace a valid answer, and this method offers no persistent approval.
 
 **Waiting approval (accepted, not yet implemented).** In both ACP versions, `session/request_permission` is live-only. For a [waiting approval](../contracts.md#approvals-that-wait) the agent MUST NOT issue or keep this RPC. Return the normal prompt settlement with the call still open. A client can disconnect. Later an eligible actor opens the session on an authenticated connection, polls `_modular-agent/requests`, shows its unchanged approval view and sends `_modular-agent/answer` on that connection with the request ID and `value: "allow"` or a decline. Recheck that actor's current rights and presence at the answer. Acceptance acknowledges the decision, not execution. A disconnect, loss of representation or changed or withheld view invalidates that route's delivery. A new connection must poll afresh. History, a stale RPC response and another actor's poll do not qualify; use the normal negative acknowledgement. Nothing changes for live-only sessions.
 
@@ -351,7 +351,7 @@ An ACP `Entry` is a recipient projection of a [shared history entry](data.md#his
 |---|---|
 | `inputAccepted`, `input`, `inputHandedBack` | `inputIds`, `when`, `content`, `releasedBy`, `reason`, `parked` where present; no input keys |
 | `turnStart`, `modelRequest` | `startedBy`, `model` where present |
-| `toolStarted`, `toolResult` | `call`, `status` where present |
+| `toolStarted`, `toolResult` | `call`, `status` where present; on a covered nested start, `approvalCoveredBy: { toolCallId, requestId }` |
 | `inputRequest`, `inputAnswer` | `request` using [Request](#request) below, or the shared Answer without `stored` or the private `approvalView` binding |
 | `resultFeedback` | `reason` |
 | `turnEnd` | `outcome`, `result`, `usage` |

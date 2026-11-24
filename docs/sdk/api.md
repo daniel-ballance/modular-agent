@@ -203,6 +203,7 @@ onQuestion(question: Question, context) -> Answer
 | `id`, `sessionId`, `kind` | `kind` is `approval`, `choice`, `text`, `link` or `secret` |
 | `question`, `details`, `options` | what to show |
 | `call` | for an approval: the exact tool call, name and input |
+| `coversNested?` | `true`: this allow also answers approval for nested calls in this dispatch ([covered approvals](../contracts.md#approvals-that-cover-nested-calls)). Omission grants no such coverage |
 | `deadline` | when it closes, if timed |
 | `approvalWait` (accepted, not yet implemented) | `untilDeadline` only for a declared waiting approval, otherwise absent |
 
