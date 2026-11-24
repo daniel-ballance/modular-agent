@@ -71,6 +71,7 @@ export class Store {
         runId TEXT NOT NULL, kind TEXT NOT NULL, stream TEXT NOT NULL DEFAULT 'open', terminal TEXT, work TEXT, UNIQUE(route,thread,runId));
       CREATE TABLE IF NOT EXISTS posts(id INTEGER PRIMARY KEY, event INTEGER NOT NULL REFERENCES events(seq), route INTEGER REFERENCES routes(id), kind TEXT NOT NULL, text TEXT NOT NULL, callId TEXT, UNIQUE(route,callId));
       CREATE TABLE IF NOT EXISTS wait_feeds(agent TEXT NOT NULL, thread TEXT NOT NULL, cursor TEXT NOT NULL, PRIMARY KEY(agent,thread));
+      CREATE TABLE IF NOT EXISTS followed_questions(route INTEGER NOT NULL REFERENCES routes(id), question TEXT NOT NULL, PRIMARY KEY(route,question));
       CREATE TABLE IF NOT EXISTS inbox(route INTEGER REFERENCES routes(id), question TEXT NOT NULL, view TEXT NOT NULL, status TEXT NOT NULL, PRIMARY KEY(route,question));`);
   }
   close() {
@@ -200,11 +201,21 @@ export class Store {
       this.queue(r.event, 'verifier', r.attempt, task, revision);
     else throw Error('This hand-off is not allowed');
   }
+  expectsClosure(r: Route) {
+    // This checkpoint is independent of the cached prompts. An idle listing
+    // is not permission to stop the agent before consuming its last decision.
+    return !!this.db.prepare('SELECT 1 FROM followed_questions WHERE route=? LIMIT 1').get(r.id);
+  }
   observe(r: Route, questions: Question[]) {
+    this.atomic(() => this.recordQuestions(r, questions));
+  }
+  private recordQuestions(r: Route, questions: Question[]) {
     const upsert = this.db.prepare(
       `INSERT INTO inbox VALUES(?,?,?,'open') ON CONFLICT(route,question) DO UPDATE SET view=excluded.view WHERE status='open'`
     );
-    for (const q of questions) upsert.run(r.id, q.id, JSON.stringify(q));
+    const follow = this.db.prepare('INSERT OR IGNORE INTO followed_questions VALUES(?,?)');
+    for (const q of questions)
+      if (upsert.run(r.id, q.id, JSON.stringify(q)).changes) follow.run(r.id, q.id);
   }
   waitCursor(r: Route) {
     return this.db.prepare('SELECT cursor FROM wait_feeds WHERE agent=? AND thread=?')
@@ -213,14 +224,15 @@ export class Store {
   seedWaits(r: Route, cursor: string, questions: Question[]) {
     this.atomic(() => {
       this.db.prepare('INSERT OR IGNORE INTO wait_feeds VALUES(?,?,?)').run(r.agent, r.thread, cursor);
-      this.observe(r, questions);
+      this.recordQuestions(r, questions);
     });
   }
   resetWaits(r: Route, cursor: string, questions: Question[]) {
     this.atomic(() => {
       // An expired cursor loses the gap. The snapshot can restore waits, not reasons.
       this.db.prepare("DELETE FROM inbox WHERE route=? AND status='open'").run(r.id);
-      this.observe(r, questions);
+      this.db.prepare('DELETE FROM followed_questions WHERE route=?').run(r.id);
+      this.recordQuestions(r, questions);
       this.db.prepare('INSERT OR REPLACE INTO wait_feeds VALUES(?,?,?)').run(r.agent, r.thread, cursor);
     });
   }
@@ -228,6 +240,7 @@ export class Store {
     this.atomic(() => {
       if ('requestId' in item) {
         const id = item.requestId;
+        this.db.prepare('DELETE FROM followed_questions WHERE route=? AND question=?').run(r.id, id);
         // The host may have missed the opening interrupt. Do not reconstruct a prompt.
         const changed = this.db.prepare(`INSERT INTO inbox VALUES(?,?,?,?)
           ON CONFLICT(route,question) DO UPDATE SET status=excluded.status WHERE status='open'`)
@@ -241,12 +254,6 @@ export class Store {
       this.db.prepare('UPDATE wait_feeds SET cursor=? WHERE agent=? AND thread=?')
         .run(item.cursor, r.agent, r.thread);
     });
-  }
-  questions(r: Route): Question[] {
-    return this.db
-      .prepare("SELECT view FROM inbox WHERE route=? AND status='open'")
-      .all(r.id)
-      .map((x) => JSON.parse(String(x.view)));
   }
   inbox() {
     return this.db

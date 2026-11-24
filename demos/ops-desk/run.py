@@ -93,7 +93,7 @@ class Desk:
     def settled(self):
         def done():
             s = self.state()
-            return s if s['routes'] and all(r['state'] in ('done', 'reopened') for r in s['routes']) else None
+            return s if s['routes'] and all(r['state'] == 'done' for r in s['routes']) else None
         return wait(done, 'settled routes')
 
     def tree(self, agent, *args):
@@ -276,6 +276,8 @@ def run(d, case):
             # Commit the decision directly on the coder while no desk can observe the run.
             subprocess.run(['node', DEMO / 'scripts/decline.mjs', q['thread'], q['id']],
                            cwd=d.root, check=True, timeout=20)
+            with sqlite3.connect(d.root / 'desk.sqlite') as db:
+                db.execute('DELETE FROM inbox')  # no prompt cache; only the feed has the reason
             d.proc, d.url = d.launch()
             s = d.settled()
             check([(item['id'], item['status']) for item in s['inbox']] == [(q['id'], 'declined')],
@@ -287,6 +289,7 @@ def run(d, case):
         with sqlite3.connect(d.root / 'desk.sqlite') as db:
             db.execute('DELETE FROM inbox')
             db.execute('UPDATE runs SET terminal=NULL,work=NULL')
+            db.execute('UPDATE wait_feeds SET cursor=? WHERE agent=? AND thread=?', ('foreign', 'coder', q['thread']))
             db.execute('UPDATE routes SET thread=NULL WHERE id=?', (q['route'],))
         d.proc, d.url = d.launch()
         again = d.approval()
@@ -303,6 +306,10 @@ def run(d, case):
             marker = d.root / 'held-handoff'
             pid = wait(lambda: int(marker.read_text()) if marker.exists() and marker.stat().st_size else None,
                        'queued hand-off before its tool result')
+            # This agent does not keep feed cursors across its own restart. Drain
+            # the decision we assert below before taking that reader away.
+            wait(lambda: any(i['id'] == q['id'] and i['status'] == 'answered' for i in d.state()['inbox']),
+                 'committed allow in the closure feed')
             os.kill(pid, signal.SIGKILL)
             # The in-flight HTTP exchange can fail, never resubmit the answer.
             try:
@@ -323,13 +330,14 @@ def run(d, case):
         check(posts[3]['text'] == 'FAIL: percentage(135): expected 100, got 135', 'first verdict is not the failed test')
     check([p['kind'] for p in posts] == kinds, 'unexpected post order: ' + str([p['kind'] for p in posts]))
     check(posts[-1]['text'] == f"PASS: {3 if case == 'verification' else 2} percentage checks passed", 'wrong pass verdict')
-    check(not any(q['status'] == 'open' for q in s['inbox']), 'inbox still has open questions')
+    check(all(q['status'] == 'answered' for q in s['inbox']), 'missing allowed decision from feed')
     check([r['agent'] for r in s['routes']] == ['triage', 'coder', 'verifier'] + (['coder', 'verifier'] if case == 'verification' else []), 'duplicate or missing route')
     check(s['cursor'] == 1, 'wrong listener cursor')
     commit = d.tree('coder', 'rev-parse', 'HEAD')
     check(commit != seed and commit == d.tree('verifier', 'rev-parse', 'HEAD') == s['routes'][-1]['revision'],
           'verifier did not test the coder commit')
     check(d.tree('verifier', 'diff', '--name-only', 'seed', 'HEAD').splitlines() == ['change.txt', 'limits.py'] and
+          d.tree('coder', 'rev-list', '--count', 'seed..HEAD') == ('2' if case == 'verification' else '1') and
           len(s['inbox']) == (2 if case == 'verification' else 1),
           'expected both file changes and just one approval per script')
     if case == 'restart':
@@ -415,7 +423,7 @@ def run_live(d, approve):
         seen = len(s['posts'])
         if approve == 'auto':
             allow_approvals(d, s['inbox'])
-        if s['routes'] and all(r['state'] in ('done', 'reopened') for r in s['routes']):
+        if s['routes'] and all(r['state'] == 'done' for r in s['routes']):
             check_live_result(d, s)
             return
         time.sleep(0.25)

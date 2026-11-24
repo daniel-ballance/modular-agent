@@ -53,6 +53,15 @@ async function* events(res: Response) {
     await reader.cancel().catch(() => {});
   }
 }
+async function* closureItems(res: Response): AsyncGenerator<WaitClosure> {
+  for await (const item of events(res)) {
+    const question = typeof item.requestId === 'string' && ['answered', 'declined', 'expired', 'revoked',
+      'cancelled', 'noLongerAnswerable', 'refused', 'superseded'].includes(item.reason);
+    const tool = typeof item.toolCallId === 'string' && item.reason === 'settled' && typeof item.status === 'string';
+    if (typeof item.cursor !== 'string' || !item.cursor || (!question && !tool)) throw Error('Invalid wait closure');
+    yield item;
+  }
+}
 export class Agui {
   constructor(
     readonly origin: string,
@@ -138,16 +147,10 @@ export class Agui {
       throw e;
     }
   }
-  async *closures(r: Route, after: string, signal: AbortSignal): AsyncGenerator<WaitClosure> {
+  async closures(r: Route, after: string, signal: AbortSignal) {
     const path = this.path(r) + '/wait-closures?' + new URLSearchParams({ after });
     const res = await this.request(path, r.parent, { signal, headers: { Accept: 'text/event-stream' } });
-    for await (const item of events(res)) {
-      const question = typeof item.requestId === 'string' && ['answered', 'declined', 'expired', 'revoked',
-        'cancelled', 'noLongerAnswerable', 'refused', 'superseded'].includes(item.reason);
-      const tool = typeof item.toolCallId === 'string' && item.reason === 'settled' && typeof item.status === 'string';
-      if (typeof item.cursor !== 'string' || !item.cursor || (!question && !tool)) throw Error('Invalid wait closure');
-      yield item;
-    }
+    return closureItems(res);
   }
   async presence(r: Pick<Route, 'thread' | 'parent'>, stop: AbortController, lost: () => void) {
     const signal = AbortSignal.any([this.signal, stop.signal]);

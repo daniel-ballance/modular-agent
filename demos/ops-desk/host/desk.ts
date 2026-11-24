@@ -12,6 +12,7 @@ class Slot {
   presence?: AbortController;
   feed?: AbortController;
   waiting = false;
+  answering = false;
   ended = false;
   recovering = false;
   idle?: NodeJS.Timeout;
@@ -123,14 +124,14 @@ export class Desk {
       if (!this.finishFromReceipt(r)) this.finish(a, 'unconfirmed', 'Work is unsettled and the thread is not listed.');
       return;
     }
-    if (listed.turn === 'none' && !listed.questions && !listed.toolCalls && !this.db.questions(r).length &&
+    if (listed.turn === 'none' && !listed.questions && !listed.toolCalls && !this.db.expectsClosure(r) &&
         this.finishFromReceipt(r)) return;
     // The listing locates work. Only the new presence and snapshot deliver a parked approval.
     await this.holdPresence(s, api, r);
     const current = await api.snapshot(r);
     this.db.seedWaits(r, current.waitCursor, current.waiting.questions);
     s.waiting = true;
-    this.follow(a, api, r);
+    await this.follow(a, api, r);
     this.poll(a);
   }
   private finishFromReceipt(r: Route) {
@@ -212,7 +213,7 @@ export class Desk {
       this.db.seedWaits(r, view.waitCursor, view.waiting.questions);
       await this.holdPresence(s, api, r);
       const outcome = await this.exchange(api, r, view);
-      this.outcome(a, api, outcome);
+      await this.outcome(a, api, outcome);
     } catch (e) {
       await this.problem(a, e);
     }
@@ -250,48 +251,68 @@ export class Desk {
     }
     this.finish(a, 'failed', `${a}: ${e instanceof Error ? e.message : 'operation failed'}`);
   }
-  private outcome(
+  private async outcome(
     a: Agent,
     api: Agui,
     outcome: { type: string; interrupts?: Question[]; pendingToolCallIds?: string[] }
   ) {
     const s = this.slots[a];
-    if (outcome.type === 'success' && (outcome.pendingToolCallIds?.length || this.db.questions(s.route!).length)) {
+    if (outcome.type === 'success' && (outcome.pendingToolCallIds?.length || this.db.expectsClosure(s.route!))) {
       // A successful answer exchange is not a closure notice.
       s.waiting = true;
-      this.follow(a, api, s.route!);
+      await this.follow(a, api, s.route!);
       this.poll(a);
     } else if (outcome.type === 'success') this.finish(a, 'done');
     else if (outcome.type === 'interrupt' && outcome.interrupts?.length) {
       this.db.observe(s.route!, outcome.interrupts);
       s.waiting = true;
-      this.follow(a, api, s.route!);
+      await this.follow(a, api, s.route!);
       this.notify();
       this.poll(a);
     } else this.finish(a, 'failed', `${a}: ${outcome.type}`);
   }
-  private follow(a: Agent, api: Agui, r: Route) {
+  private async follow(a: Agent, api: Agui, r: Route) {
     const s = this.slots[a];
     if (s.feed) return;
     const stop = (s.feed = new AbortController());
     const signal = AbortSignal.any([api.signal, stop.signal]);
-    const read = async () => {
+    const open = () => api.closures(r, this.db.waitCursor(r)!, signal);
+    const expired = (e: unknown) =>
+      e instanceof HttpError && e.status === 409 && e.message.endsWith('cursor_expired');
+    const reset = async () => {
+      if (signal.aborted) return;
+      const view = await api.snapshot(r);
+      this.db.resetWaits(r, view.waitCursor, view.waiting.questions);
+      this.notify();
+    };
+    let first;
+    try {
+      // Resolve an expired checkpoint before this host can send an answer.
+      // Otherwise the reset snapshot might land after the new decision.
+      first = await open().catch(async e => {
+        if (!expired(e)) throw e;
+        await reset();
+        return open();
+      });
+    } catch (e) {
+      s.feed = undefined;
+      stop.abort();
+      throw e;
+    }
+    const read = async (items?: Awaited<ReturnType<typeof open>>) => {
       while (!signal.aborted) {
         try {
-          for await (const item of api.closures(r, this.db.waitCursor(r)!, signal)) {
+          const stream = items ?? await open();
+          items = undefined;
+          for await (const item of stream) {
             if (signal.aborted) return;
             this.db.waitClosed(r, item);
             this.notify();
           }
         } catch (e) {
           if (signal.aborted) return;
-          if (e instanceof HttpError && e.status === 409 && e.message.endsWith('cursor_expired')) {
-            await s.serial(async () => {
-              if (signal.aborted) return;
-              const view = await api.snapshot(r);
-              this.db.resetWaits(r, view.waitCursor, view.waiting.questions);
-              this.notify();
-            });
+          if (expired(e)) {
+            await s.serial(reset);
             continue;
           }
           if (!(e instanceof LostExchange || (e instanceof TypeError && e.cause))) throw e;
@@ -300,7 +321,7 @@ export class Desk {
         await delay(100, undefined, { signal });
       }
     };
-    void read().catch(e => s.serial(async () => {
+    void read(first).catch(e => s.serial(async () => {
       if (!signal.aborted) await this.problem(a, e);
     }));
   }
@@ -314,7 +335,7 @@ export class Desk {
             try {
               // Listing tracks work, not closure reasons. Do not read a snapshot to poll a question.
               const r = s.route;
-              if (r && s.waiting && !this.db.questions(r).length && (s.ended || s.recovering)) {
+              if (r && s.waiting && !this.db.expectsClosure(r) && (s.ended || s.recovering)) {
                 const api = await s.process!.ready;
                 const latest = this.db.runs(r.id).at(-1);
                 if (latest && (s.recovering || latest.work === 'unsettled'))
@@ -325,7 +346,7 @@ export class Desk {
                   listed = true;
                   if (row.waiting.questions) {
                     await this.refresh(a);
-                    this.follow(a, api, r);
+                    await this.follow(a, api, r);
                   } else if (!row.waiting.toolCalls && row.waiting.turn === 'none')
                     this.finishFromReceipt(r);
                   break;
@@ -389,10 +410,11 @@ export class Desk {
         )
           throw new HttpError(400, 'Invalid answer');
       }
+      s.answering = true;
       try {
         const api = await s.process!.ready;
         const outcome = await this.exchange(api, r, view, answers);
-        this.outcome(r.agent, api, outcome);
+        await this.outcome(r.agent, api, outcome);
       } catch (e) {
         if (!(e instanceof HttpError)) {
           await this.problem(r.agent, e);
@@ -402,6 +424,9 @@ export class Desk {
           );
         }
         throw e;
+      } finally {
+        s.answering = false;
+        this.notify();
       }
     });
   }
@@ -409,7 +434,7 @@ export class Desk {
     const views = await Promise.all(
       agents.filter((a) => {
         const s = this.slots[a];
-        return s.waiting && s.route && this.db.questions(s.route).length;
+        return !s.answering && s.waiting && s.route && this.db.expectsClosure(s.route);
       }).map((a) => this.slots[a].serial(() => this.refresh(a)))
     );
     const inbox = this.db.inbox().map((q) => ({
