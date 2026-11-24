@@ -57,15 +57,35 @@ interface PluginHostScope {
 	/** Exact projects granted to this host. */
 	projects?: readonly string[];
 }
-export type PluginListenOptions = ListenOptions & (PluginHostScope | {
+export type AnonymousPluginListenOptions = ListenOptions & (PluginHostScope | {
 	/** Explicit operator provisioning; no client-supplied trust scopes. */
 	hosts: readonly (PluginHostScope & { projects: readonly string[] })[];
 });
 
+export interface NamedCaller { readonly callerId:string }
+export interface NamedPluginListenOptions extends ListenOptions {
+	callers: readonly (NamedCaller & {tokenFile:string})[];
+}
+export type PluginListenOptions = AnonymousPluginListenOptions | NamedPluginListenOptions;
+
 interface ServiceConnection { ws: WebSocket; stateDir: string; projects?: ReadonlySet<string> }
 
 /** Create fresh plugin registrations and handlers for each authenticated connection. */
-export async function servePluginService(makePlugins: () => ServeOptions, options: PluginListenOptions) {
+export function servePluginService(makePlugins: () => ServeOptions, options:AnonymousPluginListenOptions):Promise<import("./websocket.js").ServiceServer>;
+export function servePluginService(makePlugins: (caller:NamedCaller) => ServeOptions, options:NamedPluginListenOptions):Promise<import("./websocket.js").ServiceServer>;
+export async function servePluginService(makePlugins: (() => ServeOptions) | ((caller:NamedCaller) => ServeOptions), options: PluginListenOptions) {
+	if ("callers" in options) {
+		try {
+			const {callers} = options;
+			if ("tokenFile" in options || "hosts" in options || typeof makePlugins !== "function" || !Array.isArray(callers) || !callers.length ||
+				Array.from(callers).some(c=>!c || typeof c.callerId !== "string" || !c.callerId || typeof c.tokenFile !== "string" || !c.tokenFile) ||
+				new Set(callers.map(c=>c.callerId)).size !== callers.length) throw new Error("Invalid named callers");
+			const table = callers.map(({callerId,tokenFile})=>({tokenFile,value:{callerId,
+				stateDir: join(dirname(tokenFile), ".ma-callers", createHash("sha256").update(callerId).digest("hex"))}}));
+			return await listenWebSocket(options, PLUGIN_PROTOCOL, table, (ws, {callerId,stateDir}) =>
+				servePlugins(makePlugins({callerId}), {ws,stateDir}));
+		} catch (cause) { throw Object.assign(new Error("Invalid named plugin listener", {cause}), {code:"invalid_composition"}); }
+	}
 	const scoped = "hosts" in options;
 	const hosts = scoped ? options.hosts : [options];
 	if (!Array.isArray(hosts) || !hosts.length || scoped && "tokenFile" in options) throw new Error("Invalid served plugin hosts");
@@ -81,7 +101,7 @@ export async function servePluginService(makePlugins: () => ServeOptions, option
 		return { tokenFile, value: { allowed, stateDir: stateDir ?? `${tokenFile}.state` } };
 	}));
 	return listenWebSocket(options, PLUGIN_PROTOCOL, credentials, (ws, scope, key) =>
-		servePlugins(makePlugins(), { ws, projects: scope.allowed, stateDir: join(scope.stateDir, key) }));
+		servePlugins((makePlugins as () => ServeOptions)(), { ws, projects: scope.allowed, stateDir: join(scope.stateDir, key) }));
 }
 
 async function validateResume(input: TurnInput, host: RuntimeHost, interrupted: InterruptedTurn, runtime: Runtime) {
