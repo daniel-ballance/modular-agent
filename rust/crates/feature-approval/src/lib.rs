@@ -17,11 +17,11 @@ impl Plugin for ApprovalPlugin {
                 Box::pin(async move {
                     let data = api.snapshot(&scope.session)?;
                     let settings = &data.settings;
-                    let policy = settings["approval"].as_str().unwrap_or(if covers_nested {
-                        "ask_always"
-                    } else {
-                        "off"
-                    });
+                    let policy = match settings.get("approval") {
+                        Some(value) => value.as_str().unwrap_or("never_ask"),
+                        None if covers_nested => "ask_always",
+                        None => "off",
+                    };
                     let refuse = |text: &str| HookResult {
                         refused: Some(text.into()),
                         ..HookResult::default()

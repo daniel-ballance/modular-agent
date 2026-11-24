@@ -138,6 +138,17 @@ impl AgentApi for Relay {
     fn commands(&self) -> Vec<String> {
         self.inner.commands()
     }
+    async fn approval_dispatch(
+        &self,
+        scope: &Scope,
+        call: &ToolCall,
+        cover: Option<&ApprovalCover>,
+        after_start: bool,
+    ) -> Result<Option<ToolStatus>> {
+        self.inner
+            .approval_dispatch(scope, call, cover, after_start)
+            .await
+    }
     fn covering_approval(&self, scope: &Scope, call: &ToolCall) -> Option<ApprovalCover> {
         self.inner.covering_approval(scope, call)
     }

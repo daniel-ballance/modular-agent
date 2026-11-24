@@ -177,7 +177,8 @@ pub async fn run(agent: &Agent, options: TerminalOptions, questions: Questions) 
         } else if let Some(text) = prompt {
             // A batch invocation has no approver. Do not park new calls, and
             // do not close someone else's wait by changing its session mode.
-            let waiting = session.settings()?["approvalWait"] == "untilDeadline";
+            let waiting = session.settings()?["approvalWait"] == "untilDeadline"
+                && agent.declaration()?["approvalsOutlastTurns"] == true;
             if waiting {
                 if session
                     .questions()?

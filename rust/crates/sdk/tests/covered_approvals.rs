@@ -138,6 +138,40 @@ async fn only_an_explicit_parent_allow_answers_the_nested_gate() -> Result<()> {
 }
 
 #[tokio::test]
+async fn never_still_refuses_if_selected_while_a_direct_parent_is_asking() -> Result<()> {
+    let agent = test_agent()
+        .approval(Approval::All)
+        .approval_covers_nested(true)
+        .tool(calls("outer", "inner"))
+        .tool(Tool::new("inner", "Finish").run(|_: Value, _| async { Ok("finished") }))
+        .build()
+        .await?;
+    let session = agent.session().await?;
+    let (shown, mut views) = tokio::sync::mpsc::unbounded_channel();
+    session.on_question(move |q| {
+        shown.send(q).unwrap();
+        std::future::pending::<Answer>()
+    })?;
+    let decide = async {
+        let q = views.recv().await.unwrap();
+        assert!(q.covers_nested);
+        session.set_setting("approval", json!("never"))?;
+        session.answer(&q.id, Answer::Allow).await
+    };
+    let (call, decision) = tokio::join!(session.call_tool("outer", json!({})), decide);
+    decision?;
+    assert_eq!(call?.status, ToolStatus::Refused);
+    assert!(
+        !session
+            .history()
+            .await?
+            .iter()
+            .any(|e| e["data"]["call"]["name"] == "inner")
+    );
+    agent.close().await
+}
+
+#[tokio::test]
 async fn a_waiting_allow_covers_only_what_the_original_view_offered() -> Result<()> {
     for marked in [false, true] {
         let dir = tempfile::tempdir()?;

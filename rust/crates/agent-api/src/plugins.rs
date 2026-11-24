@@ -368,7 +368,7 @@ impl Registry {
         handlers.sort_by_key(|h| h.order);
         let mut collected = vec![];
         let mut answered = false;
-        let mut approval_cover = None;
+        let mut approval_cover: Option<ApprovalCover> = None;
         for h in handlers {
             let result = EMITTER
                 .scope(
@@ -398,7 +398,9 @@ impl Registry {
                         return Ok(reply);
                     }
                     if reply.answered {
-                        if approval_cover.is_some()
+                        if approval_cover
+                            .as_ref()
+                            .is_some_and(|c| Some(&c.tool_call_id) == scope.call.as_ref())
                             && !wire::json_eq(&value["call"], &reply.value["call"])
                         {
                             return Ok(HookResult {

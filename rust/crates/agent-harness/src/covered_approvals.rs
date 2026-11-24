@@ -25,6 +25,57 @@ fn parent<'a>(
     expected.call = Some(id.into());
     (active.scope == expected && !active.live.is_cancelled()).then_some(active)
 }
+impl super::Harness {
+    pub(super) fn cover_is_current(
+        &self,
+        scope: &Scope,
+        call: &ToolCall,
+        cover: &ApprovalCover,
+    ) -> Result<bool> {
+        let data = self.snapshot(&scope.session)?;
+        if data.settings.get("approval").is_some_and(|v| {
+            !matches!(
+                v.as_str(),
+                Some("ask_always" | "ask_unless_read_only" | "off")
+            )
+        }) {
+            return Ok(false);
+        }
+        if cover.tool_call_id != call.id {
+            return Ok(self.live_covers.parent(scope, call).as_ref() == Some(cover));
+        }
+        // Bind the dispatch to the offered view, not just the ID returned by the gate.
+        let Some(q) = questions(&data)?
+            .into_iter()
+            .find(|q| q.id == cover.request_id && q.covers_nested())
+        else {
+            return Ok(false);
+        };
+        if !wire::json_eq(&q.extra["approvalCall"], &wire::call(call, scope))
+            || !q.answer.as_ref().is_some_and(|a| {
+                !a.declined
+                    && a.value == "allow"
+                    && self
+                        .authority(&a.session, &a.actor)
+                        .is_ok_and(|rights| rights.has("approve"))
+            })
+        {
+            return Ok(false);
+        }
+        Ok(self.capability_names("tools.").iter().any(|key| {
+            wire::json_eq(&self.tool_registration(key), &q.extra["source"])
+                && capability::<dyn ToolSource>(self, key).is_ok_and(|s| {
+                    s.tools(&data).iter().any(|d| {
+                        d.name == call.name
+                            && wire::json_eq(
+                                &wire::registered_definition(d),
+                                &q.extra["definition"],
+                            )
+                    })
+                })
+        }))
+    }
+}
 impl Dispatches {
     pub(super) fn parent(&self, scope: &Scope, call: &ToolCall) -> Option<ApprovalCover> {
         parent(&self.0.lock().unwrap(), scope, call).map(|p| p.cover.clone())

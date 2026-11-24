@@ -1418,9 +1418,9 @@ impl TurnWork {
             return Ok(wire::result(&result));
         }
         let current = self.registration(api, &scope, &call.name)?;
-        if let Some(status)=api.waiting_dispatch(&scope,&call,false).await? {
+        if let Some(status)=api.approval_dispatch(&scope,&call,decision.approval_cover.as_ref(),false).await? {
             telemetry::disposition(&scope,&call,&status);
-            let r=self.settle_tool(api,&scope,&entry,ToolResult::new(&call,status,"waiting approval no longer permits dispatch")).await?;
+            let r=self.settle_tool(api,&scope,&entry,ToolResult::new(&call,status,"approval no longer permits dispatch")).await?;
             return Ok(wire::result(&r));
         }
         if !matches_registration(&decision, current.as_ref()) {

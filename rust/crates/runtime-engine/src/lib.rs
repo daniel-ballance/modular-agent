@@ -608,8 +608,11 @@ impl Engine {
                 };
                 if input.cancel.is_cancelled() {
                     ToolResult::new(call, ToolStatus::Cancelled, "turn cancelled")
-                } else if let Some(status) = api.waiting_dispatch(scope, &changed, false).await? {
-                    ToolResult::new(call, status, "waiting approval no longer permits dispatch")
+                } else if let Some(status) = api
+                    .approval_dispatch(scope, &changed, reply.approval_cover.as_ref(), false)
+                    .await?
+                {
+                    ToolResult::new(call, status, "approval no longer permits dispatch")
                 } else if !current()? {
                     ToolResult::new(
                         call,

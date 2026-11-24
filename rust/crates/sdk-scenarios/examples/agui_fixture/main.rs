@@ -325,6 +325,7 @@ async fn serve(config: Value) -> Result<()> {
             k.name == "state-and-gate",
         ))
         .model("scripted/script")
+        .approval_covers_nested(k.name.starts_with("approval") || k.name.starts_with("waiting-"))
         .approval(if k.name.starts_with("approval") {
             sdk::Approval::All
         } else {
@@ -353,8 +354,30 @@ async fn serve(config: Value) -> Result<()> {
                 sdk::Approval::Ask
             } else {
                 sdk::Approval::All
-            })
-            .tool(sdk::testing::fixtures::counter(dir.join("count")));
+            });
+        let counter = dir.join("count");
+        if k.name == "waiting-restart" {
+            builder = builder
+                .setting("modelTools", json!(["bump"]))
+                .tool(sdk::Tool::new("bump", "Increment the counter").run(
+                    |_: Value, cx| async move {
+                        let result = cx.tools().call("increment", json!({})).await?;
+                        Ok(result.text().to_owned())
+                    },
+                ))
+                .tool(
+                    sdk::Tool::new("increment", "Write the count").run(move |_: Value, _| {
+                        let path = counter.clone();
+                        async move {
+                            let next = sdk::testing::fixtures::count(&path) + 1;
+                            fs::write(path, next.to_string())?;
+                            Ok(next.to_string())
+                        }
+                    }),
+                );
+        } else {
+            builder = builder.tool(sdk::testing::fixtures::counter(counter));
+        }
     }
     builder = hooks::install(builder, &k);
     let agent = builder.build().await?;

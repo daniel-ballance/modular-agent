@@ -2463,13 +2463,21 @@ impl AgentApi for Harness {
     fn park_approval(&self, question: &Question) -> Result<Option<bool>> {
         self.park(question)
     }
-    async fn waiting_dispatch(
+    async fn approval_dispatch(
         &self,
         scope: &Scope,
         call: &ToolCall,
+        cover: Option<&ApprovalCover>,
         after_start: bool,
     ) -> Result<Option<ToolStatus>> {
-        self.check_approval(scope, call, after_start).await
+        let status = self.check_approval(scope, call, after_start).await?;
+        if status.is_none()
+            && let Some(cover) = cover
+            && !self.cover_is_current(scope, call, cover)?
+        {
+            return Ok(Some(ToolStatus::Refused));
+        }
+        Ok(status)
     }
     async fn deliver_approval(
         &self,
@@ -3446,12 +3454,12 @@ impl AgentApi for Harness {
         cover: Option<ApprovalCover>,
     ) -> ToolResult {
         if let Some(status) = self
-            .waiting_dispatch(scope, &call, true)
+            .approval_dispatch(scope, &call, cover.as_ref(), true)
             .await
             .unwrap_or(Some(ToolStatus::Refused))
         {
             telemetry::disposition(scope, &call, &status);
-            return ToolResult::new(&call, status, "waiting approval no longer permits dispatch");
+            return ToolResult::new(&call, status, "approval no longer permits dispatch");
         }
         let data = match self.snapshot(&scope.session) {
             Ok(s) => s,

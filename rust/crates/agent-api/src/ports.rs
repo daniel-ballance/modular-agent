@@ -186,10 +186,11 @@ pub trait AgentApi: Send + Sync {
     fn park_approval(&self, _question: &Question) -> Result<Option<bool>> {
         Ok(None)
     }
-    async fn waiting_dispatch(
+    async fn approval_dispatch(
         &self,
         _scope: &Scope,
         _call: &ToolCall,
+        _cover: Option<&ApprovalCover>,
         _after_start: bool,
     ) -> Result<Option<ToolStatus>> {
         Ok(None)

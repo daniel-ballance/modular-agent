@@ -122,16 +122,17 @@ impl Harness {
                 && data.pending_inputs().is_empty()
                 && !questions(&data)?.iter().any(|q| q.answerable)
                 && !branch.iter().any(|e| {
-                    let terminal = match e.kind.as_str() {
-                        "turn.start" => "turn.end",
-                        "tool.call" | "tool.started" => "tool.result",
-                        _ => return false,
-                    };
-                    !data.entries.iter().any(|done| {
-                        done.kind == terminal
-                            && done.scope.turn == e.scope.turn
-                            && done.scope.call == e.scope.call
-                    })
+                    match e.kind.as_str() {
+                        "turn.start" => !data
+                            .entries
+                            .iter()
+                            .any(|done| done.kind == "turn.end" && done.scope.turn == e.scope.turn),
+                        // A waiting call can settle in a later continuation.
+                        "tool.call" | "tool.started" => !data.entries.iter().any(|done| {
+                            done.kind == "tool.result" && done.scope.call == e.scope.call
+                        }),
+                        _ => false,
+                    }
                 }),
             RewindError::Busy("settle pending work before rewinding".into())
         );
