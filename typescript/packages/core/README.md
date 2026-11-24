@@ -16,6 +16,10 @@ try {
 
 ## What is checked
 
+The ADR 0035 run passed 647 workspace tests in each of the default and remote-parts configurations; five live tests were skipped in each. The AG-UI kit passed 48/48, including 14 host-read cases. Additional SDK tests kill a real writer on each side of recording the released class and between the first and second decisions of a batch. The named-caller kit passed 29/29. Run it from the repository root with `node conformance/plugin/run.mjs --named-callers -- "$(command -v node)" "$PWD/typescript/scripts/named-callers.mjs"` after building the workspace.
+
+Project-notes passed both cases. Ops-desk passed five of six; `host-restart` failed with `ECONNREFUSED`. A lifecycle-only check reproduced the race without any model request: send `stop` and then `start` for triage on the station socket before stop completes. The station returns the old origin for start; after stop completes, that origin refuses connections. The station needs to serialize start and stop for each agent. This is in `demos/ops-desk/host/station.ts`, not the SDK. No timeout or retry was added.
+
 The covered-approval run passed 640 workspace tests in each of the default and remote-parts configurations. Five live tests were skipped in each. Both demos passed without a model service. The [ma results](../ma/README.md#what-is-checked) give the binding counts and fixture limits.
 
 The [waiting approval tests](test/waiting-approval.test.ts) use a scripted Provider, a file counter and a clock controlled by the test. They run with the Runtime embedded and served. They check the default, the maximum, the bound view, refusal after changes to input, registration or rights, expiry on either side of an allow, erasure, and refusal to fork or move. Twelve process-group kills cover three cutoffs (ended origin, committed allow, counter effect) in both placements with kept and durable history. Reopen never increments the counter twice. The listener tests check fresh ACP polling and AG-UI presence opened after the turn.
@@ -174,7 +178,42 @@ Output hooks receive the actor as recipient. AG-UI reply and interrupt envelopes
 
 Set `traceTrusted: true` on a token entry to accept a work POST's trace parent. `traceStateVendors` lists vendor keys accepted into the local operation context. Trace headers on presence and snapshot reads are ignored. No baggage is accepted. `onWarning(field)` receives field names, not payloads.
 
-Run `typescript/scripts/check-agui.sh` after building. It installs the kit in a temporary directory. Five cases launch the standard ma. The other 21 use a disposable SDK application with operator-registered tools and controls. All 26 cases run, including TLS, the stock client, clocks, release races and four process kills.
+#### Host reads
+
+Start with the authenticated thread snapshot. Use its `waitCursor`, not its message cursor, with `GET /agui/v1/threads/{threadId}/wait-closures?after=…`. Read the SSE data objects in order. Save each cursor after applying its notice. A disconnect can mean the reader fell behind; reconnect from the saved cursor. On `409 cursor_expired`, replace the inbox from a new snapshot. The feed does not establish presence, deliver an approval or authorize a tool.
+
+On kept history the snapshot also offers `runReceipts: 1`. Use the same principal and client ID that posted the run. For example:
+
+```ts
+const url = new URL(`/agui/v1/threads/${threadId}/run-receipt`, listener.url);
+url.searchParams.set("runId", runId);
+const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+if (response.ok) {
+  const { terminal, work } = await response.json(); // exchange release and committed work
+}
+```
+
+A receipt read does not open a writer or start recovery. `unknown` means there is no committed terminal marker, not that the turn failed. A 404 does not authorize a retry. The first operation's entry ID binds the run. The deployment keeps release markers and source references in `agui-receipts.sqlite`, outside session history. It uses the data directory, or the file history directory if supplied without a data directory. With persistent service history and neither directory, it uses `$XDG_STATE_HOME/modular-agent/receipts` (default `~/.local/state/modular-agent/receipts`). Keep this storage with the deployment. Erasure removes the marker. A later session fork does not inherit it.
+
+Run `typescript/scripts/check-agui.sh` after building. It installs the kit in a temporary directory. Five cases launch standard ma. Cases needing tools, process kills or operator controls use the disposable SDK app.
+
+#### Serving named plugin callers
+
+```ts
+await serve(({ callerId }) => makePluginFor(callerId), {
+  listen: "127.0.0.1:0",
+  callers: [{ callerId: "desk", tokenFile: deskToken }, { callerId: "review", tokenFile: reviewToken }],
+});
+```
+
+The factory gets the authenticated ID on each successful upgrade. Pick the caller's project bounds and retained state there. Keep live calls and callbacks on that instance. The ID grants no session rights. A wrong token gets 401 before the factory runs. Empty or ambiguous tables, unsafe files, a plugin object instead of a factory, and combining `callers` with `tokenFile` fail with `invalid_composition`. The single-token service and the client's load options are unchanged.
+
+**Exact text for `docs/sdk/languages.md`, TypeScript.** Add these bullets after the service bullet:
+
+> - For named plugin callers, use `await serve(({ callerId }) => makePluginFor(callerId), { listen, callers })`. Add `tls` for a TLS listener. Each operator entry is `{ callerId, tokenFile }`. The listener authenticates before calling the factory. Neither the token nor a caller claim goes in a plugin message.
+> - `await agent.serveAgui({ listen, actors })` serves both host reads. From the thread snapshot, pass `waitCursor` as the `after` query value on `wait-closures`. When `runReceipts === 1`, pass the original `runId` as one query value on `run-receipt`. Use authenticated HTTP; neither read needs a presence stream.
+
+**Spec finding — duplicate query values.** In `docs/bindings/agui.md`, replace “A missing `after` is 400 `invalid_request`.” with “Exactly one `after` query value is required; a missing or repeated value is 400 `invalid_request`.” After “Encode the run ID as one query value.” add “After masking an inaccessible thread, return 400 `invalid_request` for a missing, empty or repeated `runId`.” This keeps adapters from choosing different values for the same request.
 
 #### Listing and resuming threads
 

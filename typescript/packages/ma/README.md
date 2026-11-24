@@ -31,6 +31,8 @@ ma --agui --acp --listen 127.0.0.1:7401 --policy /path/to/policy.json
 
 With `--agui`, ma prints the HTTP origin. Send authorized requests to `/agui/v1`. Add `--acp` for ACP on the same port. Policy actors need a stable `clientId`; the single-token shorthand uses `ma-local`. The AG-UI creation project is the operator's project. List kept threads with `GET /agui/v1/threads`; the counts identify open work without opening the thread. ACP returns the same waiting summary for its own connection on `session/list`. See [Serving AG-UI](../core/README.md#serving-ag-ui).
 
+The authenticated thread snapshot also returns `waitCursor`. Pass it as `after` to `GET /agui/v1/threads/{threadId}/wait-closures` for committed reasons in order. It is not a presence or answer route. For kept sessions, `runReceipts: 1` offers `GET /agui/v1/threads/{threadId}/run-receipt?runId=…` to the posting client. Its `terminal` describes the exchange; its `work` describes the linked input or turn. Neither read starts a run. These offers are snapshot fields, not new ma flags or declaration keys.
+
 The WebSocket listener requires a loopback address and an owner-only bearer token file. It acts as `ma`'s local ACP user, irrespective of `MODULAR_AGENT_ACTOR`.
 
 `ma` uses `chatgpt({ logins })` and `grok({ logins })` from `@modular-agent/subscription`. Subscription login writes and refreshes use `auth.lock` next to the private `auth.json`. The lock is shared with the other SDKs. Linux needs util-linux `flock`; macOS uses `/usr/bin/perl` to call `flock(2)`. `ma login claude` runs `claude auth login`. The TypeScript `ma` uses the Claude Agent SDK in process and does not need a sidecar.
@@ -103,9 +105,9 @@ git diff --check
 ```
 
 - Reference checks: **28/28**, including `approval-covers-script`, `trace-trust`, `resume-open`, `telemetry-export`, `client-identity`, all four codemode profile checks, `sandbox-memory` and both crash-recovery modes.
-- ACP with crash, probe and job checks: **190/190** on stdio. With live approval configured, the covered call and both binding versions’ waiting-declaration checks also passed (**193/193**). With an operator wait maximum, the public, crash and job checks passed **118/118**, including the waiting continuation. Over WebSocket, ACP passed **195/195**, the plugin kit passed **153/153**, and listener isolation passed **14/14**.
-- TypeScript workspace: **640 offline tests passed** in both normal and `MA_REMOTE` configurations. Five live tests skipped in each run. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
-- Binding kits: **23/23** ACP and **111/111** AG-UI self-tests. AG-UI passed **34/34** adapter cases, including the waiting script’s covered child.
+- ACP with crash, probe and job checks: **190/190** on stdio. With live approval configured, the covered call and both binding versions’ waiting-declaration checks also passed (**193/193**). With an operator wait maximum, the public, crash and job checks passed **118/118**, including the waiting continuation. Over WebSocket, ACP passed **195/195**, the plugin kit passed **153/153**, and listener isolation passed **14/14**. The named-caller plugin kit passed **29/29**.
+- TypeScript workspace: **647 offline tests passed** in both normal and `MA_REMOTE` configurations. Five live tests skipped in each run. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
+- Binding kits: **23/23** ACP and **111/111** AG-UI self-tests. AG-UI passed **48/48** adapter cases, including wait-closure visibility, receipt recovery and the waiting script’s covered child.
 - Claude sidecar: **51 offline tests passed** and one live check skipped. No real sign-ins or model requests ran, and no real credentials were read.
 - `tsc -b` and `git diff --check` pass. The workspace has no separate lint or formatting command.
 
