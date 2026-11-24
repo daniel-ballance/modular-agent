@@ -33,6 +33,16 @@ The four languages share `$XDG_CONFIG_HOME/modular-agent` (or `~/.config/modular
 
 ChatGPT, Grok and Claude come from the SDK. The former ids `openai-codex` and `xai` work in `--model`, `ma login`, `ma logout`, settings, `models.json` and reopened sessions. Reads find old sign-ins; the next write of `auth.json` moves them to `chatgpt` and `grok`, preferring the new slot if both exist. A file readable by other users is refused; make it private with `chmod 600` before use.
 
+## Approval
+
+Without an approval setting, `ma` does not load the approval feature. Set `approval` in the global `settings.json` or pass `--approval off|ask|all|never`. The flag wins. An explicit `off` loads the feature without asking. `ask` asks before a `codemode` call; `all` asks even for read-only calls; `never` refuses without asking.
+
+The approval view shows the full script and says that an allow covers the calls the script makes on this run. The interactive terminal asks on stderr; answer `y` or `n`. Print mode has no answerer and refuses a call that needs consent. Look for `approvalCoversNested: true` in the declaration and `approvalCoveredBy` on each covered nested start in history.
+
+To offer waiting approvals, also set a positive integer `approvalWaitMaxMs` in the operator's `policy.json`. This declares `approvalsOutlastTurns: true`. The global setting `"approval_wait": "untilDeadline"` makes waiting the default for new sessions. The default without it is `"live"`. Project settings never select approval or its lifetime. An allow given after restart is for the original request, not a new script.
+
+ACP clients can change a session's `approval` option with `session/set_config_option`. AG-UI clients can POST `{"approval":"ask"}` to `/agui/v1/threads/{threadId}/settings`. Both require the session's `settings` right. Neither changes another session or the operator's defaults.
+
 ## AG-UI listener
 
 `--agui` serves HTTP and SSE in the operator's project. Add `--acp` for ACP WebSocket upgrades on the same port. Use `HOST:0` to choose a free loopback port; the first line on stdout is the HTTP origin. Every request needs the bearer token. `ma` has no TLS options. A policy can supply `actors` instead of `--token-file`; give each client a stable `clientId`. The single-token shorthand uses client `ma-local`. No browser tool is registered by default.
@@ -83,8 +93,8 @@ scripts/websocket-kits.sh go
 ```
 
 - **Telemetry:** a loopback OTLP receiver checks binary protobuf and `service.name`. No export provider is installed without an endpoint or when `OTEL_SDK_DISABLED=true`. Phoenix received `invoke_agent ma`, `chat script` and `execute_tool codemode` from an offline scripted prompt run with `OTEL_SERVICE_NAME=ma-go`.
-- **Reference checks:** 27/27 against Go `ma`, including `resume-open`, `trace-trust`, telemetry export, client identity validation, tool function values, denied ambient access, codemode results and memory failure followed by recovery.
-- **ACP with `--crash-checks --probe-checks --job-checks`:** 188/188 on stdio against Go `ma` with the SDK's Grok Provider. The WebSocket run passed 193/193 for ACP, 153/153 for plugins and 14/14 for separate listeners. The AG-UI kit passed 26/26.
+- **Reference checks:** 28/28 against Go `ma`, including `approval-covers-script` (one allow for two writes, live and after restart), `resume-open`, `trace-trust`, telemetry export, client identity validation, tool function values, denied ambient access, codemode results and memory failure followed by recovery.
+- **ACP with `--crash-checks --probe-checks --job-checks`:** 190/190 on stdio against Go `ma`. With `--approval off`, the coverage and waiting-declaration checks passed (193/193). The WebSocket run passed 195/195 for ACP, 153/153 for plugins and 14/14 for separate listeners. The AG-UI kit passed 34/34, including a covered nested call in the waiting continuation.
 - **Sandbox regressions:** the Go tests cover imports and function values, schema-order arguments, JSON and repr, terminal memory and time limits, which suspensions reset the active clock, a tool wait longer than the compute budget, 500 nested calls, recursion at 200 and 201, a UTF-8 print cut, worker death and cancellation, malformed messages, denied OS operations and seeded random.
 - **Go checks:** build, vet and formatting passed. The full Go suite passed 38 tested packages. The race run for `modular/...` and `cmd/ma/...` passed seven tested packages. `cmd/modular` takes several minutes; use the default package timeout.
 - **No network:** the Go `codemode-tools-values` and `sandbox-memory` reference checks both passed in a separate Linux network namespace.
@@ -97,6 +107,8 @@ scripts/websocket-kits.sh go
 `ma` uses `subscription.ChatGPT`, `subscription.Grok` and `subscription.Claude`. It handles terminal instructions and aliases; the SDK handles OAuth, token refresh and model requests.
 
 ## Known gaps
+
+- The public ACP check passes with a waiting parent and no private test controls (118/118 with crash and job checks). The separate `--waiting-approval-only` group passed its two declaration checks (2/44); it needs a `MA_ACP_WAIT_FIXTURE` launcher with a controlled clock, offline approver and second listener. Stock `ma` has no such launcher. Combining the operator maximum with `--probe-checks` refused four substitute Runtimes that cannot continue waiting approvals (165/169). Those probes pass in live mode.
 
 - `find` uses `git ls-files` where Git can read a worktree and falls back to `find` otherwise. It does not interpret `.gitignore` outside a Git worktree. The existing SDK command environment is required for this tool. Very long command output is held by that environment before being cut and spilled.
 - The SDK's question handler supports in-turn text and choice answers. `auth.json` preserves named answers written by Rust, but this configuration does not store new secret answers. The SDK's question tool keeps its existing definition, which is not word-for-word the Rust question tool.
