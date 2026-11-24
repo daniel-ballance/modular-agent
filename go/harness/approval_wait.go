@@ -363,7 +363,7 @@ func (h *Harness) decideApprovalLocked(ctx context.Context, s *session, w *api.W
 	}
 	return nil
 }
-func (h *Harness) reconcileApprovalsLocked(ctx context.Context, s *session) error {
+func (h *Harness) reconcileApprovalsLocked(ctx context.Context, s *session, before ...api.Session) error {
 	c := &client{h: h}
 	for _, w := range api.WaitingApprovals(s.data) {
 		if w.Terminal.ID != "" || w.Start.ID != "" {
@@ -391,6 +391,9 @@ func (h *Harness) reconcileApprovalsLocked(ctx context.Context, s *session) erro
 			var a *api.Answer
 			if w.Decision.ID == "" {
 				a = &api.Answer{Request: q.ID, Declined: true, Reason: reason}
+				if reason == "noLongerAnswerable" && len(before) != 0 && c.anyApprover(before[0], q) && !c.anyApprover(s.data, q) {
+					a.Cause = "revoked"
+				}
 			}
 			if err := h.decideApprovalLocked(ctx, s, w, a, status); err != nil {
 				return err
@@ -399,7 +402,7 @@ func (h *Harness) reconcileApprovalsLocked(ctx context.Context, s *session) erro
 	}
 	return nil
 }
-func (h *Harness) afterApprovalChangeLocked(ctx context.Context, s *session) error {
+func (h *Harness) afterApprovalChangeLocked(ctx context.Context, s *session, before ...api.Session) error {
 	waits := api.WaitingApprovals(s.data)
 	if len(waits) == 0 {
 		return nil
@@ -417,7 +420,7 @@ func (h *Harness) afterApprovalChangeLocked(ctx context.Context, s *session) err
 			delete(s.approvalDeliveries, k)
 		}
 	}
-	if err := h.reconcileApprovalsLocked(ctx, s); err != nil {
+	if err := h.reconcileApprovalsLocked(ctx, s, before...); err != nil {
 		return err
 	}
 	h.armApprovalTimerLocked(s)

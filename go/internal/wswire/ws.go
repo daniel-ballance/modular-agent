@@ -272,6 +272,9 @@ func (s *Server) closeWithError(err error) error {
 	return s.Close()
 }
 
+// Loopback reports whether a cleartext service may connect to this host.
+func Loopback(host string) bool { return loopbackIP(host) != "" }
+
 func loopbackIP(s string) string {
 	if strings.EqualFold(s, "localhost") {
 		return "127.0.0.1"

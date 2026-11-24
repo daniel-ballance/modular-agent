@@ -383,6 +383,7 @@ func Entry(e api.Entry) map[string]any {
 		set(d, "value", a.Value, !a.Declined && a.Stored == "")
 		set(d, "declined", a.Declined, a.Declined)
 		set(d, "reason", a.Reason, a.Reason != "")
+		set(d, "cause", a.Cause, a.Cause == "revoked" && a.Actor == "" && (a.Reason == "refused" || a.Reason == "noLongerAnswerable"))
 		set(d, "stored", a.Stored, a.Stored != "")
 		set(d, "go.via", a.Via, len(a.Via) > 0)
 	case "turn.end":
@@ -653,7 +654,7 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 	case "question.secret":
 		e.Data = api.JSON(association(v, d, "requestId"))
 	case "question.answer":
-		e.Data = api.JSON(api.Answer{ApprovalView: api.Decode[*api.ApprovalView](api.JSON(d["approvalView"])), Request: association(v, d, "requestId"), Actor: str(d, "actorId"), Value: str(d, "value"), Reason: str(d, "reason"), Stored: str(d, "stored"), Declined: boolean(d, "declined"), Via: api.Decode[[]api.ActorRef](api.JSON(d["go.via"]))})
+		e.Data = api.JSON(api.Answer{ApprovalView: api.Decode[*api.ApprovalView](api.JSON(d["approvalView"])), Request: association(v, d, "requestId"), Actor: str(d, "actorId"), Value: str(d, "value"), Reason: str(d, "reason"), Cause: str(d, "cause"), Stored: str(d, "stored"), Declined: boolean(d, "declined"), Via: api.Decode[[]api.ActorRef](api.JSON(d["go.via"]))})
 	case "turn.end":
 		outcome, r := asObject(d["outcome"]), asObject(d["result"])
 		o := api.Outcome{Status: str(outcome, "kind"), Error: str(outcome, "error"), Usage: usageIn(asObject(d["usage"])), Steps: number(d, "go.steps"), Copies: e.Copies}

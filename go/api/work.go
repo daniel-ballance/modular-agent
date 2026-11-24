@@ -106,6 +106,7 @@ type Question struct {
 }
 type Answer struct {
 	ApprovalView          *ApprovalView `json:",omitempty"`
+	Cause                 string        `json:"cause,omitempty"`
 	Request, Actor, Value string
 	Reason, Stored        string
 	Declined              bool

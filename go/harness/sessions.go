@@ -22,6 +22,7 @@ import (
 )
 
 type session struct {
+	committed            chan struct{} // closed on the next published snapshot; guarded by mu
 	approvalDeliveries   map[approvalDelivery]string
 	approvalTimer        worktime.Timer
 	interfaceConnections []*InterfaceConnection
@@ -616,7 +617,8 @@ func (s *session) publishReservedInitialLocked(next api.Session, ctx context.Con
 	if err := saveHistory(ctx, l, next); err != nil {
 		return s.stopWriterLocked(err)
 	}
-	s.pendingStore, s.data = nil, next
+	s.pendingStore = nil
+	s.publishLocked(next)
 	s.provisional.Store(false)
 	return nil
 }
@@ -642,7 +644,7 @@ func (s *session) commitReservedSnapshotLocked(next api.Session, contexts ...con
 		if len(next.Entries) < len(s.data.Entries) || slices.ContainsFunc(next.Entries[len(s.data.Entries):], func(e api.Entry) bool { return !isSetup(e) }) {
 			return errProvisionalSession
 		}
-		s.data = next
+		s.publishLocked(next)
 		return nil
 	}
 	// Outside the public persistent lifecycle, keep the original lazy
@@ -656,8 +658,16 @@ func (s *session) commitReservedSnapshotLocked(next api.Session, contexts ...con
 		}
 		s.provisional.Store(false)
 	}
-	s.data = next
+	s.publishLocked(next)
 	return nil
+}
+
+func (s *session) publishLocked(next api.Session) {
+	s.data = next
+	if s.committed != nil {
+		close(s.committed)
+		s.committed = nil
+	}
 }
 
 func (s *session) recordLocked(e api.Entry, writer string, advance bool, contexts ...context.Context) (api.Entry, error) {
@@ -700,6 +710,15 @@ func (c *client) Record(ctx context.Context, id string, e api.Entry) (api.Entry,
 	}
 	s.mu.Lock()
 	var admission api.Entry
+	if e.Kind == "question.answer" {
+		a := api.Decode[api.Answer](e.Data)
+		for _, prior := range s.data.LiveEntries() {
+			if prior.Kind == "question.answer" && api.Decode[api.Answer](prior.Data).Request == a.Request {
+				s.mu.Unlock()
+				return e, api.ErrQuestionNotFound
+			}
+		}
+	}
 	if e.Kind == "job.end" && c.owner == "jobs" {
 		e, admission, err = c.finishJobLocked(s, e, ctx)
 		if err == nil {

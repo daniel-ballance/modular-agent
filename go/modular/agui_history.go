@@ -351,6 +351,14 @@ func (q *agRequest) snapshotHTTP() error {
 		calls = append(calls, agObject{"toolCallId": p.CallID, "expiresAt": time.UnixMilli(p.Deadline).UTC().Format(time.RFC3339Nano)})
 	}
 	v := agObject{"threadId": q.id, "declaration": q.a.Declaration(), "messages": h.messages, "cursor": cursor, "lastMessageId": h.last(), "waiting": agObject{"questions": views, "toolCalls": calls}}
+	watermark, err := q.a.a.Snapshot(q.id)
+	if err != nil {
+		return err
+	}
+	if watermark.Position != h.position || len(watermark.Entries) != h.entries {
+		return stale
+	}
+	v["waitCursor"] = q.waitCursor(watermark, h.entries)
 	b, err := q.encode("agui.snapshot", v)
 	if err != nil {
 		return err

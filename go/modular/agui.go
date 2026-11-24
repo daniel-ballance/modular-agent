@@ -246,8 +246,8 @@ func (s *agServer) http(w http.ResponseWriter, r *http.Request, p *agPrincipal) 
 		w.Header().Set("Access-Control-Allow-Origin", origins[0])
 		w.Header().Set("Vary", "Origin")
 	}
-	listing := r.Method == "GET" && r.URL.EscapedPath() == "/agui/v1/threads"
-	if !listing && r.URL.RawQuery != "" || r.URL.User != nil {
+	queryRead := r.Method == "GET" && (r.URL.EscapedPath() == "/agui/v1/threads" || strings.HasSuffix(r.URL.EscapedPath(), "/wait-closures"))
+	if !queryRead && r.URL.RawQuery != "" || r.URL.User != nil {
 		agHTTPError(w, invalid)
 		return
 	}
@@ -336,6 +336,8 @@ type agHost interface {
 	DiscoverForHost(api.Session, api.Actor) bool
 	JoinHost(string, api.Actor) error
 	ViewForOutput(context.Context, string) (api.Session, error)
+	ReadForHost(context.Context, string, string) (api.Session, <-chan struct{}, error)
+	HostHistoryView(context.Context, api.Session) (api.Session, error)
 	OutputValueFor(context.Context, string, api.Event) (api.Event, error)
 	ErasureEpoch(string) (int, error)
 	SubscribeOutput(func(api.Event) string, func(api.Event)) func()
@@ -538,7 +540,15 @@ func (q *agRequest) serve(r *http.Request) error {
 		}
 		return q.jsonReply(200, "agui.settings", agObject{"approval": value})
 	case r.Method == "GET" && strings.HasPrefix(path, base+"/threads/"):
-		id, pres := strings.CutSuffix(strings.TrimPrefix(path, base+"/threads/"), "/presence")
+		threadPath := strings.TrimPrefix(path, base+"/threads/")
+		if id, read := strings.CutSuffix(threadPath, "/wait-closures"); read {
+			if id == "" || strings.ContainsAny(id, "/%") {
+				return missing
+			}
+			q.id = id
+			return q.waitClosures(r.URL.RawQuery)
+		}
+		id, pres := strings.CutSuffix(threadPath, "/presence")
 		if strings.ContainsAny(id, "/%") {
 			return missing
 		}
