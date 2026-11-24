@@ -41,6 +41,8 @@ ma --agui --acp --listen 127.0.0.1:7400 --token-file /path/to/operator.token
 
 Use one command at a time. Each prints the HTTP origin when ready. Send the token in the Authorization header, not in the URL. Use a random token with at least 128 bits of entropy, in an owner-only regular file. AG-UI uses `/agui/v1`; ACP upgrades use `/`. Both serve the selected project. To distinguish clients, supply operator policy actors with a `clientId` per client instead of the shorthand. TLS is available through the SDK, not the command.
 
+The thread snapshot includes `waitCursor`. Subscribe to `GET /agui/v1/threads/{threadId}/wait-closures?after=...` for committed closures without holding presence. Resume with the cursor from the last processed item. A kept thread also offers `runReceipts: 1`. Its original authenticated client can use `GET /agui/v1/threads/{threadId}/run-receipt?runId=...` to check the exchange and its work after restart. The read does not reopen the thread. Neither read can answer a question or execute a call. Neither adds an agent declaration key.
+
 ## Find and resume interrupted work
 
 An authenticated `GET /agui/v1/threads` lists only the kept threads the client may watch. Each row has a timestamp, the turn state and the number of questions and Interface calls for that client. Listing does not open a thread. ACP includes the same counts and state in `session/list`.
@@ -72,11 +74,11 @@ By default `ma` sends no telemetry. Set `OTEL_EXPORTER_OTLP_ENDPOINT` or a per-s
 ## What is checked
 
 - **Reference:** 28/28, including `approval-covers-script`, `trace-trust` and `resume-open`. Startup recovery completed the interrupted turn without a client connecting and without repeating its tool effect.
-- **AG-UI:** 34/34, including the live and waiting approval views and the child start on continuation.
+- **AG-UI:** 48/48, including wait closures and run receipts after process loss.
 - **Telemetry:** seven offline checks cover no endpoint, SDK disabled, per-signal overrides, sampling, headers, metadata privacy and the OTLP resource. A scripted turn reached local Phoenix as `invoke_agent ma`, `chat script` and `execute_tool codemode`. The OTLP resource for that trace carried `service.name=ma-python`.
 - **ACP:** 190/190 with no approval configuration. With `--approval off`, 193/193 with the crash, probe, job and waiting-declaration checks. With an operator maximum, 118/118 public, crash and job checks. The covered continuation uses an actual ACP poll and answer; the probe Runtimes do not support waiting approvals. The standard composition does not declare several actors, tenants or session limits.
-- **WebSocket kits:** 153/153 for the plugin binding, 14/14 for separate-listener isolation and 195/195 for ACP.
-- **Python suites:** 812 passed and five live checks skipped in each Runtime and binding combination (transient/local, transient/process, durable/local and durable/process). The sandbox tests cover memory and active time, waiting on the host, worker death, cancellation, the recursion and nested-call limits, ambient access, UTF-8 output and result rendering.
+- **WebSocket kits:** 153/153 for the plugin binding, 14/14 for separate-listener isolation, 29/29 for named callers and 195/195 for ACP.
+- **Python suites:** 823 passed and five live checks skipped in each Runtime and binding combination (transient/local, transient/process, durable/local and durable/process). The sandbox tests cover memory and active time, waiting on the host, worker death, cancellation, the recursion and nested-call limits, ambient access, UTF-8 output and result rendering.
 - **Subscriptions:** offline SDK checks cover ChatGPT and Grok sign-in, model requests, refresh and reasoning replay, and Claude tool dispatch. Product checks cover client identity and former Provider ids in sign-in, settings, catalog overrides and saved sessions.
 - **Python static checks:** Ruff lint and format checks passed; strict mypy passed.
 
@@ -88,6 +90,7 @@ npm ci --prefix conformance/telemetry
 node conformance/reference/run.mjs --agent python
 MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- "$PWD/python/.venv/bin/ma" --acp
 scripts/websocket-kits.sh python
+node conformance/plugin/run.mjs --named-callers -- "$PWD/python/.venv/bin/python" "$PWD/python/scripts/named_caller_fixture.py"
 cd python
 uv run --offline pytest -q --runtime transient
 uv run --offline pytest -q --runtime durable

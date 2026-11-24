@@ -129,11 +129,16 @@ class InterfaceToolConnection:
         self, session_id: str, report: InterfaceToolReport
     ) -> InterfaceToolDisposition:
         """Report data for a handed-off call, without dispatching anything."""
+        return await self._report(session_id, report, None)
+
+    async def _report(
+        self, session_id: str, report: InterfaceToolReport, entry_id: str | None
+    ) -> InterfaceToolDisposition:
         from ._native import _error
 
         try:
             status = await self._agent._h.report_interface_result(
-                session_id, self._id, deepcopy(report)
+                session_id, self._id, deepcopy(report), entry_id=entry_id
             )
             if status == "notReady":
                 return {"status": "refused", "reason": "notReady"}

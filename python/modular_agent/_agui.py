@@ -16,9 +16,12 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import Send
 from ._agui_http import Stream
+from ._agui_waits import WaitFeed, WaitPosition
+from ._agui_receipts import read_receipt
 from ma_core import telemetry as ot
 from ma_core.wire import provider_projection, settings_in
 from ma_harness.authority import CONNECTION_AUTHORITY
+from ma_questions import eligible_question, question_state
 from ma_harness.interface_tools import branch_entries, same_json
 from opentelemetry.context import Context
 
@@ -64,6 +67,7 @@ class Binding:
         from ._agent import _acp_rights, _acp_scope
 
         self.agent = agent
+        self.receipts = agent._receipt_store
         self.actors = deepcopy(list(actors))
         self.tenant = tenant
         if state_snapshot and not state_plugin:
@@ -75,6 +79,7 @@ class Binding:
         self.active: set[tuple[str, str]] = set()
         self.presence: dict[tuple[str, str], Presence] = {}
         self.cursors: OrderedDict[tuple[str, str], Cursor] = OrderedDict()
+        self.wait_cursors: OrderedDict[str, WaitPosition] = OrderedDict()
         self.pages: OrderedDict[str, tuple[str, tuple[str, str]]] = OrderedDict()
         self.admission = asyncio.Lock()
         self.decision_runs: OrderedDict[tuple[str, str, str], None] = OrderedDict()
@@ -140,6 +145,7 @@ class Binding:
         self.presence.clear()
         self.cursors.clear()
         self.pages.clear()
+        self.wait_cursors.clear()
         self.agent._acp_server = None
 
     async def error_allowed(self, actor: AguiActor, code: str) -> bool:
@@ -197,8 +203,31 @@ class Binding:
                     "threads", {"threadId": view.sid, "declaration": self.agent.declaration()}
                 )
             elif req.method == "GET" and (
-                match := re.fullmatch(r"/threads/([\w-]+)(/presence)?", path)
+                match := re.fullmatch(
+                    r"/threads/([\w-]+)(/presence|/wait-closures|/run-receipt)?", path
+                )
             ):
+                if match[2] == "/run-receipt":
+                    state = await view.inspect(match[1], receipt=True)
+                    require(
+                        list(req.query_params) == ["runId"]
+                        and len(req.query_params.getlist("runId")) == 1
+                        and req.query_params["runId"]
+                    )
+                    with view.h.read_watermark(state):
+                        rev = await view.h.erasure_revision(view.sid)
+                        reply = await read_receipt(view, req.query_params["runId"])
+                        require(rev == await view.h.erasure_revision(view.sid), "not_found")
+                    return Response(encode(reply), media_type="application/json", headers=headers)
+                if match[2] == "/wait-closures":
+                    await view.inspect(match[1])
+                    require(
+                        list(req.query_params.keys()) == ["after"]
+                        and len(req.query_params.getlist("after")) == 1
+                    )
+                    require(view.sid in view.h.sessions, "cursor_expired")
+                    await WaitFeed(view).serve(req.query_params["after"], Stream(send, headers))
+                    return None
                 await view.attach(match[1])
                 if match[2]:
                     await view.keep_present(Stream(send, headers))
@@ -264,6 +293,7 @@ class View:
         self.grants: dict[str, set[str]] = {}
         self.scope = binding.scopes[self.client]
         self.sid = ""
+        self.inspected: Obj | None = None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -333,6 +363,26 @@ class View:
                 pages.popitem(last=False)
         return reply
 
+    async def inspect(self, sid: str, *, receipt: bool = False) -> Obj:
+        """Read without acquiring a writer or running recovery."""
+        require(sid.isalnum(), "not_found")
+        state = self.h.sessions.get(sid)
+        if receipt:
+            require(self.binding.receipts is not None, "not_found")
+        if receipt or state is None or state.get("writer_lost") or sid in self.h.interruptions:
+            state = await self.agent._call("history", "read", session=sid)
+        require(
+            state
+            and self.in_scope(state)
+            and self.h.can_open(state, self.actor, kind=self.principal["actor"]["kind"]),
+            "not_found",
+        )
+        if receipt and await self.h._pending_erasure(sid):
+            raise Failure("not_found")
+        self.sid, self.inspected = sid, state if receipt else None
+        assert state is not None
+        return cast(Obj, state)
+
     async def attach(self, sid: str) -> None:
         require(sid.isalnum(), "not_found")
         async with self.agent._lock:
@@ -357,10 +407,12 @@ class View:
         await self.check()
 
     def rights_now(self) -> set[str]:
-        s = self.h.sessions.get(self.sid)
+        s = self.h.sessions.get(self.sid) or self.inspected
         return (
             set(self.h.permissions(s, self.actor, self.grants.get(self.sid, self.rights)))
-            if s and self.in_scope(s)
+            if s
+            and self.in_scope(s)
+            and s["actors"].get(self.actor, {}).get("kind") == self.principal["actor"]["kind"]
             else set()
         )
 
@@ -369,7 +421,8 @@ class View:
         rights = self.rights_now()
         require("watch" in rights, "not_found")
         require(permission in rights, "refused")
-        require(not self.h.sessions[self.sid].get("writer_lost"), "unavailable")
+        if self.inspected is None:
+            require(not self.h.sessions[self.sid].get("writer_lost"), "unavailable")
 
     async def gate(self, method: str, value: Obj) -> Obj | None:
         if self.sid:
@@ -526,27 +579,40 @@ class View:
             return str(piece["delta"]) if piece else ""
         return text
 
-    def open_calls(self, branch: list[Obj]) -> dict[str, Obj]:
+    def open_calls(self, branch: list[Obj], state: Obj | None = None) -> dict[str, Obj]:
         return cast(
             dict[str, Obj],
             self.h.open_interface_calls(
-                self.h.sessions[self.sid], branch, self.actor, self.client, self.rights_now()
+                state or self.h.sessions[self.sid],
+                branch,
+                self.actor,
+                self.client,
+                self.rights_now(),
             ),
         )
 
     async def questions(
-        self, branch: list[Obj], *, offer_waits: bool = False
+        self, branch: list[Obj], *, offer_waits: bool = False, snapshot: bool = False
     ) -> dict[str, tuple[Obj, Obj]]:
         ended = {e.get("turn") for e in branch if e["kind"] == "turn_end"}
         presence = self.binding.presence.get(self.key)
-        qs = await self.agent._call(
-            "questions",
-            "list",
-            session=self.sid,
-            actor=self.actor,
-            openOnly=True,
-            recipientView=True,
-        )
+        if snapshot:
+            # Derive waits from the same immutable prefix as messages and waitCursor.
+            qs = [
+                {**q, "answerable": eligible_question(q, self.actor, self.rights_now())}
+                for q in question_state(branch).values()
+                if not {"answer", "closed", "selected"}.intersection(q)
+                and (not q.get("approvalWait") or q.get("turn") in ended)
+            ]
+        else:
+            qs = await self.agent._call(
+                "questions",
+                "list",
+                session=self.sid,
+                actor=self.actor,
+                openOnly=True,
+                recipientView=True,
+            )
         result = {}
         for q in qs:
             kind = q["kind"]
@@ -611,7 +677,10 @@ class View:
         through: str | None = None,
         deliver_waits: bool = False,
     ) -> tuple[Obj, Cursor]:
+        if http and self.h.max_approval_wait_ms is not None:
+            await self.h.reconcile_waits(self.sid)
         rev = await self.h.erasure_revision(self.sid)
+        state = self.h.sessions[self.sid]
         branch = self.branch()
         if through is not None:
             stop = next((i for i, e in enumerate(branch) if e["id"] == through), None)
@@ -619,14 +688,16 @@ class View:
             assert stop is not None
             branch = branch[: stop + 1]
         pos = branch[-1]["id"] if branch else None
+        wait_position = WaitPosition.at(self, pos) if http and deliver_waits else None
+        wait_cursor = uuid4().hex if wait_position else None
         messages = await self.messages(branch)
         cursor = cursor_id or uuid4().hex
         presence = self.binding.presence.get(self.key)
         if http:
             if presence and deliver_waits:
                 self.h.forget_waits(self.sid, token=presence.route)
-            qs = await self.questions(branch, offer_waits=deliver_waits)
-            calls = self.open_calls(branch)
+            qs = await self.questions(branch, offer_waits=deliver_waits, snapshot=True)
+            calls = self.open_calls(branch, state)
             reply = await self.required(
                 "snapshot",
                 {
@@ -634,6 +705,8 @@ class View:
                     "declaration": self.agent.declaration(),
                     "messages": messages,
                     "cursor": cursor,
+                    **({"waitCursor": wait_cursor} if wait_position else {}),
+                    **({"runReceipts": 1} if self.binding.receipts else {}),
                     "lastMessageId": messages[-1]["id"] if messages else None,
                     "waiting": {
                         "questions": [i for _, i in qs.values()],
@@ -651,6 +724,8 @@ class View:
             not http
             or (
                 reply["cursor"] == cursor
+                and reply.get("waitCursor") == wait_cursor
+                and same_json(reply.get("runReceipts"), 1 if self.binding.receipts else None)
                 and same_json(
                     reply["waiting"],
                     {
@@ -680,6 +755,8 @@ class View:
             and presence is self.binding.presence.get(self.key)
         ):
             self.remember_approvals(presence, qs)
+        if wait_position and wait_cursor:
+            wait_position.save(self, wait_cursor)
         return reply, Cursor(cursor, len(messages), fingerprint(reply["messages"]), pos, rev, http)
 
     def remember_approvals(self, presence: Presence, questions: dict[str, tuple[Obj, Obj]]) -> None:

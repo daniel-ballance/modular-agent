@@ -365,6 +365,7 @@ class WaitingApprovals:
                 }
                 if not allow and isinstance(d.get("reason"), str):
                     decision["reason"] = d["reason"]
+                    decision["system"] = False
                 if allow:
                     decision["approvalView"] = {
                         "requestEntryId": e["id"],
@@ -377,6 +378,7 @@ class WaitingApprovals:
                         "session": sid,
                         "writer": "@harness",
                         "kind": "question_answer",
+                        **({"id": d["_entry_id"]} if d.get("_entry_id") else {}),
                         "copies": [e["id"]],
                         "actor": actor,
                         **{k: e[k] for k in ("call", "turn", "step")},

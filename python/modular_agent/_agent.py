@@ -51,6 +51,7 @@ from .compaction import _CompactionPlugin
 from .mcp import _McpPlugin
 from ._credentials import CredentialStore, _CredentialAdapter, environment_credentials
 from ._environment import LocalEnvironment, MemoryEnvironment
+from ._agui_receipts import ReceiptStore
 from ._history import HistoryStore
 from ._listing import SessionSummary, summarize
 from ._resume import ResumeOpen, resume_sessions
@@ -272,6 +273,7 @@ class Agent:
         self._tenants = False
         self._credentials: CredentialStore = environment_credentials()
         self._restart: Callable[[], Awaitable[Agent]] | None = None
+        self._receipt_store: ReceiptStore | None = None
         self._memory_store: _MemoryHistory | None = None
 
     async def _session(self, operation: str, **data: Any) -> Any:
@@ -1449,6 +1451,17 @@ def create_agent(
             wrap_native_providers(h)
             if durability != "ephemeral" and agent._memory_store is not None:
                 raise ValueError("Kept history needs a persistent store")
+            if durability != "ephemeral":
+                receipt_root = (
+                    store.root
+                    if isinstance(store, History)
+                    else root
+                    if data_dir
+                    else Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
+                    / "modular-agent"
+                )
+                agent._receipt_store = ReceiptStore(receipt_root)
+                h.erase_host_reads = agent._receipt_store.erase
             environment_owner = h.capabilities["environment"][0]
             if (
                 data_dir is None

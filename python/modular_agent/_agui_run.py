@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Callable
 from typing import Any, cast
 from uuid import uuid4
@@ -14,6 +13,7 @@ from ma_harness.interface_tools import continuation_origin, same_json
 
 from ._agui import Cursor, View
 from ._agui_http import Stream, problem
+from ._agui_receipts import input_key, receipt_key
 from ._agui_wire import Obj, Failure, encode, event, require, to_shared, triad, valid_patch, warn
 from ._interface_tools import InterfaceToolConnection, InterfaceToolHandoff, InterfaceToolReport
 
@@ -41,6 +41,9 @@ class Exchange:
         self.state_revision: str | None = None
         self.revision = 0
         self.finished = False
+        self.handled = False
+        self.source: str | None = None
+        self.store = view.binding.receipts
         self.p = view.binding.presence.get(view.key)
         self.route = uuid4().hex
 
@@ -159,6 +162,8 @@ class Exchange:
                         await self.frame(event("STEP_STARTED", stepName=self.resumed_step))
                     )
                     self.steps.add(self.resumed_step)
+                if self.handled:
+                    await self.finish({"type": "success"})
                 while not self.finished:
                     require(not self.lost, "unavailable")
                     try:
@@ -189,12 +194,21 @@ class Exchange:
             except (asyncio.CancelledError, ConnectionError):
                 raise
             except Exception as exc:
+                if self.finished:
+                    return  # The terminal reached the transport. Never send a second one.
                 self.v.binding.cursors.pop(self.v.key, None)
                 err = event("RUN_ERROR", code=problem(exc), message="Run could not be delivered.")
                 data = await self.v.gate("error", err) if "watch" in self.v.rights_now() else None
                 if not same_json(data, err):
                     err = event("RUN_ERROR", code="output_withheld", message="Output withheld.")
+                if self.store and self.source:
+                    self.store.stage(
+                        self.source,
+                        {"code": err["code"], "fallback": err["message"] == "Output withheld."},
+                    )
                 await self.response.write(b"data: " + encode(err) + b"\n\n")
+                if self.store and self.source:
+                    self.store.released(self.source, "error")
         finally:
             detach()
             if self.unwatch:
@@ -209,6 +223,29 @@ class Exchange:
     async def prepare(self) -> None:
         v, d = self.v, self.data
         self.revision = await v.h.erasure_revision(v.sid)
+        entries = v.h.sessions[v.sid]["entries"]
+        if self.store and (row := self.store.lookup(receipt_key(v, d["runId"]))):
+            require(row[0] and not any(e["id"] == row[0] for e in entries), "conflict")
+        key = input_key(v.client, d["runId"])
+        require(
+            not any(
+                (
+                    e["kind"] == "input_queued"
+                    and e["data"].get("key") == key
+                    and e.get("actor") == v.actor
+                )
+                or (
+                    e["kind"] == "erase"
+                    and any(
+                        r["key"] == key and r["actorId"] == v.actor
+                        for r in e["data"].get("inputKeys", [])
+                    )
+                )
+                for e in entries
+                if not e.get("fork_source")
+            ),
+            "conflict",
+        )
         suffix = await v.reconcile(d["messages"], self.req.headers.get("MA-History-Cursor"))
         require(not any(m["id"].startswith("ma:") for m in suffix), "conflict")
         require(len({m["id"] for m in suffix}) == len(suffix))
@@ -334,7 +371,6 @@ class Exchange:
             )
             assert registered is not None
             definitions.append(registered)
-        key = "agui:" + json.dumps([v.client, d["runId"]], separators=(",", ":"))
         run_key = (*v.key, d["runId"])
         require(run_key not in v.binding.decision_runs, "conflict")
         if not users:
@@ -366,6 +402,9 @@ class Exchange:
                 self.cx.advertise(v.sid, definitions)
             except Exception:
                 raise Failure("refused") from None
+        if self.store:
+            self.source = self.store.reserve(receipt_key(v, d["runId"]), v.sid, entries)
+        next_source = self.source
         if users:
             result = await v.agent._call(
                 "runtime",
@@ -374,12 +413,14 @@ class Exchange:
                 actor=v.actor,
                 when="now",
                 key=key,
+                **({"_entry_id": self.source} if self.source else {}),
                 commands=False,
                 content=to_shared(users[0]["content"]),
             )
             require(not result.get("duplicate"), "conflict")
             require(result.get("input"), "unavailable")
             self.input_id = result["input"]
+            self.handled = bool(result.get("handled"))
         else:
             for q, declined, value in planned:
                 require(q["id"] in await v.questions(v.branch()), "conflict")
@@ -389,18 +430,21 @@ class Exchange:
                     session=v.sid,
                     actor=v.actor,
                     request=q["id"],
+                    **({"_entry_id": next_source} if next_source else {}),
                     delivery_token=self.p.route
                     if self.p and self.p is v.binding.presence.get(v.key)
                     else None,
                     declined=declined,
                     value="declined" if declined else value,
                 )
+                next_source = None
             for report in converted:
                 assert self.cx is not None
                 require(
-                    (await self.cx.report_tool_result(v.sid, report))["status"] == "accepted",
+                    (await self.cx._report(v.sid, report, next_source))["status"] == "accepted",
                     "conflict",
                 )
+                next_source = None
             v.binding.decision_runs[run_key] = None
             if len(v.binding.decision_runs) > 8192:
                 v.binding.decision_runs.popitem(last=False)
@@ -437,9 +481,23 @@ class Exchange:
         await v.check()
         for cid in staged:
             require(self.cx and await self.cx.release(v.sid, cid), "refused")
+        if self.store and self.source:
+            qids = [q["id"] for q in outcome.get("interrupts", [])]
+            ids = [
+                e["id"]
+                for e in v.branch()
+                if (e["kind"] == "question_open" and e["data"]["id"] in qids)
+                or (
+                    e.get("call") in staged
+                    and e["kind"] in ("tool_started", "modular-agent.interfaceHandoff")
+                )
+            ]
+            self.store.stage(self.source, {"sources": ids, "questions": qids, "calls": staged})
         await self.write(prefix + frames + snap + end)
-        v.remember(cursor)
         self.finished = True
+        if self.store and self.source:
+            self.store.released(self.source, outcome["type"])
+        v.remember(cursor)
 
     async def project(self, d: Obj) -> None:
         v = self.v

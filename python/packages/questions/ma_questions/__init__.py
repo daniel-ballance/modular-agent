@@ -71,6 +71,7 @@ class Questions(Plugin):
 
     def __init__(self):
         self.connected = {}
+        self.route_principals = {}
         self.route_eligibility = {}
         self.signals = {}
         self.wait_for_unconnected = False
@@ -92,6 +93,7 @@ class Questions(Plugin):
         s = await self.api.session("get", session=d["session"], actor=d.get("actor", "user"))
         actor = d.get("actor", s["actor"])
         self.connected.setdefault(s["id"], {}).setdefault(actor, set()).add(d.get("route"))
+        self.route_principals[s["id"], actor, d.get("route")] = d.get("principal", actor)
         return {}
 
     async def present(self, d, emit):
@@ -106,6 +108,9 @@ class Questions(Plugin):
                 routes.clear()
             else:
                 routes.discard(d.get("route"))
+            for key in list(self.route_principals):
+                if key[:2] == (sid, actor) and key[2] not in routes:
+                    del self.route_principals[key]
             if not routes:
                 del self.connected[sid][actor]
         for q in (await self._state(sid)).values():
@@ -119,7 +124,51 @@ class Questions(Plugin):
                 )
             ):
                 if not await self._answer_route(sid, q):
-                    await self._accept(sid, q, q["actor"], "declined", "noLongerAnswerable")
+                    await self._accept(
+                        sid,
+                        q,
+                        q["actor"],
+                        "declined",
+                        "refused" if q["kind"] == "approval" else "noLongerAnswerable",
+                    )
+        return {}
+
+    async def revoked_requests(self, d, emit):
+        sid = d["session"]
+
+        def has_answerer(s, q):
+            in_turn = not q.get("approvalWait") and (
+                q["kind"] == "approval"
+                or q.get("timeout") is None
+                and not self.wait_for_unconnected
+            )
+            for actor, grant in s.items():
+                rights = set(grant)
+                if not eligible_question(q, actor, rights) or "watch" not in rights:
+                    continue
+                if not in_turn:
+                    return True
+                for route in self.connected.get(sid, {}).get(actor, ()):
+                    principal = self.route_principals.get((sid, actor, route), actor)
+                    principal_rights = set(s.get(principal, ()))
+                    if (
+                        eligible_question(q, actor, rights & principal_rights)
+                        and "watch" in principal_rights
+                        and (
+                            route not in self.route_eligibility or self.route_eligibility[route](q)
+                        )
+                    ):
+                        return True
+            return False
+
+        return [
+            q["id"]
+            for q in d["requests"]
+            if has_answerer(d["before"], q) and not has_answerer(d["after"], q)
+        ]
+
+    async def notify_closed(self, d, emit):
+        self.signals.setdefault((d["session"], d["request"]), asyncio.Event()).set()
         return {}
 
     async def _answer_route(self, sid, q):
@@ -184,7 +233,7 @@ class Questions(Plugin):
             result.append({**q, "answerable": answerable})
         return result
 
-    async def _record(self, sid, kind, data, actor=None):
+    async def _record(self, sid, kind, data, actor=None, entry_id=None):
         es = await self.api.session("branch", session=sid)
         copies = [
             e["id"]
@@ -212,6 +261,7 @@ class Questions(Plugin):
             "append",
             session=sid,
             kind=kind,
+            **({"id": entry_id} if entry_id else {}),
             writer=self.name,
             data=data,
             copies=copies,
@@ -495,6 +545,8 @@ class Questions(Plugin):
             d.get("reason"),
             declined=declined,
             acting_for=d.get("acting_for"),
+            actor_decision=True,
+            entry_id=d.get("_entry_id"),
         )
         if accepted is False:
             raise AgentError("Question is closed or no longer answerable", "refused")
@@ -544,7 +596,18 @@ class Questions(Plugin):
             await self._close_question(d["session"], q)
 
     async def _accept(
-        self, sid, q, actor, value, reason=None, *, declined=None, activation=False, acting_for=None
+        self,
+        sid,
+        q,
+        actor,
+        value,
+        reason=None,
+        *,
+        declined=None,
+        activation=False,
+        acting_for=None,
+        actor_decision=False,
+        entry_id=None,
     ):
         with ot.question_answer(sid, q):
             return await self._accept_answer(
@@ -556,10 +619,23 @@ class Questions(Plugin):
                 declined=declined,
                 activation=activation,
                 acting_for=acting_for,
+                actor_decision=actor_decision,
+                entry_id=entry_id,
             )
 
     async def _accept_answer(
-        self, sid, q, actor, value, reason=None, *, declined=None, activation=False, acting_for=None
+        self,
+        sid,
+        q,
+        actor,
+        value,
+        reason=None,
+        *,
+        declined=None,
+        activation=False,
+        acting_for=None,
+        actor_decision=False,
+        entry_id=None,
     ):
         if q["kind"] == "approval" and value == "refuse":
             value, declined = "declined", True
@@ -578,13 +654,14 @@ class Questions(Plugin):
             "value": value,
             "declined": declined,
             **({"activation": True} if activation else {}),
+            **({"system": False} if actor_decision and declined and reason else {}),
             **({"actingFor": acting_for} if acting_for else {}),
             "actor": actor,
             **({"reason": reason} if reason else {}),
             **{k: q[k] for k in ("call", "turn", "step") if q.get(k)},
         }
         try:
-            await self._record(sid, "question_answer", answer, actor)
+            await self._record(sid, "question_answer", answer, actor, entry_id)
         except AgentError as exc:
             if exc.code == "refused":
                 return False

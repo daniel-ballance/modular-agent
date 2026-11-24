@@ -69,6 +69,32 @@ async def ma(root, log, *args, acp=False):
             await proc.wait()
 
 
+async def test_ma_agui_serves_host_reads_without_new_declarations(tmp_path):
+    (tmp_path / "project").mkdir()
+    (tmp_path / "data").mkdir()
+    token = tmp_path / "token"
+    token.touch(mode=0o600)
+    token.write_text(token_hex(32))
+    (tmp_path / "script").write_text(json.dumps([{"text": "Done."}]))
+    async with ma(tmp_path, "listener.log") as (_, client):
+        discovery = (await client.get(str(client.base_url).rstrip("/"))).json()
+        sid = await new(client)
+        path = f"threads/{sid}"
+        view = (await client.get(path)).json()
+        assert view["declaration"] == discovery["declaration"]
+        assert not {"runReceipts", "waitCursor"}.intersection(view["declaration"])
+        assert view["runReceipts"] == 1
+        async with client.stream(
+            "GET", path + "/wait-closures", params={"after": view["waitCursor"]}
+        ) as stream:
+            assert stream.status_code == 200
+            result = await client.post("run", json=prompt(sid))
+            assert result.status_code == 200 and '"type":"RUN_FINISHED"' in result.text
+    async with ma(tmp_path, "restarted.log") as (_, client):
+        receipt = await client.get(path + "/run-receipt", params={"runId": "one"})
+        assert receipt.json() == {"work": "completed", "terminal": "success"}
+
+
 @pytest.mark.parametrize(
     "mode,runtime",
     [

@@ -1,13 +1,27 @@
 """Coordinate native history erasure without treating a lease as read authority."""
 
 from collections import defaultdict
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from ma_core import AgentError, silent
 
 from .authority import CONNECTION_AUTHORITY
 
 
+_READ_MARKS = ContextVar("read_erasure_marks", default=None)
+
+
 class Erasure:
+    @contextmanager
+    def read_watermark(self, state):
+        """Gate a detached read against the tombstones in its actual snapshot."""
+        token = _READ_MARKS.set((state["id"], state.get("_history_tombstones", [])))
+        try:
+            yield
+        finally:
+            _READ_MARKS.reset(token)
+
     def supports_erasure(self):
         history = self.capabilities.get("history")
         if history is None:
@@ -16,6 +30,9 @@ class Erasure:
         return bool(declaration.get("erasure") and declaration.get("pending_erasure"))
 
     def _erasure_view(self, sid):
+        marks = _READ_MARKS.get()
+        if marks and marks[0] == sid:
+            return {"session": sid, "provisional": False, "tombstones": marks[1]}
         state = self.sessions.get(sid, {})
         return {
             "session": sid,
@@ -116,6 +133,8 @@ class Erasure:
                 )
             # Discard before lifting the pending mark. A failed remote request does
             # not give evidence of deletion or allow a subsequent affected model call.
+            if self.erase_host_reads:
+                self.erase_host_reads(self.sessions[sid], targets)
             for plugin in self.plugins.values():
                 if erase_provider := getattr(type(plugin), "erase_provider", None):
                     result = await erase_provider(plugin, sid, targets)

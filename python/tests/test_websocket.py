@@ -36,6 +36,35 @@ async def rpc(ws, key, method, params):
     return json.loads(await ws.recv())
 
 
+@pytest.mark.parametrize(
+    "bad", ["empty", "empty id", "unsafe", "missing", "plugin", "no argument", "no factory"]
+)
+async def test_named_caller_config_refused_before_listening(token_file, bad):
+    def factory(context):
+        pytest.fail("factory ran before authentication")
+
+    callers = [{"caller_id": "worker", "token_file": token_file}]
+    if bad == "empty":
+        callers.clear()
+    elif bad == "empty id":
+        callers[0]["caller_id"] = ""
+    elif bad == "unsafe":
+        token_file.chmod(0o644)
+    elif bad == "missing":
+        token_file.unlink()
+    elif bad == "plugin":
+        factory = Plugin("not-a-factory")
+    elif bad == "no argument":
+
+        def factory():
+            return Plugin("unnamed")
+    elif bad == "no factory":
+        factory = None
+    with pytest.raises(AgentError) as exc:
+        await serve(factory, listen="127.0.0.1:0", callers=callers)
+    assert exc.value.code == "invalid_composition"
+
+
 async def test_plugin_service_auth_frames_and_instance_lifetime(token_file):
     instances = []
     stopped = []

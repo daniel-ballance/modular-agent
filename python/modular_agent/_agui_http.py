@@ -217,7 +217,13 @@ async def listen_agui(
             require(origin_ok, "refused")
             require(
                 not scope["query_string"]
-                or (scope.get("method") == "GET" and scope["path"] == "/agui/v1/threads")
+                or (
+                    scope.get("method") == "GET"
+                    and (
+                        scope["path"] == "/agui/v1/threads"
+                        or scope["path"].endswith(("/wait-closures", "/run-receipt"))
+                    )
+                )
             )
             require(len(active) < 128, "busy")
             active.add(task)
@@ -247,18 +253,21 @@ async def listen_agui(
                 while (await receive())["type"] != "http.disconnect":
                     pass
 
+            async def respond(principal: AguiActor) -> None:
+                reply = await binding.request(req, principal, raw, headers, send)
+                if reply is None:
+                    await send({"type": "http.response.body", "body": b""})
+                else:
+                    await reply(scope, receive, send)
+
             watch = asyncio.create_task(disconnected())
-            operation = asyncio.create_task(binding.request(req, entry, raw, headers, send))
+            operation = asyncio.create_task(respond(entry))
             try:
                 done, _ = await asyncio.wait(
                     (watch, operation), return_when=asyncio.FIRST_COMPLETED
                 )
                 if operation in done:
-                    reply = operation.result()
-                    if reply is None:
-                        await send({"type": "http.response.body", "body": b""})
-                    else:
-                        await reply(scope, receive, send)
+                    operation.result()
             finally:
                 operation.cancel()
                 watch.cancel()

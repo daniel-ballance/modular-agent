@@ -4,7 +4,7 @@ import json
 import math
 from contextvars import ContextVar
 
-from ma_core import AgentError, clone
+from ma_core import AgentError
 from ma_core.wire import usage_out
 
 PERMISSIONS = {
@@ -290,28 +290,14 @@ class Authority:
         kind = d.get("kind", "user")
         if prior and prior["kind"] != kind:
             raise AgentError("A recorded actor cannot change kind", "forbidden")
-        updated = clone(s)
-        updated["actors"][d["subject"]] = {
-            "kind": kind,
-            "authority": sorted(authority),
-        }
-        self.sessions[s["id"]] = updated
-        try:
-            return await self.handle(
-                "append",
-                {
-                    "session": s["id"],
-                    "actor": actor,
-                    "writer": "@harness",
-                    "kind": "authority",
-                    "data": {
-                        "subject": d["subject"],
-                        "kind": d.get("kind", "user"),
-                        "authority": sorted(authority),
-                    },
-                },
-                None,
-            )
-        except BaseException:
-            self.sessions[s["id"]] = s
-            raise
+        return await self.handle(
+            "append",
+            {
+                "session": s["id"],
+                "actor": actor,
+                "writer": "@harness",
+                "kind": "authority",
+                "data": {"subject": d["subject"], "kind": kind, "authority": sorted(authority)},
+            },
+            None,
+        )

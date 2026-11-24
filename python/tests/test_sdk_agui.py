@@ -214,6 +214,101 @@ async def test_waiting_approval_on_returning_presence(tmp_path):
         await listener.close()
 
 
+async def test_wait_closures_replay_then_follow_without_presence(tmp_path):
+    async with service(tmp_path) as (agent, client):
+        sid = await new(client)
+        path = f"threads/{sid}"
+        snapshot = (await client.get(path)).json()
+        feed = path + "/wait-closures"
+        assert (await client.get(feed)).status_code == 400
+        assert (await client.get(feed, params={"after": snapshot["cursor"]})).status_code == 409
+        await client.post("run", json=prompt(sid))
+
+        # Ask without an answer route: each question is closed by the writer.
+        async def question():
+            answer = await agent._h.call(
+                "@harness",
+                "questions",
+                "ask",
+                {
+                    "session": sid,
+                    "actor": "alice",
+                    "kind": "approval",
+                    "question": "Private prompt",
+                },
+            )
+            return answer["request"]
+
+        first = await question()
+        async with client.stream("GET", feed, params={"after": snapshot["waitCursor"]}) as stream:
+            assert stream.status_code == 200
+            assert await agent._call("questions", "present", session=sid) == []
+            lines = (
+                json.loads(line[6:])
+                async for line in stream.aiter_lines()
+                if line.startswith("data: ")
+            )
+            a = await anext(lines)
+            assert a == {"cursor": a["cursor"], "reason": "refused", "requestId": first}
+            second = await question()
+            b = await anext(lines)
+            assert b == {"cursor": b["cursor"], "reason": "refused", "requestId": second}
+        async with client.stream("GET", feed, params={"after": a["cursor"]}) as stream:
+            replay = (
+                json.loads(line[6:])
+                async for line in stream.aiter_lines()
+                if line.startswith("data: ")
+            )
+            assert (await anext(replay))["requestId"] == second
+
+
+@pytest.mark.parametrize(
+    "boundary,terminal", [("before-marker", "unknown"), ("after-marker", "success")]
+)
+async def test_crash_after_terminal_release(tmp_path, boundary, terminal):
+    import sys
+
+    token = token_urlsafe()
+    path = tmp_path / "test-token"
+    path.touch(mode=0o600)
+    path.write_text(token)
+
+    @asynccontextmanager
+    async def process(phase):
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(Path(__file__).with_name("receipt_crash_service.py")),
+            str(tmp_path),
+            phase,
+            stdout=asyncio.subprocess.PIPE,
+        )
+        try:
+            origin = (await proc.stdout.readline()).decode().strip()
+            assert origin.startswith("http://")
+            async with AsyncClient(
+                base_url=origin + "/agui/v1/",
+                trust_env=False,
+                headers={"Authorization": "Bearer " + token},
+            ) as client:
+                yield proc, client
+        finally:
+            proc.kill()
+            await proc.wait()
+
+    async with process(boundary) as (proc, client):
+        sid = await new(client)
+        post = asyncio.create_task(client.post("run", json=prompt(sid)))
+        try:
+            assert await proc.stdout.readline() == b"released\n"
+        finally:
+            post.cancel()
+            await asyncio.gather(post, return_exceptions=True)
+    async with process("read") as (_, client):
+        # No opening snapshot, writer acquisition or recovery on this read.
+        response = await client.get(f"threads/{sid}/run-receipt", params={"runId": "one"})
+        assert response.json() == {"terminal": terminal, "work": "completed"}
+
+
 async def test_preflight_does_not_need_identity_or_admit_work(tmp_path):
     origin = "https://allowed.invalid"
     async with service(tmp_path, server={"origins": [origin]}) as (agent, client):

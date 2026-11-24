@@ -569,7 +569,7 @@ class InterfaceTools:
         )
 
     async def _commit_interface_result(
-        self, sid, cid, result, *, actor=None, suppress_continuation=False
+        self, sid, cid, result, *, actor=None, suppress_continuation=False, entry_id=None
     ):
         entries = self.sessions[sid]["entries"]
         start, checkpoints, terminal = handoff_fold(entries).get(cid, (None, [], None))
@@ -596,6 +596,7 @@ class InterfaceTools:
                 "append",
                 {
                     "session": sid,
+                    **({"id": entry_id} if entry_id else {}),
                     "turn": provenance.get("turn"),
                     "step": provenance.get("step"),
                     "call": cid,
@@ -629,7 +630,7 @@ class InterfaceTools:
         self.interface_traces.pop(key, None)
         return entry
 
-    async def report_interface_result(self, sid, token, report):
+    async def report_interface_result(self, sid, token, report, *, entry_id=None):
         if not valid_report(report):
             return "refused"
         cx = self.interface_connections.get(token)
@@ -746,7 +747,9 @@ class InterfaceTools:
                     # Carry the authorized report, not a later polling or recovery request.
                     # The ephemeral context is never part of the portable result.
                     self.interface_report_contexts[sid, cid] = ot.inject()
-                    await self._commit_interface_result(sid, cid, result, actor=actor)
+                    await self._commit_interface_result(
+                        sid, cid, result, actor=actor, entry_id=entry_id
+                    )
                 require_processed_result(result)
         finally:
             CONNECTION_AUTHORITY.reset(scope)

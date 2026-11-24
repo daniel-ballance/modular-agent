@@ -496,7 +496,7 @@ def entry_out(e):
         }
     elif kind == "inputHandedBack":
         ids = d.get("inputIds") or [d["input"]]
-        r["data"] = {"inputIds": ids}
+        r["data"] = {"inputIds": ids, **({"reason": d["reason"]} if d.get("reason") else {})}
         if len(ids) == 1:
             r["inputId"] = ids[0]
     elif kind == "input":
@@ -580,9 +580,16 @@ def entry_out(e):
         declined = d.get("declined", value == "declined")
         system_closed = e["kind"] == "question_closed" or (
             declined
+            and d.get("system") is not False
             and d.get("reason")
             in {"timeLimit", "cancelled", "noLongerAnswerable", "refused", "superseded"}
         )
+        if (
+            system_closed
+            and d.get("cause") == "revoked"
+            and d.get("reason") in {"refused", "noLongerAnswerable"}
+        ):
+            r["data"]["cause"] = "revoked"
         if not system_closed:
             r["data"]["actorId"] = d.get("actor", e.get("actor", "user"))
             if d.get("actingFor"):
@@ -811,12 +818,15 @@ def entry_in(e, sid, default_actor="user"):
             if d.get("declined")
             else d.get("value")
         )
-        if d.get("declined") and (
-            not d.get("actorId") or d.get("reason") in {"closed", "noLongerAnswerable", "cancelled"}
-        ):
+        if d.get("declined") and not d.get("actorId"):
             result["kind"] = "question_closed"
         result["data"] = {
             **d,
+            **(
+                {"system": False}
+                if d.get("actorId") and d.get("declined") and d.get("reason")
+                else {}
+            ),
             "request": d["requestId"],
             "actor": d.get("actorId", result["actor"]),
             "value": value,

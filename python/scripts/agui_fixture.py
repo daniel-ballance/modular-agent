@@ -19,6 +19,7 @@ import subprocess
 import sys
 from unittest.mock import patch
 
+from host_read_controls import HostReads, ask_later
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from modular_agent._agui_http import listen_asgi
@@ -99,8 +100,9 @@ class Timers:
                 notify()
 
 
-class Fixture:
+class Fixture(HostReads):
     def __init__(self, config):
+        self.init_host_reads()
         self.name = config["name"]
         self.root = Path(os.environ["MODULAR_AGENT_DATA_DIR"])
         self.project = Path(config["project"])
@@ -188,7 +190,7 @@ class Fixture:
                         )
             if self.name == "output-size":
                 await ctx.emit("kit.oversized", {"text": "x" * (64 << 20)})
-            if self.name == "questions":
+            if self.name in ("questions", "receipt-interrupt"):
                 await self.choice(ctx.session_id, ctx.turn_id, ctx.step_id)
 
         async def wrong(payload, ctx):
@@ -205,11 +207,13 @@ class Fixture:
                 await self.choice(ctx.session_id, ctx.turn_id, ctx.step_id)
 
         hooks = {"tool.before": before, "tool.after": after}
-        if self.name in ("questions", "state-and-gate", "output-size"):
+        if self.name in ("questions", "receipt-interrupt", "state-and-gate", "output-size"):
             hooks["step.before"] = step
         if self.name == "mixed":
             hooks["step.after"] = mixed
         if self.name in (
+            "closure-buffered",
+            "receipt-visibility",
             "approval-redacted",
             "waiting-routes",
             "state-and-gate",
@@ -246,14 +250,18 @@ class Fixture:
                 return (await cx.tools.call("increment", {})).text()
 
             plugins.append(Plugin("counter", tools=[bump, increment]))
-        elif self.waiting:
+        elif self.name == "closure-left-open":
+            plugins.append(Plugin("asker", tools=[ask_later]))
+        elif self.waiting or self.name == "closure-routes":
             plugins.append(sdk_fixture("counter", config={"path": str(self.root / "count")}))
         self.agent = await create_agent(
             project=self.project,
             data_dir=self.root,
             providers=[self.script],
             history=file_history(self.root / "store"),
-            durability="durable" if self.name == "crash-continuation" else "kept",
+            durability="durable"
+            if self.name in ("crash-continuation", "receipt-durable")
+            else "kept",
             tenants={k: {"rights": list(ACP_RIGHTS)} for k in ("test", "other")},
             several_actors=True,
             session_limits=True,
@@ -261,11 +269,13 @@ class Fixture:
             approval="ask"
             if self.name.startswith("waiting-mixed")
             else "all"
-            if self.waiting or self.name.startswith("approval")
+            if self.waiting
+            or self.name.startswith("approval")
+            or self.name in ("closure-presence", "closure-routes")
             else "off",
             approval_covers_nested=self.waiting or self.name.startswith("approval"),
             max_approval_wait=5.0 if self.waiting else None,
-            late_answers_start_turns=self.waiting,
+            late_answers_start_turns=self.waiting or self.name == "closure-left-open",
             settings={
                 "approval_timeout": 5,
                 **(
@@ -369,6 +379,9 @@ class Fixture:
         # recorded body from the store at inspect time, not from the SSE stream.
         h = self.agent._h
         store = h.capabilities["history"][1]
+        self.host_checks = self.name.startswith(("receipt-", "closure-"))
+        if self.host_checks:
+            self.observe_reads(store)
         original_keep = store.keep
 
         async def keep(d, emit):
@@ -378,8 +391,12 @@ class Fixture:
                 e["kind"] == "tool_started" for e in entries
             ):
                 await self.pause(sid, "beforeHandoff")
+            if self.host_checks:
+                await self.work_boundary(sid, entries, True)
             result = await original_keep(d, emit)
             log(self.batches, [sid, [e["id"] for e in entries]])
+            if self.host_checks:
+                await self.work_boundary(sid, entries, False)
             if self.waiting:
                 for e in entries:
                     marker = {
@@ -449,6 +466,8 @@ class Fixture:
         changed = False
         events = payload["events"]
         for ev in events:
+            if result := self.read_gate(ev):
+                return result
             d = ev["data"]
             method = d.get("method") if isinstance(d, dict) else None
             value = d.get("result", {})
@@ -499,6 +518,8 @@ class Fixture:
         d = await req.json()
         sid = d.get("threadId")
         h = self.agent._h
+        if self.host_checks and (reply := await self.host_read_control(sid, d)) is not None:
+            return reply
         match d["operation"]:
             case "tls":
                 return JSONResponse(self.control_tls)
@@ -540,7 +561,7 @@ class Fixture:
                 )
             case "barrier":
                 await self.latch[sid, d["name"]].wait()
-                if d["name"] == "presenceLost":
+                if d["name"] == "presenceLost" and self.name != "closure-routes":
                     await self.agent._call("runtime", "wait", session=sid)
             case "release":
                 self.latch[sid, "release"].set()

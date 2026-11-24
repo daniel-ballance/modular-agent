@@ -7,7 +7,7 @@ from ma_core import API, AgentError, Stop, clone, content, identity, now, silent
 from ma_core import telemetry as ot
 from ma_core.wire import provider_projection, recorded_as
 
-from .authority import Authority, PERMISSIONS, read_tenants
+from .authority import Authority, CONNECTION_AUTHORITY, PERMISSIONS, read_tenants
 from .erasure import Erasure
 from .history_views import input_outcomes, pending_inputs, select_entries, saved_step
 from .interface_tools import (
@@ -66,6 +66,8 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
         self.tool_dispatches = {}
         self.followers = []
         self.delivery_observers = {}
+        self.erase_host_reads = None
+        self.commit_listeners = {}  # Per-session synchronous notifications after publication.
         self.output_streams = {}
         self.continuation_waiters = {}
         self.erasure_locks = {}
@@ -825,7 +827,9 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
         for key in ("busy", "moving", "closing", "suspending", "writer_lost", "interruption"):
             if key in current:
                 session[key] = current[key]
-        self.sessions[session["id"]] = session
+        self.sessions[sid] = session
+        for notify in self.commit_listeners.get(sid, ()):
+            notify(entries)
         # A cancelled caller cannot dispatch from this append. The next
         # writer still needs the confirmed parent and call associations.
         if session.get("writer_lost"):
@@ -1141,6 +1145,17 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
             setup.append(aborted)
             e["parent"] = aborted["id"]
         batch = [*setup, e]
+        if d.get("handled") and e["kind"] == "input_queued":
+            batch.append(
+                {
+                    **e,
+                    "kind": "input_withdrawn",
+                    "id": identity(),
+                    "parent": e["id"],
+                    "content": [],
+                    "data": {"input": e["id"], "reason": "handled"},
+                }
+            )
         paired = {"turn_start": ("first_input", "input"), "job_end": ("job_report", "input_queued")}
         field, kind = paired.get(e["kind"], (None, None))
         if field in d:
@@ -1210,6 +1225,87 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
         if e["kind"] in {"actor_joined", "authority"}:
             joined = e["data"].get("actor", {}).get("id") or e["data"].get("subject")
             updated["departed"] = [aid for aid in updated.get("departed", []) if aid != joined]
+        if e["kind"] == "authority":
+            grant = e["data"]
+            updated["actors"][grant["subject"]] = {
+                "kind": grant["kind"],
+                "authority": grant["authority"],
+            }
+        if e["kind"] in {"authority", "actor_left", "limit"} and "questions" in self.capabilities:
+            branch = branch_entries(s)
+            closed = {
+                row["data"]["request"]
+                for row in branch
+                if row["kind"] in ("question_answer", "question_closed", "secret_answer_accepted")
+            }
+            openings = {
+                row["data"]["id"]: row
+                for row in branch
+                if row["kind"] == "question_open" and row["data"]["id"] not in closed
+            }
+            # Compare both views before publishing either the grant or its consequences.
+            # A competing answer takes the same append lock.
+            token = CONNECTION_AUTHORITY.set(None)
+            try:
+                revoked = (
+                    await self.call(
+                        "@harness",
+                        "questions",
+                        "revoked_requests",
+                        {
+                            "session": sid,
+                            "requests": [opening["data"] for opening in openings.values()],
+                            "before": {a: sorted(self.permissions(s, a)) for a in s["actors"]},
+                            "after": {
+                                a: sorted(self.permissions(updated, a)) for a in updated["actors"]
+                            },
+                        },
+                    )
+                    if openings
+                    else []
+                )
+            finally:
+                CONNECTION_AUTHORITY.reset(token)
+            for qid in revoked:
+                opening = openings[qid]
+                q = opening["data"]
+                reason = (
+                    "refused"
+                    if q["kind"] == "approval" and not q.get("approvalWait")
+                    else "noLongerAnswerable"
+                )
+                if q.get("approvalWait") and self.wait_reason(updated, opening) != (
+                    reason,
+                    "refused",
+                ):
+                    continue
+                decision = {
+                    **{k: opening[k] for k in ("turn", "step", "call") if opening.get(k)},
+                    "id": identity(),
+                    "parent": updated["position"],
+                    "session": sid,
+                    "time": e["time"],
+                    "kind": "question_closed",
+                    "writer": "@harness",
+                    "content": [],
+                    "visible": False,
+                    "copies": [opening["id"]],
+                    "data": {"request": q["id"], "reason": reason, "cause": "revoked"},
+                }
+                batch.append(decision)
+                updated["entries"].append(decision)
+                updated["position"] = decision["id"]
+                if q.get("approvalWait"):
+                    result = {
+                        **decision,
+                        **self.wait_result(opening, "refused"),
+                        "id": identity(),
+                        "parent": decision["id"],
+                        "copies": [opening["id"], decision["id"]],
+                    }
+                    batch.append(result)
+                    updated["entries"].append(result)
+                    updated["position"] = result["id"]
         if e["kind"] == "setting":
             if s.get("busy"):
                 raise AgentError("Settings may change only between turns")
@@ -1680,8 +1776,9 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
             await self.fire("@harness", "session.leave", {**d, "entry": entry})
             return entry
         if op == "input":
+            defer_command = d.pop("_defer_command", False)
             result = await self.fire("@harness", "input.arrives", d)
-            if result.get("handled") and (command := result.get("command")):
+            if not defer_command and result.get("handled") and (command := result.get("command")):
                 result["result"] = await self.handle("command", {**d, "text": command}, emit)
             return result
         if op == "prepare":
@@ -1709,6 +1806,17 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
                 return entries[0]
             for entry in entries:
                 await self._emit({"kind": "history_entry", "session": sid, "entry": entry})
+            if d["kind"] in {"limit", "authority", "actor_left"} and len(entries) > 1:
+                for closed in entries[1:]:
+                    if closed["kind"] == "question_closed":
+                        qid = closed["data"]["request"]
+                        await self.call(
+                            "@harness",
+                            "questions",
+                            "notify_closed",
+                            {"session": sid, "request": qid},
+                        )
+                await self.interface_kick(sid)
             if d["kind"] in {"limit", "authority", "actor_left", "setting"} and waiting_entries(
                 self.sessions[sid]
             ):

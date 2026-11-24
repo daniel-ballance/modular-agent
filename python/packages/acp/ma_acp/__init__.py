@@ -1528,7 +1528,7 @@ class ACP(Plugin):
         await self.api.call(
             "questions",
             "connect" if present else "disconnect",
-            {"session": sid, "actor": actor, "route": self.name},
+            {"session": sid, "actor": actor, "route": self.name, "principal": self.actor},
         )
         if present:
             self.presence.setdefault(sid, set()).add(actor)
