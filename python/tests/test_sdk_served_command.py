@@ -24,8 +24,10 @@ async def test_command_reads_reopened_sessions_project(tmp_path: Path, served: b
         await session.send("Keep this session.", "propose")
         sid = session.id
 
-    async def who(_: str, context: CommandContext) -> str:
-        return f"{context.project.name}: {(await context.environment.read('message')).decode()}"
+    async def who(args: str, context: CommandContext) -> str:
+        return (
+            f"{context.project.name}: {(await context.environment.read('message')).decode()}{args}"
+        )
 
     def setup(r: Registrar) -> None:
         r.command("who", "Read the session's message", who)
@@ -41,4 +43,8 @@ async def test_command_reads_reopened_sessions_project(tmp_path: Path, served: b
         empty = await agent.session()
         assert await empty.run_command("/who") == "second: second"
         assert {row["id"] for row in await agent.sessions()} == {sid}
-        assert await (await agent.open_session(sid)).run_command("/who") == "first: first"
+        args = '  "two words"   '
+        assert (
+            await (await agent.open_session(sid)).run_command("/who " + args)
+            == "first: first" + args
+        )

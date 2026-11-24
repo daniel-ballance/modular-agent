@@ -1610,7 +1610,7 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
                 return await self._effect(
                     d["session"],
                     self.commands[name][2],
-                    {**d, "actor": d.get("actor", command_session["actor"]), "args": args.strip()},
+                    {**d, "actor": d.get("actor", command_session["actor"]), "args": args},
                     allow_provisional=True,
                 )
             finally:

@@ -575,6 +575,8 @@ async def _serve(
             return None
 
     async def run_command(p: dict[str, Any], key: str | int) -> JsonObject:
+        if not isinstance(p.get("args"), str):
+            raise WireError("Command args must be text", "invalid_request")
         command = registered()._commands.get(p["name"])
         if command is None:
             raise WireError("Unknown command", "invalid_request")

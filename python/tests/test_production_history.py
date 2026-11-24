@@ -81,6 +81,22 @@ async def test_history_open_for_erasure_reports_held_without_waiting(tmp_path, m
     assert exc.value.code == "held"
 
 
+@pytest.mark.parametrize("details", [{}, {"retryAfterMs": 0}, {"retryAfterMs": True}])
+async def test_acquire_refuses_invalid_hold_without_retry(tmp_path, monkeypatch, details):
+    history = HTTPHistory("http://127.0.0.1", tmp_path / "token")
+    calls = 0
+
+    async def exchange(*args):
+        nonlocal calls
+        calls += 1
+        raise ServiceError(409, {"code": "held", **details})
+
+    monkeypatch.setattr(history, "request", exchange)
+    with pytest.raises(AgentError, match="Invalid history lease hold"):
+        await history.acquire("s")
+    assert calls == 1 and not history.leases
+
+
 async def test_late_successful_renewal_cannot_extend_old_lease(tmp_path, monkeypatch):
     history = HTTPHistory("http://127.0.0.1:8080", tmp_path / "token")
     history.ttl = 120
