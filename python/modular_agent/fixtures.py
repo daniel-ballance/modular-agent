@@ -125,6 +125,7 @@ def main() -> None:
         plugin = fixture(args.fixture)
         if endpoint := os.environ.get("MODULAR_AGENT_TELEMETRY_OTLP"):
             from ._scenario_telemetry import exporter
+
             with exporter(endpoint):
                 serve(plugin)
         else:

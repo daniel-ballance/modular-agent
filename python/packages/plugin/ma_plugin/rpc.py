@@ -59,6 +59,26 @@ class WireError(AgentError):
         self.details = details or {}
 
 
+def exec_timeout(params):
+    if "timeoutMs" not in params:
+        return None
+    ms = params["timeoutMs"]
+    if type(ms) is not int or not 0 < ms < 2**53:
+        raise WireError("timeoutMs must be a positive safe integer", "invalid_request")
+    return ms / 1000
+
+
+def exec_deadline(seconds):
+    if seconds is None or seconds == 0:
+        return {}
+    if type(seconds) not in (int, float) or not 0 < seconds < 2**53 / 1000:
+        raise WireError("Invalid exec timeout", "invalid_request")
+    ms = round(seconds * 1000)
+    if not 0 < ms < 2**53:
+        raise WireError("Timeout must be representable in milliseconds", "invalid_request")
+    return {"timeoutMs": ms}
+
+
 def work_method(method):
     return (
         "/" in method

@@ -7,6 +7,7 @@ from typing import Any, Literal, Protocol, TypedDict, NotRequired, cast
 
 from ma_core import Plugin as _NativePlugin
 from ma_plugin.host import Environment as _NativePort
+from ma_plugin.rpc import exec_timeout
 
 from ._types import AgentError, ErrorCode, JsonObject
 
@@ -49,6 +50,8 @@ async def _dispatch_environment(
     params: JsonObject,
     progress: Callable[[str], Awaitable[None]],
 ) -> JsonObject:
+    if name == "exec":
+        exec_timeout(params)
     operation = getattr(environment, _METHODS.get(name, ""), None)
     if operation is None:
         raise AgentError(ErrorCode.NOT_SUPPORTED, f"Environment does not implement {name}")

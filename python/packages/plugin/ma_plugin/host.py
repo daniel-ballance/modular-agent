@@ -30,8 +30,7 @@ from ma_core.wire import (
     tool_in,
     tool_out,
 )
-from .rpc import MAX_FRAME, Peer, WireError, rpc_id
-from .rpc import work_method
+from .rpc import MAX_FRAME, Peer, WireError, exec_deadline, exec_timeout, rpc_id, work_method
 from .runtime_host import HostedRuntime
 from .server import BINDING
 from .websocket import connect_plugin
@@ -204,8 +203,7 @@ class Environment:
             params["point"] = d["point"]
         elif op == "exec":
             params["command"] = d["command"]
-            if d.get("timeout") is not None:
-                params["timeoutMs"] = d["timeout"] * 1000
+            params.update(exec_deadline(d.get("timeout")))
         return await self.plugin.request("env/" + op, params, d, emit)
 
     async def save(self, d, emit):
@@ -1154,7 +1152,7 @@ class External(Plugin):
 
             args = {**p, "session": sid, "cwd": str(cwd)}
             if op == "exec":
-                args["timeout"] = p.get("timeoutMs", 0) / 1000 or None
+                args["timeout"] = exec_timeout(p)
             try:
                 r = await self.api.call("environment", operations[op], args, output)
             except AgentError as exc:

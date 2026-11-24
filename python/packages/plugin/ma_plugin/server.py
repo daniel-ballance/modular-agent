@@ -19,7 +19,7 @@ from ma_local import local_for_platform, local_type
 from ma_tools import DEFINITIONS
 
 from ma_core.wire import tool_out
-from .rpc import MAX_FRAME, Peer, WireError
+from .rpc import MAX_FRAME, Peer, WireError, exec_deadline, exec_timeout
 from .runtime_server import METHODS, RuntimeServer
 from .websocket import PLUGIN_PROTOCOL, listen_websocket, wait_for_stop
 
@@ -368,8 +368,7 @@ class Conformance(PluginServer):
                 raise WireError("Unknown tool", "invalid_request")
             callback_id = "env:" + str(key)
             self.output_handlers[callback_id] = key
-            if "timeout" in d:
-                d["timeoutMs"] = d.pop("timeout") * 1000
+            d.update(exec_deadline(d.pop("timeout", None)))
             try:
                 r = await self.peer.request("host/env/exec", d, key=callback_id)
             finally:
@@ -459,7 +458,7 @@ class Conformance(PluginServer):
                     "session": sid,
                     "cwd": cwd,
                     "command": p["command"],
-                    "timeout": p.get("timeoutMs", 0) / 1000 or None,
+                    "timeout": exec_timeout(p),
                 }
                 try:
                     result = await self.local.bash(d, output)

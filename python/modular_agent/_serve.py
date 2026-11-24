@@ -13,7 +13,7 @@ from typing import Any, TypedDict, cast, overload
 from inspect import signature
 
 from ma_plugin.host import External
-from ma_plugin.rpc import MAX_FRAME, Peer, WireError
+from ma_plugin.rpc import MAX_FRAME, Peer, WireError, exec_deadline
 from ma_plugin.server import BINDING, PluginServer
 from ma_plugin.websocket import (
     PLUGIN_PROTOCOL,
@@ -311,9 +311,7 @@ async def _serve(
             "bash": "exec",
         }
         arguments = dict(params)
-        timeout = arguments.pop("timeout", None)
-        if isinstance(timeout, (int, float)):
-            arguments["timeoutMs"] = round(timeout * 1000)
+        arguments.update(exec_deadline(arguments.pop("timeout", None)))
         from uuid import uuid4
 
         callback_id = uuid4().hex
