@@ -128,10 +128,9 @@ async def test_proposals_decline_withdraw_and_absent_join(tmp_path, runtime_kind
         assert await ask("withdraw", inputId=second["inputId"]) == {}
         assert await ask("proposals") == {"proposals": []}
         es = (await ask("history"))["entries"]
-        assert [e["data"]["inputIds"][0] for e in es if e["kind"] == "inputHandedBack"] == [
-            first["inputId"],
-            second["inputId"],
-        ]
+        hand_backs = [e for e in es if e["kind"] == "inputHandedBack"]
+        assert [e["inputId"] for e in hand_backs] == [first["inputId"], second["inputId"]]
+        assert all("inputIds" not in e["data"] for e in hand_backs)
         assert not any(e["kind"] == "turnStart" for e in es)
 
 

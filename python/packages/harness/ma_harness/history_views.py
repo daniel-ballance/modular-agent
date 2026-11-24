@@ -41,10 +41,8 @@ def pending_inputs(entries, proposals, ready):
         iid = d.get("input", e["id"])
         if e["kind"] == "input_queued":
             accepted[iid] = e
-        elif recorded_as(e, "input"):
-            settled.add(d.get("inputId", iid))
-        elif recorded_as(e, "input_withdrawn"):
-            settled.update(d.get("inputIds", [d.get("inputId", iid)]))
+        elif recorded_as(e, "input") or recorded_as(e, "input_withdrawn"):
+            settled.add(d.get("input"))
     pending = [
         e
         for iid, e in accepted.items()

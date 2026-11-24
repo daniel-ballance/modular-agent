@@ -189,7 +189,13 @@ def test_portable_question_signature_includes_scope_and_policy():
         "timeLimitMs": 1200,
         "whenTimeLimit": "leaveOpen",
     }
-    row = {"id": "entry", "kind": "inputRequest", "writer": "questions", "data": {"request": draft}}
+    row = {
+        "id": "entry",
+        "kind": "inputRequest",
+        "requestId": "q",
+        "writer": "questions",
+        "data": {"request": draft},
+    }
     signature = json.loads(entry_in(row, "session")["data"]["signature"])
     assert (
         signature["responders"],

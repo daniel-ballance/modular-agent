@@ -62,11 +62,8 @@ def fold(entries):
         kind = entry["kind"]
         if kind == "input_queued":
             pending[d.get("input") or entry["id"]] = n
-        if kind in {"input", "input_withdrawn", "input_handled"} or any(
-            recorded_as(entry, k) for k in ("input", "input_withdrawn", "input_handled")
-        ):
-            for iid in [d.get("input") or d.get("inputId"), *d.get("inputIds", [])]:
-                pending.pop(iid, None)
+        if recorded_as(entry, "input") or recorded_as(entry, "input_withdrawn"):
+            pending.pop(d.get("input"), None)
         if kind == "model_started":
             attempts.add(entry.get("step"))
         if recorded_as(entry, "response"):

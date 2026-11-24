@@ -736,8 +736,7 @@ class ACP(Plugin):
             # A duplicate describes its original turn, even if another turn is
             # now running. A closing session may disappear before wait returns.
             if receipt.get("duplicate") and any(
-                e["kind"] == "input_withdrawn"
-                and receipt["input"] in (e["data"].get("inputIds") or [e["data"].get("input")])
+                e["kind"] == "input_withdrawn" and receipt["input"] == e["data"].get("input")
                 for e in (await self.get(session_id))["entries"]
             ):
                 raise protocol_error("conflict", "Input was handed back")

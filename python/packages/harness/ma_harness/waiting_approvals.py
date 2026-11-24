@@ -419,7 +419,6 @@ class WaitingApprovals:
             tombstone = {
                 "erased": True,
                 "originalKind": "inputAnswer",
-                "requestId": e["data"]["id"],
             }
             result.update(visible=False, data={"erased": True, "originalKind": "toolResult"})
         if decision:

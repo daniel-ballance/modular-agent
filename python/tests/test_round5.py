@@ -99,7 +99,8 @@ async def test_portable_records_and_approval_fails_closed_after_reopen(tmp_path,
         await a.call("runtime", "wait", scope)
         es = [entry_out(e) for e in (await a.session("get", **scope))["entries"]]
         admission = next(e for e in es if e["kind"] == "inputAccepted")
-        assert admission["data"]["inputId"] == receipt["input"]
+        assert admission["inputId"] == receipt["input"]
+        assert "inputId" not in admission["data"]
         assert admission["data"]["content"] == content("work")
         assert len([e for e in es if e["kind"] == "plugins"]) == 1
         attempt = next(e for e in es if e["kind"] == "modelRequest")["data"]

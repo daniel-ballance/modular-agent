@@ -37,12 +37,11 @@ def work_records(entries: list[Obj], anchor: Obj) -> tuple[list[Obj], Obj | None
         iid = data.get("input") or anchor["id"]
         turn = None
         for e in entries:
-            d = e["data"]
-            if recorded_as(e, "input_withdrawn") and iid in (
-                d.get("inputIds") or [d.get("input") or d.get("inputId")]
-            ):
+            if e["data"].get("input") != iid:
+                continue
+            if recorded_as(e, "input_withdrawn"):
                 return [anchor, e], e
-            if recorded_as(e, "input") and (d.get("input") or d.get("inputId")) == iid:
+            if recorded_as(e, "input"):
                 records.append(e)
                 turn = e.get("turn")
                 break

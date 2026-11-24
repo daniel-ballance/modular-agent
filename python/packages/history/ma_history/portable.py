@@ -3,6 +3,7 @@
 from ma_core.wire import entry_in
 
 from .profile import fork_prefix
+from .service import tombstone
 
 
 def session_view(meta, records, defaults=None):
@@ -31,21 +32,7 @@ def session_view(meta, records, defaults=None):
     for index, e in enumerate(entries):
         kind, data = e["kind"], e.get("data", {})
         if e["id"] in erased and not data.get("erased"):
-            e = entries[index] = entry_in(
-                {
-                    "id": e["id"],
-                    "kind": records[index]["kind"],
-                    "parentId": e["parent"],
-                    "erased": True,
-                    **{
-                        k: records[index][k]
-                        for k in ("turnId", "stepId", "toolCallId", "jobId")
-                        if k in records[index]
-                    },
-                },
-                meta["id"],
-                actor,
-            )
+            e = entries[index] = entry_in(tombstone(records[index]), meta["id"], actor)
             kind, data = e["kind"], e["data"]
         if data.get("erased"):
             for native, wire in (

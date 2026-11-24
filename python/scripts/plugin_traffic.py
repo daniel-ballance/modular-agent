@@ -61,9 +61,7 @@ async def seed(h, sid, count):
     admitted = await api.session(
         "append", session=sid, kind="input_queued", content=content("setup"), data={"when": "after"}
     )
-    await api.session(
-        "append", session=sid, kind="input_withdrawn", data={"inputIds": [admitted["id"]]}
-    )
+    await api.session("append", session=sid, kind="input_withdrawn", data={"input": admitted["id"]})
     s = h.sessions[sid]
     assert not s.get("provisional")
     batch, parent = [], s["position"]
