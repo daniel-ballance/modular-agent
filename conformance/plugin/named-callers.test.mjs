@@ -9,8 +9,8 @@ const exec = promisify(execFile);
 const run = (...command) => exec(process.execPath, [file('run.mjs'), '--named-callers', ...command]);
 const launcher = ['--', process.execPath, file('fake-named.mjs')];
 
-test('a run without a named-caller launcher explains the skip', async () => {
-  const { stdout } = await run(); assert.match(stdout, /SKIP .*no named-caller fixture command/);
+test('selecting named callers without a launcher is a usage error', async () => {
+  await assert.rejects(run(), e => e.code === 2 && /requires a fixture launcher/.test(e.stderr));
 });
 test('one listener isolates the two authenticated callers', async () => {
   const { stdout } = await run(...launcher);

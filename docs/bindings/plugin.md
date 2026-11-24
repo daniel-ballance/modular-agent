@@ -361,7 +361,7 @@ Trace context on a callback MUST come from work under a live `parentRequestId` o
 |---|---|---|
 | `host/env/output` | `{ parentRequestId: RpcId, chunk: string }`; id of `host/env/exec` | notify |
 
-`host/tools/list` and `host/tools/call` are the wire form of [nested calls](../contracts.md#nested-calls). `host/tools/list` MUST return the session's registered tools that a plugin may start, as they stand at the request. `host/tools/call` MUST answer with the nested call's committed terminal result, whatever its status: a refused, failed or cancelled nested call is a ToolResult, not a protocol error. The host assigns the nested call's id and returns it as `callId`. The host MUST NOT forward the nested call's progress to the asking plugin. An unknown or unregistered `name` is a nested call that settles `refused`, so that it is recorded. `env/list` is optional: a caller MUST treat `not_supported` as absence and MAY fall back to `env/exec`.
+`host/tools/list` and `host/tools/call` are the wire form of [nested calls](../contracts.md#nested-calls). `host/tools/list` MUST return the session's registered tools that a plugin may start, as they stand at the request. `host/tools/call` MUST answer with the nested call's committed terminal result, whatever its status: a refused, failed or cancelled nested call is a ToolResult, not a protocol error. The host assigns the nested call's id and returns it as `callId`. The host MUST NOT forward the nested call's progress to the asking plugin. An unknown or unregistered `name` is a nested call that settles `refused`, so that it is recorded. If an environment refuses `env/list`, a caller MUST NOT bypass the refusal through `env/exec`.
 
 `host/ask` MUST NOT return a secret value, only its stored name or the non-value fields of the [shared Answer](data.md#questions). For `host/emit`, the host MUST accept only dotted custom event names that do not impersonate standard events. The host MUST attribute them to the sending plugin and gate them as output. `host/problem` is operator diagnostics, not an event or a history write.
 
@@ -419,14 +419,14 @@ A build serving the conformance plugin MUST document its command and support the
 | Part | Registers | Replaces |
 |---|---|---|
 | `provider` | Provider `conformance`, model `echo`, as in [ACP conformance mode](acp.md#conformance-mode) | `provider:conformance` |
-| `tools` | Source `conformance-tools` with `bash { command: string }` using `host/env/exec` and `read { path: string }` using `host/env/read`. A build that can ask for nested calls also registers `nest { name: string, input: object }` using `host/tools/call`. | `tool:bash`, `tool:read`, and `tool:nest` when registered |
+| `tools` | Source `conformance-tools` with `bash { command: string }` using `host/env/exec` and `read { path: string }` using `host/env/read`. The tools fixture also registers `nest { name: string, input: object }` using `host/tools/call`. | `tool:bash`, `tool:read`, and `tool:nest` |
 | `environment` | Local environment; executes the fixture commands with Bash | `working-environment` |
 | `runtime` | Transient Runtime | `runtime` |
 | `durable-runtime` | Durable Runtime | `runtime` |
 | `hooks` | `tool.before`, `turn.before` and `output`, as below | Nothing |
 
 - `read` MUST return `completed` with one text part containing the file decoded as UTF-8, or `failed` with an explanation if the read fails. `bash` MUST forward each output chunk as a text progress part and return one text part containing combined output followed by a newline and `[exit code N]`, where `N` is the returned exit code or `null`. Its status MUST be `completed` only for exit code 0, and `failed` otherwise. Wire cancellation follows [Transport](#transport).
-- `nest` MUST send one `host/tools/call` with its `name` and `input` and return the nested result's `status` and `content` unchanged. If the request fails with a protocol error it MUST return `failed` with one text part holding the error code's name. The fixture environment MUST answer `env/list` with the directory's entries or with `not_supported`.
+- `nest` MUST send one `host/tools/call` with its `name` and `input` and return the nested result's `status` and `content` unchanged. If the request fails with a protocol error it MUST return `failed` with one text part holding the error code's name. The fixture environment MUST answer `env/list` with the directory's entries and their kinds, or the specified path error.
 - The `tool.before` fixture MUST refuse a call whose input JSON contains `conformance-forbidden`, with reason `refused by the conformance plugin`. The `turn.before` fixture MUST contribute `{ "system": "The conformance plugin is loaded." }`. The `output` fixture MUST replace `conformance-secret` with `[redacted]` in editable strings, including a match across text events within one segment, without making other changes.
 
 ## Changes
