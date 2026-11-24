@@ -173,6 +173,17 @@ async def test_base_http_composition_does_not_declare_erasure(tmp_path):
             server.close()
 
 
+def test_unversioned_history_cannot_acquire_a_new_registry():
+    from ma_history.registry import Unavailable
+    from ma_history.service import Store
+
+    with closing(sqlite3.connect(":memory:")) as db:
+        db.execute("CREATE TABLE records (id TEXT)")
+        with pytest.raises(Unavailable):
+            Store(db, 1000)
+        assert db.execute("SELECT name FROM sqlite_master").fetchall() == [("records",)]
+
+
 @pytest.mark.loopback
 def test_service_does_not_replace_missing_registry_on_restart(tmp_path):
     token = tmp_path / "token"
