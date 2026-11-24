@@ -271,6 +271,23 @@ interface ApprovalPass {
 }
 interface DispatchAllowance { call: ToolCall; binding: ApprovalBinding; policy: unknown; cover?: CoveringAllow }
 interface NestedDispatch { depth: number; registration: NonNullable<ReturnType<Harness["findTool"]>>; approval: unknown; inherited?: CoveringAllow }
+type RecordedSnapshot = TurnSnapshot & { startedBy: QueuedInput["startedBy"]; resultShape?: Record<string, unknown> };
+function recordedSnapshot(start: HistoryEntry): RecordedSnapshot {
+	const d = start.data as RecordedSnapshot | undefined;
+	const id = (x: unknown) => typeof x === "string" && x.length > 0;
+	const object = (x: unknown) => x != null && typeof x === "object" && !Array.isArray(x);
+	const cap = (x?: number) => x === undefined || Number.isSafeInteger(x) && x > 0;
+	if (!d || !id(d.startedBy?.id) || !["actor", "job", "plugin", "answer", "toolResult"].includes(d.startedBy.kind) ||
+		d.model !== null && (!id(d.model?.id) || !id(d.model?.provider)) || typeof d.system !== "string" ||
+		d.context !== undefined && !validReportContent(d.context) || !Array.isArray(d.tools) ||
+		!d.tools.every(t => id(t?.name) && typeof t.description === "string" && (typeof t.parameters === "boolean" || object(t.parameters))) ||
+		!object(d.settings) || !cap(d.settings.maxSteps) || !cap(d.settings.maxOutput) ||
+		d.settings.reasoning !== undefined && !REASONING_LEVELS.some(level => level === d.settings.reasoning)) {
+		throw failure("unavailable", "Cannot recover an incomplete turn snapshot");
+	}
+	return d;
+}
+
 interface TurnState extends TurnSnapshot { interfaceOffer?: Map<string, InterfaceConnection>; interfaceAllowances?: Map<string, { call: ToolCall; approval: unknown } | null>; dispatched: Set<string>; steps: Map<string, Operation>; startingRights?: Authority[]; connectionRights?: ConnectionRights; endedHook?: boolean; sources: Map<string, string[]>; actors: Set<string>; jobs: Set<string>; tenantLimit?: boolean; capacityLimit?: boolean; stepAfterRunning?: boolean; toolResultError?: string }
 
 /**
@@ -971,6 +988,8 @@ export class Harness {
 		const s = new Session(meta, false);
 		if (store.historyErasure) this.storedTombstones.set(s, new Set(entries.filter(e => e.erased === true).map(e => e.id)));
 		for (const e of entries) s.apply(e);
+		const interrupted = this.unfinishedTurn(s, s.branch());
+		if (interrupted) recordedSnapshot(interrupted);
 		return s;
 	}
 
@@ -1204,7 +1223,7 @@ export class Harness {
 		const branch = s.branch();
 		const lastStart = this.unfinishedTurn(s, branch);
 		if (!lastStart?.turnId) return;
-		const startedBy = (lastStart.data as { startedBy?: QueuedInput["startedBy"] } | undefined)?.startedBy ?? { kind: "actor", id: lastStart.actorId ?? "user" };
+		const snapshot = recordedSnapshot(lastStart);
 		const pending = new Map((lastStart.continuesTurnId ? this.openCalls(s, lastStart.continuesTurnId) : []).map((c) => [c.id, c]));
 		for (const c of interruptedCalls(branch, lastStart.turnId)) pending.set(c.id, c);
 		// This host has no restart-time cleanup confirmation from its environments.
@@ -1213,7 +1232,7 @@ export class Harness {
 		const interrupted: InterruptedTurn = { turnId: lastStart.turnId, calls };
 		this.emit(s, "turn.interrupted", { pending: interrupted.calls.length }, "harness", { turnId: interrupted.turnId });
 		// Not awaited: the resumed turn may wait for an answer that only an Interface opened after this can give.
-		void connectionRights.exit(() => this.launch(s, interrupted.turnId, (signal) => this.resumeTurn(s, interrupted, startedBy, signal, lastStart.data as Partial<TurnSnapshot>)));
+		void connectionRights.exit(() => this.launch(s, interrupted.turnId, (signal) => this.resumeTurn(s, interrupted, snapshot, signal)));
 	}
 
 	/** Used when no Runtime is loaded: the turn ends as failed, and each pending call gets one result. */
@@ -2543,24 +2562,24 @@ export class Harness {
 		if (open.size) this.maybeContinueOpenCalls(s);
 	}
 
-	private async resumeTurn(s: Session, interrupted: InterruptedTurn, startedBy: QueuedInput["startedBy"], signal: AbortSignal, snapshot?: Partial<TurnSnapshot> & { resultShape?: Record<string, unknown> }): Promise<void> {
+	private async resumeTurn(s: Session, interrupted: InterruptedTurn, snapshot: RecordedSnapshot, signal: AbortSignal): Promise<void> {
 		const turnId = interrupted.turnId;
-		if (!this.runtime()?.supports.continuesAfterRestart) return withTrace(undefined, () => this.resumeTurnWithin(s, interrupted, startedBy, signal, snapshot));
+		if (!this.runtime()?.supports.continuesAfterRestart) return withTrace(undefined, () => this.resumeTurnWithin(s, interrupted, snapshot, signal));
 		const saved = this.savedTrace(s, turnId);
 		const span = this.turnSpan(s, turnId, saved ?? null, true);
 		try {
 			await span.run(async () => {
 				const traceContext = carrier(span.spanContext);
 				if (traceContext) await this.commit(s, [{ kind: TURN_TRACE, writer: "harness", turnId, modelVisible: false, data: { traceContext } }]);
-				await this.resumeTurnWithin(s, interrupted, startedBy, signal, snapshot);
+				await this.resumeTurnWithin(s, interrupted, snapshot, signal);
 			});
 		} finally { span.end(); }
 	}
 
-	private async resumeTurnWithin(s: Session, interrupted: InterruptedTurn, startedBy: QueuedInput["startedBy"], signal: AbortSignal, snapshot?: Partial<TurnSnapshot> & { resultShape?: Record<string, unknown> }): Promise<void> {
+	private async resumeTurnWithin(s: Session, interrupted: InterruptedTurn, snapshot: RecordedSnapshot, signal: AbortSignal): Promise<void> {
 		const turnId = interrupted.turnId;
 		const runtime = this.runtime();
-		const model = this.modelAccess(s, snapshot?.model);
+		const model = this.modelAccess(s, snapshot.model);
 		if (!runtime || !model) {
 			const pending = new Set(pendingToolCalls(s.branch(), turnId, s.order.map((id) => s.entries.get(id)!)));
 			await this.endInterruptedTurn(s, { turnId, calls: interrupted.calls.filter((c) => !pending.has(c.id)) });
@@ -2569,8 +2588,8 @@ export class Harness {
 		}
 		const branch = s.branch();
 		const state: TurnState = {
-			model: model.model, system: snapshot?.system ?? "", context: snapshot?.context, tools: snapshot?.tools ?? this.toolDefinitions(s),
-			settings: snapshot?.settings ? { ...snapshot.settings, reasoning: lowerReasoning(snapshot.settings.reasoning, model.model) } : this.turnSettings(s, model.model),
+			model: model.model, system: snapshot.system, context: snapshot.context, tools: snapshot.tools,
+			settings: { ...snapshot.settings, reasoning: lowerReasoning(snapshot.settings.reasoning, model.model) },
 			dispatched: new Set(), steps: new Map(), sources: new Map(), actors: new Set(this.recordedTurnActors(branch, turnId)),
 			jobs: new Set(this.recordedTurnJobs(branch, turnId)),
 			startingRights: this.recordedTurnRights(branch, turnId),
@@ -2590,8 +2609,8 @@ export class Harness {
 			});
 			await this.endInterruptedTurn(s, { turnId, calls: calls.filter((c) => !eligible.includes(c)) });
 			outcome = await runtime.resumeTurn(
-				{ sessionId: s.id, turnId, startedBy, model: this.turnModel(s, turnId, state, model), settings: state.settings, resultShape: snapshot?.resultShape },
-				this.runtimeHost(s, turnId, state, snapshot?.resultShape, runtime.supports.continuesAfterRestart === true),
+				{ sessionId: s.id, turnId, startedBy: snapshot.startedBy, model: this.turnModel(s, turnId, state, model), settings: state.settings, resultShape: snapshot.resultShape },
+				this.runtimeHost(s, turnId, state, snapshot.resultShape, runtime.supports.continuesAfterRestart === true),
 				signal,
 				{ turnId, calls: eligible, ...(restored ? { lastStep: restored.lastStep } : {}) },
 			);
@@ -2604,7 +2623,7 @@ export class Harness {
 			const open = new Set(pendingToolCalls(s.branch(), turnId, keptNow));
 			await this.endInterruptedTurn(s, { turnId, calls: interrupted.calls.filter((c) => !terminal.has(c.id) && !open.has(c.id)) });
 		}
-		await this.finishTurn(s, turnId, outcome, state, signal, snapshot?.resultShape);
+		await this.finishTurn(s, turnId, outcome, state, signal, snapshot.resultShape);
 	}
 
 	private recordedTurnRights(branch: HistoryEntry[], turnId: string): Authority[] {
@@ -3436,7 +3455,7 @@ export class Harness {
 		return undefined;
 	}
 
-	private toolDefinitions(s?: Session, applyLegacyFilter = true): ToolDefinition[] {
+	private toolDefinitions(s?: Session): ToolDefinition[] {
 		const seen = new Set<string>();
 		const out: ToolDefinition[] = [];
 		for (const { plugin, impl } of this.caps.get("tool-source") ?? []) {
@@ -3457,8 +3476,7 @@ export class Harness {
 				out.push(t);
 			}
 		}
-		const allowed = s?.settings.tools as string[] | undefined;
-		return applyLegacyFilter && allowed ? out.filter((t) => allowed.includes(t.name)) : out;
+		return out;
 	}
 
 	/** Run one tool call. Hook points are applied by whoever owns the operation. */
@@ -3587,7 +3605,7 @@ export class Harness {
 				tools: this.runtime()?.supports.nestedToolCalls === true ? {
 					list: async () => {
 						check();
-						return structuredClone(this.toolDefinitions(s, false).filter(t => !t.callers || t.callers.includes("plugin")));
+						return structuredClone(this.toolDefinitions(s).filter(t => !t.callers || t.callers.includes("plugin")));
 					},
 					call: async (name, input, askingSignal) => {
 						check();
