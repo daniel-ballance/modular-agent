@@ -442,7 +442,7 @@ export class HistoryArchive {
 	private exclusion?: { epoch: number; until: number };
 	private local = new Map<string, symbol>();
 	private remote?: { leased(id: string): boolean; ttl: number };
-	constructor(private dir?: string, private pendingErasureDir = dir) {}
+	constructor(readonly dir?: string, private pendingErasureDir = dir) {}
 	get persistent() { return this.dir !== undefined; }
 
 	private db() {

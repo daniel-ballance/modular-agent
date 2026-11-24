@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -50,6 +50,19 @@ test("SDK loads in-process, stdio, explicit service and environment services in 
     else process.env.MODULAR_AGENT_PLUGINS = prior;
     await Promise.all([first.close(), second.close()]);
   }
+});
+
+test("named caller tables reject unsafe or ambiguous mappings before factory setup", async t=>{
+  const {dir,tokenFile}=await token(t), listen="127.0.0.1:0", unsafe=join(dir,"unsafe");
+  await writeFile(unsafe,randomBytes(32).toString("hex"),{mode:0o600}); await chmod(unsafe,0o644);
+  const entry={callerId:"desk",tokenFile}; let factories=0;
+  const factory=()=>{ factories++; return definePlugin({name:"desk"}); };
+  for (const callers of [[],[{...entry,callerId:""}],[entry,{...entry,callerId:"other"}],[{...entry,tokenFile:unsafe}],[{...entry,tokenFile:join(dir,"missing")}]] ) {
+    await assert.rejects(serve(factory,{listen,callers}),{code:"invalid_composition"});
+  }
+  // JavaScript callers do not get the overload's factory check at compile time.
+  await assert.rejects(serve(definePlugin({name:"no-factory"}),{listen,callers:[entry]} as never),{code:"invalid_composition"});
+  assert.equal(factories,0);
 });
 
 let nextRequest = 1;

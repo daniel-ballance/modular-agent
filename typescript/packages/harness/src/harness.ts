@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { activeOperation, carrier, conversation, currentSpan, historyForPeer, observeInference, readTrace, safeName, startOperation, telemetryEvent, toolAttributes, TURN_TRACE, withTrace, type Operation } from "./telemetry.js";
 import { mapOutput, OUTPUT_SEGMENT_BYTES } from "./output.js";
 import { Reservations, resourceBytes, reservationLimits, type ReservationOptions } from "./reservations.js";
+import { RunReceipts, type ReceiptOperation } from "./run-receipts.js";
 import { memoryPendingErasure, type ErasureIntent, type ErasurePlan, type HistoryErasureRegistry, type PendingErasure } from "./erasure.js";
 import { addAbortListener } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
@@ -238,7 +239,7 @@ export interface PluginApi {
 	config(): Record<string, unknown>;
 }
 
-export interface HarnessOptions { approvalCoversNested?: boolean; agentName?: string; project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn" | "refused"; jobReportsStartTurns?: boolean; rejectUnknownModel?: boolean; reopenModelAliases?: Readonly<Record<string, string>>; resourceReservations?: ReservationOptions; tenants?: Record<string, Tenant> | null }
+export interface HarnessOptions { receiptDir?:string; approvalCoversNested?: boolean; agentName?: string; project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn" | "refused"; jobReportsStartTurns?: boolean; rejectUnknownModel?: boolean; reopenModelAliases?: Readonly<Record<string, string>>; resourceReservations?: ReservationOptions; tenants?: Record<string, Tenant> | null }
 
 export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"];
 
@@ -277,6 +278,8 @@ interface TurnState extends TurnSnapshot { interfaceOffer?: Map<string, Interfac
  * It runs no turns, calls no models and runs no tools itself.
  */
 export class Harness {
+	readonly receipts: RunReceipts;
+	readonly receiptOperation = new AsyncLocalStorage<ReceiptOperation>();
 	readonly hooks: HookRegistry;
 	readonly project: string;
 	readonly home: string;
@@ -319,6 +322,7 @@ export class Harness {
 		this.tenants = readTenants(options.tenants === undefined ? process.env.MODULAR_AGENT_TENANTS : JSON.stringify(options.tenants ?? {}));
 		this.project = options.project;
 		this.home = options.home;
+		this.receipts = new RunReceipts(options.receiptDir ?? options.home);
 		this.now = options.now ?? Date.now;
 		this.newId = options.newId ?? randomUUID;
 		this.questionsOutlastTurns = options.questionsOutlastTurns ?? true;
@@ -469,14 +473,14 @@ export class Harness {
 				await this.commit(s, [{ kind: "actorLeft", writer: pluginName, actorId, modelVisible: false, data: { actorId } }]);
 				await this.hooks.observe("session.leave", { sessionId, actorId, requestedBy });
 				this.emit(s, "session.left", { actorId }, pluginName, { actorId });
-				this.closeUnanswerable(s);
+				await this.closeRevokedWaits(s);
 				await this.reconcileApprovals(s);
 			},
 			presentActors: (id) => this.presentActors(this.session(id)),
 			presenceChanged: (id) => { const s = this.sessions.get(id); if (s) {
 				const delivered = this.approvalDeliveries.get(s);
 				for (const d of delivered ?? []) if (!d.present()) delivered!.delete(d);
-				this.closeUnanswerable(s);
+				void this.closeUnanswerable(s).catch(e => this.problem("harness", "close unanswerable wait", e));
 			} },
 			listSessions: async (project) => (await this.use<HistoryStore>("history-store")?.list(project === null ? undefined : { project: project ?? this.project })) ?? [],
 			sessionSummary: (id, viewer) => this.sessionSummary(id, viewer),
@@ -1096,6 +1100,20 @@ export class Harness {
 		return !!s && this.discoveryRights(s, actor, severalActors).includes("watch");
 	}
 
+	/** A host read never joins the viewer, takes a writer or starts recovery. Capture the
+	 * branch, the commit offset and effective rights without yielding between them. */
+	async hostView(id: string, actor: Actor, scope: (project: string, tenant: string | null) => boolean) {
+		const live = this.sessions.get(id);
+		const s = live && !live.closed && !live.suspended ? live : await this.loadInto(id);
+		if (!s || !scope(s.meta.project, s.tenant ?? null)) throw failure("not_found", "Thread not found");
+		const freshness = await this.admitHistory(s);
+		const rights = this.discoveryRights(s, actor, false);
+		if (!rights.includes("watch")) throw failure("not_found", "Thread not found");
+		const order = s.order.slice();
+		return { records:s.branch(), order, all:order.map(id=>s.entries.get(id)!), rights, live:s === live, kept:!s.ephemeral && this.use<HistoryStore>("history-store")?.supports.persistent !== false,
+			generation:createHash("sha256").update(JSON.stringify([freshness, order.filter(id => { const e = s.entries.get(id)!; return e.kind === "position" || e.erased; })])).digest("hex") };
+	}
+
 	private discoveryRights(s: Session, actor: Actor, allowJoin: boolean): Authority[] {
 		if (s.tenant !== undefined && !this.tenants.has(s.tenant)) return [];
 		if (s.actors.has(actor.id)) return this.actorRights(s, actor.id).filter(right => actor.authority.includes(right));
@@ -1367,6 +1385,18 @@ export class Harness {
 	private async commitBatch(s: Session, drafts: EntryDraft[], pluginRecord: boolean, span: Operation): Promise<HistoryEntry[]> {
 		s.interruption.signal.throwIfAborted();
 		if (s.suspended) return [];
+		const op = this.receiptOperation.getStore();
+		const first = !pluginRecord && op && !op.bound && op.thread === s.id && drafts.find(d => d.actorId === op.actor && (
+			d.kind === "inputAccepted" && (d.data as {key?:string})?.key === op.key ||
+			d.kind === "inputAnswer" && op.answers.has(d.requestId!) || d.kind === "toolResult" && op.reports.has(d.toolCallId!)));
+		if (first) {
+			if (s.entries.has(op.id)) throw failure("conflict", "Run already accepted");
+			// Use the operation's own entry as the commit witness, including in a mixed batch.
+			const previous = first.id;
+			first.id = op.id;
+			if (previous) for (const d of drafts) if (d.sources) d.sources = d.sources.map(id => id === previous ? op.id : id);
+			this.receipts.reserve(s.id, op.id);
+		}
 		const firstAdmission = s.provisional && drafts.some(d => d.kind === "inputAccepted");
 		if (s.provisional && !firstAdmission && drafts.some(d => !PROVISIONAL_SETUP.has(d.kind))) {
 			throw failure("invalid_request", "Session has not admitted its first input");
@@ -1454,8 +1484,18 @@ export class Harness {
 			const store = this.use<HistoryStore>("history-store");
 			await this.write(s, () => store?.append(s.id, entries));
 		}
+		if (first) op.bound = true;
 		for (const e of entries) {
+			// Attribute a closure to revocation only when this authority commit
+			// actually removes the last eligible route. Presence changes are not grants.
+			const routes = ["actorJoined","actorLeft","limit"].includes(e.kind)
+				? this.recordedOpenRequests(s).map(r => [r,this.hasQuestionRoute(s,r)] as const) : [];
 			s.apply(e);
+			for (const [r, previouslyEligible] of routes) {
+				if (this.hasQuestionRoute(s,r)) s.revokedQuestions.delete(r.id);
+				else if (previouslyEligible) s.revokedQuestions.add(r.id);
+			}
+			if (e.kind === "inputAnswer") s.revokedQuestions.delete(requestIdOf(e)!);
 			const inputId = inputIdOf(e);
 			if (inputId && e.kind === "input" && e.turnId) {
 				const unit = this.reservations.limits.settlementBytes;
@@ -1618,7 +1658,7 @@ export class Harness {
 		const intents = this.pendingRegistry()?.intents().filter(intent => intent.copies.some(copy => copy.sessionId === s.id)) ?? [];
 		if (intents.some(intent => intent.copies.some(copy =>
 			copy.sessionId === s.id && (!copy.erased || s.entries.get(copy.id)?.erased !== true)))) {
-			throw failure("unavailable", "Session has unresolved pending erasure");
+			throw Object.assign(failure("unavailable", "Session has unresolved pending erasure"), {pendingErasure:true});
 		}
 		return JSON.stringify(intents.map(intent => intent.id));
 	}
@@ -1633,7 +1673,7 @@ export class Harness {
 		const stored = this.storedTombstones.get(s);
 		const { plans } = await registry.read(s.id);
 		if (plans.some(p => p.copies.some(c => !c.complete || view.get(c.entryId)?.erased !== true || !stored?.has(c.entryId)))) {
-			throw failure("unavailable", "Session has unresolved pending erasure");
+			throw Object.assign(failure("unavailable", "Session has unresolved pending erasure"), {pendingErasure:true});
 		}
 		return JSON.stringify(plans.map(plan => plan.intentId));
 	}
@@ -1725,6 +1765,7 @@ export class Harness {
 				const book = existing ?? s.order.map(id => s.entries.get(id)!).find(e => e.kind === "erasure" &&
 					(e.data as { operation?: string })?.operation === operation);
 				const recorded = new Set((book?.data as { entryIds?: string[] } | undefined)?.entryIds);
+				this.receipts.erase(s.id, recorded, [...s.entries.values()]);
 				if (!s.ephemeral) await this.write(s, () => store!.erase!(s.id, [...recorded]));
 				const kept = s.ephemeral ? [...s.entries.values()] : (await store!.load(s.id)).entries;
 				const tombstones = new Set(kept.filter(e => e.erased).map(e => e.id));
@@ -1765,6 +1806,7 @@ export class Harness {
 			const book = s.entries.get(plan.recordId);
 			const recorded = new Set((book?.data as { entryIds?: string[] } | undefined)?.entryIds);
 			if (!book || book.erased || book.kind !== "erasure" || pending.some(id => !recorded.has(id))) throw failure("unavailable", "Erasure bookkeeping does not match the plan");
+			this.receipts.erase(s.id, recorded, [...s.entries.values()]);
 			await this.write(s, () => store.erase!(s.id, pending));
 			const tombstones = new Set((await store.load(s.id)).entries.filter(e => e.erased === true).map(e => e.id));
 			this.storedTombstones.set(s, tombstones);
@@ -1944,7 +1986,7 @@ export class Harness {
 		await this.commit(s, [actorJoined(actor, writer, grantedBy)]);
 		await this.hooks.observe("session.join", { sessionId: s.id, actorId: actor.id, actor, grantedBy });
 		this.emit(s, "session.joined", { actor }, writer, { actorId: actor.id });
-		this.closeUnanswerable(s);
+		await this.closeRevokedWaits(s);
 		await this.reconcileApprovals(s);
 	}
 
@@ -2018,7 +2060,7 @@ export class Harness {
 			const effective = (s.actors.get(actorId)?.authority ?? []).filter((r) => s.tenant === undefined || this.tenants.get(s.tenant)?.rights.includes(r));
 			if ((rights ?? ALL_AUTHORITY).some((right) => !effective.includes(right))) throw Object.assign(new Error("A limit cannot give a right the administrator lacks"), { code: "forbidden" });
 			await this.commit(s, [{ kind: "limit", writer, actorId, modelVisible: false, data: { rights: rights === null ? null : [...new Set(rights)] } }]);
-			this.closeUnanswerable(s);
+			await this.closeRevokedWaits(s);
 			await this.reconcileApprovals(s);
 		});
 	}
@@ -2105,6 +2147,14 @@ export class Harness {
 			});
 		if (s.erasing) throw failure("busy", "Erasure is in progress");
 		if (transformed.stopped) {
+			const inputId = this.newId();
+			if (this.receiptOperation.getStore()) {
+				await this.commit(s, [
+					{kind:"inputAccepted", writer:"harness", modelVisible:false, inputId, actorId:options.actorId,
+						data:{inputId, key:options.key, when:"now", taken:"now", content}},
+					{kind:"inputHandedBack", writer:"harness", modelVisible:false, inputId, data:{inputId, reason:"handled"}},
+				]);
+			}
 			let output: string | void = undefined;
 			const command = transformed.command;
 			if (command !== undefined) {
@@ -2112,7 +2162,7 @@ export class Harness {
 				if (options.delegatedBy) this.requireAuthority(s, options.delegatedBy, "input");
 				output = await this.runCommand(sessionId, command, options.actorId);
 			}
-			const receipt = { inputId: this.newId(), taken: "now" as const, handled: true, ...(output === undefined ? {} : { output }) };
+			const receipt = { inputId, taken: "now" as const, handled: true, ...(output === undefined ? {} : { output }) };
 			if (scoped) s.keys.set(scoped, receipt);
 			return receipt;
 		}
@@ -3931,11 +3981,35 @@ export class Harness {
 		return candidates.some(id => this.mayAnswer(s, request, id));
 	}
 
-	private closeUnanswerable(s: Session): void {
+	private hasQuestionRoute(s: Session, r: InputRequest) {
+		return this.turnAuthority.exit(() => connectionRights.exit(() => r.approvalWait
+			? [...s.actors.keys()].some(id => this.eligibleMember(s, r.answerers.length ? r.answerers : undefined, id))
+			: this.hasAnswerer(s, r)));
+	}
+
+	private async closeUnanswerable(s: Session) {
+		const closed = [];
 		for (const { request, resolve } of s.requests.values()) {
-			if (!this.hasAnswerer(s, request)) {
-				resolve({ requestId: request.id, actorId: "harness", declined: true, reason: "noLongerAnswerable" });
+			if (!this.hasQuestionRoute(s, request)) {
+				closed.push(resolve({ requestId: request.id, actorId: "harness", declined: true, reason: request.kind === "approval" ? "refused" : "noLongerAnswerable",
+					...(s.revokedQuestions.has(request.id) && {cause:"revoked" as const}) }));
 			}
+		}
+		await Promise.all(closed);
+	}
+
+	private async closeRevokedWaits(s: Session) {
+		await this.closeUnanswerable(s);
+		for (const r of this.waitingRequests(s)) {
+			if (r.approvalWait || !s.revokedQuestions.has(r.id) || this.hasQuestionRoute(s, r)) continue;
+			s.lateAnswers.add(r.id);
+			try {
+				const answer: Answer = {requestId:r.id, actorId:"harness", declined:true, reason:"noLongerAnswerable", cause:"revoked"};
+				await this.recordAnswer(s, r, answer);
+				s.waiting.delete(r.id);
+				this.emitAnswer(s, r, answer, true);
+			} finally { s.lateAnswers.delete(r.id); }
+			this.maybeContinueOpenCalls(s);
 		}
 	}
 
@@ -4002,7 +4076,9 @@ export class Harness {
 				: { requestId: request.id, actorId: answer.actorId, declined: true, reason: "superseded" };
 		}
 		const record = async () => {
-			await this.commit(s, [{ ...fields, kind: "inputAnswer", data: kept }]);
+			const systemClosure = kept.actorId === "harness" && kept.declined;
+			await this.commit(s, [{ ...fields, kind: "inputAnswer", actorId:systemClosure ? undefined : kept.actorId,
+				data:systemClosure ? {requestId:kept.requestId, declined:true, reason:kept.reason, ...(kept.cause && {cause:kept.cause})} : kept }]);
 			const system = kept.actorId === "harness" && kept.reason &&
 				["cancelled", "noLongerAnswerable", "restart", "timeLimit", "superseded", "refused", "erased"].includes(kept.reason) ? kept.reason : undefined;
 			telemetryEvent("modular_agent.question.close", { "modular_agent.question.id": request.id,
@@ -4199,7 +4275,8 @@ export class Harness {
 	private async closeWaiting(s: Session, w: WaitingApproval, reason: string, status: "refused" | "notStarted" | "outcomeUnknown", erasing = false) {
 		const run = async () => {
 			const id = w.decision?.id ?? this.newId();
-			const body = { requestId: w.request.id, declined: true, reason };
+			const body = { requestId: w.request.id, declined: true, reason,
+				...(reason === "noLongerAnswerable" && s.revokedQuestions.has(w.request.id) && {cause:"revoked" as const}) };
 			const drafts: EntryDraft[] = w.decision ? [] : [{ kind: "inputAnswer", id, writer: "harness", modelVisible: false, turnId: w.entry.turnId, stepId: w.entry.stepId,
 				toolCallId: w.entry.toolCallId, requestId: w.request.id, data: body, sources: [w.entry.id] }];
 			drafts.push(this.approvalResult(s, w, status, reason, id));

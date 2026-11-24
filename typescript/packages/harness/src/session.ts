@@ -84,6 +84,7 @@ export class Session {
 	readonly jobs = new Map<string, JobRecord>();
 	readonly requests = new Map<string, OpenRequest>();
 	readonly waiting = new Set<string>();
+	readonly revokedQuestions = new Set<string>();
 	readonly recent: AgentEvent[] = [];
 	/** Recipients following this session, each through the output gate. */
 	readonly followers = new Set<{ recipient: string; push(event: AgentEvent): void; idle(): Promise<void> }>();

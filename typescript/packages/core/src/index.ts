@@ -25,4 +25,4 @@ export type { Job, JobOutcome, JobOwner, JobRecovery, JobStarter, UnfinishedJob 
 export { defineProvider, ModelFailure } from "./provider.js";
 export type { Provider, ProviderContext } from "./provider.js";
 export { serve } from "./serve.js";
-export type { PluginListenOptions, ServiceServer } from "@modular-agent/plugin-wire";
+export type { PluginListenOptions, NamedPluginListenOptions, NamedCaller, ServiceServer } from "@modular-agent/plugin-wire";

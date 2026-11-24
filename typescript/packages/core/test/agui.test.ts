@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { fork } from "node:child_process";
+import { once } from "node:events";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -131,6 +133,84 @@ test("a presence opened after the turn receives a waiting approval only on its o
     const continuation = await events(await run(id,snap.messages,{resume}));
     assert.equal(continuation.at(-1).outcome.type,"success"); assert.equal(effects,1);
   } finally { await presence.body?.cancel(); }
+});
+
+test("a closure cursor replays a decision to its own client without delivering an approval", {timeout:10000}, async t => {
+  const dataDir = await mkdtemp(join(tmpdir(),"closure-replay-")); t.after(()=>rm(dataDir,{recursive:true,force:true}));
+  const {thread, run, request, agent} = await setup(t, {dataDir,durability:"kept", sessionLimits:true, approval:"all", maxApprovalWaitMs:60_000,
+    questionsOutlastTurns:true, settings:{approvalWait:"untilDeadline"}, tools:[tool({name:"bump", description:"Increment", input:{}, run:()=>"ran"})],
+    providers:[scriptedProvider([{toolCalls:[{name:"bump",input:{}}]}])]});
+  const id = await thread(), path = "/threads/"+id;
+  await events(await run(id,[prompt("increment")]));
+  const snap = await (await request(path)).json() as any;
+  const feed = path+"/wait-closures", after = "?after="+snap.waitCursor;
+  assert.equal((await request(feed)).status,400);
+  assert.equal((await request(feed+"?after="+snap.cursor)).status,409);
+  assert.equal((await request(feed+after,undefined,1)).status,409);
+  assert.deepEqual(snap.waiting.questions,[]);
+  const session = await agent.openSession(id);
+  const [opened] = (await session.history()).filter(e=>e.kind==="inputRequest");
+  await session.setLimit(owner.rights.filter(r=>r!=="approve"));
+  const res = await request(feed+after);
+  assert.equal(res.status,200);
+  const reader = res.body!.getReader();
+  try {
+    const {value} = await reader.read(); const item = JSON.parse(new TextDecoder().decode(value).trim().slice(6));
+    assert.deepEqual(item,{cursor:item.cursor,requestId:opened.requestId,reason:"revoked"});
+    assert.notEqual(item.cursor,snap.waitCursor);
+  } finally { await reader.cancel(); }
+});
+
+async function receiptWriter(t:TestContext) {
+  const dir = await mkdtemp(join(tmpdir(),"receipt-flush-")); t.after(()=>rm(dir,{recursive:true,force:true}));
+  const token = randomUUID(); await writeFile(join(dir,"token"),token,{mode:0o600});
+  return async function writer(stop:string) {
+    const child = fork(new URL("../../../../scripts/receipt-writer.mjs",import.meta.url),[dir,stop],{stdio:["ignore","ignore","inherit","ipc"]});
+    const ended = once(child,"exit"); t.after(()=>{ if (child.exitCode===null && child.signalCode===null) child.kill("SIGKILL"); });
+    const [origin] = await Promise.race([once(child,"message"),ended.then(()=>{throw Error("Writer exited before listening");})]);
+    const http = (path:string,body?:unknown)=>fetch(`${origin}/agui/v1`+path,{method:body?"POST":"GET",headers:{authorization:"Bearer "+token,"content-type":"application/json"},body:body===undefined ? undefined : JSON.stringify(body)});
+    return {child,ended,http};
+  };
+}
+for (const stop of ["before-marker","after-marker"]) test(`SIGKILL ${stop}: read the released exchange after restart without reopening`, async t => {
+  const writer=await receiptWriter(t);
+  const first = await writer(stop), {threadId} = await (await first.http("/threads",{})).json() as any;
+  const runId = randomUUID(), post = first.http("/run",{threadId,runId,protocolVersion:"1.0",messages:[prompt("Begin")]});
+  await post.then(r=>r.text()).catch(()=>{}); assert.deepEqual(await first.ended,[null,"SIGKILL"]);
+  const second = await writer("read");
+  try { assert.deepEqual(await (await second.http(`/threads/${threadId}/run-receipt?runId=${runId}`)).json(),
+    {terminal:stop==="before-marker"?"unknown":"success",work:"completed"}); }
+  finally { second.child.send("stop"); await second.ended; }
+});
+
+test("SIGKILL after the first decision of a batch reserves its run but not the remaining result",{timeout:10000},async t=>{
+  const writer=await receiptWriter(t), first=await writer("after-answer");
+  const {threadId}=await (await first.http("/threads",{})).json() as any, path="/threads/"+threadId;
+  const run=(runId:string,messages:unknown[],extra={})=>({threadId,runId,protocolVersion:"1.0",messages,...extra});
+  const origin=(await events(await first.http("/run",run("origin",[prompt("Mixed")],{tools:[definition]})))).at(-1);
+  const [call]=origin.outcome.pendingToolCallIds;
+  const presence=await first.http(path+"/presence"), view=await (await first.http(path)).json() as any;
+  const [question]=view.waiting.questions, result={id:"report",role:"tool",toolCallId:call,content:"Done"};
+  const batch=run("batch",[...view.messages,result],{resume:[{interruptId:question.id,status:"resolved",payload:{allow:true}}]});
+  await first.http("/run",batch).then(r=>r.text()).catch(()=>{});
+  assert.deepEqual(await first.ended,[null,"SIGKILL"]); await presence.body?.cancel().catch(()=>{});
+  const next=await writer("read-batch"), receipt=()=>next.http(path+"/run-receipt?runId=batch").then(r=>r.json());
+  try {
+    assert.deepEqual(await receipt(),{terminal:"unknown",work:"unsettled"});
+    const current=await (await next.http(path)).json() as any;
+    assert.deepEqual(current.waiting.toolCalls.map((c:any)=>c.toolCallId),[call]);
+    const remaining=[...current.messages,result];
+    assert.equal((await next.http("/run",run("batch",remaining))).status,409);
+    assert.equal((await events(await next.http("/run",run("remaining",remaining)))).at(-1).outcome.type,"success");
+    assert.deepEqual(await receipt(),{terminal:"unknown",work:"completed"});
+  } finally { next.child.send("stop"); await next.ended; }
+});
+
+test("a handled input binds its no-turn disposition before release",async t=>{
+  const dataDir=await mkdtemp(join(tmpdir(),"handled-receipt-")); t.after(()=>rm(dataDir,{recursive:true,force:true}));
+  const {request,thread,run} = await setup(t,{dataDir,durability:"kept",plugins:[definePlugin({name:"handler",hooks:{input:()=>({handle:true})}})]});
+  const id=await thread(), runId=randomUUID(); await events(await run(id,[prompt("Handle")],{runId}));
+  assert.deepEqual(await (await request(`/threads/${id}/run-receipt?runId=${runId}`)).json(),{terminal:"success",work:"handled"});
 });
 
 test("a withheld HTTP snapshot retires its cursor, even if the gate later opens",async t=>{
