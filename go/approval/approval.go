@@ -40,9 +40,7 @@ func Plugin(requested ...time.Duration) api.Plugin {
 			for _, e := range s.Branch() {
 				if e.Turn == check.Turn && e.Kind == "turn.start" {
 					recorded := api.Decode[api.TurnStart](e.Data).Settings.Approval
-					if recorded != "" {
-						policy = api.ReopenedApproval(recorded)
-					}
+					policy = api.ReopenedApproval(recorded)
 				}
 			}
 			switch policy {

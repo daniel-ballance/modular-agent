@@ -71,7 +71,10 @@ func usageIn(o object) api.Usage {
 	return api.Usage{Input: number(o, "input"), Output: number(o, "output"), Cached: number(o, "cacheRead"), CacheWrite: number(o, "cacheWrite"), Cost: real(o, "cost")}
 }
 func settingsOut(s api.Settings) object {
-	v := object{"reasoning": s.Thinking, "maxSteps": s.MaxSteps, "maxOutput": s.MaxOutput}
+	v := object{}
+	set(v, "reasoning", s.Thinking, s.Thinking != "")
+	set(v, "maxSteps", s.MaxSteps, s.MaxSteps > 0)
+	set(v, "maxOutput", s.MaxOutput, s.MaxOutput > 0)
 	set(v, "model", ref(s.Model, ""), s.Model != "")
 	set(v, "approvalWait", s.ApprovalWait, s.ApprovalWait != "")
 	set(v, "approval", api.ApprovalWire(s.Approval), s.Approval != "")
@@ -92,12 +95,6 @@ func applySettings(s *api.Settings, v object) {
 			s.MaxOutput = number(v, k)
 		case "approvalWait":
 			s.ApprovalWait = str(v, k)
-		case "go.approval":
-			// Only older Go sessions used this key. The standard key wins
-			// if both appear, regardless of object iteration order.
-			if _, standard := v["approval"]; !standard {
-				s.Approval = api.ApprovalInternal(str(v, k))
-			}
 		case "approval":
 			s.Approval = api.ApprovalInternal(str(v, k))
 		case "modelTools":
@@ -557,12 +554,19 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 		s.TraceContext = api.Decode[*telemetry.Wire](api.JSON(d["traceContext"]))
 		m := asObject(d["model"])
 		s.Settings.Model = modelID(m)
-		if !has(d, "context") {
-			s.Context = contentIn(d["go.context"])
+		if _, ok := d["tools"].([]any); !ok {
+			return e, fmt.Errorf("turn %s lacks its recorded tool offer", e.Turn)
+		}
+		if _, ok := d["settings"].(map[string]any); !ok {
+			return e, fmt.Errorf("turn %s lacks its recorded settings", e.Turn)
+		}
+		if _, ok := d["system"].(string); !ok || s.StartedBy.Kind == "" || s.StartedBy.ID == "" {
+			return e, fmt.Errorf("turn %s lacks its system or starter", e.Turn)
 		}
 		// Model identity doubles as the model setting for the running turn.
 		s.Model = api.Model{ID: s.Settings.Model, Provider: str(m, "provider")}
 		applySettings(&s.Settings, asObject(d["settings"]))
+		s.Settings.Model = s.Model.ID
 		for _, t := range api.Decode[[]object](api.JSON(d["tools"])) {
 			s.Tools = append(s.Tools, toolIn(t))
 		}

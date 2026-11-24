@@ -332,7 +332,11 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor, interrupt
 	savedApproval := snap.Settings.Approval
 	if conf, err := c.Get("configuration"); err == nil {
 		if defaults, err := conf.(api.Configuration).Settings(snap.Project); err == nil {
-			snap.Settings = turnSettings(defaults, snap.Settings)
+			// Apply session settings over the configured defaults for new turns.
+			view := snap
+			view.Settings = defaults
+			view.Entries = slices.Clone(snap.Entries)
+			snap.Settings = portable.Session(view).Settings
 		}
 	}
 	project, err := filepath.EvalSymlinks(snap.Project)
@@ -1285,7 +1289,7 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 	}
 	selectionView := snap
 	if resume != nil {
-		selectionView.Settings = turnSettings(snap.Settings, api.Decode[api.TurnStart](resume.Data).Settings)
+		selectionView.Settings = api.Decode[api.TurnStart](resume.Data).Settings
 	}
 	access, resolveErr := selection.(api.Selection).Resolve(selectionView)
 	turnID := api.ID()
@@ -1310,7 +1314,16 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 		}
 	}
 	before := api.BeforeTurn{Session: snap, Turn: turnID, Input: in.Content, Tools: tools}
-	prepared, err := h.API().Invoke(ctx, "turn.prepare", before)
+	prepared := any(before)
+	if resume == nil {
+		prepared, err = h.API().Invoke(ctx, "turn.prepare", before)
+	} else {
+		recorded := api.Decode[api.TurnStart](resume.Data)
+		// Do not add newly registered tools to a saved offer.
+		tools = slices.DeleteFunc(tools, func(t api.Tool) bool {
+			return !slices.ContainsFunc(recorded.Tools, func(saved api.Tool) bool { return saved.Name == t.Name })
+		})
+	}
 	if err != nil {
 		if ctx.Err() != nil && !errors.Is(context.Cause(ctx), api.ErrProcessStopped) {
 			if in.ID != "" && resume == nil {
@@ -1635,27 +1648,6 @@ type turnPorts struct {
 	input     api.Input
 	model     api.Model
 	tools     []api.Tool
-}
-
-// Turn settings fall back to session settings for fields an older or foreign
-// host did not record. The selected model, when present, belongs to the turn.
-func turnSettings(session, recorded api.Settings) api.Settings {
-	if recorded.Model == "" {
-		recorded.Model = session.Model
-	}
-	if recorded.Thinking == "" {
-		recorded.Thinking = session.Thinking
-	}
-	if recorded.MaxSteps == 0 {
-		recorded.MaxSteps = session.MaxSteps
-	}
-	if recorded.MaxOutput == 0 {
-		recorded.MaxOutput = session.MaxOutput
-	}
-	if recorded.Approval == "" {
-		recorded.Approval = session.Approval
-	}
-	return recorded
 }
 
 func (p *turnPorts) Hook(ctx context.Context, name string, v any) (any, error) {
