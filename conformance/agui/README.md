@@ -16,6 +16,8 @@ node run.mjs --only history --url http://127.0.0.1:39211 --token-file /path/to/d
 
 The first invocation of `run.mjs` with a command runs every case, with a fresh fixture per case. Use `--only case,case` to select cases. A URL selects one case and assumes the listener is already configured for it. The URL is the origin, not `/agui/v1/run`. Cleartext is allowed only on numeric loopback. The kit uses normal certificate and hostname verification for HTTPS. Use `NODE_EXTRA_CA_CERTS` when launching the runner to trust a test CA. Never disable verification. Supply token files, not token values. Use `--rotated-token-file`, `--sibling-token-file`, `--foreign-token-file`, `--watch-token-file`, `--tenant-token-file` and `--project-token-file` as required by the case.
 
+When a session declares `approvalCoversNested`, the approval cases check the marker in the interrupt metadata and in the recorded request. In `waiting-restart`, have `bump` increment the counter through a nested tool instead of incrementing it directly. The kit checks that the child's start names that parent and request. Without the declaration the coverage assertions are skipped with a reason.
+
 ## Waiting approval checks
 
 Eight `waiting-*` cases run by default; use `--list` or select cases with `--only`. Each case creates a thread, reads its declaration and skips with a reason unless `approvalsOutlastTurns` is true. The two mixed cases also require `interfaceTools`. In the SDK fixture set a finite `maxApprovalWaitMs`, keep history, load the approval gate and opt the session in with `approvalWait: "untilDeadline"` in trusted setup. Use the same composition but `live` for `waiting-live`. Never set the lifetime from a run POST.

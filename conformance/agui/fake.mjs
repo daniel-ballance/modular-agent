@@ -28,8 +28,9 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault, sc
   const sessions = new Map(), pages = new Map();
   let clock = Date.now();
   const waits = scenario?.startsWith('waiting-');
-  const fixture = waits ? fakeWaiting(scenario, fault, model) : scenario && fakeFixture(scenario, fault, model);
-  const declaration = { interfaceTools: true, telemetry: 1, ...(waits && { approvalsOutlastTurns: true, portableSessions: true, questionsOutlastTurns: true, lateAnswersStartTurns: true }) };
+  const covers = (waits || scenario?.startsWith('approval')) && fault !== 'no-covered-approvals';
+  const fixture = waits ? fakeWaiting(scenario, fault, model, covers) : scenario && fakeFixture(scenario, fault, model, covers);
+  const declaration = { interfaceTools: true, telemetry: 1, ...(covers && { approvalCoversNested: true }), ...(waits && { approvalsOutlastTurns: true, portableSessions: true, questionsOutlastTurns: true, lateAnswersStartTurns: true }) };
   const sockets = new WebSocketServer({ noServer: true, handleProtocols: protocols => protocols.has('modular-agent-acp-1') ? 'modular-agent-acp-1' : false });
   const peer = request => Object.keys(tokens).find(key => request.headers.authorization === `Bearer ${tokens[key]}`);
   const tls = scenario === 'tls' ? await disposableTls() : undefined;

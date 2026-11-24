@@ -39,6 +39,17 @@ test("an allowlisted browser can preflight without a token; closing the listener
   await listener.close(); assert.equal((await session.prompt("Still open")).text,"one");
 });
 
+test("the session approval setting requires settings and accepts no other key", async t => {
+  const { thread, request, agent } = await setup(t, { approval: "off", approvalCoversNested: true }, {}, [owner, { ...owner, rights: ["watch"] }]);
+  const id = await thread(), other = await thread(), path = "/threads/" + id + "/settings";
+  assert.equal((await request(path, { approval: "all" }, 1)).status, 403);
+  assert.equal((await request(path, { approval: "all", model: "other" })).status, 400);
+  assert.equal((await request(path, { approval: "sometimes" })).status, 400);
+  assert.equal((await request(path, { approval: "all" })).status, 200);
+  assert.equal((await agent.openSession(id)).settings().approval, "all");
+  assert.equal((await agent.openSession(other)).settings().approval, "off");
+});
+
 test("listing returns only kept threads, with a timestamp and no content", async t => {
   const dir = await mkdtemp(join(tmpdir(), "agui-list-")); t.after(() => rm(dir, {recursive:true, force:true}));
   for (const kept of [true, false]) {

@@ -59,6 +59,9 @@ async function run(name, fault) {
 
 for (const name of Object.keys(cases)) test(`fake passes ${name}`, () => run(name));
 for (const [name, fault, diagnosis] of [
+  ['approval', 'missing-live-coverage', /approval interrupt declares coversNested/],
+  ['waiting-restart', 'missing-waiting-coverage', /waiting interrupt declares coversNested/],
+  ['waiting-restart', 'wrong-covering-request', /child start names the covering request/],
   ['waiting-live', 'wait-live-opt-in', /exactly one toolResult/],
   ['waiting-routes', 'wait-accept-without-presence', /report is refused/],
   ['waiting-routes', 'wait-list-grants', /report is refused/],

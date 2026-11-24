@@ -39,6 +39,16 @@ The WebSocket listener requires a loopback address and an owner-only bearer toke
 
 Configuration is shared in `$XDG_CONFIG_HOME/modular-agent`, or `~/.config/modular-agent`. State is kept in `$XDG_STATE_HOME/modular-agent/typescript`, or `~/.local/state/modular-agent/typescript`. `MODULAR_AGENT_DATA_DIR` sets the configuration directory and puts state under its `state/` subdirectory. Use `--runtime transient` to keep history without resuming a turn cut off by a crash.
 
+### Approval
+
+Without configuration, `ma` loads no approval feature. Use `--approval off|ask|all|never`, or set `approval` in the **global** `settings.json`. The command line wins. Explicit `off` still loads the feature, so a client can change the session's policy.
+
+With `ask`, the terminal shows the complete `codemode` call on stderr, says the decision covers its nested calls and asks for `y` or `n`. An allow is for this run of the script only. Print mode has no approver and refuses calls that need one. It does not close an earlier session's parked call to start a print run.
+
+To let a new session wait, set a positive `approvalWaitMaxMs` in the operator's `policy.json` and `"approval_wait": "untilDeadline"` in global settings. The default is `"live"`. Project settings cannot select either approval policy or wait mode. With approval configured, look for `approvalCoversNested: true` in the declaration. With a maximum it also declares `approvalsOutlastTurns: true`.
+
+ACP clients can change the `approval` session option with `session/set_config_option`. AG-UI clients can post `{"approval":"ask"}` to `/agui/v1/threads/{threadId}/settings`. Both require the session's `settings` right. Answer a waiting approval on a fresh ACP polling or AG-UI presence route, not from history.
+
 ### Resuming at startup
 
 Pass `--resume-open` with `--acp` or `--agui`, or put `{"resume_open":true}` in the global `settings.json`. The default is false. A project file cannot turn it on or off. The option has no effect in print or interactive mode.
@@ -92,14 +102,16 @@ typescript/scripts/check-agui.sh
 git diff --check
 ```
 
-- Reference checks: **27/27**, including `trace-trust`, `resume-open`, `telemetry-export`, `client-identity`, all four codemode profile checks, `sandbox-memory` and both crash-recovery modes.
-- ACP with crash, probe and job checks: **188/188** on stdio. Over WebSocket, ACP passed **193/193**, the plugin kit passed **153/153**, and listener isolation passed **14/14**.
-- TypeScript workspace: **490 offline tests passed** in both normal and `MA_REMOTE` configurations. Five live tests skipped. That includes **51/51** shared scenario runs across embedded, TypeScript stdio and TypeScript WebSocket placements. The other SDK fixtures were not built for these runs. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
-- AG-UI: **26/26** cases. The kit passed **65/65** self-tests, including rejection of faulty listing implementations.
+- Reference checks: **28/28**, including `approval-covers-script`, `trace-trust`, `resume-open`, `telemetry-export`, `client-identity`, all four codemode profile checks, `sandbox-memory` and both crash-recovery modes.
+- ACP with crash, probe and job checks: **190/190** on stdio. With live approval configured, the covered call and both binding versions’ waiting-declaration checks also passed (**193/193**). With an operator wait maximum, the public, crash and job checks passed **118/118**, including the waiting continuation. Over WebSocket, ACP passed **195/195**, the plugin kit passed **153/153**, and listener isolation passed **14/14**.
+- TypeScript workspace: **640 offline tests passed** in both normal and `MA_REMOTE` configurations. Five live tests skipped in each run. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
+- Binding kits: **23/23** ACP and **111/111** AG-UI self-tests. AG-UI passed **34/34** adapter cases, including the waiting script’s covered child.
 - Claude sidecar: **51 offline tests passed** and one live check skipped. No real sign-ins or model requests ran, and no real credentials were read.
 - `tsc -b` and `git diff --check` pass. The workspace has no separate lint or formatting command.
 
 ## Known gaps
+
+- The public ACP waiting-continuation check runs against `ma`. The separate `--waiting-approval-only` group needs a controlled clock, a second listener and an offline approver from the `MA_ACP_WAIT_FIXTURE` launcher. Stock `ma` has no such launcher. With an operator maximum, only its two declaration checks passed (2/44). Also, four `--probe-checks` cases substitute Runtimes that cannot continue a waiting approval. With the maximum configured, the SDK refuses those compositions at startup (165/169 in that combination). The same probes pass with live approval.
 
 - macOS local commands use process-group containment, not strong containment. A process that leaves its group is outside that guarantee.
 - HTTP history on macOS needs no clock setting: the writer derives a sleep-aware clock ([SDK history configuration](../core/README.md#registering-or-serving-a-custom-history-store)).

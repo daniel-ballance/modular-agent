@@ -39,6 +39,8 @@ The kit writes `policy.json` beside the isolated `ma` configuration. A base agen
 
 With `--connect`, these checks require `--service-command`. For the test policy variants that contain `actors`, start `ma --acp --listen "$MODULAR_AGENT_CONFORMANCE_URL"` without the single-token shorthand. For ordinary variants (where `MODULAR_AGENT_CONFORMANCE_POLICY` is unset), also pass `--token-file "$MODULAR_AGENT_CONFORMANCE_TOKEN_FILE"`. The kit uses multiple credentials on the same policy listener. A bridge which starts a new process per connection does not test the same listener's attachment and authorization rules.
 
+With `approvalCoversNested` and `nestedToolCalls`, the kit selects `all` and calls `nest`. It checks the permission RPC and polling view, then checks that the child's one start names the parent's request. With an operator maximum and `approvalsOutlastTurns`, it also selects `approvalWait: untilDeadline` and checks the covered child in the continuation. This public check needs no fixture clock. Without covered approvals it prints a skip reason.
+
 ## Waiting approval checks
 
 Pass `--waiting-approval-checks` before the command, or `--waiting-approval-only` to run just this group. In each of ACP /1 and /2 the kit checks the declaration, its dependencies and the session option. It prints a skip reason if the session does not declare `approvalsOutlastTurns: true`. It never infers support from late text questions. The fixture starts with `approvalWait: "live"`; the client selects `untilDeadline` over ACP. Use a disposable managed fixture, not a deployed listener. WebSocket launch needs `--service-command`. For portable pairings use `--then` and the disposable shared store described above.

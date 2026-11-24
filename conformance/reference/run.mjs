@@ -12,6 +12,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { code as approvalScript, checkApprovalCoversScript } from "./approval-covers-script.mjs";
+
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "../..");
 const fixture = join(here, "mcp-fixture.mjs");
@@ -57,6 +59,12 @@ const checks = [
       { args: ["-p", "Say hello."], env: { MA_CLIENT_IDENTITY: "x".repeat(65) }, expect: { exit: 1, stderrContains: "MA_CLIENT_IDENTITY" } },
       { args: ["-p", "Say hello."], env: { MA_CLIENT_IDENTITY: "my-agent_2.0" }, expect: { stdout: "Hello.", exit: 0 } },
     ],
+  },
+  {
+    name: "approval-covers-script",
+    about: "A live or waiting allow covers both writes in this script, once. A refusal writes neither file.",
+    script: [codemode(approvalScript), { text: "Done." }],
+    run: (command, _invoke, _skip, t) => checkApprovalCoversScript(command, t, environment(t)),
   },
   {
     name: "codemode-nested",
@@ -298,6 +306,7 @@ const checks = [
         runsToolsAtProvider: false, liveSessions: false,
       };
       for (const [k, v] of Object.entries(want)) ok(d?.[k] === v, `${k} is ${JSON.stringify(v)}`, d?.[k]);
+      for (const key of ["approvalCoversNested", "approvalsOutlastTurns"]) ok(!(key in d), key + " is omitted without approval");
       ok(d?.projectRoot === undefined, "projectRoot is omitted", d?.projectRoot);
     } } }],
   },

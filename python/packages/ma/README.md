@@ -62,7 +62,7 @@ By default `ma` sends no telemetry. Set `OTEL_EXPORTER_OTLP_ENDPOINT` or a per-s
 
 ## What is checked
 
-- **Reference:** 27/27, including `trace-trust` and `resume-open`. Startup recovery completed the interrupted turn without a client connecting and without repeating its tool effect.
+- **Reference:** 27 passed before the suite grew to 28, including `trace-trust` and `resume-open`. Startup recovery completed the interrupted turn without a client connecting and without repeating its tool effect.
 - **AG-UI:** 26/26 with the shared thread listing and wait counts.
 - **Telemetry:** seven offline checks cover no endpoint, SDK disabled, per-signal overrides, sampling, headers, metadata privacy and the OTLP resource. A scripted turn reached local Phoenix as `invoke_agent ma`, `chat script` and `execute_tool codemode`. The OTLP resource for that trace carried `service.name=ma-python`.
 - **ACP:** 188/188 with `--crash-checks --probe-checks --job-checks`. The standard composition does not declare several actors, tenants or session limits.

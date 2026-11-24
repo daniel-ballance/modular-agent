@@ -44,9 +44,10 @@ function option(reply, value = 'live') {
   }
   return supported;
 }
-export function view(q, entry, input) {
+export function view(q, entry, input, declaration = {}) {
+  if (declaration.approvalCoversNested === true) assert.equal(entry.data.request.coversNested, true, "waiting request declares coversNested");
   assert.deepEqual(q, { id: entry.requestId, kind: 'approval', question: entry.data.request.question,
-    answerable: true, toolCallId: entry.toolCallId, call: { name: 'bash', input }, approvalWait: 'untilDeadline', deadlineAt: entry.data.request.deadlineAt }, 'fresh unchanged ACP view');
+    ...(entry.data.request.coversNested === true && { coversNested: true }), answerable: true, toolCallId: entry.toolCallId, call: { name: 'bash', input }, approvalWait: 'untilDeadline', deadlineAt: entry.data.request.deadlineAt }, 'fresh unchanged ACP view');
 }
 
 // A fresh disposable project file distinguishes actual dispatch from an early or
@@ -137,7 +138,7 @@ async function origin(c) {
 }
 async function delivery(c, e, role = 'approver') {
   const p = await c.peer(role);
-  const qs = await poll(p, c.sid); assert.equal(qs.length, 1); view(qs[0], e, c.input);
+  const qs = await poll(p, c.sid); assert.equal(qs.length, 1); view(qs[0], e, c.input, c.d);
   return p;
 }
 async function finish(c, e, status, decision, actor, opts) {
@@ -159,7 +160,7 @@ async function routes(c, e) {
     assert.deepEqual(await answer(p, c.sid, e.requestId), notOpen, 'changed or withheld delivery cannot authorize');
   }
   await c.control('gate', { role: 'approver', mode: 'pass' });
-  view((await poll(p, c.sid))[0], e, c.input);
+  view((await poll(p, c.sid))[0], e, c.input, c.d);
   const sibling = await c.peer('approver'); assert.deepEqual(await answer(sibling, c.sid, e.requestId), notOpen, 'second socket needs its own poll');
   if (c.d.severalActors) {
     const rep = await c.peer('representative'); await poll(rep, c.sid);
@@ -271,7 +272,7 @@ for (const at of ['requestPending', 'originEnd', 'answerCommit', 'continuationSt
   }
   if (['originEnd', 'requestPending'].includes(at)) {
     const back = await c.peer('approver'); assert.deepEqual(await answer(back, c.sid, e.requestId), notOpen, 'restart drops all deliveries');
-    view((await poll(back, c.sid))[0], e, c.input);
+    view((await poll(back, c.sid))[0], e, c.input, c.d);
     assert.deepEqual(await answer(back, c.sid, e.requestId), accepted); p = back;
   }
   await finish(c, e, at === 'afterEffect' ? 'outcomeUnknown' : 'completed', 'allow', p.actor);

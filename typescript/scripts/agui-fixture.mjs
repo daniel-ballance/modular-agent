@@ -66,9 +66,12 @@ const question = tool({ name: 'kit_choice', description: 'Ask a test question', 
   async run(_input, cx) { await cx.ask({ kind: 'choice', question: 'Choose a color?', options: ['yes','no'], timeLimitMs: 5000 }); return ''; } });
 const plugin = definePlugin({ name: 'kit', replaces: ['history-store'], setup(r) {
   r.historyStore(store);
-  if (waiting) r.tool(tool({ name:'bump', description:'Increment the counter', input:{type:'object'}, async run() {
-    await appendFile(join(dataDir,'counter'), '1'); return 'Incremented';
-  } }));
+  if (waiting) {
+    const increment = async () => { await appendFile(join(dataDir, 'counter'), '1'); return 'Incremented'; };
+    if (name === 'waiting-restart') r.tool(tool({ name:'increment', description:'Increment', input:{type:'object'}, callers:['plugin'], run:increment }));
+    r.tool(tool({ name:'bump', description:'Increment the counter', input:{type:'object'},
+      run: (_, cx) => name === 'waiting-restart' ? cx.tools.call('increment', {}) : increment() }));
+  }
   if (['questions','mixed'].includes(name)) r.tool(question);
   r.on('session.start', async ({sessionId, resumed}) => {
     if (!resumed) sessions.set(sessionId, await agent.openSession(sessionId));
@@ -109,6 +112,7 @@ const script = await loadScript(env.MODULAR_AGENT_SCRIPT, env.MODULAR_AGENT_SCRI
 const provider = state ? { ...script, async request(...args) { const m = await script.request(...args); return { ...m, providerData:'provider-only-sentinel' }; } } : script;
 const agent = await createAgent({ project, severalActors: true, sessionLimits: true, tenants: { kit: {rights} }, environment: memoryEnvironment(), runtime,
   durability: name === 'crash-continuation' ? 'durable' : 'kept', dataDir, interfaceTools: [source], plugins, approval: name.startsWith('waiting-mixed') ? 'ask' : waiting || name.startsWith('approval') ? 'all' : 'off',
+  approvalCoversNested: waiting || name.startsWith('approval'),
   ...(waiting ? { questionsOutlastTurns:true, maxApprovalWaitMs:5000 } : {}),
   settings:{approvalWaitMs:5000, ...(waiting && name !== 'waiting-live' ? {approvalWait:'untilDeadline'} : {})}, providers:[provider] });
 // Observe delivery at the real connection callback, not a model draft or a snapshot.

@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { spawn, spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { createAgent, defaultAcpActor, httpHistory, definePlugin, type Agent, type Settings } from "@modular-agent/core";
+import { createAgent, defaultAcpActor, httpHistory, definePlugin, type Agent, type Approval, type Settings } from "@modular-agent/core";
 import { standardFileTools } from "@modular-agent/tools-files/sdk";
 import { standardMcpTools } from "@modular-agent/tools-mcp/sdk";
 import { paths, settingsFor, skillsFor, standardSettings, mcpServers, optionalJson, trusted } from "./configuration.js";
@@ -23,10 +23,15 @@ import { formerProviderIds, modelRef, providerId } from "./provider-ids.js";
 
 const { version } = createRequire(import.meta.url)("../../package.json") as { version: string };
 
+function approvalPolicy(value: unknown, source: string): Approval {
+  if (value === "off" || value === "ask" || value === "all" || value === "never") return value;
+  throw new Error(source + ": approval must be off, ask, all or never");
+}
+
 function parse(argv: string[]) {
   const opts: { command?: string; project: string; runtime: "durable" | "transient"; session?: string; prompt?: string;
     resume?: boolean; resumeOpen?: boolean; verbose?: boolean; json?: boolean; history?: boolean; declaration?: boolean; acp?: boolean; agui?: boolean;
-    listen?: string; tokenFile?: string; policy?: string;
+    listen?: string; tokenFile?: string; policy?: string; approval?: Approval;
     trust?: boolean; all?: boolean; help?: boolean; version?: boolean; settings: Settings } = { project: process.cwd(), runtime: "durable", settings: {} };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -46,6 +51,7 @@ function parse(argv: string[]) {
       case "--resume-open": opts.resumeOpen = true; break;
       case "--listen": opts.listen = value(); break;
       case "--token-file": opts.tokenFile = value(); break;
+      case "--approval": opts.approval = approvalPolicy(value(), flag); break;
       case "--policy": opts.policy = value(); break;
       case "--all": opts.all = true; break;
       case "--project": opts.project = value(); break;
@@ -173,6 +179,12 @@ async function main(argv: string[]) {
     process.env.MODULAR_AGENT_HISTORY_TOKEN_FILE ?? "") : undefined;
   const base = { agentName: "ma", durability: opts.runtime === "durable" ? "durable" as const : "kept" as const, history, dataDir: p.state,
     resourceReservations: policy.resourceReservations };
+  const settingsPath = join(p.config, "settings.json");
+  const global = await optionalJson(settingsPath);
+  const approval = opts.approval ?? (global.approval === undefined ? undefined : approvalPolicy(global.approval, settingsPath));
+  const wait = global.approval_wait === undefined ? "live" : global.approval_wait;
+  if (wait !== "live" && wait !== "untilDeadline") throw new Error(settingsPath + ": approval_wait must be live or untilDeadline");
+  const maxApprovalWaitMs = approval === undefined ? undefined : policy.approvalWaitMaxMs;
   const script = await loadScript(process.env.MODULAR_AGENT_SCRIPT, process.env.MODULAR_AGENT_SCRIPT_LOG);
   let savedModel: string | undefined;
   if (opts.command === "sessions" || opts.session || opts.resume) {
@@ -209,8 +221,9 @@ async function main(argv: string[]) {
     else if (await auth.login("grok")) defaultModel = "grok/grok-4.7";
   }
   const build = async (cwd: string, saved?: string, projectSettings = true) => {
-    const source = projectSettings ? await settingsFor(p, cwd) : await optionalJson(join(p.config, "settings.json"));
+    const source = projectSettings ? await settingsFor(p, cwd) : global;
     const settings = { ...standardSettings(source), ...opts.settings };
+    if (maxApprovalWaitMs !== undefined) settings.approvalWait = opts.prompt === undefined ? wait : "live";
     let model = script ? "scripted/script" : conformance ? "conformance/echo" :
       saved ?? modelRef(settings.model) ?? defaultModel;
     const claudeProvider = !script && !conformance && (model?.startsWith("claude/") || !model && !inspecting || opts.command === "models")
@@ -232,6 +245,7 @@ async function main(argv: string[]) {
     else claudeProvider?.close();
     return createAgent({ ...base, project: cwd, settings, credentials: auth.credentials(), model: opts.command === "models" ? undefined : model, providers, plugins,
       compaction: !conformance, conformance, questionsOutlastTurns: true, jobReportsStartTurns: true, settingsDuringTurn: "refused",
+      approval, approvalCoversNested: approval !== undefined, maxApprovalWaitMs,
       pluginHost: serving, reopenModelAliases: formerProviderIds });
   };
   const scoped = opts.listen ? policy.actors?.some(actor => actor.projects !== undefined) : policy.stdio?.projects !== undefined;
@@ -249,8 +263,7 @@ async function main(argv: string[]) {
       return 0;
     }
     if (serving) {
-      const settingsPath = join(p.config, "settings.json");
-      const {resume_open} = await optionalJson(settingsPath);
+      const {resume_open} = global;
       if (resume_open !== undefined && typeof resume_open !== "boolean") throw new Error(`${settingsPath}: resume_open must be a boolean`);
       const acp = { projectMcp, resumeOpen:opts.resumeOpen || resume_open === true,
         onResumeOpen: (id: string, disposition: "resumed" | "skipped") => console.error(`ma: ${disposition} ${id}`),
@@ -283,7 +296,15 @@ async function main(argv: string[]) {
       if (opts.settings.model !== undefined) await session.setSetting("model", script ? "scripted/script" : opts.settings.model);
       if (opts.settings.reasoning !== undefined) await session.setSetting("thinking", opts.settings.reasoning);
     }
-    return opts.prompt === undefined ? line(agent, session, !!opts.json, !!opts.verbose) : print(session, opts.prompt, !!opts.json, !!opts.verbose);
+    if (opts.prompt === undefined) return line(agent, session, !!opts.json, !!opts.verbose);
+    // A print run has no answer route. Do not close a previous run's parked call just to print.
+    if (maxApprovalWaitMs !== undefined && session.settings().approvalWait === "untilDeadline") {
+      if ((await session.questions()).some(q => q.approvalWait)) throw new Error("This session has a waiting approval. Answer it before using print mode.");
+      await session.setSetting("approvalWait", "live");
+      try { return await print(session, opts.prompt, !!opts.json, !!opts.verbose); }
+      finally { await session.waitIdle(); await session.setSetting("approvalWait", "untilDeadline"); }
+    }
+    return print(session, opts.prompt, !!opts.json, !!opts.verbose);
   }
 }
 

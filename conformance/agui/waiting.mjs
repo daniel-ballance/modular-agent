@@ -11,6 +11,7 @@ const resume = (v, id, cancel = false) => input(v, [], { resume: [action(id, can
 const state = (peer, id) => peer.control('inspect', { threadId: id });
 function interrupt(q, entry) {
   assert.equal(q?.reason, 'approval', 'answerable approval interrupt');
+  if (entry.data.request.coversNested) assert.equal(q.metadata?.['modular-agent.coversNested'], true, 'waiting interrupt declares coversNested');
   assert.equal(q.id, entry.requestId, 'same request ID');
   assert.equal(q.toolCallId, entry.toolCallId, 'same call ID');
   assert.equal(Date.parse(q.expiresAt), entry.data.request.deadlineAt, 'original absolute expiry');
@@ -30,6 +31,7 @@ async function initial(peer, id, { mixed = false, present = false, live = false 
   }
   const otherOpen = mixed ? [one(es, 'modular-agent.interfaceHandoff').toolCallId] : [];
   const e = parked(seen.batches, 'bump', args, { otherOpen });
+  if (v.declaration.approvalCoversNested === true) assert.equal(e.data.request.coversNested, true, 'parked call offers coverage');
   assert.ok(!r.calls.has(e.toolCallId) && !r.terminal.outcome?.pendingToolCallIds?.includes(e.toolCallId), 'no triad, result or executable ID for the parked call');
   assert.deepEqual(r.pending.map(x => x.id), otherOpen, 'only handed-off siblings are executable');
   if (mixed) {
@@ -87,6 +89,13 @@ export const waiting = {
       assert.equal(r.pending.length, 0); assert.equal(finalView(r).messages.filter(m => m.role === 'user').length, 1);
       await outcome(peer, id, e, 'completed', 'allow', 'kit-owner');
       const after = await peer.api.view(id); assert.deepEqual(after.waiting.questions, []);
+      if (after.declaration.approvalCoversNested === true) {
+        const es = (await state(peer, id)).batches.flat();
+        assert.equal(rows(es, 'inputRequest').length, 1, 'only the parent asked');
+        const child = one(es.filter(r => r.data?.call?.parentCallId === e.toolCallId), 'toolStarted');
+        assert.deepEqual(child.data.approvalCoveredBy, { toolCallId: e.toolCallId, requestId: e.requestId }, 'child start names the covering request');
+        assert.equal(one(es.filter(r => r.toolCallId === child.toolCallId), 'toolResult').data.status, 'completed');
+      } else console.log('SKIP  continued child coverage (session does not declare approvalCoversNested)');
       await reportRefused(await peer.api.post(resume(after, e.requestId), opts(after)));
       await outcome(peer, id, e, 'completed', 'allow', 'kit-owner');
     } finally { await fresh.close(); }
@@ -148,6 +157,7 @@ export const waiting = {
       await acp.request('session/resume', { sessionId: id, cwd, mcpServers: [] });
       const { requests: [q] } = await acp.request('_modular-agent/requests', { sessionId: id });
       assert.ok(q?.answerable && q.id === e.requestId); assert.deepEqual(q.call, bump);
+      if (e.data.request.coversNested) assert.equal(q.coversNested, true, 'ACP offers the same coverage');
       const v = await delivered(peer.api, id, e), post = resume(v, q.id);
       const [reply, ack] = await Promise.all([peer.api.post(post, opts(v)), acp.request('_modular-agent/answer', { sessionId: id, requestId: q.id, value: 'refuse' })]);
       if (reply.status === 200) { success(await exchange(reply, post)); assert.deepEqual(ack, { accepted: false, reason: 'not_open' }); }

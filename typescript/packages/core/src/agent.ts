@@ -25,7 +25,7 @@ import { MemoryHistory, memoryArchive, memoryStore } from "./history.js";
 import { wirePlugin } from "./serve.js";
 import { environmentCredentials } from "./parts.js";
 import { standardMcpTools, type McpServerConfig } from "./mcp.js";
-import { makeSession, questionOf, submitAnswer, type Session } from "./session.js";
+import { exactLocalApproval, makeSession, questionOf, submitAnswer, type Session } from "./session.js";
 import type { Actor, Declaration, ModelInfo, ModelRef, QuestionHandler, Right, Settings } from "./data.js";
 
 export type Durability = "ephemeral" | "kept" | "durable";
@@ -50,6 +50,8 @@ export interface AgentOptions {
   model?: string | ModelRef;
   settings?: Settings;
   approval?: Approval;
+  /** An explicit allow for a top-level call also approves its nested calls in this dispatch. */
+  approvalCoversNested?: boolean;
   resourceReservations?: ReservationOptions;
   /** Enable the official context compaction plugin and /compact command. */
   compaction?: boolean;
@@ -271,7 +273,7 @@ export class Agent {
       if (!(await stat(project)).isDirectory()) throw new Error("Project must be a directory");
       const home = options.dataDir ? resolve(options.dataDir) : scratch;
       await mkdir(home, { recursive: true });
-      const h = new Harness({ project, home, agentName: options.agentName, questionsOutlastTurns: options.questionsOutlastTurns ?? false,
+      const h = new Harness({ project, home, agentName: options.agentName, approvalCoversNested: options.approvalCoversNested, questionsOutlastTurns: options.questionsOutlastTurns ?? false,
         jobReportsStartTurns: options.jobReportsStartTurns ?? false, settingsDuringTurn: options.settingsDuringTurn ?? "nextTurn",
         rejectUnknownModel: true, reopenModelAliases: options.reopenModelAliases, resourceReservations: options.resourceReservations, tenants: options.tenants ?? (options.conformance ? undefined : null) });
       const settings = structuredClone(options.settings ?? {});
@@ -440,9 +442,10 @@ export class Agent {
           const view = await api.gateOutput(entry.sessionId, actor, "input.request.opened", structuredClone(q));
           return isDeepStrictEqual(view, q);
         } });
+      const withheld = new Set<string>();
       const capability: InterfaceCapability = {
         id: "sdk.local", actorId: local.id,
-        present: id => (!this.#acp || this.#agui) && !!(this.#handlers.get(id) ?? this.#defaultHandler),
+        present: (id, request) => !withheld.has(request?.id ?? "") && (!this.#acp || this.#agui) && !!(this.#handlers.get(id) ?? this.#defaultHandler),
         onInputRequest: request => {
           const handler = this.#handlers.get(request.sessionId) ?? this.#defaultHandler;
           if (!handler || this.#questions.has(request.id)) return;
@@ -455,15 +458,18 @@ export class Agent {
             await api.checkPending(sessionId);
             if (request.approvalWait && !await api.presentApproval(sessionId, id, { routeId: "sdk.local", handle: controller,
               actorId: local.id, submittedBy: local.id, present: () => !controller.signal.aborted && (this.#handlers.get(sessionId) ?? this.#defaultHandler) === handler })) return;
+            if (!controller.signal.aborted && request.coversNested && !request.approvalWait && !await exactLocalApproval(api, q, local.id)) {
+              withheld.add(id); api.presenceChanged(sessionId); return;
+            }
             if (!controller.signal.aborted) return handler(q, { sessionId, actorId: local.id, cancelled: controller.signal });
           })
             .catch(() => undefined).then(async answer => {
-              if (!controller.signal.aborted) await submitAnswer(api, request, local.id, answer ?? "decline", undefined, controller);
+              if (!controller.signal.aborted && !withheld.has(id)) await submitAnswer(api, request, local.id, answer ?? "decline", undefined, controller);
             }).catch(async () => {
               if (!controller.signal.aborted) await submitAnswer(api, request, local.id, "decline", undefined, controller).catch(() => {});
             }).finally(() => { this.#questions.delete(id); });
         },
-        onInputRequestClosed: id => this.#questions.get(id)?.abort(),
+        onInputRequestClosed: id => { withheld.delete(id); this.#questions.get(id)?.abort(); },
       };
       api.provide("interface", capability);
     } };

@@ -3,7 +3,7 @@
 import { randomUUID as id } from 'node:crypto';
 import { dispatch, offer } from './cases.mjs';
 
-export function fakeWaiting(name, fault, model) {
+export function fakeWaiting(name, fault, model, covers) {
   const mixed = name.startsWith('waiting-mixed-');
   const call = model[0].toolCalls[0];
   function append(s, kind, data, scope = {}) {
@@ -31,9 +31,10 @@ export function fakeWaiting(name, fault, model) {
     if (name === 'waiting-live' && fault !== 'wait-live-opt-in') { append(s, 'toolResult', { status: 'refused' }, s.scope); }
     else {
       const deadlineAt = s.now + 5000, question = `Allow ${call.name} with ${JSON.stringify(call.input)}?`;
-      s.question = { id: s.qid, reason: 'approval', message: question, toolCallId, expiresAt: new Date(deadlineAt).toISOString() };
+      s.question = { id: s.qid, reason: 'approval', message: question, toolCallId,
+        ...(covers && fault !== 'missing-waiting-coverage' && { metadata: { 'modular-agent.coversNested': true } }), expiresAt: new Date(deadlineAt).toISOString() };
       s.entry = append(s, 'inputRequest', { request: { id: s.qid, toolCallId, question, deadlineAt, timeLimitMs: 5000,
-        whenTimeLimit: 'decline', kind: 'approval', approvalWait: 'untilDeadline', answerable: false }, call: { ...call, id: toolCallId },
+        ...(covers && { coversNested: true }), whenTimeLimit: 'decline', kind: 'approval', approvalWait: 'untilDeadline', answerable: false }, call: { ...call, id: toolCallId },
         source: { plugin: 'counter', toolSource: 'counter' }, definition: { name: call.name } }, { ...s.scope, requestId: s.qid, sources: [response.id] });
       const pending = append(s, 'toolPending', { requestIds: [s.qid] }, s.scope);
       if (fault !== 'wait-split-batch') { s.batches.pop(); s.batches.at(-1).push(pending); }
@@ -65,6 +66,12 @@ export function fakeWaiting(name, fault, model) {
     if (s.answer) {
       const scope = { ...s.scope, turnId, sources: [s.entry.id, s.answer.id] };
       if (s.status === 'completed') { s.counter++; append(s, 'toolStarted', {}, scope); }
+      if (s.status === 'completed' && covers && name === 'waiting-restart') {
+        const child = { ...scope, toolCallId: id() };
+        append(s, 'toolStarted', { call: { id: child.toolCallId, name: 'increment', parentCallId: scope.toolCallId },
+          approvalCoveredBy: { toolCallId: scope.toolCallId, requestId: fault === 'wrong-covering-request' ? 'other' : s.qid } }, child);
+        append(s, 'toolResult', { status: 'completed' }, child);
+      }
       append(s, 'toolResult', { status: s.status }, scope);
     }
     if (fault === 'wait-rehandoff' && s.front) s.dispatches.push(s.front);
@@ -104,7 +111,7 @@ export function fakeWaiting(name, fault, model) {
       if (route.sid !== msg.params.sessionId || !s) throw new Error('session not attached');
       if (msg.method === '_modular-agent/requests') {
         route.seen = s.question?.id;
-        return { requests: s.question ? [{ id: s.qid, answerable: true, call }] : [] };
+        return { requests: s.question ? [{ id: s.qid, answerable: true, call, ...(covers && { coversNested: true }) }] : [] };
       }
       if (msg.method === '_modular-agent/answer' && route.seen === msg.params.requestId) {
         if (s.question) { decide(s, false, client); advance(s); return { accepted: true }; }

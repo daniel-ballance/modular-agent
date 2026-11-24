@@ -39,7 +39,7 @@ const MAX_LINE_BYTES = 64 * 1024 * 1024;
 export async function unchangedAcpApproval(api: PluginApi, entry: HistoryEntry, recipient: string) {
 	const { request, call } = entry.data as { request: InputRequest; call: { name: string; input: object } };
 	const view = { id: request.id, kind: request.kind, question: request.question, toolCallId: entry.toolCallId,
-		call: { name: call.name, input: call.input }, approvalWait: request.approvalWait, deadlineAt: request.deadlineAt };
+		call: { name: call.name, input: call.input }, ...(request.coversNested ? { coversNested: true } : {}), approvalWait: request.approvalWait, deadlineAt: request.deadlineAt };
 	const method = "_modular-agent/requests";
 	const reply = await api.gateOutput(entry.sessionId, recipient, "reply", { method, result: { requests: [structuredClone(view)] } });
 	return reply?.method === method && isDeepStrictEqual(reply.result.requests, [view]);
@@ -720,6 +720,7 @@ export class AcpInterface implements InterfaceCapability {
 			inputKeys: bool("inputKeys"),
 			portableSessions: bool("portableSessions"),
 			questionsOutlastTurns: bool("questionsOutlastTurns"),
+			...(scoped.approvalCoversNested === true && bool("approvalCoversNested") ? { approvalCoversNested: true } : {}),
 			...(scoped.approvalsOutlastTurns === true && bool("approvalsOutlastTurns") ? { approvalsOutlastTurns: true } : {}),
 			lateAnswersStartTurns: bool("questionsOutlastTurns"),
 			startsTurnsUnasked: d.startsTurnsUnasked && d.startsTurnsUnasked !== "never" ? "jobReports" : "never",
@@ -979,6 +980,7 @@ export class AcpInterface implements InterfaceCapability {
 			id: r.id, kind: r.kind, question: r.question, ...(r.kind === "choice" && r.options ? { options: r.options } : {}),
 			...(r.kind === "link" && r.details ? { details: r.details } : {}), ...(r.toolCallId ? { toolCallId: r.toolCallId } : {}),
 			...(call ? { call: { name: call.name, input: call.input } } : {}),
+			...(r.coversNested ? { coversNested: true } : {}),
 			...(r.approvalWait ? { approvalWait: r.approvalWait, deadlineAt: r.deadlineAt } : {}),
 		};
 	}
@@ -1042,8 +1044,9 @@ export class AcpInterface implements InterfaceCapability {
 			const payload = { method: "session/request_permission", params: {
 				sessionId: request.sessionId,
 				toolCall: { toolCallId: request.toolCallId ?? request.id, title: call.name, rawInput: call.input,
-					...(request.details ? { content: [{ type: "content" as const, content: { type: "text" as const, text: request.details } }] } : {}) },
-				options, _meta: { ...this.questionTrace(), [NS]: { requestId: request.id, actorId } },
+					...(request.coversNested || request.details ? { content: [{ type: "content" as const, content: { type: "text" as const,
+						text: request.coversNested ? request.question : request.details! } }] } : {}) },
+				options, _meta: { ...this.questionTrace(), [NS]: { requestId: request.id, actorId, ...(request.coversNested ? { coversNested: true } : {}) } },
 			} };
 			const gated = await this.apiFor(request.sessionId).gateOutput(request.sessionId, this.actorId, "request", payload);
 			if (!gated || !isDeepStrictEqual(gated, payload) || Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: Number.MAX_SAFE_INTEGER, ...gated })) > MAX_LINE_BYTES) {
