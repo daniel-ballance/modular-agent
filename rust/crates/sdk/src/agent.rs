@@ -160,6 +160,7 @@ pub struct AgentBuilder {
     settings: serde_json::Map<String, Value>,
     model_provider_aliases: &'static [(&'static str, &'static str)],
     approval: Option<Approval>,
+    approval_covers_nested: bool,
     max_approval_wait_ms: Option<u64>,
     on_question: Option<QuestionHandler>,
     pub(crate) restartable: bool,
@@ -590,6 +591,11 @@ impl AgentBuilder {
         self.max_approval_wait_ms = Some(maximum);
         self
     }
+    /// Let an explicit allow cover the nested calls made in that dispatch.
+    pub fn approval_covers_nested(mut self, enabled: bool) -> Self {
+        self.approval_covers_nested = enabled;
+        self
+    }
 
     pub fn approval(mut self, policy: Approval) -> Self {
         self.approval = Some(policy);
@@ -732,7 +738,9 @@ impl AgentBuilder {
             Arc::new(feature_questions::QuestionsPlugin),
         ];
         if self.approval.is_some() {
-            plugins.push(Arc::new(feature_approval::ApprovalPlugin));
+            plugins.push(Arc::new(feature_approval::ApprovalPlugin {
+                covers_nested: self.approval_covers_nested,
+            }));
         }
         if self.acp_conformance {
             plugins.push(Arc::new(tools_builtin::BuiltinTools));

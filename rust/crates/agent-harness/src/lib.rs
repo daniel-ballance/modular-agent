@@ -6,6 +6,7 @@ use agent_api::{
 mod bytes;
 pub use bytes::{ByteCapacity, ByteLimits};
 mod capacity;
+mod covered_approvals;
 mod waiting_approvals;
 pub use capacity::{Capacity, Pool as ReservationPool, ResourceLimits};
 mod interface_tools;
@@ -94,6 +95,7 @@ pub struct Harness {
     agent_name: std::sync::OnceLock<String>,
     project: Option<PathBuf>,
     approval_maximum: std::sync::OnceLock<u64>,
+    live_covers: covered_approvals::Dispatches,
     approval_audiences: RwLock<waiting_approvals::Audiences>,
     model_provider_aliases: std::sync::OnceLock<&'static [(&'static str, &'static str)]>,
     tenants: RwLock<tenants::Tenants>,
@@ -123,6 +125,7 @@ impl Harness {
             agent_name: Default::default(),
             project,
             approval_maximum: Default::default(),
+            live_covers: Default::default(),
             approval_audiences: Default::default(),
             model_provider_aliases: Default::default(),
             tenants: RwLock::default(),
@@ -3432,11 +3435,15 @@ impl AgentApi for Harness {
     fn finish_interface_calls(&self, scope: &Scope, result: &mut TurnResult) -> Result<()> {
         self.finish_interface_turn(scope, result)
     }
+    fn covering_approval(&self, scope: &Scope, call: &ToolCall) -> Option<ApprovalCover> {
+        self.live_covers.parent(scope, call)
+    }
     async fn dispatch_tool(
         &self,
         scope: &Scope,
         call: ToolCall,
         cancel: CancellationToken,
+        cover: Option<ApprovalCover>,
     ) -> ToolResult {
         if let Some(status) = self
             .waiting_dispatch(scope, &call, true)
@@ -3464,6 +3471,15 @@ impl AgentApi for Harness {
                 let name = telemetry::name(&call.name)
                     .map_or_else(|| "execute_tool".into(), |n| format!("execute_tool {n}"));
                 let op = Operation::new(name, SpanKind::Internal, Some(scope), attrs);
+                let _dispatch = match cover {
+                    Some(cover) => match self.live_covers.begin(scope, &call, cover) {
+                        Ok(guard) => Some(guard),
+                        Err(error) => {
+                            return ToolResult::new(&call, ToolStatus::Refused, error.to_string());
+                        }
+                    },
+                    None => None,
+                };
                 let result = op
                     .run(source.run(self.api(), scope.clone(), call, cancel))
                     .await;

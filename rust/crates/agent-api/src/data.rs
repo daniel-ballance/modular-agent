@@ -655,8 +655,17 @@ pub struct Output {
     pub stream: Option<String>,
     pub end: bool,
 }
+/// The approval gate's decision for one dispatch. Never accepted from the wire.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalCover {
+    pub tool_call_id: String,
+    pub request_id: String,
+}
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HookResult {
+    #[serde(skip)]
+    pub approval_cover: Option<ApprovalCover>,
     #[serde(default)]
     pub suspended: bool,
     pub value: Value,

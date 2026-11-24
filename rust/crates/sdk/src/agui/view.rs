@@ -249,6 +249,9 @@ impl Service {
             interrupt["responseSchema"] = match q.kind {
                 base::RequestKind::Approval => {
                     interrupt["toolCallId"] = json!(q.scope.call);
+                    if q.covers_nested() {
+                        interrupt["metadata"] = json!({"modular-agent.coversNested":true});
+                    }
                     json!({"type":"object","properties":{"allow":{"type":"boolean"}},"required":["allow"],"additionalProperties":false})
                 }
                 base::RequestKind::Choice => json!({"type":"string","enum":v["options"]}),

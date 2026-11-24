@@ -68,6 +68,7 @@ struct PreparedStep {
 }
 
 struct Allowance {
+    approval_cover: Option<ApprovalCover>,
     input: Value,
     source: Value,
     definition: ToolDefinition,
@@ -1359,6 +1360,7 @@ impl TurnWork {
                         self.allowed.lock().unwrap().insert(
                             call.id.clone(),
                             Allowance {
+                                approval_cover: r.approval_cover,
                                 input: call.input.clone(),
                                 source,
                                 definition,
@@ -1466,6 +1468,7 @@ impl TurnWork {
             }
         }
         let allowed = Allowance {
+            approval_cover: decision.approval_cover,
             source: registration.clone(),
             definition: definition.clone(),
             input: call.input.clone(),
@@ -1505,7 +1508,7 @@ impl TurnWork {
             )
         } else {
             api.check_writer(&scope.session)?;
-            api.dispatch_tool(&scope, call, token).await
+            api.dispatch_tool(&scope, call, token, allowed.approval_cover).await
         };
         let _commit = self.commits.lock().await;
         if r.status == ToolStatus::Waiting {

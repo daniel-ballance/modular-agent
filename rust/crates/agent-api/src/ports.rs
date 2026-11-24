@@ -283,11 +283,15 @@ pub trait AgentApi: Send + Sync {
     fn finish_interface_calls(&self, _scope: &Scope, _result: &mut TurnResult) -> Result<()> {
         Ok(())
     }
+    fn covering_approval(&self, _scope: &Scope, _call: &ToolCall) -> Option<ApprovalCover> {
+        None
+    }
     async fn dispatch_tool(
         &self,
         scope: &Scope,
         call: ToolCall,
         cancel: CancellationToken,
+        cover: Option<ApprovalCover>,
     ) -> ToolResult;
 }
 #[derive(Debug)]

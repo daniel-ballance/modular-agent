@@ -171,6 +171,10 @@ async fn question(
                         "title":q.extra["approvalCall"]["name"],"rawInput":q.extra["approvalCall"]["input"],"status":"pending"},
                     "options":[{"optionId":"allow","name":"Allow","kind":"allow_once"},{"optionId":"refuse","name":"Refuse","kind":"reject_once"}],
                     "_meta":{"modular-agent":{"requestId":q.id,"actorId":connection_actor().as_str()}}});
+                if q.covers_nested() {
+                    params["_meta"]["modular-agent"]["coversNested"] = json!(true);
+                    params["toolCall"]["content"] = json!([{"type":"content","content":{"type":"text","text":q.text}}]);
+                }
                 let payload = json!({"method":"session/request_permission","params":params});
                 let actor = actor_scope(&session.id);
                 let gate = |value| session.api.output(&actor, Output { recipient:"interface.acp".into(), value, stream:None, end:true });

@@ -282,6 +282,10 @@ impl TestAgentBuilder {
         self.builder = self.builder.max_approval_wait_ms(maximum);
         self
     }
+    pub fn approval_covers_nested(mut self, enabled: bool) -> Self {
+        self.builder = self.builder.approval_covers_nested(enabled);
+        self
+    }
     pub fn approval(mut self, policy: Approval) -> Self {
         self.builder = self.builder.approval(policy);
         self

@@ -63,7 +63,7 @@ async fn compose_with(
         Arc::new(feature_jobs::JobsPlugin),
         Arc::new(feature_subagents::SubagentsPlugin::default()),
         Arc::new(feature_questions::QuestionsPlugin),
-        Arc::new(feature_approval::ApprovalPlugin),
+        Arc::new(feature_approval::ApprovalPlugin::default()),
         provider,
         Arc::new(feature_model::ModelPlugin),
         Arc::new(feature_prompt::PromptPlugin),

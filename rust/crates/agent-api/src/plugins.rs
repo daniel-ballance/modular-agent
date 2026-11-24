@@ -368,6 +368,7 @@ impl Registry {
         handlers.sort_by_key(|h| h.order);
         let mut collected = vec![];
         let mut answered = false;
+        let mut approval_cover = None;
         for h in handlers {
             let result = EMITTER
                 .scope(
@@ -397,8 +398,19 @@ impl Registry {
                         return Ok(reply);
                     }
                     if reply.answered {
+                        if approval_cover.is_some()
+                            && !wire::json_eq(&value["call"], &reply.value["call"])
+                        {
+                            return Ok(HookResult {
+                                refused: Some("call changed after approval".into()),
+                                ..answer(value)
+                            });
+                        }
                         value = reply.value;
                         answered = true;
+                    }
+                    if h.owner == "feature.approval" {
+                        approval_cover = reply.approval_cover;
                     }
                 }
                 Rule::Transform => {
@@ -416,6 +428,7 @@ impl Registry {
                             answered,
                             refused: reply.refused,
                             suspended: reply.suspended,
+                            approval_cover: None,
                         });
                     }
                 }
@@ -438,6 +451,7 @@ impl Registry {
         Ok(HookResult {
             value,
             answered,
+            approval_cover,
             ..HookResult::default()
         })
     }

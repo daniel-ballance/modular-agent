@@ -209,10 +209,17 @@ impl Question {
     pub fn waits_for_approval(&self) -> bool {
         self.kind == RequestKind::Approval && self.extra["approvalWait"] == "untilDeadline"
     }
+    pub fn covers_nested(&self) -> bool {
+        self.kind == RequestKind::Approval && self.extra["coversNested"] == true
+    }
     pub fn approval_projection(&self) -> Value {
         let call = &self.extra["approvalCall"];
-        json!({"id":self.id,"kind":"approval","question":self.text,"toolCallId":self.scope.call,
-              "call":{"name":call["name"],"input":call["input"]},"deadlineAt":self.extra["deadlineAt"],"approvalWait":"untilDeadline"})
+        let mut view = json!({"id":self.id,"kind":"approval","question":self.text,"toolCallId":self.scope.call,
+              "call":{"name":call["name"],"input":call["input"]},"deadlineAt":self.extra["deadlineAt"],"approvalWait":"untilDeadline"});
+        if self.covers_nested() {
+            view["coversNested"] = json!(true);
+        }
+        view
     }
     pub fn new(scope: Scope, kind: RequestKind, text: &str) -> Self {
         Self {
