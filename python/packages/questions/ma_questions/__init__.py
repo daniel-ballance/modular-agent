@@ -4,6 +4,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 
+from ma_core.wire import question_signature
 from ma_core import telemetry as ot
 from ma_core import AgentError, Plugin, content, identity
 
@@ -315,16 +316,13 @@ class Questions(Plugin):
                 if k in d
             },
         }
-        signature = json.dumps(
-            {
-                **details,
-                "responders": d.get("responders"),
-                "timeout": d.get("timeout"),
-                "park": d.get("park", True),
-                "call": d.get("call"),
-            },
-            sort_keys=True,
-        )
+        policy = {
+            "restrictedResponders": d.get("responders"),
+            "timeout": d.get("timeout"),
+            "park": d.get("park", True),
+            "call": d.get("call"),
+        }
+        signature = question_signature(details | policy)
         previous = (await self._state(sid)).values()
         if details.get("coversNested") and d.get("call") and asker == "approval":
             # Reopen the same unanswered request, but never spend a covering
@@ -341,19 +339,9 @@ class Questions(Plugin):
                         break
                     await self._close_question(sid, q)
         for q in reversed(list(previous)):
-            if q["key"] != key or (not key.startswith("call:") and q["asker"] != asker):
+            if q["key"] != key or q["asker"] != asker:
                 continue
-            signature_matches = q["signature"] == signature
-            if not signature_matches:
-                # Old sessions recorded the details separately from the wait policy.
-                signature_matches = (
-                    q["signature"] == json.dumps(details, sort_keys=True)
-                    and q.get("restrictedResponders") == d.get("responders")
-                    and q.get("timeout") == d.get("timeout")
-                    and q.get("park", True) == d.get("park", True)
-                    and q.get("call") == d.get("call")
-                )
-            if not signature_matches:
+            if q.get("signature") != signature:
                 raise AgentError("Question key reused for different details")
             if "answer" in q and await self._reusable(sid, q):
                 return q
@@ -376,12 +364,9 @@ class Questions(Plugin):
             "actor": actor,
             "authority": authority,
             "responders": d.get("responders", list(s["actors"])),
-            "restrictedResponders": d.get("responders"),
-            "call": d.get("call"),
+            **policy,
             "turn": d.get("turn"),
             "step": d.get("step"),
-            "timeout": d.get("timeout"),
-            "park": d.get("park", True),
             "child": d.get("child"),
         }
         self.signals[(sid, q["id"])] = asyncio.Event()

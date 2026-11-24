@@ -177,6 +177,37 @@ async def test_keyed_answers_reuse_only_on_current_branch_and_current_authority(
     assert await a.call("questions", "list", {"session": sid}) == []
 
 
+def test_portable_question_signature_includes_scope_and_policy():
+    from ma_core.wire import entry_in
+
+    draft = {
+        "id": "q",
+        "askedBy": "tools",
+        "kind": "text",
+        "question": "Proceed?",
+        "answerers": ["owner"],
+        "toolCallId": "call",
+        "timeLimitMs": 1200,
+        "whenTimeLimit": "leaveOpen",
+    }
+    row = {"id": "entry", "kind": "inputRequest", "writer": "questions", "data": {"request": draft}}
+    signature = json.loads(entry_in(row, "session")["data"]["signature"])
+    assert (
+        signature["responders"],
+        signature["call"],
+        signature["timeout"],
+        signature["park"],
+    ) == (
+        ["owner"],
+        "call",
+        1.2,
+        True,
+    )
+    draft["signature"] = json.dumps({"kind": "text", "question": "Proceed?"}, sort_keys=True)
+    with pytest.raises(ValueError, match="signature"):
+        entry_in(row, "session")
+
+
 async def test_timeout_leaves_no_result_then_late_answer_runs_new_turn(agent):
     c = call("ask_user", question="Which?", kind="choice", options=["a", "b"], timeout=0)
     h, a, sid, fake = await agent([reply(calls=[c]), reply("continued")])
