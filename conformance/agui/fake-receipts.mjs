@@ -37,10 +37,13 @@ export function fakeReceipts(name, fault) {
         if (fault === 'withheld-oracle' && s.policy === 'reply') return error(res, 403, 'output_withheld');
         return error(res, 404, 'not_found');
       }
+      if (['terminal', 'work'].includes(s.policy) && fault !== `redact-${s.policy}`) return error(res, 403, 'output_withheld');
       if (s.policy === 'reply' && fault !== 'ignore-reply-gate') return error(res, 403, 'output_withheld');
       const ends = s.batches.flat().filter(e => e.kind === 'turnEnd');
       let work = ends.find(e => e.turnId === r.turnId)?.data.outcome.kind ?? 'unsettled';
       let terminal = r.terminal;
+      if (s.policy === 'terminal') terminal = 'unknown';
+      if (s.policy === 'work') work = 'unsettled';
       if (fault === 'exchange-is-work' && terminal === 'interrupt') work = 'completed';
       if (fault === 'latest-turn' && s.recovered) work = ends.at(-1).data.outcome.kind;
       if (fault === 'assume-transient' && s.recovered && r.terminal === 'unknown') work = 'failed';
@@ -74,6 +77,10 @@ export function fakeReceipts(name, fault) {
         r = bind(s, client, data); r.origin = s.origin;
         if (fault === 'extra-result-input') append(s, 'inputAccepted');
         if (phase === 'afterResult') return pause(s, data, response);
+        r.turnId = start(s, r.origin); end(s, r.turnId, 'failed');
+        emit(); push('RUN_ERROR', { code: 'failed', message: 'Continuation failed.' });
+        r.terminal = fault === 'lost-released-error' ? 'unknown' : 'error';
+        latch(s, 'terminalRecorded', data.runId).resolve(); return;
       } else if (suffix.length === 1 && suffix[0].role === 'user') {
         append(s, 'inputAccepted'); s.origin = start(s); append(s, 'input', {}, { turnId: s.origin });
         s.messages.push({ ...suffix[0], id: 'ma:user:' + id() });
