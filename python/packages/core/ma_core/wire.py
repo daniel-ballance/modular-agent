@@ -296,7 +296,7 @@ def model_request_fields(model, request, repeatable, *, auxiliary=False):
         "data": {
             "model": model,
             "safeToRepeat": repeatable,
-            **({"auxiliary": True} if auxiliary else {"tracksStepAfter": True}),
+            **({"auxiliary": True} if auxiliary else {}),
             "tools": [t["name"] for t in request["tools"]],
             **({"request": request} if repeatable else {}),
         },

@@ -184,7 +184,7 @@ async def test_recover_foreign_standard_record(tmp_path, monkeypatch):
     }
     intent = entry(
         "modelRequest",
-        {"model": model, "safeToRepeat": False, "tools": ["bash"], "tracksStepAfter": True},
+        {"model": model, "safeToRepeat": False, "tools": ["bash"]},
         turnId=turn,
         stepId=step,
     )

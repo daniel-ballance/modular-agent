@@ -84,7 +84,7 @@ async def test_pending_call_does_not_echo_the_hosts_checkpoint():
 async def test_runtime_restores_gate_without_replaying_a_committed_decision(decision):
     scope = {"turnId": "turn", "stepId": "step"}
     rows = [
-        {**scope, "kind": "modelRequest", "data": {"tracksStepAfter": True}},
+        {**scope, "kind": "modelRequest", "data": {}},
         {
             **scope,
             "kind": "response",
@@ -120,7 +120,7 @@ async def test_runtime_rejects_mismatched_last_step_before_effects(last):
                 "turnId": "turn",
                 "stepId": "step",
                 "kind": "modelRequest",
-                "data": {"tracksStepAfter": True},
+                "data": {},
             },
             {
                 "turnId": "turn",

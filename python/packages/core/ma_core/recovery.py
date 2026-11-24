@@ -38,7 +38,7 @@ def step_checkpoint(entries, turn_id, step_id=None):
         raise ValueError("Unknown answered step checkpoint")
     decisions = [e for e in entries if e["kind"] == STEP_AFTER and e.get("stepId") == step]
     restored = {"stepId": step}
-    if not decisions and intents[0]["data"].get("tracksStepAfter") is True:
+    if not decisions:
         return response, restored
     if (
         len(decisions) != 1
