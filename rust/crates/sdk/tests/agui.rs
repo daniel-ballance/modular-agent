@@ -179,6 +179,55 @@ async fn tenant_without_input_never_starts_a_provisional_session() -> anyhow::Re
 }
 
 #[tokio::test]
+async fn presence_first_opened_on_return_can_resume_a_parked_approval() -> anyhow::Result<()> {
+    use modular_agent::{Approval, Durability, Tool};
+    let dir = tempfile::tempdir()?;
+    let agent = Agent::builder()
+        .project(dir.path())
+        .data_dir(dir.path().join("data"))
+        .durability(Durability::Kept)
+        .approval(Approval::All)
+        .max_approval_wait_ms(60_000)
+        .setting("approvalWait", json!("untilDeadline"))
+        .tool(Tool::new("bump", "Increment").run(|_: Value, _| async { Ok("Bumped") }))
+        .provider(scripted_provider(
+            json!([{"toolCalls":[{"name":"bump","input":{}}]},{"text":"Finished."}]),
+        ))
+        .build()
+        .await?;
+    let server = serve(&agent, dir.path()).await?;
+    let id = thread(&server).await?;
+    let origin = exchange(&server, input(&id, "origin", json!("Bump"))).await?;
+    assert_eq!(origin.last().unwrap()["outcome"], json!({"type":"success"}));
+    let client = reqwest::Client::new();
+    let presence = client
+        .get(url(&server, &format!("/threads/{id}/presence")))
+        .bearer_auth(TOKEN)
+        .send()
+        .await?
+        .error_for_status()?;
+    let snapshot: Value = client
+        .get(url(&server, &format!("/threads/{id}")))
+        .bearer_auth(TOKEN)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(snapshot["waiting"]["toolCalls"], json!([]));
+    let q = &snapshot["waiting"]["questions"][0];
+    assert!(q["expiresAt"].is_string());
+    assert!(q["message"].as_str().unwrap().contains("bump"));
+    let end=exchange(&server,json!({"protocolVersion":"1.0","threadId":id,"runId":"answer","messages":snapshot["messages"],"resume":[{"interruptId":q["id"],"status":"resolved","payload":{"allow":true}}]})).await?;
+    assert_eq!(end.last().unwrap()["outcome"]["type"], "success");
+    assert!(end.iter().any(|f| f["type"] == "TOOL_CALL_RESULT"));
+    drop(presence);
+    server.close().await;
+    agent.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_left_open_question_can_be_answered_without_presence() -> anyhow::Result<()> {
     left_open_exchange(
         modular_agent::Ask::choice("Which?", &["first", "second"]),

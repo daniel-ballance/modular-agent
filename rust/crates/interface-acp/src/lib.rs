@@ -362,6 +362,19 @@ impl State {
         if let Some(session) = session {
             let failed = result.is_err();
             let value = result.unwrap_or_else(|error| json!({"error":error.to_string()}));
+            // Withdraw only this connection's delivery when a re-poll is withheld.
+            if method == "_modular-agent/requests" {
+                let waiting = questions(&session.api.snapshot(&session.id)?)?
+                    .into_iter()
+                    .filter(Question::waits_for_approval)
+                    .map(|q| q.id)
+                    .collect::<std::collections::BTreeSet<_>>();
+                session
+                    .approval_views
+                    .lock()
+                    .unwrap()
+                    .retain(|(_, id)| !waiting.contains(id));
+            }
             let payload = json!({"method":method,"result":value});
             let gated = session
                 .api
@@ -384,7 +397,8 @@ impl State {
             if method == "_modular-agent/requests"
                 && let Some(questions) = value["requests"].as_array_mut()
             {
-                binding::mark_poll_view(&session, &payload["result"]["requests"], questions)?;
+                binding::mark_poll_view(&session, &payload["result"]["requests"], questions)
+                    .await?;
                 let mut routes = session.approval_views.lock().unwrap();
                 for view in questions
                     .iter()
@@ -654,6 +668,16 @@ impl State {
                             &actor_scope(&session.id),
                             json!({"model":info.name,"thinking":thinking}),
                         )?;
+                    }
+                    "approvalWait" => {
+                        ensure!(
+                            session.api.declaration()?["approvals_outlast_turns"] == true,
+                            request_error("not_supported", "waiting approvals are disabled")
+                        );
+                        session
+                            .api
+                            .settings(&actor_scope(&session.id), json!({"approvalWait":value}))?;
+                        session.wake.notify_one();
                     }
                     "approval" => {
                         let policy = match value {

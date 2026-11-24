@@ -74,6 +74,9 @@ pub fn declaration(api: &dyn AgentApi, session: Option<&str>) -> Result<Value> {
         "confinesFiles":d["environment"]["confines_files"] == true,
         "commandContainment":if d["environment"]["stops_commands_after_sigkill"] == true {"strong"} else if d["environment"]["containment"] == "processGroup" {"processGroup"} else {"none"}
     });
+    if d["approvals_outlast_turns"] == true {
+        declaration["approvalsOutlastTurns"] = json!(true);
+    }
     if d["interface_tools"] == true {
         declaration["interfaceTools"] = json!(true);
     }
@@ -347,6 +350,9 @@ pub(crate) fn prompt_response(data: &SessionData, receipt: &Receipt) -> Result<V
 }
 
 pub fn shared_question(q: Question) -> Value {
+    if q.waits_for_approval() {
+        return q.approval_projection();
+    }
     let mut value = json!({"id":q.id,"kind":q.kind,"question":q.text});
     if let Some(call_id) = q.scope.call {
         value["toolCallId"] = json!(call_id);
@@ -391,7 +397,11 @@ pub(crate) fn poll_payload(session: &Session) -> Result<Value> {
     )
 }
 
-pub(crate) fn mark_poll_view(session: &Session, before: &Value, after: &mut [Value]) -> Result<()> {
+pub(crate) async fn mark_poll_view(
+    session: &Session,
+    before: &Value,
+    after: &mut [Value],
+) -> Result<()> {
     let api = session.api.as_ref();
     let service = requests(api)?;
     let current = service.visible(api, &session.id, connection_actor().as_str())?;
@@ -406,6 +416,12 @@ pub(crate) fn mark_poll_view(session: &Session, before: &Value, after: &mut [Val
                             .any(|v| v["id"] == id && wire::json_eq(v, view))
                     }))
         });
+        let eligible = if eligible && current.iter().any(|q| q.id == id && q.waits_for_approval()) {
+            api.deliver_approval(&session.id, &id, &session.waiting_route()?)
+                .await?
+        } else {
+            eligible
+        };
         if let Some(view) = view.as_object_mut() {
             view.insert("answerable".into(), json!(eligible));
         }
@@ -714,6 +730,28 @@ pub(crate) async fn extension(
                     .unwrap()
                     .contains(&(actor.to_owned(), id.to_owned()))
             {
+                return Ok(json!({"accepted":false,"reason":"not_open"}));
+            }
+            if q.waits_for_approval() {
+                let route = session.waiting_route()?;
+                let allow = p["value"] == "allow" && p["declined"] != true;
+                let decline = p["declined"] == true || p["value"] == "refuse";
+                if route.actor != actor || (!allow && !decline) {
+                    return Ok(json!({"accepted":false,"reason":"not_open"}));
+                }
+                let accepted = api
+                    .decide_approval(
+                        &session.id,
+                        id,
+                        &route,
+                        allow,
+                        p["reason"].as_str().map(str::to_owned),
+                    )
+                    .await?;
+                if accepted {
+                    session.wake.notify_one();
+                    return Ok(json!({"accepted":true}));
+                }
                 return Ok(json!({"accepted":false,"reason":"not_open"}));
             }
             if q.kind == RequestKind::Secret {

@@ -165,6 +165,7 @@ struct Client {
     run: Arc<tokio::sync::Mutex<()>>,
     cursor: Mutex<Option<Cursor>>,
     presence: Mutex<Option<String>>,
+    presence_token: Mutex<base::CancellationToken>,
     questions: Mutex<BTreeMap<String, Option<String>>>,
     paused: Mutex<Option<(String, InterfaceConnection)>>,
     runs: Mutex<std::collections::VecDeque<String>>,
@@ -483,6 +484,20 @@ impl Service {
         let v = self.gate(a, id, v).await?;
         Ok(reply(status, "application/json", Body::from(encode(&v)?)))
     }
+    fn waiting_route(&self, a: &AguiActor, c: &Client, expected: &str) -> R<base::ApprovalRoute> {
+        let slot = c.presence.lock().unwrap();
+        if slot.as_deref() != Some(expected) {
+            return Err(Fail::Conflict);
+        }
+        Ok(base::ApprovalRoute {
+            instance: expected.into(),
+            binding: format!("agui:{}", a.client_id),
+            actor: a.id().into(),
+            principal: a.id().into(),
+            ceiling: a.principal.actor.rights.clone(),
+            live: c.presence_token.lock().unwrap().clone(),
+        })
+    }
     fn presence(self: Arc<Self>, a: Arc<AguiActor>, id: String, c: Arc<Client>) -> R<Response> {
         let route = base::id();
         let questions = base::requests(self.h())?;
@@ -492,12 +507,14 @@ impl Service {
         }
         let approvals = self.right(&a, &id, "approve")?;
         questions.connect_answer_route(&id, a.id(), &route, approvals);
+        *c.presence_token.lock().unwrap() = base::CancellationToken::new();
         *slot = Some(route.clone());
         drop(slot);
         struct Guard(Arc<Client>, Arc<dyn base::InputRequests>, String, String);
         impl Drop for Guard {
             fn drop(&mut self) {
                 let mut slot = self.0.presence.lock().unwrap();
+                self.0.presence_token.lock().unwrap().cancel();
                 self.1.detach_presence(&self.2, &self.3);
                 *slot = None;
                 self.0.questions.lock().unwrap().retain(|_, r| r.is_none());

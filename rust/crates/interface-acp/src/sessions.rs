@@ -78,6 +78,18 @@ impl Session {
         *self.worker.lock().unwrap() = Some(worker);
         Ok(())
     }
+    pub fn waiting_route(&self) -> Result<ApprovalRoute> {
+        self.check_view()?;
+        let actor = connection_actor();
+        Ok(ApprovalRoute {
+            instance: self.route.clone(),
+            binding: "acp".into(),
+            actor: actor.clone(),
+            principal: actor.clone(),
+            ceiling: self.api.authority(&self.id, &actor)?,
+            live: self.stop.clone(),
+        })
+    }
     pub async fn detach_route(&self) -> bool {
         let last = self.fanout.remove(&self.route);
         self.stop.cancel();
@@ -477,11 +489,15 @@ pub(crate) fn config(api: &dyn AgentApi, id: &str) -> Result<Value> {
     }
     let effective_thinking =
         wire::lower_reasoning(settings["thinking"].as_str().unwrap_or("low"), &thinking);
-    Ok(json!([
+    let mut options = json!([
         {"id":"model","name":"Model","category":"model","type":"select","currentValue":current_model,"options":models},
         {"id":"thinking","name":"Thinking","category":"thought_level","type":"select","currentValue":effective_thinking,"options":thinking.into_iter().map(|v|json!({"value":v,"name":v})).collect::<Vec<_>>()},
         {"id":"approval","name":"Approval","type":"select","currentValue":match settings["approval"].as_str().unwrap_or("off") {"ask_always"=>"all","ask_unless_read_only"=>"ask","never_ask"=>"never",_=>"off"},"options":[{"value":"off","name":"Off"},{"value":"ask","name":"Ask unless read-only"},{"value":"all","name":"Ask always"},{"value":"never","name":"Refuse without asking"}]}
-    ]))
+    ]);
+    if api.declaration()?["approvals_outlast_turns"] == true {
+        options.as_array_mut().unwrap().push(json!({"id":"approvalWait","name":"Approval wait","type":"select","currentValue":settings["approvalWait"].as_str().unwrap_or("live"),"options":[{"value":"live","name":"Live only"},{"value":"untilDeadline","name":"Until deadline"}]}));
+    }
+    Ok(options)
 }
 struct Opening<'a>(&'a Mutex<std::collections::BTreeSet<String>>, String);
 impl Drop for Opening<'_> {
