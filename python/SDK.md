@@ -172,6 +172,98 @@ The launcher of a stdio ACP host is trusted for per-request trace context unless
 - The [connection rules](../docs/contracts.md#authority) say: “The Harness MUST refuse unless operator policy admits that principal for this session's project and tenant, `joinOnOpen` is enabled and the session supports another member if needed.” The Python network policy has no `joinOnOpen` option. The listener refuses unrecorded actors; a trusted Interface must grant them membership first. The kit fixture uses that grant operation.
 - The [binding](../docs/bindings/agui.md#shared-state) says: “The adapter starts each run with the plugin's current snapshot if the plugin is present.” For [placement](../docs/sdk/placement.md#serving-ag-ui), add: “To expose state, select its emitting plugin and supply its current snapshot reader. The reader takes a session ID and returns the plugin's revision and snapshot, or no snapshot. Do not use a client's input state as that snapshot.”
 
+## Plugin traffic for one tool turn
+
+Run `cd python && uv run --offline python scripts/plugin_traffic.py > traffic.jsonl`.
+Each row gives bytes toward and away from the host and frame counts by plugin and method.
+Replies count toward the request that caused them. The timer covers the ACP prompt handler,
+two offline model steps and one successful file read. It excludes setup, process startup and
+shutdown. Each already-published SQLite branch has the stated number of entries. After the
+setup records, every tenth entry has model-visible text; the others have 128 bytes of hidden
+note data. No CPU quota was set. Times are individual measurements, not thresholds.
+
+The base ACP kit in `9fefe95e` used `--process-plugins all` for `--binding process`.
+Its workers use a **private Python protocol**, not the public plugin binding. Here
+**public** uses three Python stdio plugins: Runtime, Provider and tool source.
+**Local** uses in-process parts and the same Provider directive. No ACP client transport
+is counted. In the private placement a small worker request enters the ACP handler.
+
+| Prior entries | Private bytes, before → after | Private ms | Public bytes, before → after | Public ms | Local ms |
+|---:|---:|---:|---:|---:|---:|
+| 10 | 1,648,345 → 479,658 | 85 → 67 | 76,812 → 54,574 | 40 → 35 | 45 → 38 |
+| 100 | 3,592,193 → 512,943 | 116 → 73 | 90,234 → 65,206 | 55 → 43 | 64 → 46 |
+| 1,000 | 23,041,023 → 847,098 | 432 → 155 | 225,246 → 172,318 | 222 → 122 | 257 → 122 |
+
+The private frame count went from 982 to 974 at each size. Public stayed at 68. Local had no
+plugin frames. These are not measurements of the original kit's mixed-content session.
+
+**Private workers.** At 1,000 entries, Runtime `entries` calls accounted for 8.87 MB,
+history `keep` for 7.70 MB, and Context branch reads for 1.73 MB. The environment, prompt
+and approval plugins fetched entries just to read the project or settings. The Harness now
+selects from the committed branch or kept history before copying, depending on the operation.
+For example, an input waiter gets its own outcome; tool settlement still checks for a result
+in a later turn. A store commit carries metadata and the batch, not the entire prior session.
+The Context plugin reads visible entries, call dispositions and the current turn's feedback
+barriers, not two copies of the raw branch. None of these private operations is a
+`modular-agent-plugin/1` requirement. Recording an exact repeatable model request and
+delivering gated history events still move real data.
+
+**Public binding.** In the two-step, 1,000-entry turn:
+
+| Method (both directions) | Bytes before → after | What [the binding](../docs/bindings/plugin.md) requires |
+|---|---:|---|
+| `runtime/runTurn` | 992 → 893 | One Turn with model, support and settings, not a transcript. |
+| `host/runtime/prepareStep` | 42,499 → 31,407 | Allocated step ID and usage; full prepared ModelRequest in the reply. |
+| `host/runtime/model` | 42,781 → 31,689 | Step ID and full authorized ModelRequest; assistant message in the reply. |
+| `provider/request` | 41,897 → 31,857 | Provider and model identity and full ModelRequest. |
+| `host/hook` for `provider.request` | 82,644 → 62,564 | The original payload out and the full transformed payload back, even without handlers. The host commits before granting permission to infer. |
+| `host/hook` for `provider.response` | 1,130 → 1,130 | Raw message and scope, not the request or history. |
+
+Native message data, duplicate tool schemas and session settings bulked up every copy.
+The host now projects the model view instead of copying native records into it. Message
+source IDs still track erasure and opaque reasoning. The five transfers of the model
+request per step remain. A catalog/readiness check is not a new registration; neither
+initialize nor a registration appeared during the turn. The read tool got its scoped call.
+No plugin asked for raw history on this fresh turn. On recovery, the Runtime reads the
+committed checkpoint by turn ID through `host/history`. The current binding pages the
+branch (or all kept entries), not just that turn. A peer cannot substitute a truncated
+page or a cached history after a move or erasure.
+
+### Proposed binding text (not implemented)
+
+For a negotiated extension to [Runtime callbacks](../docs/bindings/plugin.md#runtime-callbacks)
+and [Provider requests](../docs/bindings/plugin.md#the-host-asks-a-provider):
+
+> The host MAY offer `requestRefs: 1` at initialization. A plugin MAY accept by returning
+> `requestRefs: 1` in its registration. Without agreement the existing method schemas apply.
+> With agreement a Runtime MAY send `byStep: true` in `host/runtime/prepareStep`. After
+> normal preparation the host MUST then reply `{ prepared: true }` and retain the exact
+> prepared ModelRequest for that parent and step. In `host/runtime/model` the Runtime
+> MAY omit `request` for that preparation only. The host MUST use that request and apply
+> the same single-attempt, phase, limit and authority checks as for a literal request.
+> On `model.failed` the Runtime MAY omit `payload.request` for that attempt; the host MUST
+> supply the retained request to the hook chain. This option does not authorize a retry
+> or a recovery replay. Retained requests expire with the live parent; an unknown or
+> ineligible reference is `invalid_request`.
+
+> With agreement a Provider MAY omit `payload.request` on its one `provider.request`
+> callback. Omission means the exact request of the named live `provider/request` parent
+> on this connection. The host MUST perform the same transform, commit and final dispatch
+> checks. If the effective request is unchanged by JSON value, it MAY reply
+> `{ unchanged: true }` to this abbreviated callback; otherwise it MUST return the full
+> transformed payload. Only the successful reply authorizes inference. The response
+> callback, cancellation and loss rules do not change.
+
+For [paging history](../docs/bindings/plugin.md#paging-history):
+
+> The host MAY offer `historySelect: 1` at initialization. A plugin MAY accept by returning
+> the same member. Only with agreement, `host/history` MAY carry `turnId: Id` or
+> `toolCallId: Id`, but not both. The host MUST select the branch or kept view as before,
+> then filter by that association, then apply `after` and `limit`. A cursor outside the
+> selected view is `invalid_request`. Page size, order, erasure freshness, trace projection
+> and authority rules remain unchanged. A turn filter does not prove a call has no later
+> settlement. A reader needing that proof MUST also check by call ID across kept history.
+
 ## Remaining Python implementation gaps
 
 The older base build's private `MA_PLUGIN_PROCESSES` placement does not install OpenTelemetry in its worker processes. The shared telemetry check does not exercise it: `create_agent` passes an empty internal worker list to the Harness, and `process:<sdk>` uses the SDK's explicit plugin binding. The SDK's public hosted Runtime placement records the invocation in the host and uses the plugin binding for propagation.
