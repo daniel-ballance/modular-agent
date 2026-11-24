@@ -96,7 +96,19 @@ See [Erasure](#erasure) under Settled.
 
 ### The agent from outside
 
-**Limit: other Interfaces.** [Interface and Harness](contracts.md#interface-and-harness) defines the core operations; [ACP](bindings/acp.md) maps the host wire. The [proposed AG-UI binding](bindings/agui.md) maps an HTTP Interface on the shared listener. There is no model gateway or network working environment profile. Default: use the specified bindings across builds. Keep other service APIs private to a deployment with its own authentication, authorization and retry rules. Refuse combinations that require an unverified version, feature or policy; matching a major version does not certify historical snapshots.
+**Limit: other Interfaces.** [Interface and Harness](contracts.md#interface-and-harness) defines the core operations; [ACP](bindings/acp.md) maps the host wire. The [AG-UI binding](bindings/agui.md) maps an HTTP Interface on the shared listener. There is no model gateway or network working environment profile. Default: use the specified bindings across builds. Keep other service APIs private to a deployment with its own authentication, authorization and retry rules. Refuse combinations that require an unverified version, feature or policy; matching a major version does not certify historical snapshots.
+
+### A host driving several agents
+
+The [ops desk](../demos/ops-desk/DESIGN.md#findings) drove three agents from one host. These limits remain; each has a workaround the desk uses.
+
+**Limit: no feed of closed waits.** An AG-UI client learns that a question or approval closed only by reading a fresh snapshot; presence carries no events and a snapshot does not say why a wait ended. Default: recheck the snapshot before showing or sending an answer.
+
+**Limit: no run receipt after a crash.** After an agent restarts, a client can read the thread snapshot but cannot reattach to the lost run stream or fetch its terminal event. Default: save the thread ID before sending input, use one thread per task, and never replay a tool from a snapshot.
+
+**Limit: one token per plugin service listener.** A plugin service has one token file, and a tool call names a session, not the calling agent. Default: one listener per caller, each bound to the identity its token proves.
+
+**Limit: approval in stock `ma`.** `ma` declares no approval feature, and a gate in another process cannot ask a question. Default: a tool that asks inside its own call. [ADR 0034](adr/0034-approvals-that-wait.md) needs the pre-dispatch gate, so `ma` gains an approval setting with its 0.3.0 implementation.
 
 ### Agents working together
 

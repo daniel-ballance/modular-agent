@@ -86,7 +86,7 @@ With real models (`--live`) the same flow runs against your sign-ins; it is not 
 
 Expected findings (checked against the scripted desk):
 
-- **Approvals cannot wait past a turn — confirmed.** The [interrupt rules](../../docs/bindings/agui.md#interrupts-and-frontend-tools) require an existing presence and forbid extending an approval past its turn. In the deadline check the question disappeared from `waiting.questions`, the change tool was refused, and the file and commit stayed unchanged. A stored inbox row did not make a late answer valid. The desk keeps a presence stream and uses three-minute deadlines; someone reading it hours later finds a refusal. [ADR 0034](../../docs/adr/0034-approvals-that-wait.md) proposes parking the model call at its approval gate before the change tool starts. The desk would need to move its check there; the demo still exercises the live-only rule.
+- **Approvals cannot wait past a turn — confirmed.** The [interrupt rules](../../docs/bindings/agui.md#interrupts-and-frontend-tools) require an existing presence and forbid extending an approval past its turn. In the deadline check the question disappeared from `waiting.questions`, the change tool was refused, and the file and commit stayed unchanged. A stored inbox row did not make a late answer valid. The desk keeps a presence stream and uses three-minute deadlines; someone reading it hours later finds a refusal. [ADR 0034](../../docs/adr/0034-approvals-that-wait.md), accepted for 0.3.0, specifies parking the model call at its approval gate before the change tool starts. The desk would need to move its check there; the demo still exercises the live-only rule.
 - **Finding and waking open work — resolved for a running desk.** At start-up and at each agent launch the host pages [the thread listing](../../docs/bindings/agui.md#listing-threads), then reads the gated snapshots of open work. SQLite still owns events, routes and debug links; it is not an index of agent waits. The coder starts with [`--resume-open`](../../docs/reference/standard-configuration.md#resuming-at-start-up). Triage uses the Python server's `resume_open` option. The Go verifier calls `ResumeInterrupted` on unfinished sessions before it accepts clients.
 - **Someone still has to start the processes and keep the answer route alive.** The local agent station owns the three processes, their tool listeners and the original presence streams. Killing the HTTP host does not move an approval to a new presence. If the station or agent dies, that approval cannot be restored; ordinary recovery settles the turn. A listed Interface call without a received handoff cannot be executed from its snapshot. Listing is not a wake-up signal for a stopped service.
 - **Posts during a turn — confirmed for Interface tools.** A frontend handoff ends the exchange; it cannot acknowledge a post and continue that step. A server tool can. A plugin can also emit a gated custom event, but that is a live notification, not a committed, acknowledged post. The desk authenticates each tool service separately and stores posts by session and call ID.
@@ -95,12 +95,12 @@ Expected findings (checked against the scripted desk):
 Additional findings:
 
 - **Stock `ma` cannot switch on write approval.** The [standard configuration](../../docs/reference/standard-configuration.md#the-program) omits the approval feature. A remote `tool.before` gate [cannot ask](../../docs/bindings/plugin.md#from-core-hooks-to-wire-hooks). A separate coder tool therefore asks inside its own `tools/call`, then invokes `edit` on the approved arguments. The gate refuses other edits, writes and shell commands.
-- **Rust tool-originated approval needs an extra field.** [InputRequestDraft](../../docs/bindings/data.md#questions) specifies no `options` for approval. With the documented draft, Rust offered the exact approval, but returned HTTP 409 on `{allow:true}`. Its answer check looks for `allow` in `options` as for a choice. Supplying the options on the coder tool's approval made that same answer work.
+- **Rust tool-originated approval needed an extra field — fixed.** Rust checked an approval answer against the draft's `options` as for a choice, so `{allow:true}` was refused unless the tool listed `allow`. It now accepts `allow` as [the data binding](../../docs/bindings/data.md#questions) says, and the coder's approval lists no options.
 - **A closed run has no closure feed.** [Presence](../../docs/bindings/agui.md#listener-and-authentication) carries comments, not events. A snapshot lists only still-answerable questions, not the reason a former question disappeared. The host checks a fresh snapshot before showing or sending answers. It can label a deadline refusal here because it controls the sole answer route. It also observes the desk plugin's `turn.end` hook so it does not stop a coder that is still finishing after expiry.
 - **Recovery gives a thread snapshot, not a run receipt or terminal outcome.** After `SIGKILL`, GET reopened the coder session. Its snapshot showed the interrupted tool's effects as unknown and the recovered assistant reply. There is no AG-UI operation to reattach to the lost run stream or fetch its terminal event. The host records “reopened,” not a synthetic `RUN_FINISHED`. It saves the thread ID before sending input, uses one thread per routed task, and never replays a tool from a snapshot. A 404 for a saved provisional thread cannot distinguish loss before first input from an inaccessible session; the host does not silently start over on a new thread.
 - **Identifying callers of the desk service takes three listeners.** The public [plugin service API](../../docs/sdk/placement.md#services) takes one `tokenFile`, not a token-to-principal map. `tools/call` has a session and a call, not an authenticated agent name. Each listener closes over the identity whose token it accepts. Neither model text nor plugin initialization config selects that identity.
 
-All three real AG-UI adapters ran. The implementation-status sentences at the top of the binding and under SDK placement's “Serving AG-UI” are out of date.
+All three real AG-UI adapters ran. The binding and SDK placement pages that said no build implemented AG-UI were corrected.
 
 ### Two live events
 
@@ -124,6 +124,19 @@ Phoenix reported the following usage on the `chat` spans, selected by the three 
 | **Total** | **9** | **18,474 / 656** | **10** | **23,207 / 797** |
 
 Triage and the verifier shared the event trace in both runs. Both runs predate the coder's trace trust policy. Their event traces omit the coder turn.
+
+## Where the findings went
+
+| Finding | Outcome |
+|---|---|
+| Approvals cannot wait past a turn | [ADR 0034](../../docs/adr/0034-approvals-that-wait.md), accepted; implemented in 0.3.0 |
+| Finding and waking open work | Resolved: [thread listing](../../docs/bindings/agui.md#listing-threads), `sessionSummary` in every SDK, [`ma --resume-open`](../../docs/reference/standard-configuration.md#resuming-at-start-up) |
+| Someone must start the processes | Deployment's job, by design ([ADR 0012](../../docs/adr/0012-one-agent-is-the-scope.md)) |
+| Posts during a turn | Kept as plugin tools; Interface-run tools suit client actions |
+| One trace across agents | Resolved: `traceTrusted` in `ma`'s policy; a span link to the `hand_off` call waits for a later [telemetry version](../../docs/telemetry.md#what-later-versions-add) |
+| Approval in stock `ma`; closure feed; run receipt; one token per service | [Open questions](../../docs/open-questions.md#a-host-driving-several-agents) |
+| Rust approval answers | Fixed |
+| AG-UI status text | Fixed |
 
 ## Plan
 

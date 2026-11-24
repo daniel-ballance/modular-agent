@@ -120,6 +120,8 @@ Each SDK's README lists its own gaps.
 ## Planned for 0.3.0
 
 - **Approvals that wait past their turn** ([ADR 0034](docs/adr/0034-approvals-that-wait.md), accepted): a session can keep an unstarted call open for an approver who answers later, within an operator's maximum, rechecked in full before it runs.
+- **An approval setting in `ma`,** using that gate, so a host can approve `ma`'s writes without a special tool.
+- **The remaining host limits** the [ops desk](demos/ops-desk/DESIGN.md#where-the-findings-went) found: a feed of closed waits, a run receipt after a crash, and one plugin service serving several callers.
 
 ## The specification
 
