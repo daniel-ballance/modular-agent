@@ -108,21 +108,21 @@ export function launch(projects: Projects, agent: Agent, pluginUrl: string, appr
   });
   let cmd: string[];
   if (agent === 'coder') {
-    plugins.push({
-      command: [python, join(demo, 'coder', 'change.py')],
-      env: { DESK_APPROVAL_MS: String(approvalMs), ...(live ? { DESK_LIVE: '1' } : {}) }
-    });
+    writeFileSync(join(data, 'settings.json'), JSON.stringify({
+      approval_wait: 'untilDeadline',
+      ...(live ? { thinking: 'low', step_limit: 8, output_limit: 2048 } : {})
+    }));
     if (live) {
       // Keep ma's configuration and HOME private to the desk. Only Claude Code needs its sign-in.
       childEnv.CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR;
       childEnv.MODULAR_AGENT_CLAUDE_SIDECAR = resolve(demo, '../../typescript/sidecars/claude/dist/main.js');
       copyFileSync(join(demo, 'coder/instructions.md'), join(data, 'AGENTS.md'));
-      writeFileSync(join(data, 'settings.json'), JSON.stringify({ thinking: 'low', step_limit: 8, output_limit: 2048 }));
     } else childEnv.MODULAR_AGENT_SCRIPT = join(demo, 'coder', 'model.json');
     const policy = join(data, 'policy.json');
     writeFileSync(
       policy,
       JSON.stringify({
+        approvalWaitMaxMs: approvalMs,
         actors: [
           {
             tokenFile: auth.path,
@@ -138,6 +138,8 @@ export function launch(projects: Projects, agent: Agent, pluginUrl: string, appr
       resolve(demo, '../../rust/target/debug/ma'),
       '--agui',
       '--resume-open',
+      '--approval',
+      'ask',
       '--listen',
       '127.0.0.1:0',
       '--policy',

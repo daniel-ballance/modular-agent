@@ -7,7 +7,7 @@ type Process = ReturnType<Control['start']>;
 class Slot {
   route?: Route;
   process?: Process;
-  present = false;
+  presence?: AbortController;
   waiting = false;
   ended = false;
   recovering = false;
@@ -127,10 +127,9 @@ export class Desk {
       s.route = r;
       s.recovering = true;
       this.db.admitted(r);
-      // A snapshot never renews an approval. An in-turn view here is
-      // answerable only while the station still holds its original presence.
-      this.db.observe(r, view.waiting.questions);
-      s.present = true;
+      // A parked approval needs a fresh delivery on this host's presence.
+      await this.holdPresence(s, api, r);
+      this.db.observe(r, (await api.snapshot(r)).waiting.questions);
       s.waiting = true;
       this.poll(a);
     }
@@ -163,10 +162,18 @@ export class Desk {
     s.ended = false;
     void s.serial(() => this.drive(a, r));
   }
+  private async holdPresence(s: Slot, api: Agui, r: Route) {
+    if (!s.presence) {
+      const p = (s.presence = new AbortController());
+      await api.presence(r, p, () => {
+        if (s.presence === p) s.presence = undefined;
+        this.notify();
+      });
+    }
+  }
   private detach(s: Slot) {
-    if (s.present && s.route && !s.process?.abort.signal.aborted && s.process)
-      void this.control.detach(s.route).catch(() => {}); // the agent may already have exited
-    s.present = false;
+    s.presence?.abort();
+    s.presence = undefined;
     s.waiting = false;
     clearTimeout(s.poll);
   }
@@ -188,8 +195,7 @@ export class Desk {
         this.db.thread(r, await api.create(r));
       }
       const view = await api.snapshot(r); // GET reopens the same session and runs recovery.
-      await this.control.presence(r);
-      s.present = true;
+      await this.holdPresence(s, api, r);
       if (view.messages.some((m) => m.role === 'user')) {
         // Each thread belongs to one input route. A committed user message is
         // evidence of admission, even if this host died before saving its cursor.
@@ -261,7 +267,9 @@ export class Desk {
     if (!s.waiting || !r || !s.process || this.closing) return;
     let view: Snapshot;
     try {
-      view = await (await s.process.ready).snapshot(r);
+      const api = await s.process.ready;
+      await this.holdPresence(s, api, r);
+      view = await api.snapshot(r);
     } catch (e) {
       // A deadline can commit while the agent builds its snapshot. Without a
       // single-watermark view there is no button, and no change to the route.

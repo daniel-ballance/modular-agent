@@ -22,7 +22,7 @@ export type Question = {
   toolCallId?: string;
   expiresAt?: string;
   responseSchema?: { enum?: string[] };
-  metadata?: Record<string, string>;
+  metadata?: Record<string, unknown>;
 };
 const pending = "('queued','sending','admitted')";
 

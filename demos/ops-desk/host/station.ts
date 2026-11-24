@@ -1,5 +1,5 @@
-// The agent processes, their tool listeners and their presence streams live
-// together. Losing the HTTP host must not create a replacement approval route.
+// Keep the agents available while the HTTP host reconnects.
+import { coderScope } from './coder-scope.js';
 import { serve, tool, type ToolContext } from '@modular-agent/core';
 import { mkdirSync, existsSync, writeFileSync, rmSync, statSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
@@ -16,9 +16,7 @@ const db = new Store(join(root, 'desk.sqlite'), 'station');
 const projects = new Projects(root, resolve(process.env.DESK_SAMPLE ?? join(demo, 'sample')));
 const processes = new Map<Agent, ReturnType<typeof launch>>();
 const services = new Map<Agent, { url: string; close(): Promise<void> }>();
-const presence = new Map<string, AbortController>();
-// A process being stopped stays in `processes` until it exits; it must not
-// answer a start or take a presence stream meanwhile.
+// A child being stopped cannot serve a start request.
 const stopping = new WeakSet<ReturnType<typeof launch>>();
 let host: Socket | undefined;
 function notify(event: object) {
@@ -36,6 +34,7 @@ for (const a of agents) {
     {
       name: 'desk',
       setup: (reg) => {
+        if (a === 'coder') reg.on('tool.before', ({ call }) => coderScope(call));
         reg.tool(
           tool({
             name: 'post',
@@ -90,8 +89,8 @@ for (const a of agents) {
   services.set(a, service);
 }
 
-type Command = { agent: Agent; op: string; thread?: string; approvalMs: number; parent?: string };
-async function handle({ agent, op, thread, parent, approvalMs }: Command) {
+type Command = { agent: Agent; op: string; approvalMs: number };
+async function handle({ agent, op, approvalMs }: Command) {
   if (!agents.includes(agent)) throw Error('Unknown agent');
   let child = processes.get(agent);
   if (op === 'start') {
@@ -106,11 +105,6 @@ async function handle({ agent, op, thread, parent, approvalMs }: Command) {
       void child.exited.then(() => {
         if (processes.get(agent) !== started) return;
         processes.delete(agent);
-        for (const [k, p] of presence)
-          if (k.startsWith(agent + ':')) {
-            p.abort();
-            presence.delete(k);
-          }
         notify({ event: 'exit', agent });
       });
     }
@@ -121,21 +115,7 @@ async function handle({ agent, op, thread, parent, approvalMs }: Command) {
     await child?.stop();
     return;
   }
-  if (!child || stopping.has(child)) throw Error('Agent stopped');
-  if (!thread) throw Error('Missing session');
-  const key = agent + ':' + thread;
-  if (op === 'detach') {
-    presence.get(key)?.abort();
-    presence.delete(key);
-  } else if (op === 'presence') {
-    if (presence.has(key)) return; // Keep the original stream. Never re-offer its views.
-    const p = new AbortController();
-    await (await child.ready).presence({ thread, parent: parent ?? null }, p, () => {
-      stopping.add(child!);
-      void child!.stop();
-    });
-    presence.set(key, p);
-  } else throw Error('Unknown operation');
+  throw Error('Unknown operation');
 }
 
 // Relative socket names also work in a checkout with a long absolute path.

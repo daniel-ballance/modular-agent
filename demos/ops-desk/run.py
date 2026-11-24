@@ -79,8 +79,11 @@ class Desk:
             s = self.state()
             return next((q for q in s['inbox'] if q['answerable']), None)
         q = wait(first, 'coder approval')
-        check(q['agent'] == 'coder' and q['reason'] == 'approval' and q['toolCallId'] and
-              'apply_change' in q['message'] and 'return' in q['message'] and q['expiresAt'], 'wrong approval view')
+        script = json.loads((DEMO / 'coder/model.json').read_text())[0]['toolCalls'][0]['input']['code']
+        check(q['agent'] == 'coder' and q['reason'] == 'approval' and q['toolCallId'] and q['expiresAt'] and
+              q.get('metadata', {}).get('modular-agent.coversNested') is True and
+              'codemode' in q['message'] and json.dumps(script) in q['message'],
+              'approval did not show the complete script and its nested-call coverage')
         return q
 
     def answer(self, q):
@@ -143,10 +146,14 @@ def check_traces():
             result = json.loads(out)
             events, invocations = result['events'], result['invocations']
             check(len(events) == 1 and len(events[0]) == 32 and int(events[0], 16), 'expected one desk.event trace')
-            check({s['service'] for s in invocations} == {'desk-triage', 'desk-coder', 'desk-verifier'},
-                  f'missing agent invocation: {invocations}')
-            for span in invocations:
-                check(span['trace'] == events[0], f"{span['service']} used trace {span['trace']}, expected {events[0]}")
+            origins = [s for s in invocations if s['trace'] == events[0]]
+            check({s['service'] for s in origins} == {'desk-triage', 'desk-coder', 'desk-verifier'},
+                  f'missing agent invocation in the event trace: {origins}')
+            coder = next(s for s in origins if s['service'] == 'desk-coder')
+            check(len(invocations) == 4 and any(
+                s['thread'] == coder['thread'] and any(link['traceId'] == coder['trace'] and
+                link['spanId'] == coder['span'] for link in s['links']) for s in invocations),
+                'the approval continuation did not link to the coder turn')
         finally:
             stop(proc)
 
@@ -250,8 +257,8 @@ def run(d, case):
         else:
             raise RuntimeError('accepted a late answer')
         view = d.request(f"/sessions/{q['route']}")
-        check(not view['waiting']['questions'] and 'refused' in json.dumps(view['messages']).lower(),
-              'agent snapshot does not show the refused change')
+        check(not view['waiting']['questions'] and any(m.get('toolCallId') == q['toolCallId'] and
+              m.get('error') == 'timeLimit' for m in view['messages']), 'missing deadline settlement')
         check(d.tree('coder', 'rev-parse', 'HEAD') == seed and not d.tree('coder', 'status', '--porcelain'),
               'deadline changed the checkout')
         return
@@ -302,6 +309,9 @@ def run(d, case):
     commit = d.tree('coder', 'rev-parse', 'HEAD')
     check(commit != seed and commit == d.tree('verifier', 'rev-parse', 'HEAD') == s['routes'][-1]['revision'],
           'verifier did not test the coder commit')
+    check(d.tree('verifier', 'diff', '--name-only', 'seed', 'HEAD').splitlines() == ['change.txt', 'limits.py'] and
+          len(s['inbox']) == (2 if case == 'verification' else 1),
+          'expected both file changes and just one approval per script')
     if case == 'restart':
         check(s['routes'][1]['state'] == 'reopened' and s['routes'][1]['thread'] == q['thread'], 'coder session not reopened')
         snap = d.request(f"/sessions/{q['route']}")
@@ -309,7 +319,8 @@ def run(d, case):
         check(snap['threadId'] == q['thread'] and snap['declaration']['continuesAfterRestart'] and
               not snap['waiting']['questions'], 'wrong recovered session')
         check(len([m for m in messages if m['role'] == 'user']) == 1, 'coder input admitted twice')
-        check(any('effects are unknown' in m.get('error', '') for m in messages) and
+        check(any(m.get('toolCallId') == q['toolCallId'] and m.get('error') == 'interrupted after start'
+                  for m in messages) and
               any(m.get('content') == 'The coder turn is finished.' for m in messages),
               'missing uncertain settlement or recovered completion')
         verifier = d.request(f"/sessions/{s['routes'][-1]['id']}")

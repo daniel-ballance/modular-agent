@@ -53,7 +53,20 @@ function questionForm(questions) {
     answers = new Map();
   form.append(el('strong', questions[0].agent));
   for (const q of questions) {
-    const label = el('label', q.message);
+    const label = el('label');
+    label.append(el('pre', q.message)); // the unchanged interrupt, not a description from the model
+    if (q.toolCallId) label.append(el('small', 'Call: ' + q.toolCallId));
+    if (q.metadata?.['modular-agent.coversNested'] === true) {
+      label.append(el('strong', 'Allow covers the writes, commands and other calls this script makes.'));
+      // ma puts the exact JSON input in the prompt. Also show its code with real line breaks.
+      const input = /^Allow codemode with (\{.*\})\? /.exec(q.message);
+      if (input) {
+        try {
+          const { code } = JSON.parse(input[1]);
+          if (typeof code === 'string') label.append(el('pre', code));
+        } catch { /* Other prompt formats still show the complete unchanged view. */ }
+      }
+    }
     form.append(label);
     if (q.expiresAt) form.append(el('small', 'Deadline: ' + new Date(q.expiresAt).toLocaleTimeString()));
     if (!q.answerable) {
