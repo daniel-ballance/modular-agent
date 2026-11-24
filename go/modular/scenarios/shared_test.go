@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -158,6 +159,19 @@ func (r run) agent(ctx context.Context, s scenario, checkAnswers func(*modularte
 		config["waitingCounter"] = true
 	}
 	for i, name := range s.Agent.Plugins {
+		if r.waiting != nil && name == "counter" && r.placement.SDK != "" && r.placement.SDK != "go" && (s.Name == "waiting-approval-changed-source" || s.Name == "waiting-approval-changed-definition") {
+			_, file, _, _ := runtime.Caller(0)
+			args := []string{"node", filepath.Join(filepath.Dir(file), "counter-catalog.mjs")}
+			if r.placement.Service {
+				svc := r.services[i]
+				args = append(args, "--service", svc.URL, svc.TokenFile)
+			} else {
+				args = append(args, r.placement.Command...)
+				args = append(args, name)
+			}
+			opts = append(opts, modular.WithProcessPlugin(modular.ProcessPlugin{Command: args, Config: config}))
+			continue
+		}
 		if r.placement.Service {
 			opts = append(opts, modular.WithServicePlugin(r.services[i]))
 		} else if r.placement.SDK == "" {

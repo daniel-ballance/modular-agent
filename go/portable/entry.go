@@ -335,7 +335,14 @@ func Entry(e api.Entry) map[string]any {
 			set(r, "options", q.Options, len(q.Options) > 0)
 		}
 		set(r, "details", q.Details, len(q.Details) > 0)
-		set(r, "timeLimitMs", max(1, q.Wait.Milliseconds()), q.Wait > 0)
+		if q.ApprovalWait != "" {
+			r["timeLimitMs"] = q.ApprovalIntervalMs
+			if q.Deadline != nil {
+				r["deadlineAt"] = q.Deadline.UnixMilli()
+			}
+		} else {
+			set(r, "timeLimitMs", max(1, q.Wait.Milliseconds()), q.Wait > 0)
+		}
 		if q.Defer {
 			r["whenTimeLimit"] = "leaveOpen"
 		}
@@ -350,7 +357,11 @@ func Entry(e api.Entry) map[string]any {
 			d["call"] = callOut(*q.ApprovalCall)
 		}
 		if q.Definition != nil {
-			d["definition"] = toolOut(*q.Definition)
+			if q.ApprovalWait != "" && len(q.Definition.Wire) != 0 {
+				d["definition"] = q.Definition.Wire
+			} else {
+				d["definition"] = toolOut(*q.Definition)
+			}
 		}
 		if q.Source != nil {
 			d["source"] = q.Source
@@ -612,6 +623,10 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 		q.Options = api.Decode[[]string](api.JSON(r["options"]))
 		q.Allowed = api.Decode[[]string](api.JSON(r["go.allowed"]))
 		q.ApprovalWait = str(r, "approvalWait")
+		if q.ApprovalWait != "" {
+			q.Wait = 0
+			q.ApprovalIntervalMs = int64(number(r, "timeLimitMs"))
+		}
 		if has(r, "answerers") {
 			q.Allowed = api.Decode[[]string](api.JSON(r["answerers"]))
 		}

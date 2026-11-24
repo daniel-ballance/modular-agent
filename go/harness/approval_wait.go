@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"time"
@@ -121,12 +122,13 @@ func (c *client) ParkApproval(ctx context.Context, q api.Question) (bool, error)
 	q.ID = api.ID()
 	q.ApprovalWait = api.UntilDeadline
 	q.Answerable = false
-	q.Wait = time.Duration(ms) * time.Millisecond
+	q.Wait = 0
+	q.ApprovalIntervalMs = ms
 	next := snap
 	next.Entries = slices.Clip(next.Entries)
 	r := appendEntry(&next, api.Entry{ID: q.ID, Kind: "question.open", Turn: q.Turn, Step: q.Step, Call: q.Call, Actor: q.Actor, Copies: []string{response.ID}}, "harness", true)
 	deadline := time.UnixMilli(r.Time.UnixMilli() + ms).UTC()
-	if deadline.UnixMilli() > 9007199254740991 || q.Wait <= 0 {
+	if deadline.UnixMilli() > 9007199254740991 || deadline.Year() > 9999 {
 		s.mu.Unlock()
 		return true, errors.New("unrepresentable approval deadline")
 	}
@@ -152,7 +154,7 @@ func (c *client) ParkApproval(ctx context.Context, q api.Question) (bool, error)
 
 func sameWaitingCall(q api.Question, c api.Call, source *api.ToolRegistration, def *api.Tool) bool {
 	a := q.ApprovalCall
-	return a != nil && a.ID == c.ID && q.Actor == c.Actor && a.Name == c.Name && c.ParentCall == "" && c.Origin == "model" && q.Step == c.Step && portable.EqualJSON(a.Input, c.Input) && q.Source != nil && source != nil && *q.Source == *source && q.Definition != nil && def != nil && portable.EqualJSON(definitionJSON(*q.Definition), definitionJSON(*def))
+	return a != nil && a.ID == c.ID && a.Actor == c.Actor && q.Actor == c.Actor && a.Name == c.Name && c.ParentCall == "" && c.Origin == "model" && q.Step == c.Step && portable.EqualJSON(a.Input, c.Input) && q.Source != nil && source != nil && *q.Source == *source && q.Definition != nil && def != nil && portable.EqualJSON(definitionJSON(*q.Definition), definitionJSON(*def))
 }
 func definitionJSON(t api.Tool) []byte {
 	if len(t.Wire) > 0 {
@@ -163,12 +165,15 @@ func definitionJSON(t api.Tool) []byte {
 
 func (c *client) validWait(s api.Session, w *api.WaitingApproval) bool {
 	q := w.Question
-	if q.Kind != "approval" || q.ApprovalWait != api.UntilDeadline || q.Defer || q.Answerable || q.ID == "" || q.Session != s.ID || q.Call != w.Request.Call || q.Turn != w.Request.Turn || q.Step != w.Request.Step || q.Wait <= 0 || q.Wait.Milliseconds() > c.h.maxApprovalWaitMs || q.Deadline == nil || q.Deadline.UnixMilli() != w.Request.Time.UnixMilli()+q.Wait.Milliseconds() || q.ApprovalCall == nil || q.ApprovalCall.ID != q.Call || q.Definition == nil || q.Source == nil || s.Settings.ApprovalWait != api.UntilDeadline || w.Pending.ID == "" {
+	if w.InvalidDecision || q.Kind != "approval" || q.ApprovalWait != api.UntilDeadline || q.Defer || q.Answerable || q.ID == "" || q.Session != s.ID || q.Call != w.Request.Call || q.Turn != w.Request.Turn || q.Step != w.Request.Step || q.ApprovalIntervalMs <= 0 || q.ApprovalIntervalMs > c.h.maxApprovalWaitMs || q.Deadline == nil || q.Deadline.UnixMilli() != w.Request.Time.UnixMilli()+q.ApprovalIntervalMs || q.ApprovalCall == nil || q.ApprovalCall.ID != q.Call || q.Definition == nil || q.Source == nil || s.Settings.ApprovalWait != api.UntilDeadline || w.Pending.ID == "" {
 		return false
 	}
 	call := *q.ApprovalCall
 	call.Step = q.Step
-	resp, _ := approvalResponse(s, q.Turn, call)
+	resp, orig := approvalResponse(s, q.Turn, call)
+	if resp.Actor != q.Actor || orig.Name != call.Name || q.Source.Plugin == "" || q.Source.ToolSource == "" || q.Definition.Name != call.Name {
+		return false
+	}
 	return resp.ID != "" && slices.Contains(w.Request.Copies, resp.ID) && offeredInterface(s, q.Turn, call)
 }
 func (c *client) answerableLocked(ctx context.Context, s *session, w *api.WaitingApproval) bool {
@@ -375,6 +380,8 @@ func (h *Harness) reconcileApprovalsLocked(ctx context.Context, s *session) erro
 			reason, status = "noLongerAnswerable", "refused"
 		case w.Answer.Declined:
 			status = "refused"
+		case w.Decision.ID != "" && (w.Answer.ApprovalView == nil || !c.eligibleApprover(s.data, q, w.Answer.Actor) || !c.authorized(s.data, w.Answer.ApprovalView.SubmittedBy, "approve") || !c.authorized(s.data, w.Answer.ApprovalView.SubmittedBy, "watch")):
+			status = "refused"
 		}
 		if status != "" {
 			var a *api.Answer
@@ -433,7 +440,7 @@ func (p *turnPorts) waitingProof(ctx context.Context, s api.Session, c api.Call,
 			origin = api.Decode[api.TurnStart](e.Data).ContinuesTurn
 		}
 	}
-	if origin != w.Request.Turn || !p.canRunTools(c.Actor) || !p.c.eligibleApprover(s, w.Question, a.Actor) || !p.c.authorized(s, proof.SubmittedBy, "approve") || !p.c.authorized(s, proof.SubmittedBy, "watch") || validateToolInput(*def, c.Input) != nil {
+	if origin != w.Request.Turn || !p.workStillAuthorized(s, w) || !p.canRunTools(c.Actor) || !p.c.eligibleApprover(s, w.Question, a.Actor) || !p.c.authorized(s, proof.SubmittedBy, "approve") || !p.c.authorized(s, proof.SubmittedBy, "watch") || validateToolInput(*def, c.Input) != nil {
 		return nil, api.ErrAnswerAuthority
 	}
 	viewCtx := api.WithConnectionRights(api.WithActingVia(api.AsActor(ctx, a.Actor), proof.SubmittedBy), &proof.Rights)
@@ -465,10 +472,64 @@ func (p *turnPorts) finalWaitingLocked(ctx context.Context, c api.Call, sources 
 		return api.ErrApprovalExpired
 	}
 	who := w.Answer.ApprovalView.SubmittedBy
-	if !p.c.validWait(s.data, w) || w.Terminal.ID != "" || w.Start.ID != "" && (!afterStart || w.Start.Turn != p.id) || !p.canRunToolsLocked(c.Actor) || !knownApproval(s.data.Settings.Approval) || !p.c.eligibleApprover(s.data, w.Question, w.Answer.Actor) || !p.c.authorized(s.data, who, "watch") || !p.c.authorized(s.data, who, "approve") {
+	if !p.c.validWait(s.data, w) || w.Terminal.ID != "" || w.Start.ID != "" && (!afterStart || w.Start.Turn != p.id) || !p.canRunToolsLocked(c.Actor) || !p.workStillAuthorized(s.data, w) || !knownApproval(s.data.Settings.Approval) || !p.c.eligibleApprover(s.data, w.Question, w.Answer.Actor) || !p.c.authorized(s.data, who, "watch") || !p.c.authorized(s.data, who, "approve") {
 		return api.ErrAnswerAuthority
 	}
 	return nil
+}
+
+// A portable admission may name more authorizers than this SDK put on its
+// own input. Check them under their recorded scope as well as the local
+// admission, connection and job ceilings. An unknown scope is not authority.
+func (p *turnPorts) workStillAuthorized(s api.Session, w *api.WaitingApproval) bool {
+	var work api.Input
+	for _, e := range s.Branch() {
+		if e.Kind == "turn.start" && e.Turn == w.Question.Turn {
+			work = turnAdmission(s, e)
+			break
+		}
+	}
+	if work.ID == "" || work.ConnectionRights == nil && work.JobRights == nil {
+		return false
+	}
+	for _, e := range s.LiveEntries() {
+		if e.Kind != "input.accepted" || api.Decode[api.Input](e.Data).ID != work.ID {
+			continue
+		}
+		var d struct {
+			Data struct {
+				Authorizers []struct{ SessionID, ActorID, JobID string }
+			}
+		}
+		if len(e.Wire) == 0 {
+			return true
+		}
+		if err := json.Unmarshal(e.Wire, &d); err != nil {
+			return false
+		}
+		for _, ref := range d.Data.Authorizers {
+			who := ref.ActorID
+			if ref.JobID != "" {
+				if who != "" {
+					return false
+				}
+				who = "job:" + ref.JobID
+			}
+			snap := s
+			if ref.SessionID != s.ID {
+				var err error
+				snap, err = p.c.Snapshot(ref.SessionID)
+				if err != nil || snap.Project != s.Project || snap.Tenant != s.Tenant {
+					return false
+				}
+			}
+			if !p.c.authorized(snap, who, "tools") {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 func knownApproval(v string) bool {
 	return v == "" || v == "off" || v == "ask-always" || v == "ask-unless-read-only"

@@ -90,6 +90,7 @@ type agFixture struct {
 	clock                           kitClock
 	spans                           *tracetest.SpanRecorder
 	mu                              sync.Mutex
+	redactClient                    string
 	edges                           map[string]chan struct{}
 	warnings                        []string
 	erasure                         api.ProviderErasure
@@ -197,6 +198,18 @@ func (l *kitLease) Save(snap api.Session) error {
 		return err
 	}
 	for _, e := range batch {
+		if strings.HasPrefix(f.Name, "waiting-") {
+			switch {
+			case e.Kind == "question.answer":
+				f.signal("answerCommitted")
+			case e.Kind == "tool.result" && e.Actor == "kit-owner":
+				f.signal("reportCommitted")
+			case e.Kind == "turn.end" && slices.ContainsFunc(snap.Entries, func(s api.Entry) bool {
+				return s.Kind == "turn.start" && s.Turn == e.Turn && api.Decode[api.TurnStart](s.Data).ContinuesTurn != ""
+			}):
+				f.signal("continuationEnded")
+			}
+		}
 		if f.Name == "crash-after-result" && e.Kind == "tool.result" && e.Actor == "kit-owner" {
 			f.pause("afterResult")
 		}
@@ -211,6 +224,7 @@ type kitWriter struct {
 	http.ResponseWriter
 	f      *agFixture
 	thread string
+	staged []string
 }
 
 func (w *kitWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
@@ -220,15 +234,22 @@ func (w *kitWriter) Write(b []byte) (int, error) {
 		return n, err
 	}
 	var ev struct {
-		Type, ThreadID string
-		Outcome        struct{ PendingToolCallIDs []string }
+		Type, ThreadID, ToolCallID, ToolCallName string
+		Outcome                                  struct{ PendingToolCallIDs []string }
 	}
 	if json.Unmarshal(bytes.TrimSpace(b[6:]), &ev) == nil {
 		if ev.Type == "RUN_STARTED" {
 			w.thread = ev.ThreadID
 		}
+		if ev.Type == "TOOL_CALL_START" && ev.ToolCallName == w.f.Offer.Name {
+			w.staged = append(w.staged, ev.ToolCallID)
+		}
 		if ev.Type == "RUN_FINISHED" {
-			for _, id := range ev.Outcome.PendingToolCallIDs {
+			ids := ev.Outcome.PendingToolCallIDs
+			if strings.HasPrefix(w.f.Name, "waiting-mixed") && len(ids) == 0 {
+				ids = w.staged
+			}
+			for _, id := range ids {
 				if err = w.f.log(w.thread+".handoffs", id); err != nil {
 					return n, err
 				}
@@ -331,6 +352,12 @@ func (f *agFixture) parts() api.Plugin {
 		return a.Handle("output.batch", "", func(ctx context.Context, v any) (api.Decision, error) {
 			b := v.(api.OutputBatch)
 			for i, e := range b.Events {
+				f.mu.Lock()
+				redact := f.redactClient == b.Recipient && f.redactClient != ""
+				f.mu.Unlock()
+				if redact && e.Method == "agui.interrupt" {
+					e.Data = bytes.ReplaceAll(e.Data, []byte("waiting-counter-sentinel"), []byte("redacted"))
+				}
 				switch f.Name {
 				case "error-gate":
 					if e.Method == "agui.discovery" || e.Kind == "plugin.problem" {
@@ -381,7 +408,7 @@ func (f *agFixture) evidence(id string) map[string]any {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return map[string]any{"spans": spans, "batches": lines[[]json.RawMessage](filepath.Join(f.dir, id+".batches")), "dispatches": lines[string](filepath.Join(f.dir, id+".handoffs")), "model": lines[json.RawMessage](os.Getenv("MODULAR_AGENT_SCRIPT_LOG")), "warnings": slices.Clone(f.warnings), "erasure": map[string]any{"outOfReach": f.erasure.OutOfReach}}
+	return map[string]any{"counter": len(lines[int](filepath.Join(f.dir, "counter"))), "project": f.Project, "spans": spans, "batches": lines[[]json.RawMessage](filepath.Join(f.dir, id+".batches")), "dispatches": lines[string](filepath.Join(f.dir, id+".handoffs")), "model": lines[json.RawMessage](os.Getenv("MODULAR_AGENT_SCRIPT_LOG")), "warnings": slices.Clone(f.warnings), "erasure": map[string]any{"outOfReach": f.erasure.OutOfReach}}
 }
 func (f *agFixture) control(ctx context.Context, op, id, name string, ms int64) (any, error) {
 	if op == "tls" && f.Name == "tls" {
@@ -517,13 +544,33 @@ func TestAGUIKitProgram(t *testing.T) {
 		return reply, err
 	}
 	f.Offer.Callers = []string{"model"}
+	if strings.HasPrefix(f.Name, "waiting-mixed-") {
+		f.Offer.Hints.ReadOnly = true
+	}
 	store, err := history.New(filepath.Join(f.dir, "history"))
 	must(err)
 	mode := modular.Durable
 	if f.Name == "crash-before-handoff" {
 		mode = modular.Kept
 	}
-	a, err := modular.New(t.Context(), modular.WithPluginHost(true), modular.WithProject(f.Project), modular.WithDataDir(f.dir), modular.WithHistory(modular.NewHistoryStore(&kitStore{store, &f}, true, true)), modular.WithEnvironment(modulartest.MemoryEnvironment()), modular.WithDurability(mode), modular.WithProvider(provider), modular.WithModel(modulartest.ScriptedModel), modular.WithSeveralActors(true), modular.WithTenants(map[string]modular.Tenant{"test": {Rights: api.Rights}}), modular.WithInterfaceTools(modular.InterfaceToolSource{SourceID: "kit", ActorID: "kit-owner", RouteID: "kit-primary", ResultTimeoutMS: 60000, Tools: []modular.ToolDefinition{f.Offer}}))
+	opts := []modular.Option{modular.WithPluginHost(true), modular.WithProject(f.Project), modular.WithDataDir(f.dir), modular.WithHistory(modular.NewHistoryStore(&kitStore{store, &f}, true, true)), modular.WithEnvironment(modulartest.MemoryEnvironment()), modular.WithDurability(mode), modular.WithProvider(provider), modular.WithModel(modulartest.ScriptedModel), modular.WithSeveralActors(true), modular.WithTenants(map[string]modular.Tenant{"test": {Rights: api.Rights}}), modular.WithInterfaceTools(modular.InterfaceToolSource{SourceID: "kit", ActorID: "kit-owner", RouteID: "kit-primary", ResultTimeoutMS: 60000, Tools: []modular.ToolDefinition{f.Offer}})}
+	if strings.HasPrefix(f.Name, "waiting-") {
+		v := "untilDeadline"
+		if f.Name == "waiting-live" {
+			v = "live"
+		}
+		policy := modular.All
+		if strings.HasPrefix(f.Name, "waiting-mixed-") {
+			policy = modular.Ask
+		}
+		opts = append(opts, modular.WithMaxApprovalWaitMs(5000), modular.WithLateAnswersStartTurns(true), modular.WithApproval(policy), modular.WithSettings(modular.Settings{"approvalWait": v}), modular.WithTool(modular.NewTool("bump", "Increment the counter.", func(context.Context, struct {
+			Hold bool   `json:"hold"`
+			Note string `json:"note"`
+		}, *modular.ToolContext) (string, error) {
+			return "counted", f.log("counter", 1)
+		})))
+	}
+	a, err := modular.New(t.Context(), opts...)
 	must(err)
 	port, load := a.AGUIFixturePorts()
 	f.host = port
@@ -573,11 +620,18 @@ func TestAGUIKitProgram(t *testing.T) {
 			return
 		}
 		var req struct {
-			Operation, ThreadID, Name string
-			Milliseconds              int64
+			Operation, ThreadID, Name, Client, Mode string
+			Milliseconds                            int64
 		}
 		if json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&req) != nil {
 			w.WriteHeader(400)
+			return
+		}
+		if req.Operation == "approvalGate" && req.Client == "kit-primary" && req.Mode == "redact" {
+			f.mu.Lock()
+			f.redactClient = req.Client
+			f.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(struct{}{})
 			return
 		}
 		v, err := f.control(r.Context(), req.Operation, req.ThreadID, req.Name, req.Milliseconds)

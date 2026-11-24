@@ -44,7 +44,7 @@ type runtimeWork struct {
 	registration                                                             func(string) object
 	registrations                                                            map[string]object
 	calls                                                                    map[string]api.Call
-	interfaceTools                                                           bool
+	interfaceTools, waitingApprovals                                         bool
 	committed, offered, gating, pending, ran                                 map[string]bool
 	approved                                                                 map[string]api.ToolCheck
 	results                                                                  map[string]api.ToolResult
@@ -74,6 +74,9 @@ func runRuntimeHost(ctx context.Context, t api.Turn, host api.API, declaration a
 	defer w.endTraceSteps()
 	w.turnContext, w.authorize = ctx, host.Authorize
 	w.steering = declaration.Steering
+	if a, ok := host.(interface{ SupportsWaitingApprovals() bool }); ok {
+		w.waitingApprovals = a.SupportsWaitingApprovals()
+	}
 	if host, ok := t.IO.(interface{ SupportsInterfaceTools() bool }); ok {
 		w.interfaceTools = declaration.InterfaceTools && host.SupportsInterfaceTools()
 	}
@@ -565,7 +568,7 @@ func (w *runtimeWork) honorCancel(o *api.Outcome) {
 
 // Validate IDs supplied by opted-in Runtime code against host-owned state.
 func (w *runtimeWork) validInterfaceOpen(out api.Outcome) bool {
-	if !w.interfaceTools {
+	if !w.interfaceTools && !w.waitingApprovals {
 		return true
 	}
 	snap, err := w.turn.IO.Snapshot()
@@ -573,15 +576,16 @@ func (w *runtimeWork) validInterfaceOpen(out api.Outcome) bool {
 		return false
 	}
 	handoffs := api.InterfaceHandoffs(snap)
+	waits := api.WaitingApprovals(snap)
 	settled := map[string]bool{}
 	for _, e := range snap.LiveEntries() {
-		if handoffs[e.Call].ID != "" && e.WasKind("tool.result") {
+		if (handoffs[e.Call].ID != "" || waits[e.Call] != nil) && e.WasKind("tool.result") {
 			settled[e.Call] = true
 		}
 	}
 	seen := map[string]bool{}
 	for _, c := range out.Open {
-		if seen[c.ID] || !w.pending[c.ID] && !(settled[c.ID] && handoffs[c.ID].Turn == w.turn.ID) {
+		if seen[c.ID] || !w.pending[c.ID] && !(settled[c.ID] && (handoffs[c.ID].Turn == w.turn.ID || waits[c.ID] != nil && waits[c.ID].Question.Turn == w.turn.ID)) {
 			return false
 		}
 		seen[c.ID] = true
@@ -620,14 +624,25 @@ func (w *runtimeWork) applyOutcome(o *api.Outcome) {
 	o.Open = nil
 	if o.Status != "cancelled" {
 		var handoffs map[string]api.Entry
-		if w.interfaceTools {
+		if w.interfaceTools || w.waitingApprovals {
 			if snap, err := w.turn.IO.Snapshot(); err == nil {
+				waits := api.WaitingApprovals(snap)
 				handoffs = api.InterfaceHandoffs(snap)
 				for _, e := range snap.LiveEntries() {
-					if e.WasKind("tool.result") && handoffs[e.Call].ID != "" {
+					if e.WasKind("tool.result") && (handoffs[e.Call].ID != "" || waits[e.Call] != nil) {
 						delete(w.pending, e.Call)
 					}
 				}
+			}
+		}
+		if w.waitingApprovals {
+			if snap, err := w.turn.IO.Snapshot(); err == nil {
+				for _, call := range api.OpenCalls(snap) {
+					if w.pending[call.ID] && o.Status == "completed" {
+						o.Open = append(o.Open, w.calls[call.ID])
+					}
+				}
+				return
 			}
 		}
 		for id := range w.pending {

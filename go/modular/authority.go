@@ -181,7 +181,8 @@ func (s *Session) Questions(ctx context.Context, options ...QuestionsOptions) ([
 	visible := map[string]bool{}
 	for _, entry := range view.Entries {
 		if entry.Kind == "question.open" {
-			visible[entry.ID] = true
+			raw := api.Decode[struct{ Question api.Question }](entry.Data)
+			visible[raw.Question.ID] = true
 		}
 	}
 	list, err := s.agent.q.manager().List(s.id)

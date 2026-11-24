@@ -137,7 +137,9 @@ func states(s api.Session) map[string]*state {
 			if q.Question.Session != s.ID {
 				continue
 			}
-			q.Question.Deadline = questionDeadline(e.Time, q.Question.Wait)
+			if q.Question.ApprovalWait == "" {
+				q.Question.Deadline = questionDeadline(e.Time, q.Question.Wait)
+			}
 			out[q.Question.ID] = &state{q: q}
 		case "question.secret":
 			if st := out[api.Decode[string](e.Data)]; st != nil {
@@ -248,6 +250,7 @@ func (m *Manager) Ask(ctx context.Context, q api.Question) (api.Answer, error) {
 	if q.Kind != "approval" && q.Kind != "choice" && q.Kind != "text" && q.Kind != "link" && q.Kind != "secret" {
 		return api.Answer{}, errors.New("invalid question kind")
 	}
+	q.ApprovalIntervalMs = 0
 	if q.Kind == "approval" {
 		q.Options = []string{"allow", "refuse"}
 	}

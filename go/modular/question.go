@@ -155,6 +155,14 @@ func sdkQuestion(raw api.Question) Question {
 }
 
 func (a *Agent) sdkApprovalView(ctx context.Context, q api.Question, _ string) bool {
+	who, via := api.Acting(ctx), api.ActingVia(ctx)
+	if via != "" && via != localActor || who != localActor && !a.severalActors {
+		return false
+	}
+	snap, err := a.a.Snapshot(q.Session)
+	if err != nil || snap.Project != a.project {
+		return false
+	}
 	event := api.Event{Kind: "question.open", Session: q.Session, Turn: q.Turn, Step: q.Step, Call: q.Call, Data: api.JSON(q)}
 	out, err := a.a.(interface {
 		OutputValue(context.Context, api.Event) (api.Event, error)
@@ -209,7 +217,7 @@ func (q *questionRouter) handle(raw api.Question) {
 			defer host.ForgetApprovalRoute(raw.Session, instance)
 		}
 		question := sdkQuestion(raw)
-		if raw.Deadline != nil && !raw.Defer {
+		if raw.Deadline != nil && !raw.Defer && raw.ApprovalWait == "" {
 			var cancel context.CancelFunc
 			ctx, cancel = context.WithDeadline(ctx, *raw.Deadline)
 			defer cancel()

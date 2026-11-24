@@ -5,10 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -52,7 +57,8 @@ func (r run) checkWaiting(t *testing.T, path string, sc scenario) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.CommandContext(ctx, "node", "waiting-run.mjs", config, exe)
+	_, self, _, _ := runtime.Caller(0)
+	cmd := exec.CommandContext(ctx, "node", filepath.Join(filepath.Dir(self), "waiting-run.mjs"), config, exe)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s: %v\n%s", sc.Name, err, out)
@@ -89,7 +95,7 @@ func (f *waitFixture) hold(ctx context.Context, name string) {
 	}
 }
 func (f *waitFixture) options(s scenario) []modular.Option {
-	opts := []modular.Option{modular.WithLateAnswersStartTurns(true), modular.WithPlugin(modular.Plugin{Name: "waiting-controls", Setup: func(r *modular.Registrar) error {
+	opts := []modular.Option{modular.WithPluginHost(true), modular.WithLateAnswersStartTurns(true), modular.WithPlugin(modular.Plugin{Name: "waiting-controls", Setup: func(r *modular.Registrar) error {
 		if err := r.OnTurnBefore(func(ctx context.Context, _ modular.TurnBefore) (modular.TurnContribution, error) {
 			f.hold(ctx, "afterAnswer")
 			return modular.TurnContribution{}, nil
@@ -186,14 +192,15 @@ type waitCommand struct {
 	}
 }
 type waitWorker struct {
-	t       *testing.T
-	ctx     context.Context
-	run     run
-	sc      scenario
-	clock   *modulartest.ManualClock
-	agent   *modular.Agent
-	session *modular.Session
-	views   map[string]*modular.Session
+	t        *testing.T
+	ctx      context.Context
+	run      run
+	sc       scenario
+	clock    *modulartest.ManualClock
+	agent    *modular.Agent
+	session  *modular.Session
+	views    map[string]*modular.Session
+	recorder *tracetest.SpanRecorder
 }
 
 func (w *waitWorker) command(p waitCommand) (any, error) {
@@ -210,6 +217,42 @@ func (w *waitWorker) command(p waitCommand) (any, error) {
 		view = w.views[p.As]
 	}
 	switch p.Op {
+	case "declaration":
+		d, err := w.run.sessionDeclaration(w.ctx, w.agent, w.session.ID())
+		w.session = nil // last ACP detach unloads the writer
+		return d, err
+	case "parked":
+		if err := view.WaitIdle(w.ctx); err != nil {
+			return nil, err
+		}
+		active := []string{}
+		if w.recorder != nil {
+			ended := map[string]bool{}
+			for _, s := range w.recorder.Ended() {
+				ended[s.SpanContext().SpanID().String()] = true
+			}
+			for _, s := range w.recorder.Started() {
+				if !ended[s.SpanContext().SpanID().String()] && s.Name() != "modular_agent.history.lease.renew" {
+					active = append(active, s.Name())
+				}
+			}
+			if err := otel.GetTracerProvider().(*sdktrace.TracerProvider).ForceFlush(w.ctx); err != nil {
+				return nil, err
+			}
+		}
+		req, err := http.NewRequestWithContext(w.ctx, "POST", w.run.telemetry.ParkedURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		res.Body.Close()
+		if res.StatusCode != 204 {
+			return nil, fmt.Errorf("receiver checkpoint HTTP %d", res.StatusCode)
+		}
+		return active, nil
 	case "probe", "open":
 		w.clock = modulartest.UseClock(w.t, time.UnixMilli(p.Now))
 		sc := w.sc
@@ -217,7 +260,6 @@ func (w *waitWorker) command(p waitCommand) (any, error) {
 			sc.Agent.Durability = modular.Kept
 			sc.Agent.Approval = modular.All
 			sc.Agent.MaxApprovalWaitMs = new(int64(100))
-			sc.Agent.Settings = nil
 		}
 		sc.Agent.Settings = nil // Record the real settings at session creation, not composition.
 		a, err := w.run.agent(w.ctx, sc, nil)
@@ -226,7 +268,7 @@ func (w *waitWorker) command(p waitCommand) (any, error) {
 		}
 		w.agent = a
 		if p.Op == "probe" {
-			return a.Declaration(), nil
+			return w.run.sessionDeclaration(w.ctx, a, "")
 		}
 		if p.ID == "" {
 			w.session, err = a.Session(w.ctx, modular.SessionOptions{Actors: sc.Agent.Actors, Settings: w.sc.Agent.Settings})
@@ -274,7 +316,11 @@ func (w *waitWorker) command(p waitCommand) (any, error) {
 	case "answer":
 		answer := modular.Allow()
 		if p.Decision == "decline" {
-			answer = modular.Decline("")
+			reason := ""
+			if w.run.telemetry != nil {
+				reason = w.run.telemetry.Values.Answer
+			}
+			answer = modular.Decline(reason)
 		}
 		err := view.Answer(w.ctx, p.ID, answer)
 		var e *modular.Error
@@ -383,6 +429,11 @@ func TestWaitingScenarioProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := waitWorker{t: t, ctx: t.Context(), run: run{dir: opt.Dir, placement: opt.Placement, services: opt.Services, waiting: &waitFixture{path: opt.Dir}}, sc: sc}
+	w.run.telemetry = openTelemetryRun(t)
+	if w.run.telemetry != nil && w.run.telemetry.SDK {
+		w.recorder = tracetest.NewSpanRecorder()
+		otel.GetTracerProvider().(*sdktrace.TracerProvider).RegisterSpanProcessor(w.recorder)
+	}
 	dec, enc := json.NewDecoder(os.Stdin), json.NewEncoder(os.Stdout)
 	for {
 		var p waitCommand

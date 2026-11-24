@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
-import {readFile} from 'node:fs/promises';
+import {readFile, writeFile} from 'node:fs/promises';
 import {dirname,join,resolve} from 'node:path';
 import {createInterface} from 'node:readline';
 import {pathToFileURL} from 'node:url';
@@ -11,7 +11,9 @@ import {pathToFileURL} from 'node:url';
 const [config,exe]=process.argv.slice(2);
 const {Path:path,Dir:dir}=JSON.parse(await readFile(config));
 const sc=JSON.parse(await readFile(path));
-const {waitingStep,waitingRecords,skipReason}=await import(pathToFileURL(resolve(dirname(path),'../../waiting.mjs')));
+const telemetry=process.env.MODULAR_AGENT_TELEMETRY_RUN && JSON.parse(await readFile(process.env.MODULAR_AGENT_TELEMETRY_RUN));
+const rules=telemetry?resolve(process.cwd(),'conformance/sdk/waiting.mjs'):resolve(dirname(path),'../../waiting.mjs');
+const {waitingStep,waitingRecords,skipReason}=await import(pathToFileURL(rules));
 let child,exit,lines,id,now=1740000000000;
 const start=()=>{
  child=spawn(exe,['-test.run=^TestWaitingScenarioProcess$'],{env:{...process.env,MA_GO_WAIT_WORKER:config},detached:true,stdio:['pipe','pipe','inherit']});
@@ -41,6 +43,7 @@ async function run(){
  start();if(sc.expectCreateError){await assert.rejects(()=>rpc('open',{now}),e=>e.code===sc.expectCreateError.code);return;}
  const opened=await rpc('open',{now});id=opened.id;
  for(const [k,v] of Object.entries(sc.expectDeclaration??{}))assert.equal(opened.declaration[k]??false,v);
+ let parked,last;
  for(const step of sc.steps){
   const w=step.expect??{};let result;
   try{
@@ -57,6 +60,14 @@ async function run(){
   if(w.text)assert.equal(result.text,w.text);
   if(w.toolResults){const got=result.toolResults??[];assert.equal(got.length,w.toolResults.length);for(let i=0;i<got.length;i++){assert.equal(got[i].name,w.toolResults[i].name);assert.equal(got[i].status,w.toolResults[i].status);}}
   waitingRecords(sc,w,states,await records(),result);
+  if(result)last=result;
+  if(telemetry && step.prompt){parked={originBatches:await records(),counterAtPark:await count(),activeWorkAtPark:await rpc('parked')}}
+ }
+ if(telemetry){
+  const finalBatches=await records(),historyKinds=finalBatches.flat().map(r=>r.kind);
+  const declaration=await rpc('declaration');
+  await writeFile(telemetry.reportPath,JSON.stringify({scenario:sc.scenario,placement:telemetry.placement,passed:true,sessionId:id,turnId:states.request.turnId,outcome:last.outcome,historyKinds,declarations:{session:declaration},waiting:{...parked,finalBatches,counterAfter:await count()}}));
+  await stop('close');
  }
 }
 try{await run()}finally{await stop('kill')}

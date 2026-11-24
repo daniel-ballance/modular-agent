@@ -90,6 +90,7 @@ type ToolRegistration struct {
 }
 
 type Question struct {
+	ApprovalIntervalMs                                                  int64             `json:",omitempty"`
 	ApprovalWait                                                        string            `json:",omitempty"`
 	ApprovalCall                                                        *Call             `json:",omitempty"`
 	Definition                                                          *Tool             `json:",omitempty"`

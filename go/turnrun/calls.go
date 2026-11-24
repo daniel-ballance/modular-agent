@@ -133,7 +133,7 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 			p.open = false
 			p.result = &api.ToolResult{Status: "unknown", Content: api.Text(interrupted)}
 		}
-		if !repair && !p.ran {
+		if !repair && !p.ran && !p.gatePending && api.WaitingApprovals(snap)[p.call.ID] == nil {
 			status := "not_started"
 			if p.result != nil {
 				status = p.result.Status

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"slices"
-	"time"
 )
 
 const UntilDeadline = "untilDeadline"
@@ -40,7 +39,7 @@ type WaitingApproval struct {
 	Request, Pending, Decision, Start, Terminal, End Entry
 	Question                                         Question
 	Answer                                           Answer
-	Listed                                           bool
+	Listed, InvalidDecision                          bool
 }
 
 // WaitingApprovals folds only the current branch's original requests. Starts
@@ -61,10 +60,7 @@ func WaitingApprovals(s Session) map[string]*WaitingApproval {
 		if out == nil {
 			out = map[string]*WaitingApproval{}
 		}
-		if q.Deadline == nil {
-			t := time.UnixMilli(e.Time.UnixMilli() + q.Wait.Milliseconds()).UTC()
-			q.Deadline = &t
-		}
+		// A missing deadline or decision binding cannot authorize a handoff.
 		out[e.Call] = &WaitingApproval{Request: e, Question: q}
 	}
 	if len(out) == 0 {
@@ -102,7 +98,22 @@ func WaitingApprovals(s Session) map[string]*WaitingApproval {
 			}
 		}
 	}
+	byRequest := map[string]*WaitingApproval{}
+	for _, w := range out {
+		byRequest[w.Question.ID] = w
+	}
 	for _, e := range live {
+		if e.Kind == "question.answer" {
+			a := Decode[Answer](e.Data)
+			if w := byRequest[a.Request]; w != nil && w.Decision.ID != e.ID {
+				// Even an off-branch or incomplete decision closes this identity. It
+				// cannot be replaced or spent as though it had the missing proof.
+				w.InvalidDecision = true
+				if w.Decision.ID == "" {
+					w.Decision, w.Answer = e, a
+				}
+			}
+		}
 		if w := out[e.Call]; w != nil {
 			if e.WasKind("tool.result") {
 				w.Terminal = e

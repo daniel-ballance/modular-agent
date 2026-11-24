@@ -321,6 +321,9 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor, interrupt
 			return errors.New("no interrupted turn")
 		}
 	}
+	if c.h.SupportsWaitingApprovals() && snap.Settings.ApprovalWait == "" {
+		snap.Settings.ApprovalWait = "live"
+	}
 	savedApproval := snap.Settings.Approval
 	if conf, err := c.Get("configuration"); err == nil {
 		if defaults, err := conf.(api.Configuration).Settings(snap.Project); err == nil {
@@ -1288,10 +1291,10 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 	turn := api.Turn{ID: ports.id, Session: snap.ID, Actor: in.Actor, Input: in.ID, Settings: snap.Settings, System: prepared.(api.BeforeTurn).System, Context: prepared.(api.BeforeTurn).Context, Access: access, Tools: tools, IO: ports, CanRepeat: true}
 	turn.Reopen, turn.Continuing = in.Calls, len(in.Calls) > 0 || in.Continuation != ""
 	turn.StartedBy = api.TurnStarter{Kind: "actor", ID: in.Actor}
-	if in.Job != "" {
-		turn.StartedBy = api.TurnStarter{Kind: "job", ID: in.Job}
-	} else if in.Continuation != "" {
+	if in.Continuation != "" {
 		turn.StartedBy = in.ContinuedBy
+	} else if in.Job != "" {
+		turn.StartedBy = api.TurnStarter{Kind: "job", ID: in.Job}
 	} else if turn.Continuing {
 		answer := in.Answer
 		if answer == "" {
@@ -1854,6 +1857,9 @@ func (p *turnPorts) Record(ctx context.Context, e api.Entry) (api.Entry, error) 
 				e, err := p.s.recordLocked(e, p.c.owner, true, ctx)
 				p.s.mu.Unlock()
 				if err == nil {
+					if w.Start.ID == "" && w.Question.ApprovalCall != nil {
+						toolDisposition(ctx, *w.Question.ApprovalCall, api.Decode[api.ToolResult](e.Data).Status)
+					}
 					p.Emit(ctx, api.Event{Kind: "history.added", Data: api.JSON(e)})
 				}
 				return e, err

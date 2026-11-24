@@ -125,9 +125,20 @@ func (w *runtimeWork) beforeTool(ctx context.Context, p object) (any, error) {
 	return answer, nil
 }
 
+func (w *runtimeWork) preDisposition(ctx context.Context, c api.Call, status string) {
+	// A waiting call can be settled concurrently by the writer at its deadline
+	// or on revocation. The writer emits its disposition once at result commit.
+	if w.waitingApprovals {
+		if s, err := w.turn.IO.Snapshot(); err == nil && api.WaitingApprovals(s)[c.ID] != nil {
+			return
+		}
+	}
+	api.ObserveToolDisposition(ctx, c, status)
+}
+
 func (w *runtimeWork) refuseTool(ctx context.Context, c api.Call, answer object, reason string) (any, error) {
 	ctx = w.traceStep(ctx, c.Step)
-	api.ObserveToolDisposition(ctx, c, "refused")
+	w.preDisposition(ctx, c, "refused")
 	result, err := w.settleTool(context.WithoutCancel(ctx), c, api.ToolResult{Status: "refused", Content: api.Text(reason)})
 	if err != nil {
 		return nil, err
@@ -229,7 +240,7 @@ func (w *runtimeWork) runTool(ctx context.Context, submitted api.Call) (any, err
 		}
 	}
 	if reason != "" {
-		api.ObserveToolDisposition(w.traceStep(ctx, c.Step), c, status)
+		w.preDisposition(w.traceStep(ctx, c.Step), c, status)
 		out, err := w.settleTool(context.WithoutCancel(ctx), c, api.ToolResult{Status: status, Content: api.Text(reason)})
 		w.mu.Unlock()
 		return resultOut(out), err
@@ -275,7 +286,7 @@ func (w *runtimeWork) runTool(ctx context.Context, submitted api.Call) (any, err
 	if _, err := w.record(ctx, e); err != nil {
 		if errors.Is(err, api.ErrAnswerAuthority) || errors.Is(err, api.ErrApprovalExpired) {
 			status := api.GateFailureStatus(err)
-			api.ObserveToolDisposition(w.traceStep(ctx, c.Step), c, status)
+			w.preDisposition(w.traceStep(ctx, c.Step), c, status)
 			out, err := w.settleTool(context.WithoutCancel(ctx), c, api.ToolResult{Status: status, Content: api.Text(err.Error())})
 			w.mu.Unlock()
 			return resultOut(out), err

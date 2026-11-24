@@ -213,8 +213,8 @@ func entryValue(e api.Entry) map[string]any {
 	}
 	role := ""
 	switch e.Kind {
-	case "limit", "tenant", "actor.set", "actor.left", "input.accepted", "input.returned", "job.start", "job.end", "job.cleanup", "model.request", "question.open", "question.answer", "plugins.set", "resultFeedback":
-		return portable.Entry(e)
+	case "tool.open", "limit", "tenant", "actor.set", "actor.left", "input.accepted", "input.returned", "job.start", "job.end", "job.cleanup", "model.request", "question.open", "question.answer", "plugins.set", "resultFeedback":
+		return portable.EntryWithoutTrace(e)
 	case "input":
 		role = "user"
 		shared := portable.Entry(e)

@@ -10,6 +10,10 @@ mkdir -p "$TMPDIR" "$repo/go/.bin"
 kit="$repo/conformance/agui"
 scratch=$(mktemp -d "$TMPDIR/go-agui-kit.XXXXXX")
 trap 'rm -rf -- "$scratch"' EXIT
-cp "$kit"/*.mjs "$kit"/package{,-lock}.json "$scratch/"
-npm ci --silent --no-audit --no-fund --prefix "$scratch"
-node "$scratch/run.mjs" "$@" -- "$kit/go.mjs"
+mkdir "$scratch/agui"
+cp "$kit"/*.mjs "$kit"/package{,-lock}.json "$scratch/agui/"
+# New waiting cases share record and wire checks with the ACP kit.
+ln -s "$repo/conformance/waiting" "$scratch/waiting"
+ln -s "$repo/conformance/tools" "$scratch/tools"
+npm ci --silent --no-audit --no-fund --prefix "$scratch/agui"
+node "$scratch/agui/run.mjs" "$@" -- "$kit/go.mjs"
