@@ -349,7 +349,7 @@ An ACP `Entry` is a recipient projection of a [shared history entry](data.md#his
 
 | Entry kinds | Fields in `data` |
 |---|---|
-| `inputAccepted`, `input`, `inputHandedBack` | `inputIds`, `when`, `content`, `releasedBy`, `reason`, `parked` where present; no input keys |
+| `inputAccepted`, `input`, `inputHandedBack` | `when`, `content`, `releasedBy`, `reason`, `parked` where present; no input keys |
 | `turnStart`, `modelRequest` | `startedBy`, `model` where present |
 | `toolStarted`, `toolResult` | `call`, `status` where present; on a covered nested start, `approvalCoveredBy: { toolCallId, requestId }` |
 | `inputRequest`, `inputAnswer` | `request` using [Request](#request) below, or the shared Answer without `stored` or the private `approvalView` binding |
@@ -436,7 +436,7 @@ The full conformance fixture MUST declare `nestedToolCalls` and offer the fixtur
 
 For the opt-in production checks, a conformance launcher without `ma`'s policy file MUST accept `MODULAR_AGENT_CONFORMANCE_POLICY` as an absolute path to an operator file in the [reference policy format](../reference/standard-configuration.md#connection-policy-and-limits). It MUST apply the policy and limits through the normal serving options and fail startup with a diagnostic for an invalid file. The launcher MUST NOT honor this test option outside conformance mode. `ma` uses its normal policy path or `--policy`.
 
-An agent participating in the shared-erasure check MUST take its authoritative test registry location from the operator. A launcher MAY use `MODULAR_AGENT_CONFORMANCE_ERASURE_DIR` for this location in conformance mode. All participants in the check MUST use the same authoritative state. The directory does not define a registry format or allow a composition without coordination to claim `erasure`.
+The shared-erasure fixture MUST use the history service’s [pending-erasure registry](history-http.md#pending-erasure-registry-profile-pendingerasure-1) across independent writers. A composition without coordination MUST NOT claim `erasure`.
 
 The [conformance kit](../../conformance/acp/README.md) exercises this mode. See [Conformance and versioning](../conformance.md) for what passing the kit establishes.
 

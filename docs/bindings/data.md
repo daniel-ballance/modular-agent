@@ -256,7 +256,7 @@ The host and Runtime MUST write the shapes and visibility shown. Associations be
 
 | Kind | Record owner over the plugin binding | Model-visible | Required or optional fields |
 |---|---|---|---|
-| `inputAccepted` | Host | No | `actorId`, `jobId?`, `inputId`; `key?: Id`, `when: "now" \| "steer" \| "after" \| "propose"`, `releasedBy?: Id`, `submittedBy?: Id` (defaults to actor), `parked?: boolean` (required on initial job report admissions; see [Job reports](#job-reports)), `taken?: "now" \| "after" \| "inTurn" \| "proposed"` (required original disposition for ordinary admissions), `content: Content`, `authorizers: Authorizer[]`, `rights: Rights` |
+| `inputAccepted` | Host | No | `actorId`, `jobId?`, `inputId`; `key?: Id`, `when: "now" \| "steer" \| "after" \| "propose"`, `releasedBy?: Id`, `submittedBy?: Id` (defaults to actor), `parked?: boolean` (required on initial job report admissions; see [Job reports](#job-reports)), `taken?: "now" \| "after" \| "inTurn" \| "proposed"` (required on the first ordinary admission), `content: Content`, `authorizers: Authorizer[]`, `rights: Rights` |
 | `inputHandedBack` | Host | No | `inputId`; `reason: "withdrawn" \| "declined" \| "cancelled" \| "restart" \| "conflict" \| "handled" \| "turnEnded"` |
 | `input` | Host | Yes | `turnId`, `actorId`, `jobId?`, `inputId`; `message: Message` with role `user`, `key?: Id` |
 | `turnStart` | Host | No | `turnId`, `continuesTurnId?`; `startedBy: { kind: "actor" \| "job" \| "plugin" \| "answer" \| "toolResult", id: Id }`, `model: ModelRef \| null`, `system: string`, `context?: Content`, `tools: ToolDefinition[]`, `settings: TurnSettings`, `resultShape?: Schema`, `traceContext?: TraceContext`, `point?: Id`, `authorizers: Authorizer[]`, `rights: Rights`, `sources?: Id[]` for history carried in `system` or `context` |
@@ -292,7 +292,7 @@ Outcome is exactly one of `{ kind: "completed" }`, `{ kind: "cancelled" }`, `{ k
 
 A private kind MUST have a dot in its name, be namespaced by its writer and be non-model-visible in a portable session. A reader MUST keep private records. Portable reconstruction MUST NOT depend on their meaning.
 
-`TraceContext` is `{ traceparent: string, tracestate?: string }` in W3C format. These two fields are private Harness metadata, not content or authority. A legacy reader keeps the unknown field and dotted kind as inert data. Readers that recognize them ignore invalid context without rejecting otherwise valid history. The usual envelope and topology checks still apply. See [Restart](../telemetry.md#restart).
+`TraceContext` is `{ traceparent: string, tracestate?: string }` in W3C format. These two fields are private Harness metadata, not content or authority. Readers that do not use trace context keep it as inert data. Readers that recognize them ignore invalid context without rejecting otherwise valid history. The usual envelope and topology checks still apply. See [Restart](../telemetry.md#restart).
 
 ### Recording order and ownership
 

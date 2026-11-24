@@ -350,7 +350,7 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 		const content = [{ type: "text", text: "fixture input" }];
 		before = [
 			{ kind: "actorJoined", data: { actor: { id: "kit", kind: "host", rights }, operatorAdmission: true } },
-			{ kind: "inputAccepted", actorId: "kit", inputId: "kit-input", data: { content, when: "now", authorizers, rights } },
+			{ kind: "inputAccepted", actorId: "kit", inputId: "kit-input", data: { content, when: "now", taken: "now", authorizers, rights } },
 			{ kind: "turnStart", turnId: "kit-turn", data: { model: modelRef, startedBy: { kind: "actor", id: "kit" }, system: "kit", settings: { maxSteps: 8 }, tools: Object.values(tools), authorizers, rights } },
 			{ kind: "input", turnId: "kit-turn", actorId: "kit", modelVisible: true, message: { role: "user", content }, inputId: "kit-input" },
 		].map((e, i) => ({ id: `kit-base-${i}`, parentId: i ? `kit-base-${i - 1}` : null, sessionId: "kit-session", time: Date.now(), writer: "kit-host", modelVisible: false, ...e }));
@@ -425,10 +425,10 @@ function scenario({ model, tool = async (c) => ({ callId: c.id, status: "complet
 				if (!attempt || attempt.sent || !equal(attempt.request, p.request)) invalid("not the prepared attempt");
 				refuseLimit("model", p.stepId);
 				attempt.sent = true;
-				attempt.intent = put({ kind: "modelRequest", stepId: p.stepId, modelVisible: false, data: { model: modelRef, safeToRepeat: false, tracksStepAfter: true, tools: p.request.tools.map((t) => t.name) }, sources: attempt.sources });
+				attempt.intent = put({ kind: "modelRequest", stepId: p.stepId, modelVisible: false, data: { model: modelRef, safeToRepeat: false, tools: p.request.tools.map((t) => t.name) }, sources: attempt.sources });
 				if (refuseAt === "postIntent" && rt.modelCalls === 1) {
 					// Runtime records and effects: only the host settles a committed, undispatched attempt.
-					put({ kind: "response", stepId: p.stepId, modelVisible: false, data: { recovery: true }, message: { role: "assistant", stop: "aborted", content: [] } });
+					put({ kind: "response", stepId: p.stepId, modelVisible: false, data: { recovery: true }, sources: [attempt.intent.id], message: { role: "assistant", stop: "aborted", content: [] } });
 					refuseLimit("postIntent", p.stepId);
 				}
 				const answer = await model(p.request, rt.modelCalls++);
@@ -554,7 +554,7 @@ await attempt("initialize", async () => {
 	check("register: provider conformance with model echo", !!provider?.models?.some((m) => m.id === "echo" && m.provider === "conformance"), JSON.stringify(reg.providers));
 	const ts = (reg.toolSources ?? []).find((x) => x.id === "conformance-tools");
 	const names = (ts?.tools ?? []).map((t) => t.name);
-	check("register: tool source conformance-tools with bash and read", names.includes("bash") && names.includes("read"), JSON.stringify(names));
+	check("register: conformance-tools offers bash, read and nest", ["bash", "read", "nest"].every(name => names.includes(name)), JSON.stringify(names));
 	// Shared data: Tools. This checks the schema container, not the 2020-12 vocabulary.
 	check("register: tool parameter schemas are objects or booleans", (ts?.tools ?? []).every((t) => typeof t.parameters === "boolean" || (t.parameters && typeof t.parameters === "object" && !Array.isArray(t.parameters))));
 	// Plugin binding: The host asks a Provider.
@@ -726,7 +726,8 @@ await attempt("tools", async () => {
 	// Plugin binding: The conformance plugin. Progress forwarding here is a Bash fixture rule.
 	const progress = p.notes.slice(beforeProgress).filter((n) => n.method === "tools/progress" && n.params?.parentRequestId === b.id);
 	check("fixture bash: forwards output as progress and includes the exit line", progress.map((n) => textOf(n.params.content)).join("").includes("kit-out") && textOf(bres.content).endsWith("\n[exit code 0]"));
-	check("tools/call bash: used host/env/exec", p.hostCalls.some((c) => c.method === "host/env/exec" && c.params?.parentRequestId === b.id));
+	const exec = p.hostCalls.find(c => c.method === "host/env/exec" && c.params?.parentRequestId === b.id);
+	check("tools/call bash: host/env/exec omits an unrequested deadline", !!exec && !Object.hasOwn(exec.params, "timeoutMs"));
 	check("tools/call bash: host/env/exec carries the call's sessionId", p.hostCalls.some((c) => c.method === "host/env/exec" && c.params?.parentRequestId === b.id && c.params?.sessionId === "s1"), String(JSON.stringify(p.hostCalls.find((c) => c.method === "host/env/exec" && c.params?.parentRequestId === b.id)?.params ?? null)).slice(0, 200));
 
 	const lst = await p.request("tools/list", { toolSource: "conformance-tools" });
@@ -1097,10 +1098,10 @@ async function runtimeChecks(part) {
 		];
 		const before = [
 			entry("actorJoined", { turnId: undefined, data: { actor: { id: "kit", kind: "host", rights }, operatorAdmission: true } }),
-			entry("inputAccepted", { turnId: undefined, actorId: "kit", inputId: "kit-input", data: { content: source, when: "now", rights, authorizers } }),
+			entry("inputAccepted", { turnId: undefined, actorId: "kit", inputId: "kit-input", data: { content: source, when: "now", taken: "now", rights, authorizers } }),
 			entry("turnStart", { data: { startedBy: { kind: "actor", id: "kit" }, model: { provider: "kit", id: "scripted" }, system: "kit", tools: ["read", "bash"].map((name) => ({ name, description: name, parameters: true })), settings: { maxSteps: 8 }, rights, authorizers } }),
 			entry("input", { modelVisible: true, actorId: "kit", message: { role: "user", content: [{ type: "text", text: "do three things" }] }, inputId: "kit-input" }),
-			entry("modelRequest", { stepId: "kit-step-1", data: { model: { provider: "kit", id: "scripted" }, safeToRepeat: false, tracksStepAfter: true, tools: recoveryTools.map((t) => t.name) } }),
+			entry("modelRequest", { stepId: "kit-step-1", data: { model: { provider: "kit", id: "scripted" }, safeToRepeat: false, tools: recoveryTools.map((t) => t.name) } }),
 			entry("response", { modelVisible: true, stepId: "kit-step-1", message: { role: "assistant", content: [notStarted, startedCall, safeCall].map(toolCall), stop: "toolUse", usage: usage0 } }),
 			entry("toolStarted", { toolCallId: "c-started", stepId: "kit-step-1", actorId: "kit", data: { call: { id: startedCall.id, name: startedCall.name, input: startedCall.input, actorId: "kit", startedBy: "model" }, source: fixtureSource, definition: recoveryTools[1], openWorld: true, safeToRepeat: false, rights, authorizers } }),
 			entry("toolStarted", { toolCallId: "c-safe", stepId: "kit-step-1", actorId: "kit", data: { call: { id: safeCall.id, name: safeCall.name, input: safeCall.input, actorId: "kit", startedBy: "model" }, source: fixtureSource, definition: recoveryTools[0], openWorld: false, safeToRepeat: true, rights, authorizers } }),

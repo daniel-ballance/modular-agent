@@ -445,7 +445,7 @@ async function jobCapacity(kit, scope) {
 		const terminal = (await history(a, sid, { all: true })).entries;
 		check("capacity: cancellation at saturation still closes the question and hands back accepted input", afterCancel.result?.stopReason === "cancelled" &&
 			equal(stale, { accepted: false, reason: "not_open" }) && rows("inputHandedBack", terminal).some((e) =>
-				e.inputId === ordinary.inputId || e.inputIds?.includes(ordinary.inputId)));
+				e.inputId === ordinary.inputId));
 	} finally { await h.stop(); }
 }
 
@@ -524,8 +524,8 @@ async function eraseAcrossWriters(kit, cutoff) {
 	try {
 		const { a, hello } = await h.peer();
 		const source = await open(a, project);
-		check("agent and session declare coordination when the shared mechanism is configured",
-			meta(hello)?.declaration?.erasure === true && meta(source)?.declaration?.erasure === true);
+		if (meta(hello)?.declaration?.erasure !== true || meta(source)?.declaration?.erasure !== true)
+			throw Error("agent and source session must declare coordinated erasure");
 		const sid = await approvalOff(a, source);
 		sourcePath = store.path(sid);
 		stage = "commit source prompt";

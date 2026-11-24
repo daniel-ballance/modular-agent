@@ -60,7 +60,7 @@ async function outcome(peer, id, e, status, decision, actor, cause) {
 }
 function scenario(run, { mixed, restart, roles = [] } = {}) {
   return { model: [{ toolCalls: [bump, ...(mixed ? [{ name: offer.name, input: draft }] : [])] }, { text: second }],
-    control: true, restart, async run(peer) {
+    control: true, restart, roles, async run(peer) {
       const { threadId, declaration } = await peer.api.create();
       assert.equal(declaration.approvalsOutlastTurns, true, 'fixture must declare approvalsOutlastTurns');
       assert.equal(declaration.approvalCoversNested, true, 'fixture must declare approvalCoversNested');

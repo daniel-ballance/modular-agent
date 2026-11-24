@@ -22,7 +22,6 @@ const write = (path, value) => {
   writeFileSync(path + '.new', JSON.stringify(value), { mode: 0o600 });
   renameSync(path + '.new', path);
 };
-const skip = (name, reason) => console.log(`SKIP  ${name} (${reason})`);
 const errorCode = (number, code) => e => e.code === number && e.data?.code === code;
 
 export function support(d) {
@@ -90,6 +89,7 @@ async function launch(kit, name, version, run) {
     extensions = meta(h).extensions ?? [];
     d = meta(reply)?.declaration;
     const capable = option(reply, reopen ? 'untilDeadline' : 'live');
+    assert.equal(capable, change.reopen !== 'unsupported', 'waiting fixture session declaration');
     if (capable) assert.equal(meta(h).declaration.approvalsOutlastTurns, true);
     return capable;
   }
@@ -122,7 +122,8 @@ async function launch(kit, name, version, run) {
     async advance(to) { write(clock, to); await control('tick'); },
   };
   try {
-    return await run(c, await start());
+    await start();
+    return await run(c);
   } finally {
     try { await closePeers(); } finally { if (host) { await kit.stop(host); assert.equal(host.permissions.length, 0, 'no live permission RPC for an offline or waiting decision'); } }
   }
@@ -322,19 +323,12 @@ cases.capacity = async c => {
 export async function waitingChecks(kit) {
   for (const v of [1, 2]) {
     const label = `ACP/${v} waiting approval`;
-    let enabled;
-    await kit.attempt(`${label}: declaration`, async () => {
-      enabled = await launch(kit, 'declaration', v, async (_, supported) => supported);
-      kit.check(`${label}: declaration and default option`, true);
-    });
-    if (!enabled) { if (enabled === false) skip(label, 'session does not declare approvalsOutlastTurns'); continue; }
     for (const [name, scenario] of Object.entries(cases)) await kit.attempt(`${label}: ${name}`, async () => {
-      await launch(kit, name, v, async (c, supported) => {
-        assert.ok(supported, 'fixture lost approvalsOutlastTurns');
+      await launch(kit, name, v, async c => {
         const feature = ({ 'remove-one': 'severalActors', 'remove-last': 'severalActors', fork: 'forking', rewind: 'rewinding', 'erase-inputRequest': 'erasure', 'erase-inputAnswer': 'erasure', capacity: 'resourceReservations' })[name];
-        if (feature && !c.d[feature]) return skip(`${label}: ${name}`, `no ${feature}`);
-        if (name === 'move' && !c.extensions.includes('move')) return skip(`${label}: move`, 'no move extension');
-        if (name.startsWith('erase-') && c.d.erasureDuringTurn === 'refused') return skip(`${label}: ${name}`, 'erasure during turn refused');
+        if (feature) assert.equal(c.d[feature], true, `fixture must declare ${feature}`);
+        if (name === 'move') assert.ok(c.extensions.includes('move'), 'fixture must offer move');
+        if (name.startsWith('erase-')) assert.equal(c.d.erasureDuringTurn, 'allowed', 'fixture must allow erasure during a turn');
         await select(c.a, c.sid, 'model', 'conformance/echo'); await select(c.a, c.sid, 'approval', 'all');
         if (name !== 'live-offline') await c.optIn();
         await scenario(c); kit.check(`${label}: ${name}`, true);

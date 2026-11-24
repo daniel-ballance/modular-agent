@@ -106,7 +106,7 @@ export function fakeClosures(name, fault, model) {
         case 'inspect': return { ...await base.control(operation, s, args), project: '/fixture' };
         case 'openWait':
           s.waitKind = args.kind; s.waitQ = randomUUID();
-          s.batches.push([{ kind: 'inputRequest', id: randomUUID(), data: { request: { id: s.waitQ, whenTimeLimit: args.kind === 'leaveOpen' ? 'leaveOpen' : 'decline' } } }]);
+          s.batches.push([{ kind: 'inputRequest', id: randomUUID(), requestId: s.waitQ, data: { request: { id: s.waitQ, askedBy: 'fixture', whenTimeLimit: args.kind === 'leaveOpen' ? 'leaveOpen' : 'decline' } } }]);
           return { requestId: s.waitQ };
         case 'advance':
           if (s.waitKind === 'leaveOpen') {
