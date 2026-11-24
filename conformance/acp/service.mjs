@@ -4,6 +4,24 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { isLoopback } from "../tools/websocket.mjs";
 
+export function trackProcess(child, verbose) {
+	let stderr = "", spawnError;
+	child.stderr?.setEncoding("utf8").on("data", (chunk) => {
+		stderr = (stderr + chunk).slice(-8192);
+		if (verbose) process.stderr.write(chunk);
+	});
+	const exited = new Promise((resolve) => {
+		child.once("error", (error) => {
+			spawnError = error.message;
+			resolve({ code: null, signal: null });
+		});
+		child.once("exit", (code, signal) => resolve({ code, signal }));
+	});
+	const closed = new Promise((resolve) => child.once("close", resolve));
+	const status = () => ({ exitCode: child.exitCode, signal: child.signalCode, spawnError, stderr });
+	return { child, exited, closed, status };
+}
+
 export function manageServices(config, command, cwd, envFor, verbose) {
 	let primary;
 	const children = new Set();
@@ -12,11 +30,7 @@ export function manageServices(config, command, cwd, envFor, verbose) {
 			cwd, env: { ...envFor(extraEnv), MODULAR_AGENT_CONFORMANCE_URL: url.href, MODULAR_AGENT_CONFORMANCE_TOKEN_FILE: config.tokenFile },
 			detached: true, stdio: ["ignore", verbose ? "inherit" : "ignore", captureStderr ? "pipe" : verbose ? "inherit" : "ignore"],
 		});
-		const exited = new Promise((resolve) => {
-			child.once("error", () => resolve({ code: null, signal: null }));
-			child.once("exit", (code, signal) => resolve({ code, signal }));
-		});
-		const service = { child, exited, url };
+		const service = { ...trackProcess(child, verbose), url };
 		children.add(service);
 		return service;
 	};
