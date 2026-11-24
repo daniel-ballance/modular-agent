@@ -118,7 +118,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--resume-open", action="store_true", help="reopen interrupted service turns at startup"
     )
-    parser.add_argument("--agui", action="store_true", help="serve AG-UI over HTTP and SSE")
+    parser.add_argument(
+        "--agui",
+        action="store_true",
+        help="serve AG-UI runs, wait closures and kept-session receipts over HTTP and SSE",
+    )
     parser.add_argument("--listen", metavar="ADDR", help="agent service loopback address")
     parser.add_argument("--policy", type=Path, metavar="FILE", help="operator policy JSON")
     parser.add_argument(
