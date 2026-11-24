@@ -90,7 +90,7 @@ Then read on:
 
 ## Use `ma`
 
-`ma` is a coding agent for everyday use: one `codemode` tool that runs Python in a [Monty](https://github.com/pydantic/monty) sandbox and reaches files, commands and MCP servers through it; Agent Skills; Providers for ChatGPT, Grok and Claude subscriptions; a line-based terminal and ACP for editors and hosts such as T3 Code. The [standard configuration](docs/reference/standard-configuration.md) describes it; all four implementations pass the same [reference checks](conformance/reference/README.md).
+`ma` is a coding agent for everyday use: one `codemode` tool that runs Python in a [Monty](https://github.com/pydantic/monty) sandbox and reaches files, commands and MCP servers through it; Agent Skills; Providers for ChatGPT, Grok and Claude subscriptions; a line-based terminal, ACP for editors and hosts such as T3 Code, and AG-UI for web apps. The [standard configuration](docs/reference/standard-configuration.md) describes it; all four implementations pass the same [reference checks](conformance/reference/README.md).
 
 ```sh
 git clone https://github.com/daniel-ballance/modular-agent.git && cd modular-agent
