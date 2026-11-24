@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 
 from ma_plugin.websocket import wait_for_stop
@@ -121,6 +122,9 @@ def main() -> None:
     args = parser.parse_args()
     if (args.listen is None) != (args.token_file is None):
         parser.error("--listen and --token-file must be used together")
+    if args.fixture == "acp-waiting" and args.listen is None:
+        path = Path(__file__).resolve().parents[1] / "scripts/acp_wait_fixture.py"
+        os.execv(sys.executable, [sys.executable, str(path)])
     if args.listen is None:
         plugin = fixture(args.fixture)
         if endpoint := os.environ.get("MODULAR_AGENT_TELEMETRY_OTLP"):

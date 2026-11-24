@@ -52,7 +52,12 @@ class Echo(Plugin):
     async def generate(self, d, emit):
         # Read authoritative turn entries, not a compacted context or old tool results.
         inputs = await self.api.session(
-            "branch", session=d["session"], kind="input", fields=["content"], last=True
+            "branch",
+            session=d["session"],
+            turn=d.get("turn"),
+            kind="input",
+            fields=["content"],
+            last=True,
         )
         text = plain(inputs[-1]["content"]) if inputs else ""
         turn = d.get("turn")

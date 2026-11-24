@@ -13,7 +13,10 @@ from os import PathLike
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import TracebackType
-from typing import Any, NotRequired, Self, TypedDict, cast, overload
+from typing import TYPE_CHECKING, Any, NotRequired, Self, TypedDict, cast, overload
+
+if TYPE_CHECKING:
+    from ._acp_interface import _AcpConnections
 
 from jsonschema import Draft202012Validator
 from referencing import Registry
@@ -797,11 +800,12 @@ class Agent:
         compose_reopen: Callable[[Path, str], Awaitable[Agent]] | None,
         project_settings: Callable[[Path], JsonObject] | None,
         project_mcp: Callable[[Path], Sequence[JsonObject]] | None,
+        connections: _AcpConnections | None = None,
     ) -> tuple[Sequence[AcpActor], Callable[[Any, AcpActor], Awaitable[None]]]:
         kinds: dict[str, str] = {}
         from ._acp_interface import _AcpConnections, _Interface, install_poll_route
 
-        connections = _AcpConnections()
+        connections = connections or _AcpConnections()
         principals = actors
         scopes = {}
         routes = {}

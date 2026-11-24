@@ -1411,7 +1411,7 @@ class ACP(Plugin):
             or (e["kind"] == "job_start" and e["job"] not in jobs)
             for e in entries
         ):
-            raise AgentError("Cannot move pending work; finish or cancel it first")
+            raise AgentError("Cannot move pending work; finish or cancel it first", "busy")
 
     async def disconnect(self):
         await self._cancel_requests()
