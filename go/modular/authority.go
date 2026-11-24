@@ -192,6 +192,9 @@ func (s *Session) Questions(ctx context.Context, options ...QuestionsOptions) ([
 	out := []Question{}
 	for _, q := range list {
 		if q.Answerable && visible[q.ID] {
+			if q.CoversNested && q.ApprovalWait == "" && !s.agent.sdkApprovalView(s.ctx(ctx), q, "sdk") {
+				continue
+			}
 			if q.ApprovalWait != "" {
 				if present {
 					if !s.agent.a.(api.WaitingApprovalHost).PresentApproval(s.ctx(ctx), q, "sdk", s.approvalInstance) {
@@ -205,6 +208,14 @@ func (s *Session) Questions(ctx context.Context, options ...QuestionsOptions) ([
 			out = append(out, sdkQuestion(q))
 		}
 	}
+	s.liveViewsMu.Lock()
+	s.liveViews = nil
+	for _, q := range out {
+		if q.CoversNested && q.ApprovalWait == "" {
+			s.liveViews = append(s.liveViews, q.ID)
+		}
+	}
+	s.liveViewsMu.Unlock()
 	return out, nil
 }
 
@@ -224,6 +235,19 @@ func (s *Session) Answer(ctx context.Context, id string, answer Answer) error {
 		if w.Question.ID == id {
 			waiting = true
 			break
+		}
+	}
+	if !waiting {
+		for _, q := range m.Recorded(snap) {
+			if q.ID == id && q.CoversNested {
+				s.liveViewsMu.Lock()
+				delivered := slices.Contains(s.liveViews, id)
+				s.liveViewsMu.Unlock()
+				if !delivered || !s.agent.sdkApprovalView(s.ctx(ctx), q, "sdk") {
+					return appError(api.ErrAnswerAuthority, Forbidden)
+				}
+				break
+			}
 		}
 	}
 	if waiting {

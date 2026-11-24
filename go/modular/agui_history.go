@@ -295,6 +295,9 @@ func agInterrupt(v api.Question) agObject {
 	switch v.Kind {
 	case "approval":
 		m["toolCallId"] = v.Call
+		if v.CoversNested {
+			m["metadata"] = agObject{"modular-agent.coversNested": true}
+		}
 		if c := v.ApprovalCall; c != nil && (!strings.Contains(v.Prompt, c.Name) || !strings.Contains(v.Prompt, string(c.Input))) {
 			m["message"] = v.Prompt + " " + c.Name + " " + string(c.Input)
 		}

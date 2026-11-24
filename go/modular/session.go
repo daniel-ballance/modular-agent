@@ -15,6 +15,8 @@ import (
 )
 
 type Session struct {
+	liveViewsMu      sync.Mutex
+	liveViews        []string // Covered live approval views delivered by Questions on this handle.
 	approvalInstance string
 	agent            *Agent
 	id               string

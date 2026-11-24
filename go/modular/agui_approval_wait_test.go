@@ -18,7 +18,7 @@ func TestAGUIWaitingApprovalDeliveredOnReturn(t *testing.T) {
 		effects.Add(1)
 		return "one", nil
 	})
-	a := modulartest.Agent(t, modular.WithDurability(modular.Kept), modular.WithDataDir(t.TempDir()), modular.WithLateAnswersStartTurns(true), modular.WithApproval(modular.All), modular.WithMaxApprovalWaitMs(30000), modular.WithSettings(modular.Settings{"approvalWait": "untilDeadline"}), modular.WithTool(bump), modulartest.Script(`[{"toolCalls":[{"name":"bump","input":{}}]},{"text":"settled"}]`))
+	a := modulartest.Agent(t, modular.WithDurability(modular.Kept), modular.WithDataDir(t.TempDir()), modular.WithLateAnswersStartTurns(true), modular.WithApproval(modular.All), modular.WithApprovalCoversNested(true), modular.WithMaxApprovalWaitMs(30000), modular.WithSettings(modular.Settings{"approvalWait": "untilDeadline"}), modular.WithTool(bump), modulartest.Script(`[{"toolCalls":[{"name":"bump","input":{}}]},{"text":"settled"}]`))
 	actor := agActor(t)
 	actor.Actor.ID = "user"
 	url := agURL(t, a, modular.ServeAGUIOptions{Actors: []modular.ACPActor{actor}})
@@ -35,9 +35,13 @@ func TestAGUIWaitingApprovalDeliveredOnReturn(t *testing.T) {
 	}
 	snap := agReadBody(t, agRequest(t, "GET", thread, "", testAGToken, nil))
 	var view struct {
-		Messages []map[string]any
-		Waiting  struct {
-			Questions []struct{ ID, ToolCallID, Message, ExpiresAt string }
+		Declaration map[string]any
+		Messages    []map[string]any
+		Waiting     struct {
+			Questions []struct {
+				ID, ToolCallID, Message, ExpiresAt string
+				Metadata                           map[string]any
+			}
 			ToolCalls []any
 		}
 	}
@@ -45,7 +49,7 @@ func TestAGUIWaitingApprovalDeliveredOnReturn(t *testing.T) {
 		t.Fatal(snap, err)
 	}
 	q := view.Waiting.Questions[0]
-	if q.ToolCallID == "" || q.ExpiresAt == "" || !strings.Contains(q.Message, "bump {}") {
+	if view.Declaration["approvalCoversNested"] != true || q.Metadata["modular-agent.coversNested"] != true || q.ToolCallID == "" || q.ExpiresAt == "" || !strings.Contains(q.Message, "bump {}") {
 		t.Fatal(q)
 	}
 	body, _ := json.Marshal(map[string]any{"threadId": id, "runId": "approve", "protocolVersion": "1.0", "messages": view.Messages, "resume": []any{map[string]any{"interruptId": q.ID, "status": "resolved", "payload": map[string]bool{"allow": true}}}})

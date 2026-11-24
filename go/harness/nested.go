@@ -15,7 +15,17 @@ import (
 // MaxNestedDepth counts edges below a model or UI call.
 const MaxNestedDepth = 8
 
+// ConfigureCoveredApprovals is set at composition, only with the approval plugin.
+func (h *Harness) ConfigureCoveredApprovals(on bool) { h.approvalCoversNested = on }
+func (c *client) SupportsCoveredApprovals() bool     { return c.h.approvalCoversNested }
+
+type approvalCover struct {
+	ToolCallID string `json:"toolCallId"`
+	RequestID  string `json:"requestId"`
+}
+
 type invocation struct {
+	cover   *approvalCover
 	p       *turnPorts
 	ctx     context.Context
 	cancel  context.CancelCauseFunc
@@ -86,7 +96,7 @@ func (i *invocation) Call(ctx context.Context, name string, input json.RawMessag
 	}
 	defer done()
 	call := api.Call{ID: api.ID(), ParentCall: i.call.ID, Name: name, Input: input, Origin: "tool", Actor: i.call.Actor, Step: i.call.Step}
-	result, err := i.p.runNested(ctx, call, i.depth+1)
+	result, err := i.p.runNested(ctx, call, i.depth+1, i.cover)
 	if err != nil && !errors.Is(context.Cause(ctx), api.ErrProcessStopped) {
 		i.mu.Lock()
 		i.failure = errors.Join(i.failure, err)
@@ -106,7 +116,7 @@ func validateToolInput(def api.Tool, input json.RawMessage) error {
 	return api.ValidateJSON(resolved, input)
 }
 
-func (p *turnPorts) runNested(ctx context.Context, call api.Call, depth int) (api.ToolResult, error) {
+func (p *turnPorts) runNested(ctx context.Context, call api.Call, depth int, cover *approvalCover) (api.ToolResult, error) {
 	requested, err := p.Record(context.WithoutCancel(ctx), api.Entry{Kind: "tool.call", Step: call.Step, Call: call.ID, Data: api.JSON(call)})
 	if err != nil {
 		return api.ToolResult{}, err
@@ -137,7 +147,7 @@ func (p *turnPorts) runNested(ctx context.Context, call api.Call, depth int) (ap
 		}
 		binding := api.ToolRegistration{Plugin: plugin, ToolSource: source}
 		definition := portable.Tool(def)
-		changed, err := p.Hook(api.WithNestedTools(ctx, nil), "runtime.tool.before", api.ToolCheck{Session: p.s.id, Turn: p.id, Call: call, Definition: def})
+		changed, err := p.Hook(api.WithNestedTools(ctx, nil), "runtime.tool.before", api.ToolCheck{ApprovalCovered: cover != nil, Session: p.s.id, Turn: p.id, Call: call, Definition: def})
 		check, _ := changed.(api.ToolCheck)
 		if errors.Is(err, api.ErrQuestionOpen) || check.Open {
 			fail("refused", "Nested calls cannot be left open.")
@@ -177,7 +187,11 @@ func (p *turnPorts) runNested(ctx context.Context, call api.Call, depth int) (ap
 			continue
 		}
 		repeat := false // No nested call is independently repeatable.
-		start, err := p.Record(ctx, api.Entry{Kind: "tool.started", Step: call.Step, Call: call.ID, Data: api.JSON(final), SafeToRepeat: &repeat, OpenWorld: &def.External, Copies: []string{requested.ID}, Wire: api.JSON(map[string]any{"data": map[string]any{"definition": definition, "source": binding}})})
+		data := map[string]any{"definition": definition, "source": binding}
+		if cover != nil {
+			data["approvalCoveredBy"] = cover
+		}
+		start, err := p.Record(ctx, api.Entry{Kind: "tool.started", Step: call.Step, Call: call.ID, Data: api.JSON(final), SafeToRepeat: &repeat, OpenWorld: &def.External, Copies: []string{requested.ID}, Wire: api.JSON(map[string]any{"data": data})})
 		if err != nil {
 			return api.ToolResult{}, err
 		}
@@ -207,7 +221,7 @@ func (p *turnPorts) runNested(ctx context.Context, call api.Call, depth int) (ap
 			continue
 		}
 		dispatched = true
-		result, processing = p.executeTool(ctx, executor, snap, final, binding, depth)
+		result, processing = p.executeTool(ctx, executor, snap, final, binding, depth, cover)
 		result.Returns = def.Output
 		call = final
 		if result.Status == "open" {
@@ -245,11 +259,11 @@ func (p *turnPorts) runNested(ctx context.Context, call api.Call, depth int) (ap
 	return result, processing
 }
 
-func (p *turnPorts) executeTool(ctx context.Context, source api.ToolSource, snap api.Session, call api.Call, binding api.ToolRegistration, depth int) (result api.ToolResult, err error) {
+func (p *turnPorts) executeTool(ctx context.Context, source api.ToolSource, snap api.Session, call api.Call, binding api.ToolRegistration, depth int, cover *approvalCover) (result api.ToolResult, err error) {
 	ctx, span := startTool(ctx, call)
 	defer func() { endTool(span, result, err) }()
 	live, cancel := context.WithCancelCause(ctx)
-	i := &invocation{p: p, ctx: live, cancel: cancel, call: call, depth: depth}
+	i := &invocation{p: p, ctx: live, cancel: cancel, call: call, depth: depth, cover: cover}
 	defer func() {
 		if v := recover(); v != nil {
 			result = api.ToolResult{Status: "unknown", Content: api.Text(fmt.Sprintf("Tool panic: %v", v))}

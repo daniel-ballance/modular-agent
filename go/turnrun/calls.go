@@ -348,7 +348,7 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 					return
 				}
 				p.ran = true
-				result := t.IO.RunTool(api.WithExecution(ctx, api.Execution{Session: t.Session, Turn: t.ID, Call: check.Call}), check.Call)
+				result := t.IO.RunTool(api.WithExecution(ctx, api.Execution{Session: t.Session, Turn: t.ID, Call: check.Call, LiveApproval: check.LiveApproval}), check.Call)
 				p.result = &result
 			}
 			workers.Add(1)

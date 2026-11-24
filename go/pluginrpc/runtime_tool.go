@@ -298,7 +298,7 @@ func (w *runtimeWork) runTool(ctx context.Context, submitted api.Call) (any, err
 	w.mu.Unlock()
 	t := w.turn
 	ctx = w.traceStep(ctx, c.Step)
-	result := t.IO.RunTool(api.WithExecution(api.AsActor(ctx, t.Actor), api.Execution{Session: t.Session, Turn: t.ID, Call: c}), c)
+	result := t.IO.RunTool(api.WithExecution(api.AsActor(ctx, t.Actor), api.Execution{Session: t.Session, Turn: t.ID, Call: c, LiveApproval: check.LiveApproval}), c)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if errors.Is(context.Cause(w.turnContext), api.ErrProcessStopped) {

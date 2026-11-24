@@ -527,13 +527,15 @@ type Failure struct {
 	Retry   bool
 }
 type ToolCheck struct {
-	InputChanged  bool
-	Session, Turn string
-	Open          bool
-	Validate      func(Call) error
-	Call          Call
-	Definition    Tool
-	Refused       string
+	ApprovalCovered bool      `json:"-"` // Set by the active parent invocation, not a tool argument.
+	LiveApproval    *Question `json:"-"` // Explicit live allow whose view covered nested calls.
+	InputChanged    bool
+	Session, Turn   string
+	Open            bool
+	Validate        func(Call) error
+	Call            Call
+	Definition      Tool
+	Refused         string
 }
 type AfterTool struct {
 	Call   Call
