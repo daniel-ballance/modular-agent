@@ -11,11 +11,16 @@ async function refresh() {
   const n = ++generation,
     res = await fetch('/state');
   if (!res.ok) throw Error('Could not load the desk.');
-  const { agents, inbox, posts } = await res.json();
+  const { agents, inbox, posts, runs } = await res.json();
   if (n !== generation) return;
   byId('agents').textContent = Object.entries(agents)
     .map(([a, s]) => a + ': ' + s)
     .join(' · ');
+  byId('runs').replaceChildren(...runs.map(r => {
+    const li = el('li', `${r.agent} · ${r.kind} · stream ${r.stream} · terminal ${r.terminal ?? 'not available'} · work ${r.work ?? 'not available'}`);
+    li.append(el('small', `Thread ${r.thread} · run ${r.runId}`));
+    return li;
+  }));
   byId('posts').replaceChildren(
     ...posts.map((p) => {
       const li = el('li');

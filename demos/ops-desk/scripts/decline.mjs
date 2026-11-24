@@ -10,7 +10,7 @@ try {
   await api.presence(route, presence, () => {});
   const view = await api.snapshot(route);
   assert.deepEqual(view.waiting.questions.map(q => q.id), [id]);
-  const end = await api.run(route, view, [{ interruptId: id, status: 'resolved', payload: { allow: false } }], () => {});
+  const end = await api.run(route, 'decline-while-host-down', view, [{ interruptId: id, status: 'resolved', payload: { allow: false } }], () => {});
   assert.equal(end.type, 'success');
 } finally {
   presence.abort();

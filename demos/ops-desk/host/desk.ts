@@ -1,5 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { HttpError, LostExchange, Agui, admission, type Decision, type Snapshot } from './agui.js';
+import { HttpError, LostExchange, Agui, type Decision, type Snapshot } from './agui.js';
 import { Control } from './control.js';
 import { Projects } from './processes.js';
 import { agents, Store, type Agent, type Question, type Route } from './store.js';
@@ -74,7 +75,7 @@ export class Desk {
           s.process = undefined;
           this.notify();
           if (s.route && !this.closing) {
-            if (s.recovering || !s.route.thread)
+            if (!s.route.thread)
               this.finish(a, 'failed', `${a} exited before it could serve the session.`);
             else {
               s.recovering = true;
@@ -84,8 +85,7 @@ export class Desk {
                 if (!s.route) {
                   this.armIdle(a);
                   this.wake();
-                } else if (!s.waiting)
-                  this.finish(a, 'failed', 'The agent did not list the interrupted route.');
+                }
               } catch (e) {
                 await this.problem(a, e);
               }
@@ -102,41 +102,44 @@ export class Desk {
 
   private async findWork(a: Agent, api: Agui, parent: string | null) {
     const s = this.slots[a];
-    for await (const row of api.threads(parent)) {
-      const { threadId: thread, waiting } = row;
-      let r = this.db.activeThread(a, thread);
-      if (waiting.turn === 'none' && !waiting.questions && !waiting.toolCalls && !(r && this.db.questions(r).length)) {
-        // Recovery may have finished before the listener started. A kept
-        // thread for this delivery is not a reason to submit the input again.
-        if (r) {
-          this.db.admitted(r);
-          this.db.finish(r, 'reopened', a + ' reopened the session. No new input was sent.');
-          if (s.route?.id === r.id) s.route = undefined;
-        }
-        continue;
+    const r = this.db.inFlight(a);
+    for (const run of this.db.runs(a)) {
+      if (run.stream === 'open') this.db.stream(run.id, 'lost');
+      const receipt = await api.receipt(run.thread, run.runId);
+      this.db.receipt(run.id, receipt);
+      if (r && r.id === run.route && run.kind === 'input' && receipt) {
+        if (!r.thread) this.db.link(r, run.thread);
+        this.db.admitted(r);
       }
-      const view = await api.snapshot({ thread, parent: r?.parent ?? null });
-      if (!r) {
-        // Only match the actual first admission, not model or tool output.
-        const input = view.messages.find((m) => m.role === 'user')?.content;
-        if (typeof input !== 'string' || !input.startsWith('Desk route: ')) continue;
-        const key = JSON.parse(input.split('\n', 1)[0].slice('Desk route: '.length));
-        r = typeof key === 'string' ? this.db.activeKey(a, key) : undefined;
-        if (!r || r.thread || input !== admission(r)) continue;
-        this.db.link(r, thread);
-      }
-      if (s.route && s.route.id !== r.id) throw Error(a + ' has two active routes');
-      s.route = r;
-      s.recovering = true;
-      this.db.admitted(r);
-      // A parked approval needs a fresh delivery on this host's presence.
-      await this.holdPresence(s, api, r);
-      const current = await api.snapshot(r);
-      this.db.seedWaits(r, current.waitCursor, current.waiting.questions);
-      s.waiting = true;
-      this.follow(a, api, r);
-      this.poll(a);
     }
+    let listed;
+    for await (const row of api.threads(parent)) {
+      if (r?.thread === row.threadId) listed = row.waiting;
+    }
+    if (!r) return;
+    s.route = r;
+    s.recovering = true;
+    if (!listed || !r.thread) {
+      if (!this.finishFromReceipt(r)) this.finish(a, 'unconfirmed', 'Work is unsettled and the thread is not listed.');
+      return;
+    }
+    if (listed.turn === 'none' && !listed.questions && !listed.toolCalls && !this.db.questions(r).length &&
+        this.finishFromReceipt(r)) return;
+    // The listing locates work. Only the new presence and snapshot deliver a parked approval.
+    await this.holdPresence(s, api, r);
+    const current = await api.snapshot(r);
+    this.db.seedWaits(r, current.waitCursor, current.waiting.questions);
+    s.waiting = true;
+    this.follow(a, api, r);
+    this.poll(a);
+  }
+  private finishFromReceipt(r: Route) {
+    const last = this.db.runs(r.id).at(-1);
+    if (last?.work === 'unsettled') return false;
+    if (!last?.work) this.finish(r.agent, 'unconfirmed', 'No visible receipt. No work was resubmitted.');
+    else if (['completed', 'handled', 'handedBack'].includes(last.work)) this.finish(r.agent, 'done');
+    else this.finish(r.agent, 'failed', `The run receipt reports work ${last.work}.`);
+    return true;
   }
   private armIdle(a: Agent) {
     const s = this.slots[a];
@@ -169,10 +172,16 @@ export class Desk {
   private async holdPresence(s: Slot, api: Agui, r: Route) {
     if (!s.presence) {
       const p = (s.presence = new AbortController());
-      await api.presence(r, p, () => {
-        if (s.presence === p) s.presence = undefined;
-        this.notify();
-      });
+      try {
+        await api.presence(r, p, () => {
+          if (s.presence === p) s.presence = undefined;
+          this.notify();
+        });
+      } catch (e) {
+        s.presence = undefined;
+        p.abort();
+        throw e;
+      }
     }
   }
   private detach(s: Slot) {
@@ -183,7 +192,7 @@ export class Desk {
     s.waiting = false;
     clearTimeout(s.poll);
   }
-  private finish(a: Agent, state: 'done' | 'reopened' | 'failed', note?: string) {
+  private finish(a: Agent, state: 'done' | 'unconfirmed' | 'failed', note?: string) {
     const s = this.slots[a];
     this.detach(s);
     this.db.finish(s.route!, state, note);
@@ -196,40 +205,47 @@ export class Desk {
     try {
       const api = await this.connect(a, r.parent);
       if (s.route?.id !== r.id || s.waiting) return;
-      if (!r.thread) {
-        this.projects.prepare(r);
-        this.db.thread(r, await api.create(r));
-      }
-      const view = await api.snapshot(r); // GET reopens the same session and runs recovery.
+      if (r.thread) throw Error('A saved thread cannot start a second input');
+      this.projects.prepare(r);
+      this.db.thread(r, await api.create(r));
+      const view = await api.snapshot(r);
       this.db.seedWaits(r, view.waitCursor, view.waiting.questions);
       await this.holdPresence(s, api, r);
-      if (view.messages.some((m) => m.role === 'user')) {
-        // Each thread belongs to one input route. A committed user message is
-        // evidence of admission, even if this host died before saving its cursor.
-        this.db.admitted(r);
-        const current = await api.snapshot(r);
-        if (current.waiting.questions.length)
-          this.outcome(a, api, { type: 'interrupt', interrupts: current.waiting.questions });
-        else this.finish(a, 'reopened', `${a} reopened the interrupted session. No new input was sent.`);
-        return;
-      }
-      const outcome = await api.run(r, view, undefined, () => this.db.admitted(r));
+      const outcome = await this.exchange(api, r, view);
       this.outcome(a, api, outcome);
     } catch (e) {
       await this.problem(a, e);
     }
   }
+  private async exchange(api: Agui, r: Route, view: Snapshot, answers?: Decision[]) {
+    const runId = answers ? randomUUID() : r.runKey;
+    const id = this.db.beginRun(r, runId, answers ? 'answer' : 'input'); // before the POST, even for answers
+    let outcome;
+    try {
+      outcome = await api.run(r, runId, view, answers, () => {
+        if (!answers) this.db.admitted(r);
+      });
+    } catch (e) {
+      this.db.stream(id, e instanceof HttpError ? 'refused' : 'lost');
+      throw e;
+    }
+    this.db.stream(id, 'ended');
+    this.db.receipt(id, await api.receipt(r.thread!, runId));
+    return outcome;
+  }
   private async problem(a: Agent, e: unknown) {
     const s = this.slots[a];
     if (this.closing || !s.route) return;
-    // A lost exchange is not a failed turn. Stop the old writer before reopening.
+    // A lost stream is not a failed turn. The station wakes a writer only if it exited.
     if (s.process?.abort.signal.aborted) return; // exit callback owns recovery
     if (
       s.route.thread &&
-      !s.recovering &&
+      this.db.runs(s.route.id).length &&
       (e instanceof LostExchange || (e instanceof TypeError && e.cause))
     ) {
-      await s.process?.stop();
+      s.recovering = true;
+      s.waiting = true;
+      this.poll(a);
       return;
     }
     this.finish(a, 'failed', `${a}: ${e instanceof Error ? e.message : 'operation failed'}`);
@@ -300,13 +316,22 @@ export class Desk {
               const r = s.route;
               if (r && s.waiting && !this.db.questions(r).length && (s.ended || s.recovering)) {
                 const api = await s.process!.ready;
+                const latest = this.db.runs(r.id).at(-1);
+                if (latest && (s.recovering || latest.work === 'unsettled'))
+                  this.db.receipt(latest.id, await api.receipt(latest.thread, latest.runId));
+                let listed = false;
                 for await (const row of api.threads(r.parent)) {
                   if (row.threadId !== r.thread) continue;
-                  if (row.waiting.questions) await this.refresh(a);
-                  else if (!row.waiting.toolCalls && row.waiting.turn === 'none')
-                    this.finish(a, s.recovering ? 'reopened' : 'done');
+                  listed = true;
+                  if (row.waiting.questions) {
+                    await this.refresh(a);
+                    this.follow(a, api, r);
+                  } else if (!row.waiting.toolCalls && row.waiting.turn === 'none')
+                    this.finishFromReceipt(r);
                   break;
                 }
+                if (!listed && !this.finishFromReceipt(r))
+                  this.finish(a, 'unconfirmed', 'Work is unsettled and the thread is not listed.');
               }
             } catch (e) {
               await this.problem(a, e);
@@ -366,7 +391,7 @@ export class Desk {
       }
       try {
         const api = await s.process!.ready;
-        const outcome = await api.run(r, view, answers, () => {});
+        const outcome = await this.exchange(api, r, view, answers);
         this.outcome(r.agent, api, outcome);
       } catch (e) {
         if (!(e instanceof HttpError)) {
@@ -404,6 +429,7 @@ export class Desk {
         agents.map((a) => [a, this.slots[a].route ? 'working' : this.slots[a].process ? 'idle' : 'stopped'])
       ),
       routes: this.db.routes(),
+      runs: this.db.runs(),
       cursor: this.db.cursor()
     };
   }

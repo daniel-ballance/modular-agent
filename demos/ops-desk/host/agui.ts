@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Question, Route, WaitClosure } from './store.js';
+import type { Question, Receipt, Route, WaitClosure } from './store.js';
 import { operation } from './trace.js';
 
 export type Snapshot = {
@@ -7,6 +7,7 @@ export type Snapshot = {
   messages: { role: string; content?: unknown }[];
   cursor: string;
   waitCursor: string;
+  runReceipts: 1;
   waiting: { questions: Question[]; toolCalls: { toolCallId: string; expiresAt: string }[] };
 };
 export type Decision = { interruptId: string; status: 'resolved' | 'cancelled'; payload?: unknown };
@@ -62,7 +63,6 @@ export class Agui {
   }
   private async request(path: string, parent: string | null, init: RequestInit = {}) {
     const span = operation('desk.agui', parent);
-    // The station can hold presence without installing its own exporter.
     const traceparent = span.header ?? parent;
     try {
       const res = await fetch(this.origin + '/agui/v1' + path, {
@@ -115,6 +115,7 @@ export class Agui {
     const s = await (await this.request(this.path(r), r.parent)).json();
     if (
       s.threadId !== r.thread ||
+      s.runReceipts !== 1 ||
       typeof s.waitCursor !== 'string' || !s.waitCursor ||
       !Array.isArray(s.messages) ||
       !Array.isArray(s.waiting?.questions) ||
@@ -122,6 +123,20 @@ export class Agui {
     )
       throw Error('Invalid thread snapshot');
     return s;
+  }
+  async receipt(thread: string, runId: string): Promise<Receipt | null> {
+    const path = this.path({ thread }) + '/run-receipt?' + new URLSearchParams({ runId });
+    try {
+      const v = await (await this.request(path, null)).json();
+      if (!['unknown', 'success', 'interrupt', 'cancelled', 'error'].includes(v.terminal) ||
+          !['unsettled', 'completed', 'cancelled', 'failed', 'limit', 'handled', 'handedBack'].includes(v.work))
+        throw Error('Invalid run receipt');
+      return { terminal: v.terminal, work: v.work };
+    } catch (e) {
+      // Missing and inaccessible look alike. Neither authorizes another POST.
+      if (e instanceof HttpError && (e.status === 404 || e.status === 403)) return null;
+      throw e;
+    }
   }
   async *closures(r: Route, after: string, signal: AbortSignal): AsyncGenerator<WaitClosure> {
     const path = this.path(r) + '/wait-closures?' + new URLSearchParams({ after });
@@ -154,11 +169,11 @@ export class Agui {
   }
   async run(
     r: Route,
+    runId: string,
     view: Snapshot,
     decisions: Decision[] | undefined,
     admitted: () => void
   ): Promise<Outcome> {
-    const runId = decisions ? randomUUID() : r.runKey;
     const messages = decisions
       ? view.messages
       : [...view.messages, { id: randomUUID(), role: 'user', content: admission(r) }];
@@ -187,7 +202,7 @@ export class Agui {
         if (e.threadId !== r.thread || e.runId !== runId || started) throw Error('Wrong run identity');
         started = true;
         admitted();
-      } else if (e.type === 'RUN_ERROR') throw Error('Agent ended the run: ' + e.code);
+      } else if (e.type === 'RUN_ERROR') terminal = { type: 'error' };
       else if (e.type === 'RUN_FINISHED' && started && e.threadId === r.thread && e.runId === runId)
         terminal = e.outcome;
     }

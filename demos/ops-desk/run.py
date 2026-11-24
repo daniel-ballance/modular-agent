@@ -70,7 +70,7 @@ class Desk:
     def state(self):
         check(self.proc.poll() is None, 'host exited')
         s = self.request('/state')
-        check(not any(r['state'] == 'failed' for r in s['routes']),
+        check(not any(r['state'] in ('failed', 'unconfirmed') for r in s['routes']),
               'route failed: ' + str([p['text'] for p in s['posts'] if p['kind'] == 'notice']))
         return s
 
@@ -281,9 +281,13 @@ def run(d, case):
         # Erase both shortcuts. The route and event are the host's own data.
         with sqlite3.connect(d.root / 'desk.sqlite') as db:
             db.execute('DELETE FROM inbox')
+            db.execute('UPDATE runs SET terminal=NULL,work=NULL')
             db.execute('UPDATE routes SET thread=NULL WHERE id=?', (q['route'],))
         d.proc, d.url = d.launch()
         again = d.approval()
+        receipts = [r for r in d.state()['runs'] if r['thread'] == q['thread']]
+        check([(r['kind'], r['terminal'], r['work']) for r in receipts] == [('input', 'interrupt', 'completed')],
+              'the restored receipt must describe the parked input, not its later answer')
         check(all(again[k] == q[k] for k in ('route', 'thread', 'id', 'message', 'toolCallId', 'expiresAt')),
               'listing did not restore the same open approval')
     check(d.tree('coder', 'rev-parse', 'HEAD') == seed and not d.tree('coder', 'status', '--porcelain'),
@@ -324,7 +328,12 @@ def run(d, case):
           len(s['inbox']) == (2 if case == 'verification' else 1),
           'expected both file changes and just one approval per script')
     if case == 'restart':
-        check(s['routes'][1]['state'] == 'reopened' and s['routes'][1]['thread'] == q['thread'], 'coder session not reopened')
+        receipts = [r for r in s['runs'] if r['thread'] == q['thread']]
+        check([(r['kind'], r['terminal'], r['work']) for r in receipts] ==
+              [('input', 'interrupt', 'completed'), ('answer', 'unknown', 'completed')] and
+              receipts[1]['stream'] == 'lost' and receipts[0]['runId'] != receipts[1]['runId'],
+              'lost answer stream and recovered work were not reported separately: ' + str(receipts))
+        check(s['routes'][1]['state'] == 'done' and s['routes'][1]['thread'] == q['thread'], 'coder work not completed')
         snap = d.request(f"/sessions/{q['route']}")
         messages = snap['messages']
         check(snap['threadId'] == q['thread'] and snap['declaration']['continuesAfterRestart'] and
@@ -336,6 +345,11 @@ def run(d, case):
               'missing uncertain settlement or recovered completion')
         verifier = d.request(f"/sessions/{s['routes'][-1]['id']}")
         check(len([m for m in verifier['messages'] if m['role'] == 'user']) == 1, 'hand-off delivered twice')
+    if case == 'host-restart':
+        receipts = [r for r in s['runs'] if r['thread'] == q['thread']]
+        check([(r['kind'], r['terminal'], r['work']) for r in receipts] ==
+              [('input', 'interrupt', 'completed'), ('answer', 'success', 'completed')],
+              'missing receipt for the restored approval or its answer')
     if case in ('happy', 'duplicate'):
         wait(lambda: all(v == 'stopped' for v in d.state()['agents'].values()), 'idle agents to stop')
         snap = d.request(f"/sessions/{posts[1]['route']}")

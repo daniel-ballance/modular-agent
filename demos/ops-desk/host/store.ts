@@ -15,6 +15,21 @@ export type Route = {
   state: string;
   parent: string | null;
 };
+export type Receipt = {
+  terminal: 'unknown' | 'success' | 'interrupt' | 'cancelled' | 'error';
+  work: 'unsettled' | 'completed' | 'cancelled' | 'failed' | 'limit' | 'handled' | 'handedBack';
+};
+export type SavedRun = {
+  id: number;
+  route: number;
+  agent: Agent;
+  thread: string;
+  runId: string;
+  kind: 'input' | 'answer';
+  stream: 'open' | 'ended' | 'lost' | 'refused';
+  terminal: Receipt['terminal'] | null;
+  work: Receipt['work'] | null;
+};
 export type Question = {
   id: string;
   reason: string;
@@ -52,6 +67,8 @@ export class Store {
       INSERT OR IGNORE INTO listener VALUES(1,0);
       CREATE TABLE IF NOT EXISTS routes(id INTEGER PRIMARY KEY, event INTEGER NOT NULL REFERENCES events(seq), agent TEXT NOT NULL, attempt INTEGER NOT NULL,
         task TEXT NOT NULL, runKey TEXT NOT NULL, revision TEXT NOT NULL, thread TEXT, state TEXT NOT NULL DEFAULT 'queued', UNIQUE(event,agent,attempt));
+      CREATE TABLE IF NOT EXISTS runs(id INTEGER PRIMARY KEY, route INTEGER NOT NULL REFERENCES routes(id), thread TEXT NOT NULL,
+        runId TEXT NOT NULL, kind TEXT NOT NULL, stream TEXT NOT NULL DEFAULT 'open', terminal TEXT, work TEXT, UNIQUE(route,thread,runId));
       CREATE TABLE IF NOT EXISTS posts(id INTEGER PRIMARY KEY, event INTEGER NOT NULL REFERENCES events(seq), route INTEGER REFERENCES routes(id), kind TEXT NOT NULL, text TEXT NOT NULL, callId TEXT, UNIQUE(route,callId));
       CREATE TABLE IF NOT EXISTS wait_feeds(agent TEXT NOT NULL, thread TEXT NOT NULL, cursor TEXT NOT NULL, PRIMARY KEY(agent,thread));
       CREATE TABLE IF NOT EXISTS inbox(route INTEGER REFERENCES routes(id), question TEXT NOT NULL, view TEXT NOT NULL, status TEXT NOT NULL, PRIMARY KEY(route,question));`);
@@ -116,10 +133,8 @@ export class Store {
     const r = this.select(`r.thread=? AND state IN ${pending}`, thread);
     return r?.agent === agent ? r : undefined;
   }
-  // A route key in the original desk admission also works if its debug link was lost.
-  activeKey(agent: Agent, key: string) {
-    const r = this.select(`runKey=? AND state IN ${pending}`, key);
-    return r?.agent === agent ? r : undefined;
+  inFlight(agent: Agent) {
+    return this.select("r.agent=? AND state IN ('sending','admitted')", agent);
   }
   route(id: number) {
     return this.select('r.id=?', id);
@@ -138,10 +153,25 @@ export class Store {
       if (r.agent === 'triage') this.db.prepare('UPDATE listener SET cursor=max(cursor,?)').run(r.event);
     });
   }
+  beginRun(r: Route, runId: string, kind: SavedRun['kind']) {
+    return Number(this.db.prepare('INSERT INTO runs(route,thread,runId,kind) VALUES(?,?,?,?)')
+      .run(r.id, r.thread, runId, kind).lastInsertRowid);
+  }
+  stream(id: number, state: SavedRun['stream']) {
+    this.db.prepare('UPDATE runs SET stream=? WHERE id=?').run(state, id);
+  }
+  receipt(id: number, value: Receipt | null) {
+    this.db.prepare('UPDATE runs SET terminal=?,work=? WHERE id=?').run(value?.terminal ?? null, value?.work ?? null, id);
+  }
+  runs(filter?: Agent | number): SavedRun[] {
+    const where = filter === undefined ? '' : typeof filter === 'number' ? 'WHERE route=?' : 'WHERE agent=?';
+    return this.db.prepare(`SELECT u.*,r.agent FROM runs u JOIN routes r ON r.id=u.route ${where} ORDER BY u.id`)
+      .all(...(filter === undefined ? [] : [filter])) as SavedRun[];
+  }
   cursor() {
     return this.db.prepare('SELECT cursor FROM listener').get()!.cursor;
   }
-  finish(r: Route, status: 'done' | 'reopened' | 'failed', note?: string) {
+  finish(r: Route, status: 'done' | 'unconfirmed' | 'failed', note?: string) {
     this.atomic(() => {
       if (note)
         this.db
