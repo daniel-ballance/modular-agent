@@ -1,6 +1,6 @@
 // Opt-in ADR 0030 checks. Each profile has its own operator policy and data directory.
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, watch, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, watch, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual as equal } from "node:util";
@@ -470,6 +470,7 @@ async function holdLease(store, path) {
 }
 
 export async function erasure(kit) {
+	if (!kit.store || (await kit.store.json("/v1")).pendingErasure !== 1) throw Error("erasure fixture requires the shared HTTP pendingErasure: 1 registry");
 	for (const cutoff of ["reported pending", "bookkeeping commit", "tombstone commit"]) {
 		await kit.attempt(`erasure: ${cutoff}`, () => eraseAcrossWriters(kit, cutoff));
 	}
@@ -478,9 +479,7 @@ export async function erasure(kit) {
 async function eraseAcrossWriters(kit, cutoff) {
 	const { project, store, prompt, history, closeSession, reopenWatchdog, within } = kit;
 	const check = (label, ok, detail) => kit.check(`erasure (${cutoff}): ${label}`, ok, detail);
-	const dir = mkdtempSync(join(kit.root, "pending-state-"));
 	const scope = scoped([project], [null]);
-	const env = { MODULAR_AGENT_CONFORMANCE_ERASURE_DIR: dir };
 	const reached = deferred(), releaseReply = deferred();
 	let eraseSource, sourcePath;
 	let stage = "start writer", faultReached = false;
@@ -506,7 +505,7 @@ async function eraseAcrossWriters(kit, cutoff) {
 			}
 		},
 	});
-	const h = await host(kit, [scope], { extraEnv: proxy ? { ...env, MODULAR_AGENT_HISTORY_URL: proxy.url } : env });
+	const h = await host(kit, [scope], { extraEnv: proxy ? { MODULAR_AGENT_HISTORY_URL: proxy.url } : {} });
 	let reader, reopener, releaseLease, dst;
 	const takeoverLoad = async (peer, sid, ms, label) => {
 		const started = performance.now();
@@ -549,11 +548,13 @@ async function eraseAcrossWriters(kit, cutoff) {
 		await within(loadMs, load(a, dst, project), "attach second fork");
 		await closeSession(a, dst);
 		const before = await store.pages(dst);
+		const firstCopy = firstRows.find(e => e.kind === "inputAccepted" && contains(e, secret));
+		if (!firstCopy || !equal(firstCopy.sources, [target.id])) throw Error("first fork did not name the source admission");
 		const copy = before.find((e) => e.kind === "inputAccepted" && contains(e, secret));
-		if (!copy) throw Error("fork-of-fork did not retain the fixture admission");
+		if (!copy || !equal(copy.sources, [firstCopy.id])) throw Error("fork-of-fork did not name its source admission");
 		stage = "hold the destination and attach the independent reader";
 		releaseLease = await holdLease(store, store.path(dst));
-		reader = await host(kit, [scope], { dir: h.directory, extraEnv: env });
+		reader = await host(kit, [scope]);
 		const { a: r } = await reader.peer();
 		await within(loadMs, load(r, first, project), "independent writer attaches first fork");
 		const erase = (p) => ext(p, "erase", { sessionId: sid, entryIds: [target.id] });
@@ -582,12 +583,12 @@ async function eraseAcrossWriters(kit, cutoff) {
 		releaseLease = undefined;
 		await release();
 		stage = "reopen and reconcile the pending intent";
-		reopener = await host(kit, [scope], { dir: h.directory, extraEnv: env, which: kit.second });
+		reopener = await host(kit, [scope], { which: kit.second });
 		const { a: next } = await reopener.peer();
 		await takeoverLoad(next, dst, loadMs, "new writer reconciles fork-of-fork");
 		const kept = await store.pages(dst);
 		const tombstone = kept.find((e) => e.id === copy.id);
-		check("next writer reconciles durable pending intent once, before replay", tombstone?.erased === true &&
+		check("next writer reconciles durable pending intent once, before replay", tombstone?.erased === true && equal(tombstone.sources, [firstCopy.id]) &&
 			!contains(kept, secret) && !contains(next.updates, secret) && rows("erasure", kept).length === 1);
 		const duplicate = await input(next, dst, secret, key, "now");
 		check("pending copy key survives only as an erased receipt", equal(duplicate, { duplicate: true, erased: true }) && equal(await store.pages(dst), kept));
