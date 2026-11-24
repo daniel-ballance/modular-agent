@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -43,13 +44,21 @@ func TestAGUIApprovalSettingIsPerSessionAndRequiresSettings(t *testing.T) {
 	}
 }
 
+func checkApprovalCall(t *testing.T, metadata map[string]any, name string, input map[string]any) {
+	t.Helper()
+	want := map[string]any{"name": name, "input": input}
+	if got := metadata["modular-agent.approvalCall"]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("approvalCall = %#v; want %#v", got, want)
+	}
+}
+
 func TestAGUIWaitingApprovalDeliveredOnReturn(t *testing.T) {
 	var effects atomic.Int32
-	bump := modular.NewTool("bump", "Bump.", func(context.Context, struct{}, *modular.ToolContext) (string, error) {
-		effects.Add(1)
-		return "one", nil
+	bump := modular.NewTool("bump", "Bump.", func(_ context.Context, in bumpInput, _ *modular.ToolContext) (string, error) {
+		effects.Add(int32(in.N))
+		return "done", nil
 	})
-	a := modulartest.Agent(t, modular.WithDurability(modular.Kept), modular.WithDataDir(t.TempDir()), modular.WithLateAnswersStartTurns(true), modular.WithApproval(modular.All), modular.WithApprovalCoversNested(true), modular.WithMaxApprovalWaitMs(30000), modular.WithSettings(modular.Settings{"approvalWait": "untilDeadline"}), modular.WithTool(bump), modulartest.Script(`[{"toolCalls":[{"name":"bump","input":{}}]},{"text":"settled"}]`))
+	a := modulartest.Agent(t, modular.WithDurability(modular.Kept), modular.WithDataDir(t.TempDir()), modular.WithLateAnswersStartTurns(true), modular.WithApproval(modular.All), modular.WithApprovalCoversNested(true), modular.WithMaxApprovalWaitMs(30000), modular.WithSettings(modular.Settings{"approvalWait": "untilDeadline"}), modular.WithTool(bump), modulartest.Script(`[{"toolCalls":[{"name":"bump","input":{"n":2}}]},{"text":"settled"}]`))
 	actor := agActor(t)
 	actor.Actor.ID = "user"
 	url := agURL(t, a, modular.ServeAGUIOptions{Actors: []modular.ACPActor{actor}})
@@ -80,12 +89,13 @@ func TestAGUIWaitingApprovalDeliveredOnReturn(t *testing.T) {
 		t.Fatal(snap, err)
 	}
 	q := view.Waiting.Questions[0]
-	if view.Declaration["approvalCoversNested"] != true || q.Metadata["modular-agent.coversNested"] != true || q.ToolCallID == "" || q.ExpiresAt == "" || !strings.Contains(q.Message, "bump {}") {
+	checkApprovalCall(t, q.Metadata, "bump", map[string]any{"n": float64(2)})
+	if view.Declaration["approvalCoversNested"] != true || q.Metadata["modular-agent.coversNested"] != true || q.ToolCallID == "" || q.ExpiresAt == "" || !strings.Contains(q.Message, `bump {"n":2}`) {
 		t.Fatal(q)
 	}
 	body, _ := json.Marshal(map[string]any{"threadId": id, "runId": "approve", "protocolVersion": "1.0", "messages": view.Messages, "resume": []any{map[string]any{"interruptId": q.ID, "status": "resolved", "payload": map[string]bool{"allow": true}}}})
 	result := agPost(t, url+"/run", string(body), 200)
-	if effects.Load() != 1 || !strings.Contains(result, "settled") || !strings.Contains(result, `"outcome":{"type":"success"}`) {
+	if effects.Load() != 2 || !strings.Contains(result, "settled") || !strings.Contains(result, `"outcome":{"type":"success"}`) {
 		t.Fatal(result)
 	}
 }

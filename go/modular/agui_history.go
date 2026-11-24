@@ -305,11 +305,18 @@ func agInterrupt(v api.Question) agObject {
 	switch v.Kind {
 	case "approval":
 		m["toolCallId"] = v.Call
+		metadata := agObject{}
 		if v.CoversNested {
-			m["metadata"] = agObject{"modular-agent.coversNested": true}
+			metadata["modular-agent.coversNested"] = true
 		}
-		if c := v.ApprovalCall; c != nil && (!strings.Contains(v.Prompt, c.Name) || !strings.Contains(v.Prompt, string(c.Input))) {
-			m["message"] = v.Prompt + " " + c.Name + " " + string(c.Input)
+		if c := v.ApprovalCall; c != nil {
+			metadata["modular-agent.approvalCall"] = agObject{"name": c.Name, "input": c.Input}
+			if !strings.Contains(v.Prompt, c.Name) || !strings.Contains(v.Prompt, string(c.Input)) {
+				m["message"] = v.Prompt + " " + c.Name + " " + string(c.Input)
+			}
+		}
+		if len(metadata) != 0 {
+			m["metadata"] = metadata
 		}
 		m["responseSchema"] = agObject{"type": "object", "properties": agObject{"allow": agObject{"type": "boolean"}}, "required": []string{"allow"}}
 	case "choice":
