@@ -97,11 +97,9 @@ With real models (`--live`) the same flow runs against your sign-ins; it is not 
 - **Tracing — used.** All three work tokens trust the desk's trace parent. The host carries it across the queue. The approval continuation has its own turn span linked to the origin. [Telemetry v1](../../docs/telemetry.md#what-later-versions-add) does not link the receiving turn to another agent's `hand_off` call.
 - **Earlier fixes.** Rust accepts the approval schema without choice options. All three AG-UI adapters run; their status text was corrected.
 
-### New finding: displaying the script as code
+### Resolved: displaying the script as code
 
-The [AG-UI interrupt](../../docs/bindings/agui.md#interrupts-and-frontend-tools) carries the exact name and arguments in `message`, not in structured fields. The page always shows that unchanged message. To also show the script with actual line breaks, it has to recognize Rust `ma`'s prompt and decode the JSON inside it. This parsing is for display only.
-
-Proposed addition to **Interrupts and frontend tools / Questions**: “For an approval, the adapter SHOULD include `metadata["modular-agent.approvalCall"] = { name, input }` from the exact gated request in both the run interrupt and the snapshot interrupt. When supplied, the object MUST be part of the unchanged approval view. A client MAY render this object as code. It MUST NOT use model history to fill missing arguments or treat the object as authority to execute.”
+The page always shows the unchanged approval message. When the [AG-UI interrupt](../../docs/bindings/agui.md#interrupts-and-frontend-tools) includes `metadata["modular-agent.approvalCall"]` for `codemode`, the page also shows `input.code` with its original line breaks. Without that field it does not try to recover the script from the prompt or history. Allow and refuse still answer the request ID.
 
 ### Two live events
 
@@ -139,7 +137,7 @@ Triage and the verifier shared the event trace in both runs. Both runs predate t
 | Posts during a turn | Server tools acknowledge committed posts without ending the turn. |
 | One trace across agents | `traceTrusted` and a queued trace parent for inputs; a span link for the approval continuation. |
 | Rust approval answers; AG-UI status text | Fixed in the framework. |
-| Rendering the unchanged approval as code | [Proposed interrupt metadata](#new-finding-displaying-the-script-as-code). |
+| Rendering the unchanged approval as code | [Resolved](#resolved-displaying-the-script-as-code): the page reads the gated call from interrupt metadata. |
 
 ## Plan
 

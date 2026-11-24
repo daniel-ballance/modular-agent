@@ -63,14 +63,10 @@ function questionForm(questions) {
     if (q.toolCallId) label.append(el('small', 'Call: ' + q.toolCallId));
     if (q.metadata?.['modular-agent.coversNested'] === true) {
       label.append(el('strong', 'Allow covers the writes, commands and other calls this script makes.'));
-      // ma puts the exact JSON input in the prompt. Also show its code with real line breaks.
-      const input = /^Allow codemode with (\{.*\})\? /.exec(q.message);
-      if (input) {
-        try {
-          const { code } = JSON.parse(input[1]);
-          if (typeof code === 'string') label.append(el('pre', code));
-        } catch { /* Other prompt formats still show the complete unchanged view. */ }
-      }
+    }
+    const call = q.metadata?.['modular-agent.approvalCall'];
+    if (q.reason === 'approval' && call?.name === 'codemode' && typeof call.input?.code === 'string') {
+      label.append(el('pre', call.input.code));
     }
     form.append(label);
     if (q.expiresAt) form.append(el('small', 'Deadline: ' + new Date(q.expiresAt).toLocaleTimeString()));
