@@ -19,14 +19,14 @@ import (
 // rust/crates/credentials-auth/src/lib.rs and no trailing newline.
 const rustAuthFixture = `{
   "logins": {
-    "openai-codex": {
+    "chatgpt": {
       "type": "oauth",
       "access": "access-codex",
       "refresh": "refresh-codex",
       "expires": 1700000000000,
       "account": "acct-7"
     },
-    "xai": {
+    "grok": {
       "type": "api_key",
       "key": "test-key"
     }
@@ -42,15 +42,15 @@ func TestRustAuthFixtureRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := SubscriptionLogins(path)
-	l, err := a.Login("openai-codex")
+	l, err := a.Login("chatgpt")
 	if err != nil || l == nil || l.Account == nil || *l.Account != "acct-7" || l.Expires != 1700000000000 {
 		t.Fatalf("bad OAuth fixture read: %v, %v", l, err)
 	}
-	k, err := a.Login("xai")
+	k, err := a.Login("grok")
 	if err != nil || k == nil || k.Secret() != "test-key" {
 		t.Fatal("API key fixture did not round-trip", err)
 	}
-	if err := a.Set(t.Context(), "openai-codex", l); err != nil {
+	if err := a.Set(t.Context(), "chatgpt", l); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(path)
@@ -101,7 +101,7 @@ func TestLoginFileRefusesPublicModeAndPreservesOtherMembers(t *testing.T) {
 func TestStagedAnswerPreservesAuthLogins(t *testing.T) {
 	ctx := t.Context()
 	a := SubscriptionLogins(filepath.Join(t.TempDir(), "auth.json"))
-	if err := a.Set(ctx, "xai", &Login{Type: "api_key", Key: "test-key"}); err != nil {
+	if err := a.Set(ctx, "grok", &Login{Type: "api_key", Key: "test-key"}); err != nil {
 		t.Fatal(err)
 	}
 	store := a.CredentialStore()
@@ -121,7 +121,7 @@ func TestStagedAnswerPreservesAuthLogins(t *testing.T) {
 		t.Fatalf("activation: %v, %v", decision, err)
 	}
 	value, err := store.Get(ctx, "named")
-	l, loginErr := a.Login("xai")
+	l, loginErr := a.Login("grok")
 	if err != nil || value != "answer" || loginErr != nil || l == nil || l.Secret() != "test-key" {
 		t.Fatal("activated answer or login missing", err)
 	}
@@ -132,7 +132,7 @@ func TestRefreshSpendsOneTokenUnderLock(t *testing.T) {
 	a := SubscriptionLogins(path)
 	second := SubscriptionLogins(path)
 	old := Login{Type: "oauth", Access: "old", Refresh: "one", Expires: 1}
-	if err := a.Set(t.Context(), "xai", &old); err != nil {
+	if err := a.Set(t.Context(), "grok", &old); err != nil {
 		t.Fatal(err)
 	}
 	var count atomic.Int32
@@ -157,7 +157,7 @@ func TestRefreshSpendsOneTokenUnderLock(t *testing.T) {
 	}
 	run := func(a Logins) {
 		defer wg.Done()
-		v, err := a.Current(t.Context(), "xai", nil, refresh)
+		v, err := a.Current(t.Context(), "grok", nil, refresh)
 		if err != nil || v.Access != "new" || v.Refresh != "two" {
 			t.Errorf("wrong login after refresh: %v, %v", v, err)
 		}
@@ -167,7 +167,7 @@ func TestRefreshSpendsOneTokenUnderLock(t *testing.T) {
 	<-started
 	blocked, cancel := context.WithTimeout(t.Context(), 35*time.Millisecond)
 	defer cancel()
-	if _, err := second.Current(blocked, "xai", nil, refresh); err != context.DeadlineExceeded {
+	if _, err := second.Current(blocked, "grok", nil, refresh); err != context.DeadlineExceeded {
 		t.Errorf("second attempt did not wait for the lock: %v", err)
 	}
 	wg.Add(1)

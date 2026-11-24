@@ -31,7 +31,7 @@ Claude needs Node.js 22 or later and the [Claude program](../../../typescript/pa
 
 The four languages share `$XDG_CONFIG_HOME/modular-agent` (or `~/.config/modular-agent`). Go saves sessions, command state and spilled output under `$XDG_STATE_HOME/modular-agent/go` (or `~/.local/state/modular-agent/go`). `MODULAR_AGENT_DATA_DIR` puts configuration directly in that directory and puts state in its `state/` subdirectory. `ma --trust-project` records the canonical project path in `trusted-projects.json` outside the project. A project's own settings are read without granting it permission to start a server. One ACP connection can serve several canonical projects, each with its own settings, prompt and trusted MCP servers.
 
-ChatGPT, Grok and Claude come from the SDK. The former ids `openai-codex` and `xai` work in `--model`, `ma login`, `ma logout`, settings, `models.json` and reopened sessions. Reads find old sign-ins; the next write of `auth.json` moves them to `chatgpt` and `grok`, preferring the new slot if both exist. A file readable by other users is refused; make it private with `chmod 600` before use.
+Use `chatgpt`, `grok` or `claude` for a subscription. A file readable by other users is refused; make it private with `chmod 600` before use.
 
 ## Approval
 
@@ -100,13 +100,13 @@ scripts/websocket-kits.sh go
 - **Sandbox regressions:** the Go tests cover imports and function values, schema-order arguments, JSON and repr, terminal memory and time limits, which suspensions reset the active clock, a tool wait longer than the compute budget, 500 nested calls, recursion at 200 and 201, a UTF-8 print cut, worker death and cancellation, malformed messages, denied OS operations and seeded random.
 - **Go checks:** build, vet and formatting passed. The full Go suite passed 38 tested packages. The race run for `modular/...` and `cmd/ma/...` passed seven tested packages. `cmd/modular` takes several minutes; use the default package timeout.
 - **No network:** the Go `codemode-tools-values` and `sandbox-memory` reference checks both passed in a separate Linux network namespace.
-- **Subscriptions:** the alias tests cover both former ids in every listed entry point, including reopening a saved session. The login test checks that the SDK's device and waiting steps retain the terminal instructions. SDK tests cover Grok device polling, request shape, encrypted reasoning and refresh, both ChatGPT sign-ins, and the Claude binding. No real sign-ins or model requests were made.
+- **Subscriptions:** the login test checks the device and waiting instructions. SDK tests cover Grok device polling, request shape, encrypted reasoning and refresh, both ChatGPT sign-ins, and the Claude binding. No real sign-ins or model requests were made.
 
 ## Built so far
 
 `ma` exports metadata-only OpenTelemetry when `OTEL_EXPORTER_OTLP_ENDPOINT` or a signal endpoint is set. It supports `http/protobuf` (default) and `grpc`, including per-signal overrides. It uses `ma` as the default service name and as the agent name. `OTEL_SDK_DISABLED=true` disables recording and export. The declaration does not change. See [Telemetry](../../../docs/reference/standard-configuration.md#telemetry).
 
-`ma` uses `subscription.ChatGPT`, `subscription.Grok` and `subscription.Claude`. It handles terminal instructions and aliases; the SDK handles OAuth, token refresh and model requests.
+`ma` uses `subscription.ChatGPT`, `subscription.Grok` and `subscription.Claude`. It handles terminal instructions; the SDK handles OAuth, token refresh and model requests.
 
 ## Known gaps
 

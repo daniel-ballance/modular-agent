@@ -74,7 +74,7 @@ func (c responsesConfig) requestBody(m subscriptionModel, r modular.ModelRequest
 				Provider string           `json:"provider"`
 				Output   []map[string]any `json:"output"`
 			}
-			if json.Unmarshal(msg.ProviderData, &previous) == nil && (previous.Provider == c.id || previous.Provider == c.legacyID) && previous.Output != nil {
+			if json.Unmarshal(msg.ProviderData, &previous) == nil && previous.Provider == c.id && previous.Output != nil {
 				i := 0
 				for _, item := range previous.Output {
 					if item["type"] == "function_call" && i < len(calls) {

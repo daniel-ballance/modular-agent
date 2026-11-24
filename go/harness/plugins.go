@@ -38,7 +38,6 @@ type Harness struct {
 	interfaceTools       map[string]*interfaceSource
 	agentName            string
 	localActor           string
-	providerAliases      map[string]string
 	deferHistory         bool
 	handBackOnOpen       bool
 	parkJobReports       bool
@@ -83,19 +82,8 @@ func NewWithLocalActor(actor string) *Harness {
 	return h
 }
 
-// SetProviderAliases configures model-id migration before any sessions open.
-func (h *Harness) SetProviderAliases(aliases map[string]string) { h.providerAliases = aliases }
-
 func (h *Harness) SetAgentName(name string) { h.agentName = name }
 func (c *client) TelemetryProfile() int     { return 1 }
-
-func (h *Harness) currentModel(ref string) string {
-	provider, id, ok := strings.Cut(ref, "/")
-	if current := h.providerAliases[provider]; ok && current != "" {
-		return current + "/" + id
-	}
-	return ref
-}
 
 // DeferPersistentHistory keeps new public sessions provisional until admission.
 // Call before loading plugins.

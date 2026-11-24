@@ -34,7 +34,7 @@ type GrokOptions struct {
 
 // Grok constructs the grok Provider. It reads the login file at request time.
 func Grok(opts GrokOptions) (modular.Provider, error) {
-	config := responsesConfig{id: grokID, label: "Grok", endpoint: grokEndpoint, systemMessage: true, legacyID: "xai"}
+	config := responsesConfig{id: grokID, label: "Grok", endpoint: grokEndpoint, systemMessage: true}
 	return responsesProvider(config, opts.Logins, opts.ClientIdentity, opts.Models, opts.CatalogOverrides, opts.HTTPTransport)
 }
 
