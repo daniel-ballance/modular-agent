@@ -217,7 +217,13 @@ async def listen_agui(
             require(origin_ok, "refused")
             require(
                 not scope["query_string"]
-                or (scope.get("method") == "GET" and scope["path"] == "/agui/v1/threads")
+                or (
+                    scope.get("method") == "GET"
+                    and (
+                        scope["path"] == "/agui/v1/threads"
+                        or scope["path"].endswith("/wait-closures")
+                    )
+                )
             )
             require(len(active) < 128, "busy")
             active.add(task)

@@ -365,6 +365,7 @@ class WaitingApprovals:
                 }
                 if not allow and isinstance(d.get("reason"), str):
                     decision["reason"] = d["reason"]
+                    decision["system"] = False
                 if allow:
                     decision["approvalView"] = {
                         "requestEntryId": e["id"],

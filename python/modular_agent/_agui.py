@@ -16,9 +16,11 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import Send
 from ._agui_http import Stream
+from ._agui_waits import WaitFeed, WaitPosition
 from ma_core import telemetry as ot
 from ma_core.wire import provider_projection, settings_in
 from ma_harness.authority import CONNECTION_AUTHORITY
+from ma_questions import eligible_question, question_state
 from ma_harness.interface_tools import branch_entries, same_json
 from opentelemetry.context import Context
 
@@ -75,6 +77,7 @@ class Binding:
         self.active: set[tuple[str, str]] = set()
         self.presence: dict[tuple[str, str], Presence] = {}
         self.cursors: OrderedDict[tuple[str, str], Cursor] = OrderedDict()
+        self.wait_cursors: OrderedDict[str, WaitPosition] = OrderedDict()
         self.pages: OrderedDict[str, tuple[str, tuple[str, str]]] = OrderedDict()
         self.admission = asyncio.Lock()
         self.decision_runs: OrderedDict[tuple[str, str, str], None] = OrderedDict()
@@ -140,6 +143,7 @@ class Binding:
         self.presence.clear()
         self.cursors.clear()
         self.pages.clear()
+        self.wait_cursors.clear()
         self.agent._acp_server = None
 
     async def error_allowed(self, actor: AguiActor, code: str) -> bool:
@@ -197,9 +201,16 @@ class Binding:
                     "threads", {"threadId": view.sid, "declaration": self.agent.declaration()}
                 )
             elif req.method == "GET" and (
-                match := re.fullmatch(r"/threads/([\w-]+)(/presence)?", path)
+                match := re.fullmatch(r"/threads/([\w-]+)(/presence|/wait-closures)?", path)
             ):
                 await view.attach(match[1])
+                if match[2] == "/wait-closures":
+                    require(
+                        list(req.query_params.keys()) == ["after"]
+                        and len(req.query_params.getlist("after")) == 1
+                    )
+                    await WaitFeed(view).serve(req.query_params["after"], Stream(send, headers))
+                    return None
                 if match[2]:
                     await view.keep_present(Stream(send, headers))
                     return None
@@ -535,18 +546,27 @@ class View:
         )
 
     async def questions(
-        self, branch: list[Obj], *, offer_waits: bool = False
+        self, branch: list[Obj], *, offer_waits: bool = False, snapshot: bool = False
     ) -> dict[str, tuple[Obj, Obj]]:
         ended = {e.get("turn") for e in branch if e["kind"] == "turn_end"}
         presence = self.binding.presence.get(self.key)
-        qs = await self.agent._call(
-            "questions",
-            "list",
-            session=self.sid,
-            actor=self.actor,
-            openOnly=True,
-            recipientView=True,
-        )
+        if snapshot:
+            # Derive waits from the same immutable prefix as messages and waitCursor.
+            qs = [
+                {**q, "answerable": eligible_question(q, self.actor, self.rights_now())}
+                for q in question_state(branch).values()
+                if not {"answer", "closed", "selected"}.intersection(q)
+                and (not q.get("approvalWait") or q.get("turn") in ended)
+            ]
+        else:
+            qs = await self.agent._call(
+                "questions",
+                "list",
+                session=self.sid,
+                actor=self.actor,
+                openOnly=True,
+                recipientView=True,
+            )
         result = {}
         for q in qs:
             kind = q["kind"]
@@ -619,13 +639,15 @@ class View:
             assert stop is not None
             branch = branch[: stop + 1]
         pos = branch[-1]["id"] if branch else None
+        wait_position = WaitPosition.at(self, pos) if http and deliver_waits else None
+        wait_cursor = uuid4().hex if wait_position else None
         messages = await self.messages(branch)
         cursor = cursor_id or uuid4().hex
         presence = self.binding.presence.get(self.key)
         if http:
             if presence and deliver_waits:
                 self.h.forget_waits(self.sid, token=presence.route)
-            qs = await self.questions(branch, offer_waits=deliver_waits)
+            qs = await self.questions(branch, offer_waits=deliver_waits, snapshot=True)
             calls = self.open_calls(branch)
             reply = await self.required(
                 "snapshot",
@@ -634,6 +656,7 @@ class View:
                     "declaration": self.agent.declaration(),
                     "messages": messages,
                     "cursor": cursor,
+                    **({"waitCursor": wait_cursor} if wait_position else {}),
                     "lastMessageId": messages[-1]["id"] if messages else None,
                     "waiting": {
                         "questions": [i for _, i in qs.values()],
@@ -651,6 +674,7 @@ class View:
             not http
             or (
                 reply["cursor"] == cursor
+                and reply.get("waitCursor") == wait_cursor
                 and same_json(
                     reply["waiting"],
                     {
@@ -680,6 +704,8 @@ class View:
             and presence is self.binding.presence.get(self.key)
         ):
             self.remember_approvals(presence, qs)
+        if wait_position and wait_cursor:
+            wait_position.save(self, wait_cursor)
         return reply, Cursor(cursor, len(messages), fingerprint(reply["messages"]), pos, rev, http)
 
     def remember_approvals(self, presence: Presence, questions: dict[str, tuple[Obj, Obj]]) -> None:

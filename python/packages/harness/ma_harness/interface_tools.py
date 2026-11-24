@@ -471,7 +471,7 @@ class InterfaceTools:
             return {}
         ids = {e["id"] for e in branch}
         calls = {}
-        for cid, state in handoff_fold(s["entries"]).items():
+        for cid, state in handoff_fold(branch).items():
             start, cp, terminal = self.checked_interface_state(state, ids)
             if terminal or not self.restored_interface(start, cp):
                 continue
