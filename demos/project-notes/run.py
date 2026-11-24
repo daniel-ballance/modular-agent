@@ -11,7 +11,7 @@ import sys
 import time
 from contextlib import ExitStack
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, gettempdir
 from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
@@ -366,7 +366,7 @@ def main():
         ):
             parser.error("build the Claude sidecar first (see the demo README)")
 
-    temp = Path(os.environ.get("TMPDIR") or Path.home() / ".cache/ma-std-tmp").resolve()
+    temp = Path(os.environ.get("TMPDIR") or gettempdir()).resolve()
     temp.mkdir(parents=True, exist_ok=True)
     os.environ["TMPDIR"] = str(temp)
     os.umask(0o077)

@@ -7,8 +7,6 @@ Send a build failure to a webhook. The Python agent posts a summary, the Rust `m
 From the repository root on Linux, use `git`, `setpriv` (util-linux), `mise`, `uv`, Python 3 and Node with `node:sqlite` (22.13 or newer):
 
 ```sh
-export TMPDIR="$HOME/.cache/ma-std-tmp" CARGO_INCREMENTAL=0
-mkdir -p "$TMPDIR"
 demos/ops-desk/build.sh
 python3 demos/ops-desk/run.py
 ```
@@ -52,7 +50,7 @@ Auto prints each approval before answering through the same HTTP API as the page
 | Coder, Rust `ma` | `claude/claude-sonnet-5-5` | `DESK_CODER_MODEL` |
 | Verifier, Go | `chatgpt/gpt-6.1-sol` | `DESK_VERIFIER_MODEL` |
 
-Each invocation uses a fresh, private `ops-desk-live-*` directory under `TMPDIR`. It prints the posts and exits after the routes settle. Success requires an answered approval, a changed commit checked out by the verifier, and a passing verdict backed by its test tool. The page stops; the logs, database and checkouts stay in that directory until you remove it. Match the printed thread IDs to `gen_ai.conversation.id` in Phoenix. See [the two measured runs](DESIGN.md#two-live-events) for latency and token counts.
+Each invocation uses a fresh, private `ops-desk-live-*` directory. The runner chooses it. It prints the posts and exits after the routes settle. Success requires an answered approval, a changed commit checked out by the verifier, and a passing verdict backed by its test tool. The page stops; the logs, database and checkouts stay in that directory until you remove it. Match the printed thread IDs to `gen_ai.conversation.id` in Phoenix. See [the two measured runs](DESIGN.md#two-live-events) for latency and token counts.
 
 ## Try the scripted page
 

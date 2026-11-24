@@ -28,6 +28,7 @@ done
 want() { [[ " ${languages[*]} " == *" $1 "* ]]; }
 all=false; [ ${#languages[@]} -eq 4 ] && all=true
 
+# This script's logs only. Callers leave TMPDIR unset; language suites use the system temp directory.
 export TMPDIR="${TMPDIR:-$HOME/.cache/ma-std-tmp}"
 mkdir -p "$TMPDIR" || exit 1
 TMPDIR="$(cd "$TMPDIR" && pwd -P)"

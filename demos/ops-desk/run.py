@@ -14,7 +14,7 @@ import sys
 import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from tempfile import TemporaryDirectory, mkdtemp
+from tempfile import TemporaryDirectory, gettempdir, mkdtemp
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
@@ -442,7 +442,7 @@ def main():
     if args.approve and not args.live:
         p.error('--approve requires --live')
     os.umask(0o077)
-    temp = Path(os.environ.get('TMPDIR') or Path.home() / '.cache/ma-std-tmp').resolve()
+    temp = Path(os.environ.get('TMPDIR') or gettempdir()).resolve()
     temp.mkdir(parents=True, exist_ok=True)
     os.environ['TMPDIR'] = str(temp)
     if args.live:

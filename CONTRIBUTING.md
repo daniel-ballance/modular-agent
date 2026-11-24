@@ -45,14 +45,14 @@ Use `scripts/stress.sh N [check.sh options]` to reproduce failures under load. I
 
 Each step has a 30-minute hang guard (`MA_CHECK_STEP_LIMIT`, in seconds). A step that reaches it is stopped with its processes and reported as failed; its log ends with `hang guard: stopped after`. The guard catches hangs; a step that is merely slow is a problem to find, not a reason to raise it.
 
-The checks need Linux with unprivileged user, PID and mount namespaces, [mise](https://mise.jdx.dev) (which pins Rust and Go), Node.js 22.12 or later, and [uv](https://docs.astral.sh/uv/) (which pins Python 3.13). Set `TMPDIR` to a folder on disk if `/tmp` is small; the script defaults to `~/.cache/ma-std-tmp`.
+The checks need Linux with unprivileged user, PID and mount namespaces, [mise](https://mise.jdx.dev) (which pins Rust and Go), Node.js 22.12 or later, and [uv](https://docs.astral.sh/uv/) (which pins Python 3.13). Leave `TMPDIR` and `CARGO_INCREMENTAL` unset. No suite needs an on-disk temp directory or a shared Cargo incremental setting. A full RAM-backed `/tmp` once filled and caused spurious failures; that is a size limit. The check scripts therefore put their own logs under `~/.cache/ma-std-tmp` when `TMPDIR` is unset. Language suites use the system temp directory. Parallel worktrees keep separate Cargo target directories. A shared `CARGO_TARGET_DIR` would make those worktrees wait on one build lock.
 
 A coding agent's shell commands may run inside a systemd scope that ends with the agent's process; T3 Code does this. Ending the scope kills everything in it, including a check started with `nohup` or `setsid`. Start a long run as its own user unit instead, so it survives:
 
 ```sh
 mkdir -p "$HOME/.cache/ma-std-tmp"
 systemd-run --user --unit=ma-check --collect --same-dir \
-  --setenv=PATH="$PATH" --setenv=TMPDIR="$HOME/.cache/ma-std-tmp" \
+  --setenv=PATH="$PATH" \
   -p Delegate=yes -p StandardOutput=file:"$HOME/.cache/ma-std-tmp/check.log" -p StandardError=inherit \
   scripts/check.sh
 systemctl --user is-active ma-check    # active while it runs

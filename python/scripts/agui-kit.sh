@@ -2,7 +2,9 @@
 # A private install: other language lanes may run the same kit concurrently.
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
-kit=$(mktemp -d "${TMPDIR:-$HOME/.cache/ma-std-tmp}/python-agui-kit-XXXXXX")
+parent="${TMPDIR:-/tmp}"
+mkdir -p "$parent"
+kit=$(mktemp -d "$parent/python-agui-kit-XXXXXX")
 trap 'rm -rf "$kit"' EXIT
 mkdir -p "$kit/agui"
 cp "$root"/conformance/agui/{*.mjs,package*.json} "$kit/agui/"
