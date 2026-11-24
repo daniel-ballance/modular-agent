@@ -3198,10 +3198,9 @@ impl AgentApi for Harness {
     }
     async fn erase(&self, scope: &Scope, entries: Vec<String>) -> Result<ErasureReport> {
         require(self, scope, "erase")?;
-        let _erasure = self
-            .erasure
-            .try_write()
-            .map_err(|_| anyhow!("erasure requires idle turns and no other erasure"))?;
+        let _erasure = self.erasure.try_write().map_err(|_| {
+            OperationError::Busy("erasure requires idle turns and no other erasure".into())
+        })?;
         let (erased, unresolved, affected) = {
             let mut sessions = self.sessions.lock().unwrap();
             ensure!(
@@ -3209,7 +3208,7 @@ impl AgentApi for Harness {
                     .values()
                     .all(|s| s.active.is_none() && s.check_rewind().is_ok())
                     && self.blocked_projects.lock().unwrap().is_empty(),
-                "erasure requires all local turns to be idle"
+                OperationError::Busy("erasure requires all local turns to be idle".into())
             );
             let store = self
                 .store()

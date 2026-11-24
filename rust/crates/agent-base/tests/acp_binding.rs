@@ -564,6 +564,66 @@ async fn binding_cancel_hands_back_queued_content_and_duplicate_keeps_cancelled_
 }
 
 #[tokio::test]
+async fn erase_during_a_turn_returns_busy_and_preserves_the_approval() {
+    let rig = Rig::new(json!([
+        call("bash", json!({"command":"printf x >> count"})),
+        "done"
+    ]));
+    let cwd = rig.project.path().to_owned();
+    rig.client(None, false, async move |cx| {
+        let new = rpc(&cx, "session/new", json!({"cwd":cwd,"mcpServers":[]})).await?;
+        let id = &new["sessionId"];
+        assert_eq!(
+            new["_meta"]["modular-agent"]["declaration"]["erasureDuringTurn"],
+            "refused"
+        );
+        let pending = cx
+            .send_request(PromptRequest::new(
+                id.as_str().unwrap().to_owned(),
+                vec!["work".into()],
+            ))
+            .block_task();
+        let q = question(&cx, id).await?;
+        let all = json!({"sessionId":id,"all":true});
+        let before = rpc(&cx, "_modular-agent/history", all.clone()).await?;
+        let request = before["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["kind"] == "inputRequest" && e["requestId"] == q["id"])
+            .unwrap();
+        let error = rpc(
+            &cx,
+            "_modular-agent/erase",
+            json!({"sessionId":id,"entryIds":[request["id"]]}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(json!(error.code), -32602);
+        assert_eq!(
+            error.data,
+            Some(json!({"code":"busy"})),
+            "{}",
+            error.message
+        );
+        assert_eq!(rpc(&cx, "_modular-agent/history", all).await?, before);
+        assert_eq!(
+            rpc(
+                &cx,
+                "_modular-agent/answer",
+                json!({"sessionId":id,"requestId":q["id"],"value":"allow"})
+            )
+            .await?,
+            json!({"accepted":true})
+        );
+        assert_eq!(pending.await?.stop_reason, StopReason::EndTurn);
+        assert_eq!(std::fs::read(cwd.join("count")).unwrap(), b"x");
+        Ok(())
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn binding_optional_methods_branch_history_and_erasure_shapes() {
     let r = Rig::new(json!(["one", "two"]));
     let cwd = r.project.path().to_path_buf();
