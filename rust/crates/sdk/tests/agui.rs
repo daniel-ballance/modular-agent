@@ -1,3 +1,5 @@
+#[path = "agui/approval_call.rs"]
+mod approval_call;
 #[path = "agui/crash.rs"]
 mod crash;
 #[path = "agui/listing.rs"]
