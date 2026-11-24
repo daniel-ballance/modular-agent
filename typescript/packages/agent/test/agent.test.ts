@@ -94,8 +94,8 @@ test("an Interface answers an approval; a second answer is refused", async () =>
 	const s = await api.startSession();
 	await api.input(s, { content: "make a file", actorId: "user" });
 	while (!requests.length) await new Promise((r) => setTimeout(r, 5));
-	assert.deepEqual(harnessApi!.answer(s, { requestId: requests[0].id, actorId: "user", value: "allow" }), { accepted: true });
-	assert.equal(harnessApi!.answer(s, { requestId: requests[0].id, actorId: "user", value: "allow" }).accepted, false);
+	assert.deepEqual(await harnessApi!.submitAnswer(s, { requestId: requests[0].id, actorId: "user", value: "allow" }), { accepted: true });
+	assert.equal((await harnessApi!.submitAnswer(s, { requestId: requests[0].id, actorId: "user", value: "allow" })).accepted, false);
 	await api.waitForIdle(s);
 	assert.equal(readFileSync(join(project, "made.txt"), "utf8").trim(), "hi");
 	await h.stop();

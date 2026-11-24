@@ -57,7 +57,7 @@ test("the agent reopens settings and receipts but does not continue a question w
 	assert.equal(api.history(sid).at(-1)?.parentId, "e7");
 	assert.deepEqual(await api.input(sid, { content: "ignored", key: "one", actorId: "friend" }), { duplicate: true, inputId: "original", taken: "now" });
 	assert.equal(api.openRequests(sid)[0]?.id, "foreign-question");
-	assert.equal(api.answer(sid, { requestId: "foreign-question", actorId: "friend", value: "allow" }).accepted, true);
+	assert.equal((await api.submitAnswer(sid, { requestId: "foreign-question", actorId: "friend", value: "allow" })).accepted, true);
 	await api.waitForIdle(sid);
 	const history = api.history(sid);
 	assert.ok(!history.some(e => e.continuesTurnId || e.kind === "toolStarted" || e.kind === "toolResult"));
@@ -182,7 +182,7 @@ test("changing any part of a keyed question does not reuse its answer", async (t
 		const result = api.ask(sid, draft);
 		await until(() => seen.length > index);
 		const r = seen[index++];
-		assert.equal(api.answer(sid, { requestId: r.id, actorId: "user", declined: true }).accepted, true);
+		assert.equal((await api.submitAnswer(sid, { requestId: r.id, actorId: "user", declined: true })).accepted, true);
 		assert.equal((await result).requestId, r.id);
 		return r.id;
 	};

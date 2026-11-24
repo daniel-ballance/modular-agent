@@ -61,7 +61,8 @@ export class TerminalInterface implements InterfaceCapability {
 	onInputRequest(request: InputRequest): void {
 		if (this.options.mode !== "interactive") {
 			// Nobody is there to answer in print and JSON modes.
-			queueMicrotask(() => this.api.answer(request.sessionId, { requestId: request.id, actorId: this.actorId, declined: true, reason: "nobody to answer in print mode" }));
+			void this.api.submitAnswer(request.sessionId, { requestId: request.id, actorId: this.actorId, declined: true, reason: "nobody to answer in print mode" })
+				.catch(() => this.line(red("Could not decline the request")));
 			return;
 		}
 		this.requests.push(request);
@@ -212,7 +213,7 @@ export class TerminalInterface implements InterfaceCapability {
 		for await (const raw of rl) {
 			const line = raw.trim();
 			if (this.blocking()) {
-				this.answer(this.requests[0], line);
+				await this.answer(this.requests[0], line);
 				continue;
 			}
 			if (!line) {
@@ -243,17 +244,18 @@ export class TerminalInterface implements InterfaceCapability {
 		return 0;
 	}
 
-	private answer(request: InputRequest, line: string): void {
+	private async answer(request: InputRequest, line: string): Promise<void> {
 		let value: string | undefined = line;
 		const choices = request.kind === "approval" ? ["allow", "refuse"] : request.options;
 		if (choices && /^\d+$/.test(line)) value = choices[Number(line) - 1];
 		const declined = !line || (request.kind === "approval" && value !== "allow");
-		const result = this.api.answer(this.sessionId, { requestId: request.id, actorId: this.actorId, value: declined ? undefined : value, declined });
 		// A secret must not stay in the line history, where the up arrow would bring it back.
 		if (request.kind === "secret") {
 			const history = (this.rl as unknown as { history?: string[] } | undefined)?.history;
 			if (history?.[0] === line) history.shift();
 		}
+		const result = await this.api.submitAnswer(this.sessionId, { requestId: request.id, actorId: this.actorId, value: declined ? undefined : value, declined })
+			.catch(() => ({ accepted: false, reason: "Could not submit the answer" }));
 		if (!result.accepted) this.line(red(result.reason ?? "Not accepted"));
 	}
 
@@ -316,7 +318,7 @@ export class TerminalInterface implements InterfaceCapability {
 			case "/answer": {
 				const request = this.requests[0];
 				if (!request) return this.line("No question is open."), true;
-				this.answer(request, arg);
+				await this.answer(request, arg);
 				return true;
 			}
 			case "/jobs": {

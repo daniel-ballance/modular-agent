@@ -47,7 +47,7 @@ export class HttpInterface implements InterfaceCapability {
 				}],
 				["POST", /^\/sessions\/([^/]+)\/cancel$/, async (req) => ({ handedBack: await api.cancel(req.params[0]) })],
 				["GET", /^\/sessions\/([^/]+)\/requests$/, (req) => api.openRequests(req.params[0])],
-				["POST", /^\/sessions\/([^/]+)\/answers$/, (req) => api.answer(req.params[0], { ...req.body, actorId: actor.id })],
+				["POST", /^\/sessions\/([^/]+)\/answers$/, (req) => api.submitAnswer(req.params[0], { ...req.body, actorId: actor.id })],
 				["GET", /^\/sessions\/([^/]+)\/events$/, async (req, res) => {
 					const sessionId = req.params[0];
 					api.session(sessionId); // refuses a session that isn't open

@@ -15,7 +15,7 @@ function fakeUi() {
 	const plugin: Plugin = { name: "fake-ui", setup(a) { api = a; a.provide("interface", { id: "fake", actorId: "user", onInputRequest: (r: InputRequest) => requests.push(r) }); } };
 	return {
 		plugin, requests,
-		answer: (r: InputRequest, value: string) => api.answer(r.sessionId, { requestId: r.id, actorId: "user", value, declined: value !== "allow" }),
+		answer: (r: InputRequest, value: string) => api.submitAnswer(r.sessionId, { requestId: r.id, actorId: "user", value, declined: value !== "allow" }),
 		next: async () => {
 			for (let i = 0; i < 400 && !requests.length; i++) await new Promise((r) => setTimeout(r, 5));
 			assert.ok(requests.length, "no question was asked");
@@ -59,8 +59,8 @@ test("a question outlasts its turn; a late allow runs the call and the agent car
 	assert.deepEqual((checkpoint.data as { requestIds: string[] }).requestIds, [asked.id]);
 
 	// The late answer lets the call run, in a new turn started by the answer.
-	assert.deepEqual(ui.answer(asked, "allow"), { accepted: true });
-	assert.equal(ui.answer(asked, "allow").accepted, false, "one answer closes the question");
+	assert.deepEqual(await ui.answer(asked, "allow"), { accepted: true });
+	assert.equal((await ui.answer(asked, "allow")).accepted, false, "one answer closes the question");
 	await api.waitForIdle(s);
 	const results = kinds(h, s, "toolResult");
 	assert.equal(results.length, 1, "exactly one result");
@@ -100,7 +100,7 @@ test("the Harness preserves a committed pending call when the Runtime reply is l
 	assert.deepEqual(end.outcome, { kind: "failed", error: "Runtime reply lost" });
 	assert.deepEqual(end.result.openToolCalls, [call.id]);
 	assert.equal(kinds(h, s, "toolResult").length, 0);
-	assert.deepEqual(ui.answer(asked, "allow"), { accepted: true });
+	assert.deepEqual(await ui.answer(asked, "allow"), { accepted: true });
 	await api.waitForIdle(s);
 	assert.deepEqual(kinds(h, s, "toolResult").map((e) => e.toolCallId), [call.id]);
 	const [first, continuation] = kinds(h, s, "turnStart");
@@ -137,7 +137,7 @@ test("new input while a call is open sees a stand-in result; the real one later 
 	assert.equal(seen[0], WAITING_NOTE);
 	// the record holds no fake result
 	assert.equal(kinds(h, s, "toolResult").length, 0);
-	ui.answer(asked, "allow");
+	await ui.answer(asked, "allow");
 	await api.waitForIdle(s);
 	assert.equal(seen[1], "The user answered: allow");
 	assert.equal(turnData(h, s).at(-1)!.result.text, "The payment went through.");
@@ -153,7 +153,7 @@ test("a late decline is passed to the question tool and the agent carries on", a
 	await api.input(s, { content: "pay", actorId: "user" });
 	const asked = await ui.next();
 	await api.waitForIdle(s);
-	ui.answer(asked, "refuse");
+	await ui.answer(asked, "refuse");
 	await api.waitForIdle(s);
 	const [result] = kinds(h, s, "toolResult");
 	assert.equal((result.data as { status: string }).status, "completed");
@@ -179,7 +179,7 @@ test("a question waiting past its turn survives a restart, with a transient Runt
 	await api.openSession(s);
 	const again = await ui.next();
 	assert.equal(again.id, asked.id);
-	assert.deepEqual(ui.answer(again, "allow"), { accepted: true });
+	assert.deepEqual(await ui.answer(again, "allow"), { accepted: true });
 	await api.waitForIdle(s);
 	assert.match(JSON.stringify(kinds(h, s, "toolResult")[0].message), /The user answered: allow/);
 	assert.equal(turnData(h, s).at(-1)!.result.text, "Paid after the restart.");

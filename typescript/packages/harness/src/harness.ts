@@ -208,7 +208,6 @@ export interface PluginApi {
 	// actors
 	ask(sessionId: string, request: InputRequestDraft): Promise<Answer>;
 	deferTool(sessionId: string, turnId: string | undefined, question: InputRequestDraft): Promise<{ pending: string } | { refuse: string } | undefined>;
-	answer(sessionId: string, answer: Answer): { accepted: boolean; reason?: string };
 	refreshApprovals(sessionId: string): Promise<void>;
 	registerApprovalRoute(policy: ApprovalRoute): () => void;
 	presentApproval(sessionId: string, requestId: string, delivery: ApprovalDelivery): Promise<boolean>;
@@ -538,7 +537,6 @@ export class Harness {
 			callTool: (sessionId, call) => this.callTool(this.session(sessionId), { ...call, id: call.id ?? this.newId() }),
 			ask: (sessionId, request) => this.ask(this.session(sessionId), request, pluginName),
 			deferTool: (id, turnId, question) => this.deferTool(this.session(id), turnId, question, pluginName),
-			answer: (sessionId, answer) => this.answer(this.session(sessionId), answer),
 			refreshApprovals: id => this.reconcileApprovals(this.session(id)),
 			registerApprovalRoute: policy => { this.approvalRoutes.set(policy.id, policy); return () => {
 				if (this.approvalRoutes.get(policy.id) === policy) this.approvalRoutes.delete(policy.id);
@@ -4437,11 +4435,12 @@ export class Harness {
 					s.requests.delete(request.id);
 					s.lateAnswers.add(request.id);
 					for (const i of viewers) i.onInputRequestClosed?.(request.id);
-					if (s.suspended) { resolve({ ...answer, declined: true }); return Promise.resolve(); }
+					if (s.suspended) { const declined = { ...answer, declined: true }; resolve(declined); return Promise.resolve(declined); }
 					const work = this.recordAnswer(s, request, answer, stepId, request.kind === "secret" && !answer.declined).then(kept => {
 						this.emitAnswer(s, request, kept);
 						s.lateAnswers.delete(request.id);
 						resolve(kept);
+						return kept;
 					}, error => { reject(error); throw error; });
 					void work.catch(error => this.problem("harness", "record answer", error));
 					return work;
@@ -4479,7 +4478,7 @@ export class Harness {
 	}
 
 	/** Answer a question left open past its turn. The answer is recorded, then the open calls carry on if they can. */
-	private answerLate(s: Session, answer: Answer): { accepted: boolean; reason?: string; settled?: Promise<void> } {
+	private async answerLate(s: Session, answer: Answer): Promise<{ accepted: boolean; reason?: string }> {
 		const request = this.waitingRequests(s).find((r) => r.id === answer.requestId);
 		if (!request || request.approvalWait) return { accepted: false, reason: "The request is closed or can no longer be answered" };
 		if (!this.mayAnswer(s, request, answer.actorId)) return { accepted: false, reason: `${answer.actorId} may not answer this request` };
@@ -4495,12 +4494,14 @@ export class Harness {
 			this.emitAnswer(s, request, kept, true);
 			s.waiting.delete(request.id);
 			this.maybeContinueOpenCalls(s, currentSpan());
+			return kept;
 		}));
-		s.settling = work.catch((error) => this.problem("harness", "late answer", error)).finally(() => {
+		s.settling = work.then(() => {}, error => this.problem("harness", "late answer", error)).finally(() => {
 			if (s.settling === tracked) s.settling = undefined;
 		});
 		const tracked = s.settling;
-		return { accepted: true, settled: work };
+		const kept = await work;
+		return { accepted: !kept.declined || !!answer.declined };
 	}
 
 	/** Tool calls on the current branch that have no result and are not part of a running turn. */
@@ -4607,32 +4608,11 @@ export class Harness {
 			answer = { requestId: answer.requestId, actorId: answer.actorId, delegatedBy: answer.delegatedBy };
 		}
 		const open = s.requests.get(request.id);
-		if (open) await open.resolve(answer);
-		else {
-			const accepted = this.answerLate(s, answer);
-			if (!accepted.accepted) return accepted;
-			await accepted.settled;
-		}
-		return { accepted: true };
+		if (!open) return this.answerLate(s, answer);
+		const kept = await open.resolve(answer);
+		return { accepted: !kept.declined || !!answer.declined };
 	}
 
-	private answer(s: Session, answer: Answer): { accepted: boolean; reason?: string } {
-		const open = s.requests.get(answer.requestId);
-		const request = open?.request ?? this.waitingRequests(s).find(r => r.id === answer.requestId);
-		// Legacy local interfaces can submit asynchronously. ACP never carries secret values.
-		if (request?.kind === "secret" && !answer.declined) {
-			if (!this.mayAnswer(s, request, answer.actorId)) return { accepted: false };
-			void this.submitAnswer(s, answer).catch(error => this.problem("harness", "secret answer", error));
-			return { accepted: true };
-		}
-		if (!open) {
-			const { accepted, reason } = this.answerLate(s, answer);
-			return reason === undefined ? { accepted } : { accepted, reason };
-		}
-		if (!this.mayAnswer(s, open.request, answer.actorId)) return { accepted: false, reason: `${answer.actorId} may not answer this request` };
-		open.resolve(answer); // the first accepted answer closes the request
-		return { accepted: true };
-	}
 
 	// ---------- jobs ----------
 

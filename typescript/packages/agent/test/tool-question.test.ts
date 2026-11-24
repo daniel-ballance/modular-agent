@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
-import { type Harness, type InputRequest, type Plugin, type PluginApi, textOf } from "@modular-agent/harness";
+import { type CredentialStore, type Harness, type InputRequest, type Plugin, type PluginApi, textOf } from "@modular-agent/harness";
 import { questionTool } from "@modular-agent/tools-question";
 import { createAgent } from "../src/index.js";
 
@@ -14,7 +14,7 @@ function fakeUi() {
 	const plugin: Plugin = { name: "fake-ui", setup(a) { api = a; a.provide("interface", { id: "fake", actorId: "user", onInputRequest: (r: InputRequest) => requests.push(r) }); } };
 	return {
 		plugin, requests,
-		answer: (r: InputRequest, value: string) => api.answer(r.sessionId, { requestId: r.id, actorId: "user", value }),
+		answer: (r: InputRequest, value: string) => api.submitAnswer(r.sessionId, { requestId: r.id, actorId: "user", value }),
 		next: async () => {
 			for (let i = 0; i < 400 && !requests.length; i++) await new Promise((r) => setTimeout(r, 5));
 			assert.ok(requests.length, "no question was asked");
@@ -48,7 +48,7 @@ test("a tool's own question answered within the turn", async () => {
 	await api.input(s, { content: "set up a database", actorId: "user" });
 	const q = await ui.next();
 	assert.deepEqual(q.options, ["postgres", "sqlite"]);
-	ui.answer(q, "sqlite");
+	await ui.answer(q, "sqlite");
 	await api.waitForIdle(s);
 	assert.match(lastText(h, s) ?? "", /The user answered: sqlite/);
 	await h.stop();
@@ -75,7 +75,7 @@ test("a tool's own question outlasts its turn; the tool runs again and finds the
 	await api.openSession(s);
 	const again = await ui.next();
 	assert.equal(again.id, asked.id);
-	assert.deepEqual(ui.answer(again, "postgres"), { accepted: true });
+	assert.deepEqual(await ui.answer(again, "postgres"), { accepted: true });
 	await api.waitForIdle(s);
 	const results = kinds(h, s, "toolResult");
 	assert.equal(results.length, 1, "exactly one result");
@@ -115,7 +115,11 @@ test("a secret goes to the credential store and nowhere else", async () => {
 	await api.input(s, { content: "set up github", actorId: "user" });
 	const q = await ui.next();
 	assert.equal(q.kind, "secret");
-	assert.equal(ui.answer(q, "ghp_SECRET123").accepted, true);
+	const store = h.use<CredentialStore>("credential-store")!, stage = store.stage;
+	store.stage = async () => undefined;
+	try { assert.deepEqual(await ui.answer(q, "not-staged"), { accepted: false }); } finally { store.stage = stage; }
+	assert.equal(api.openRequests(s)[0]?.id, q.id);
+	assert.equal((await ui.answer(q, "ghp_SECRET123")).accepted, true);
 	await api.waitForIdle(s);
 	assert.match(lastText(h, s)!, /kept as "secret:github"; its value is not shown to you/);
 	assert.ok(!context.includes("ghp_SECRET123"), "the model never sees it");
