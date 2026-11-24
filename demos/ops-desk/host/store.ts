@@ -118,20 +118,19 @@ export class Store {
       return true;
     });
   }
-  private select(where: string, value: string | number) {
+  private select(where: string, ...values: (string | number)[]) {
     return this.db
       .prepare(
         `SELECT r.*, e.parent FROM routes r JOIN events e ON e.seq=r.event WHERE ${where} ORDER BY r.id LIMIT 1`
       )
-      .get(value) as Route | undefined;
+      .get(...values) as Route | undefined;
   }
   next(agent: Agent) {
     // Delivery and discovery are separate. Never use the queue to look for an admitted turn.
     return this.select("agent=? AND state IN ('queued','sending')", agent);
   }
   activeThread(agent: Agent, thread: string) {
-    const r = this.select(`r.thread=? AND state IN ${pending}`, thread);
-    return r?.agent === agent ? r : undefined;
+    return this.select(`r.agent=? AND r.thread=? AND state IN ${pending}`, agent, thread);
   }
   inFlight(agent: Agent) {
     return this.select("r.agent=? AND state IN ('sending','admitted')", agent);

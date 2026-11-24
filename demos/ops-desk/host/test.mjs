@@ -46,6 +46,11 @@ test('only the named agents can queue work; replay and failed verdicts have boun
     s.handOff(triage, 'coder', 'fix limit', 'seed');
     s.handOff(triage, 'coder', 'duplicate', 'seed');
     const revision = 'a'.repeat(40);
+    // Thread IDs come from separate agents and need not be globally unique.
+    s.thread(triage, 'local-thread');
+    s.thread(s.next('coder'), 'local-thread');
+    assert.equal(s.activeThread('coder', 'local-thread').agent, 'coder');
+    assert.equal(s.activeThread('triage', 'local-thread').agent, 'triage');
     for (let i = 0; i < 3; i++) {
       const coder = s.next('coder');
       assert.equal(coder.attempt, i);

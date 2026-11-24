@@ -20,7 +20,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 DEMO = Path(__file__).resolve().parent
 HOST = DEMO / 'host/dist/main.js'
-CASES = ['happy', 'refusal', 'verification', 'restart', 'duplicate', 'host-restart', 'host-decline']
+CASES = ['happy', 'refusal', 'verification', 'restart', 'duplicate', 'host-restart', 'host-decline', 'callers']
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -164,8 +164,9 @@ def station(env, cwd, log):
                             env=env, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                             stderr=log, text=True)
     try:
-        check(side.stdout.readline().strip() == 'ready', 'agent station did not start')
-        yield
+        url = side.stdout.readline().strip()
+        check(url.startswith('ws://127.0.0.1:'), 'agent station did not print its loopback plugin address')
+        yield url
     finally:
         stop(side)
 
@@ -189,7 +190,7 @@ def start(temp, case, trace_endpoint=None):
         fixtures = sample / 'cases.json'
         fixtures.write_text(json.dumps([*json.loads(fixtures.read_text()), [135, 100]]))
         env['DESK_SAMPLE'] = str(sample)
-    with (temp / 'host.log').open('w') as log, station(env, temp, log):
+    with (temp / 'host.log').open('w') as log, station(env, temp, log) as tools:
         def launch():
             proc = subprocess.Popen(['node', HOST], cwd=temp, env=env, stdin=subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=log, text=True)
@@ -208,6 +209,7 @@ def start(temp, case, trace_endpoint=None):
         try:
             desk = Desk(root, *launch(), time.monotonic() + 600 if case == 'live' else None)
             desk.launch = launch
+            desk.tools = tools
             yield desk
         except Exception:
             if case == 'live':
@@ -263,6 +265,9 @@ def run(d, case):
               'deadline changed the checkout')
         return
     q = d.approval()
+    if case == 'callers':
+        subprocess.run([DEMO / 'triage/.venv/bin/python', DEMO / 'scripts/check-callers.py', d.tools, q['thread']],
+                       cwd=d.root, check=True, timeout=20)
     if case in ('host-restart', 'host-decline'):
         d.proc.kill()
         check(d.proc.wait() == -signal.SIGKILL, 'host was not killed')
