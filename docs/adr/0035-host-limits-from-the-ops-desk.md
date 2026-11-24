@@ -41,4 +41,4 @@ The desk runs three listeners. Each accepts one token file and closes over the n
 
 Accepted as recommended on 2026-11-24: a separate optional per-thread feed of wait closures; a status-only run receipt for every accepted AG-UI exchange on kept history, kept on the serving deployment; and an opt-in operator table of named callers on one plugin listener. Implementations follow in 0.3.0.
 
-All four SDKs and `ma --agui` implement it from 0.3.0.
+All four SDKs and `ma --agui` implement it from 0.3.0. All four shipped AG-UI fixtures offer the wait-closure feed and run receipts on kept history.
