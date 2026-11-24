@@ -568,7 +568,12 @@ impl interface_acp::Factory for Factory {
             base::ensure!(
                 !routes.contains_key(id)
                     && (self.0.inner.harness.max_approval_wait_ms().is_some()
-                        || base::AgentApi::snapshot(self.0.inner.harness.as_ref(), id).is_err()),
+                        || base::AgentApi::snapshot(self.0.inner.harness.as_ref(), id)
+                            .ok()
+                            .is_none_or(|d| d
+                                .entries
+                                .iter()
+                                .any(|e| e.writer == "interface.agui"))),
                 interface_acp::request_error("busy", "session is already open by another writer")
             );
             routes.insert(id.into(), sink.clone());

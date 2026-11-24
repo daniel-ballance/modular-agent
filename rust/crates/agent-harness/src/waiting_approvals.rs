@@ -280,6 +280,86 @@ impl Harness {
                     .is_ok_and(|r| eligible(&r))
             })
     }
+    /// Called only while replacing a grant or removing a member. Compare the
+    /// same audience on both sides of that change. Presence loss alone is not revocation.
+    pub(super) fn close_revoked_questions(
+        &self,
+        before: &SessionData,
+        next: &mut SessionData,
+    ) -> Result<bool> {
+        if !before.entries.iter().any(|e| e.kind == "request.open") {
+            return Ok(false);
+        }
+        let mut closed = false;
+        for q in questions(before)?.into_iter().filter(|q| q.answerable) {
+            // A question relayed to another session still has that audience.
+            if q.route.iter().any(|s| s != &before.id) {
+                continue;
+            }
+            let approval = q.kind == RequestKind::Approval;
+            let present = if approval && !q.waits_for_approval() {
+                Some(requests(self)?.present_for_approval(&before.id))
+            } else {
+                None
+            };
+            let eligible = |d: &SessionData| {
+                std::iter::once("user".to_owned())
+                    .chain(actors(d).into_keys())
+                    .any(|actor| {
+                        q.extra["answerers"]
+                            .as_array()
+                            .is_none_or(|v| v.iter().any(|a| a == &actor))
+                            && present.as_ref().is_none_or(|set| set.contains(&actor))
+                            && self
+                                .executor_rights(d, &actor, &Authority::full())
+                                .is_ok_and(|r| {
+                                    r.has("watch")
+                                        && r.has(if approval { "approve" } else { "answer" })
+                                })
+                    })
+            };
+            if !eligible(before) || eligible(next) {
+                continue;
+            }
+            let Some(open) = before.entries.iter().find(|e| {
+                e.kind == "request.open" && e.content.as_ref().is_some_and(|v| v["id"] == q.id)
+            }) else {
+                continue;
+            };
+            let expired = q.extra["whenTimeLimit"] == "decline"
+                && q.timeout_ms
+                    .is_some_and(|ms| open.at.saturating_add(ms) <= now());
+            let reason = if expired {
+                "timeLimit"
+            } else {
+                "noLongerAnswerable"
+            };
+            let mut value = json!({"request":q.id, "reason":reason});
+            if !expired {
+                value["cause"] = json!("revoked");
+            }
+            push(
+                next,
+                &q.scope,
+                Draft::new("request.closed", false, value).copying(vec![open.id.clone()]),
+            );
+            if q.waits_for_approval() {
+                settlement(
+                    next,
+                    open,
+                    &q,
+                    reason,
+                    if expired {
+                        ToolStatus::NotStarted
+                    } else {
+                        ToolStatus::Refused
+                    },
+                )?;
+            }
+            closed = true;
+        }
+        Ok(closed)
+    }
     pub(super) fn park(&self, draft: &Question) -> Result<Option<bool>> {
         let Some(max) = self.max_approval_wait_ms() else {
             return Ok(None);

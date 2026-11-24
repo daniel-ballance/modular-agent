@@ -96,6 +96,32 @@ pub fn install(b: sdk::AgentBuilder, k: &Arc<Kit>) -> sdk::AgentBuilder {
         let k = state.clone();
         async move {
             let mut v = out.value;
+            if k.name == "closure-buffered" && out.recipient == "kit-primary" {
+                if v["question"]["id"].is_string()
+                    && k.latches
+                        .lock()
+                        .unwrap()
+                        .contains(&(out.session_id.clone(), "hold:beforeWaitDelivery".into()))
+                {
+                    k.latch(&out.session_id, "beforeWaitDelivery");
+                    k.barrier(&out.session_id, "released").await;
+                }
+                let (q, mode) = k.wait_gate.lock().unwrap().clone();
+                if match mode.as_str() {
+                    "opening" => {
+                        v["entry"]["kind"] == "inputRequest" && v["entry"]["requestId"] == q
+                    }
+                    "decision" => {
+                        v["entry"]["kind"] == "inputAnswer" && v["entry"]["requestId"] == q
+                    }
+                    "notice" => {
+                        v["type"] == "modular-agent.waitClosed" && v["data"]["requestId"] == q
+                    }
+                    _ => false,
+                } {
+                    return Ok(OutputDecision::Block);
+                }
+            }
             if k.name == "release-gate"
                 && v["type"] == "MESSAGES_SNAPSHOT"
                 && k.file(&out.session_id)

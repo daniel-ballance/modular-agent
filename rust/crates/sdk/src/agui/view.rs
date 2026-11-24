@@ -8,7 +8,7 @@ pub(super) struct Cursor {
     source: [u8; 32],
     count: usize,
     epoch: Option<String>,
-    http: bool,
+    wait: Option<String>,
 }
 fn digest(v: &Value) -> [u8; 32] {
     Sha256::digest(v.to_string()).into()
@@ -288,8 +288,9 @@ impl Service {
         c: &Client,
         d: &SessionData,
         token: &str,
-        http: bool,
+        wait: Option<&str>,
     ) -> R<(Value, Cursor)> {
+        let http = wait.is_some();
         let messages = self.messages(a, d).await?;
         let last = messages.as_array().and_then(|l| l.last()).map(|m| &m["id"]);
         let v = if http {
@@ -304,7 +305,7 @@ impl Service {
                 .into_iter()
                 .map(|(_, call, deadline)| json!({"toolCallId":call,"expiresAt":iso(deadline)}))
                 .collect::<Vec<_>>();
-            json!({"threadId":id,"declaration":self.agent.declaration_for(Some(id),false).map_err(|_|Fail::Lost)?,"messages":messages,"cursor":token,"lastMessageId":last,"waiting":{"questions":questions,"toolCalls":calls}})
+            json!({"threadId":id,"declaration":self.agent.declaration_for(Some(id),false).map_err(|_|Fail::Lost)?,"messages":messages,"cursor":token,"waitCursor":wait,"lastMessageId":last,"waiting":{"questions":questions,"toolCalls":calls}})
         } else {
             json!({"type":"MESSAGES_SNAPSHOT","messages":messages})
         };
@@ -312,6 +313,7 @@ impl Service {
         let view = self.gate(a, id, v).await?;
         if http
             && (view["cursor"] != token
+                || view["waitCursor"] != json!(wait)
                 || view["lastMessageId"] != json!(last)
                 || view.get("waiting") != waiting.as_ref())
         {
@@ -334,7 +336,7 @@ impl Service {
             source: digest(&messages),
             count,
             epoch: epoch(d),
-            http,
+            wait: wait.map(str::to_owned),
         };
         Ok((view, cursor))
     }
@@ -361,7 +363,7 @@ impl Service {
             return Err(Fail::Cursor);
         }
         let (view, current) = self
-            .snapshot_value(a, &d.id, c, d, &saved.id, saved.http)
+            .snapshot_value(a, &d.id, c, d, &saved.id, saved.wait.as_deref())
             .await?;
         if current.epoch != saved.epoch
             || current.source != saved.source
@@ -385,7 +387,9 @@ impl Service {
             .lock()
             .unwrap()
             .retain(|id, _| !waiting.contains(id));
-        let (v, cursor) = self.snapshot_value(a, id, c, &d, &base::id(), true).await?;
+        let (v, cursor) = self
+            .snapshot_value(a, id, c, &d, &base::id(), Some(&base::id()))
+            .await?;
         let bytes = self.buffer(id, encode(&v)?)?;
         if d.position != self.watch(a, id)?.position {
             return Err(Fail::Conflict);
@@ -406,6 +410,10 @@ impl Service {
                 .unwrap()
                 .insert(qid.into(), presence.clone());
         }
+        c.wait_cursors
+            .lock()
+            .unwrap()
+            .record(cursor.wait.clone().unwrap(), reads::Boundary::snapshot(&d));
         *c.cursor.lock().unwrap() = Some(cursor);
         Ok(reply(200, "application/json", Body::from(bytes)))
     }
@@ -416,7 +424,7 @@ impl Service {
         c: &Client,
         d: &SessionData,
     ) -> R<(Vec<Value>, Cursor)> {
-        let (v, cur) = self.snapshot_value(a, id, c, d, &base::id(), false).await?;
+        let (v, cur) = self.snapshot_value(a, id, c, d, &base::id(), None).await?;
         let last = v["messages"].as_array().unwrap().last().map(|m| &m["id"]);
         let after = json!({"type":"CUSTOM","name":"modular-agent.history","value":{"cursor":cur.id,"lastMessageId":last}});
         if self.gate(a, id, after.clone()).await? != after {

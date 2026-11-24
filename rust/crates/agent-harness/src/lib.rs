@@ -27,6 +27,7 @@ struct OpenSession {
     lease: Option<Box<dyn Lease>>,
     provisional: bool,
     generation: CancellationToken,
+    commits: Option<tokio::sync::broadcast::Sender<()>>,
     interruption: CancellationToken,
     queue: VecDeque<Input>,
     input_contexts: BTreeMap<String, Context>,
@@ -429,6 +430,7 @@ impl Harness {
                         data,
                         lease,
                         provisional,
+                        commits: None,
                         generation: CancellationToken::new(),
                         interruption: CancellationToken::new(),
                         queue: VecDeque::new(),
@@ -598,6 +600,7 @@ impl Harness {
                     data,
                     lease: Some(lease),
                     provisional: false,
+                    commits: None,
                     generation: CancellationToken::new(),
                     interruption: CancellationToken::new(),
                     queue: VecDeque::new(),
@@ -908,6 +911,9 @@ impl Harness {
         });
         self.reservations().rebuild(&data);
         open.data = data;
+        if let Some(commits) = &open.commits {
+            let _ = commits.send(());
+        }
         self.pending_events
             .lock()
             .unwrap()
@@ -1088,6 +1094,18 @@ impl Harness {
         }
         Ok(())
     }
+    /// Subscribe before reading a catch-up watermark. Only the ledger contains facts;
+    /// the bounded channel carries wakes, never entry bodies.
+    pub fn follow_commits(&self, id: &str) -> Result<tokio::sync::broadcast::Receiver<()>> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let open = sessions
+            .get_mut(id)
+            .ok_or_else(|| OperationError::NotFound("session closed".into()))?;
+        Ok(open
+            .commits
+            .get_or_insert_with(|| tokio::sync::broadcast::channel(128).0)
+            .subscribe())
+    }
     fn commit(&self, open: &mut OpenSession, data: &SessionData) -> Result<()> {
         self.commit_reserved(open, data, None)
     }
@@ -1166,6 +1184,9 @@ impl Harness {
                     .is_some_and(|lease| lease.check().is_err());
             self.interrupt(open, if lost { "writerLost" } else { "commitFailed" });
             return Err(LostPart(format!("session commit failed: {error}")).into());
+        }
+        if let Some(commits) = &open.commits {
+            let _ = commits.send(());
         }
         if open.provisional {
             open.provisional = false;
@@ -2697,8 +2718,13 @@ impl AgentApi for Harness {
         let mut next = open.data.clone();
         next.position = Some(entry.id.clone());
         next.entries.push(entry.clone());
+        let revoked = matches!(entry.kind.as_str(), "actor.grant" | "actor.left")
+            && self.close_revoked_questions(&open.data, &mut next)?;
         self.commit(open, &next)?;
         open.data = next;
+        if revoked {
+            requests(self)?.decisions_changed();
+        }
         if let Some(content) = &entry.content {
             match entry.kind.as_str() {
                 "request.open" => {
@@ -3112,6 +3138,7 @@ impl AgentApi for Harness {
                 data: next,
                 lease,
                 provisional: false,
+                commits: None,
                 generation: CancellationToken::new(),
                 interruption: CancellationToken::new(),
                 queue: VecDeque::new(),
@@ -3273,14 +3300,26 @@ impl AgentApi for Harness {
         } else {
             &recipient
         };
+        let shared = matches!(
+            value["type"].as_str(),
+            Some("modular-agent.waitClosed" | "turnEnded" | "toolResult")
+        ) && value["data"].is_object();
+        let event = if shared {
+            value
+        } else {
+            json!({"type":kind,"data":value})
+        };
         let gated = self
-            .remote_output(scope, recipient, vec![json!({"type":kind,"data":value})])
+            .remote_output(scope, recipient, vec![event])
             .await
             .unwrap_or_default();
         if self.output_epoch(&scope.session)? != epoch {
             return Ok(None);
         }
-        Ok(gated.into_iter().next().map(|event| event["data"].clone()))
+        Ok(gated
+            .into_iter()
+            .next()
+            .map(|event| if shared { event } else { event["data"].clone() }))
     }
     async fn emit(&self, event: Event) -> Result<()> {
         let mut events =

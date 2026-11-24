@@ -2,6 +2,7 @@
 //! metadata. The Harness owns every admission, decision and settlement.
 mod input;
 mod listing;
+mod reads;
 mod run;
 mod view;
 use crate::{AcpActor, Agent, Code, Error, InterfaceConnection, Rights, Session};
@@ -164,6 +165,7 @@ struct Routes {
 struct Client {
     run: Arc<tokio::sync::Mutex<()>>,
     cursor: Mutex<Option<Cursor>>,
+    wait_cursors: Mutex<reads::WaitCursors>,
     presence: Mutex<Option<String>>,
     presence_token: Mutex<base::CancellationToken>,
     questions: Mutex<BTreeMap<String, Option<String>>>,
@@ -456,6 +458,12 @@ impl Service {
         let prefix = "/agui/v1";
         if req.method() == Method::GET && path == "/agui/v1/threads" {
             return self.list_threads(&a, req.uri().query()).await;
+        }
+        if req.method() == Method::GET
+            && let Some(path) = path.strip_prefix("/agui/v1/threads/")
+            && let Some(id) = path.strip_suffix("/wait-closures")
+        {
+            return self.wait_closures(a, id, req.uri().query());
         }
         if req.uri().query().is_some() {
             return Err(Fail::Invalid);
