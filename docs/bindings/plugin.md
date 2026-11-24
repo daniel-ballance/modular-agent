@@ -378,7 +378,7 @@ The host MUST fit the whole `result` it sends, including any `next`, in 4 MiB. I
 
 ### Authority
 
-**Proposed for services ([ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md)).** An operator can [name the caller at WebSocket authentication](websocket.md#proposed-named-callers). There is no new field in `plugin/initialize`, `tools/call` or callbacks. The `host.name` in the handshake describes software. Neither it, `config`, `sessionId` nor `call.actorId` authenticates the connecting Harness. A name assigned by the listener does not change the checks below or give the plugin access to another connection.
+**For services, accepted, not yet implemented ([ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md)).** An operator can [name the caller at WebSocket authentication](websocket.md#named-callers). There is no new field in `plugin/initialize`, `tools/call` or callbacks. The `host.name` in the handshake describes software. Neither it, `config`, `sessionId` nor `call.actorId` authenticates the connecting Harness. A name assigned by the listener does not change the checks below or give the plugin access to another connection.
 
 For a hosted connection, the host MUST resolve parent RPC IDs and plugin ownership in that connection's state, not across connections, even when the same service supplies multiple registrations or hosts. See [plugin services](websocket.md#a-plugin-service).
 

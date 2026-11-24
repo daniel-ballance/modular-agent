@@ -112,9 +112,9 @@ Reconnect with a fresh authenticated request, not an SSE offset. The snapshot ro
 
 For example, an approved browser tool can be left open by turn `t1`. Run `r1` finishes with that call in `pendingToolCallIds`. A new authenticated connection of the same client sends the result in `r2`. The Harness records it against `t1`; `r2` follows the continuation `t2`. If the browser disappears before reporting, `t1`'s deadline settles the call instead. Neither path starts the tool again.
 
-## Proposed wait closures
+## Wait closures
 
-[ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md) proposes an optional `waitCursor` string in the thread snapshot. If supplied, use it with `GET /agui/v1/threads/{threadId}/wait-closures?after={waitCursor}`. If absent, recheck the snapshot as today. This read and the proposed receipt below use the same [HTTP authentication and origin rules](#listener-and-authentication) as the snapshot. The cursor covers exactly the snapshot's committed watermark. It is opaque, scoped to that client, actor, thread and view. It is not a message history cursor or an SSE offset.
+[ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md), accepted and not yet implemented, adds an optional `waitCursor` string in the thread snapshot. If supplied, use it with `GET /agui/v1/threads/{threadId}/wait-closures?after={waitCursor}`. If absent, recheck the snapshot as today. This read and the proposed receipt below use the same [HTTP authentication and origin rules](#listener-and-authentication) as the snapshot. The cursor covers exactly the snapshot's committed watermark. It is opaque, scoped to that client, actor, thread and view. It is not a message history cursor or an SSE offset.
 
 This GET returns `text/event-stream`. It uses the [framing and bounds](#framing-and-versions) above, not the AG-UI run lifecycle. Each `data` item is one of the following. There are no prompts, answer values, arguments, results or executable handoffs in the stream.
 
@@ -131,7 +131,7 @@ At delivery, including after buffering, recheck rights, scope, gate policy and p
 
 A client can save the cursor after applying each item. Disconnect a slow reader rather than drop a committed closure. On reconnect, authenticate again. A missing `after` is 400 `invalid_request`. After masking inaccessible threads, reject an expired, foreign or otherwise unresolvable cursor with 409 `cursor_expired`. On a branch move that invalidates the view, close the stream and invalidate its cursor. Read a new snapshot to reset the inbox; this recovers current waits, not missing reasons. Presence remains comments only. The feed never appends to a closed run.
 
-## Proposed run receipts
+## Run receipts
 
 [ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md) proposes a separate optional read. A thread snapshot with `runReceipts: 1` offers `GET /agui/v1/threads/{threadId}/run-receipt?runId={runId}`. Encode the run ID as one query value. Offer the read only for sessions configured to keep history. With the field absent, reconnect by snapshot as today. The GET requires the original authenticated principal and client ID, current membership, `watch` and the thread's project and tenant scope. It does not open a writer, start recovery, mark presence or attach to a run.
 

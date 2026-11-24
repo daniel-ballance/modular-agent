@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-11-24
 ---
 
@@ -11,7 +11,7 @@ The [ops desk](../../demos/ops-desk/DESIGN.md#findings) drove three agents. Thre
 
 Today an AG-UI run can finish with an interrupt while the question stays open. Presence carries comments, not events. The desk rereads the snapshot before showing an answer button and again before sending the answer. The snapshot says nothing about why a question disappeared. The desk can label a deadline refusal because it controls the sole answer route. It also watches the plugin's `turn.end` hook before stopping the coder: closing its question did not end its turn.
 
-**Proposal.** Give the thread snapshot a wait cursor. Offer a separate [read-only feed](../bindings/agui.md#proposed-wait-closures) from that cursor. Use the Harness's [ordered catch-up and live follow](../contracts.md#following-a-session). Report a question's first committed decision or an Interface tool wait's terminal settlement. Distinguish an answer, a decline and expiry. Label a revocation only when the writer recorded it as the cause of closure. Losing one answer route is not a decision. Gate the source facts and the notice for this viewer, on catch-up as well as live. Send no answer value or executable call. The feed does not mark presence or deliver an approval view.
+**Proposal.** Give the thread snapshot a wait cursor. Offer a separate [read-only feed](../bindings/agui.md#wait-closures) from that cursor. Use the Harness's [ordered catch-up and live follow](../contracts.md#following-a-session). Report a question's first committed decision or an Interface tool wait's terminal settlement. Distinguish an answer, a decline and expiry. Label a revocation only when the writer recorded it as the cause of closure. Losing one answer route is not a decision. Gate the source facts and the notice for this viewer, on catch-up as well as live. Send no answer value or executable call. The feed does not mark presence or deliver an approval view.
 
 **Not chosen.** Polling faster cannot distinguish two causes of disappearance. Adding events to presence would make watching an inbox keep an answer route alive. Appending to a finished run would change the AG-UI exchange. The host can merge feeds; the agent need not order closures across agents.
 
@@ -21,7 +21,7 @@ Today an AG-UI run can finish with an interrupt while the question stays open. P
 
 After `SIGKILL` the desk could reopen the coder's thread. Its snapshot showed the interrupted tool's outcome as unknown and included the recovered reply. Neither was a terminal event for its run. It saves the thread ID before sending input, uses one thread per routed task and records “reopened.” It never runs a tool from the snapshot. A missing provisional thread is not grounds to start over.
 
-**Proposal.** Offer a [run receipt](../bindings/agui.md#proposed-run-receipts) on kept history, by thread and run ID, to the same authenticated client. Bind it to the accepted work, including a run that delivers answers or tool results rather than new input. Report two facts: the terminal class the adapter can confirm for the exchange, and the committed disposition of the work it followed. For example, the run can end with an interrupt and the turn can later complete. If the process died before recording a terminal class, report `unknown` for that class even after recovery. Neither fact proves delivery or execution. Keep the link for the life of its source records, subject to erasure and the recipient's current view.
+**Proposal.** Offer a [run receipt](../bindings/agui.md#run-receipts) on kept history, by thread and run ID, to the same authenticated client. Bind it to the accepted work, including a run that delivers answers or tool results rather than new input. Report two facts: the terminal class the adapter can confirm for the exchange, and the committed disposition of the work it followed. For example, the run can end with an interrupt and the turn can later complete. If the process died before recording a terminal class, report `unknown` for that class even after recovery. Neither fact proves delivery or execution. Keep the link for the life of its source records, subject to erasure and the recipient's current view.
 
 **Not chosen.** The last turn in a thread can belong to another run. An input key alone misses answer-only runs. Saving SSE frames or resending a terminal group would retain content and could repeat a frontend handoff. Reopening a stream is not needed to read a disposition.
 
@@ -31,7 +31,7 @@ After `SIGKILL` the desk could reopen the coder's thread. Its snapshot showed th
 
 The desk runs three listeners. Each accepts one token file and closes over the name of that agent. `tools/call` identifies a session and a call. Neither identifies the connecting Harness.
 
-**Proposal.** Let the operator give one [plugin service](../bindings/websocket.md#proposed-named-callers) a table of token files and stable caller IDs. Pass the matched ID to the [SDK's per-connection plugin factory](../sdk/placement.md#proposed-serving-named-callers). There is no caller field on `tools/call` or `plugin/initialize`. The token authenticates the connecting Harness. Its ID grants no session right, project access or callback authority. The desk still decides which caller may hand work to the coder. Live work stays connection-local, even on two connections for the same ID. Keep the single-token form. Keep [separate confined instances](0030-production-gaps.md#isolation-decisions) where a service cannot isolate its state and resources.
+**Proposal.** Let the operator give one [plugin service](../bindings/websocket.md#named-callers) a table of token files and stable caller IDs. Pass the matched ID to the [SDK's per-connection plugin factory](../sdk/placement.md#serving-named-callers). There is no caller field on `tools/call` or `plugin/initialize`. The token authenticates the connecting Harness. Its ID grants no session right, project access or callback authority. The desk still decides which caller may hand work to the coder. Live work stays connection-local, even on two connections for the same ID. Keep the single-token form. Keep [separate confined instances](0030-production-gaps.md#isolation-decisions) where a service cannot isolate its state and resources.
 
 **Not chosen.** A model argument, a session ID or a name in initialization settings is a claim by the caller. A shared token cannot distinguish the callers. An ACP actor table would mix transport identity with rights in somebody else's session.
 
@@ -39,8 +39,6 @@ The desk runs three listeners. Each accepts one token file and closes over the n
 
 ## Owner decisions
 
-1. Where should wait closures appear? Recommend a separate, optional per-thread feed. Start at the snapshot cursor and replay committed reasons, not guesses. Leave the combined inbox to the host.
-2. What should survive a lost run? Recommend a status-only receipt for every accepted AG-UI exchange on kept history. Keep it across restart on the serving deployment until its sources are erased or age out. Do not promise stream delivery or receipt portability between deployments.
-3. May several plugin callers share a listener? Recommend an opt-in operator table and a caller ID local to each connection's factory. Require the same isolation as separate listeners; keep separate instances when that cannot be shown.
+Accepted as recommended on 2026-11-24: a separate optional per-thread feed of wait closures; a status-only run receipt for every accepted AG-UI exchange on kept history, kept on the serving deployment; and an opt-in operator table of named callers on one plugin listener. Implementations follow in 0.3.0.
 
-These are proposals, not new conformance claims. No edition, SDK version or kit result changes here.
+This changes no edition to pin. No build implements it yet.

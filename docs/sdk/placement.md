@@ -60,7 +60,7 @@ A history service credential has raw access to the whole service. Use [separate 
 
 Agents in any language that share a history service and the same actor ids can reopen and continue each other's [portable sessions](../bindings/data.md#portable-sessions).
 
-### Proposed: serving named callers
+### Serving named callers
 
 [ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md) proposes `serve(factory, { listen, callers, tls? })` for a plugin service. `callers` is a nonempty operator list of `{ callerId, tokenFile }`. Each `callerId` is a nonempty, case-sensitive string. The token files must be readable only by their owner, as in the [WebSocket rules](../bindings/websocket.md#connecting). This form requires a factory. Reject a missing factory, empty list or ID, unsafe or unreadable file, duplicate ID or duplicate token value, even in different files. Reject options with both `callers` and `tokenFile`. These are `invalid_composition` errors before listening.
 
@@ -86,7 +86,7 @@ To let a client run a tool such as `pick_color`, include its definition in `crea
 
 The app advertises the exact definitions it can run. On a live, eligible terminal event it runs or declines the named calls, then supplies the results in a later run. It does not execute from replay or use a tool message to approve a call. For a JSON result, send it as text or use a declared content part; this binding does not fill shared `ToolResult.value`. An application that needs durable result delivery can retain a report under the call ID until it is accepted or expires, subject to its own erasure policy.
 
-**Proposed host reads ([ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md)).** An app can use the [wait cursor](../bindings/agui.md#proposed-wait-closures) from a thread snapshot without holding presence. On kept history it can look up its own [run receipt](../bindings/agui.md#proposed-run-receipts) if the snapshot offers it. Neither read changes the answer or handoff API. There is no SDK object for an inbox spanning agents.
+**Host reads, accepted, not yet implemented ([ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md)).** An app can use the [wait cursor](../bindings/agui.md#wait-closures) from a thread snapshot without holding presence. On kept history it can look up its own [run receipt](../bindings/agui.md#run-receipts) if the snapshot offers it. Neither read changes the answer or handoff API. There is no SDK object for an inbox spanning agents.
 
 ## Durability
 
