@@ -114,7 +114,7 @@ Each SDK's README lists its own gaps.
 
 - **Approvals that wait past their turn** ([ADR 0034](docs/adr/0034-approvals-that-wait.md), done on `main`): a session can keep an unstarted call open for an approver who answers later, within an operator's maximum, rechecked in full before it runs.
 - **Approval in `ma`** (done on `main`), off unless configured: an approver allows a whole `codemode` script, and the allow covers the writes and commands it makes ([covered approvals](docs/contracts.md#approvals-that-cover-nested-calls)), live or waiting past the turn.
-- **What a host can learn from one agent** ([ADR 0035](docs/adr/0035-host-limits-from-the-ops-desk.md), accepted, next): a feed of why each wait closed, a receipt for how a lost AG-UI run ended, and named callers on one plugin service.
+- **What a host can learn from one agent** ([ADR 0035](docs/adr/0035-host-limits-from-the-ops-desk.md), done on `main`): a feed of why each wait closed, a receipt for how a lost AG-UI run ended, and named callers on one plugin service.
 
 ## The specification
 

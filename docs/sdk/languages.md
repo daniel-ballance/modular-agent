@@ -125,6 +125,8 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - Every public function and type is fully type-annotated and passes a strict type checker.
 - Minimum Python version: the one pinned in `python/mise.toml`.
 - Subscription Providers: `subscription_logins(path)`, `await sign_in(provider, logins, …)` and `await sign_out(provider, logins)`, where `provider` is `"chatgpt"` or `"grok"`. Construct the Providers with `modular_agent.chatgpt.chatgpt(logins=…)` or `modular_agent.grok.grok(logins=…)`, and `modular_agent.claude.claude(…)` on Anthropic's Python Agent SDK.
+- For named plugin callers, use `await serve(factory, listen=address, callers=[{"caller_id": "desk", "token_file": path}])`. The synchronous factory takes a `CallerContext` with `context["caller_id"]` and returns a fresh `Plugin`. `PluginCaller` is the operator entry type. With `token_file=path` instead, an existing zero-argument factory or plugin value still works.
+- The listener returned by `await agent.serve_agui(...)` serves the host reads over HTTP. In the thread snapshot use `waitCursor` for `GET /agui/v1/threads/{threadId}/wait-closures?after=...`. When `runReceipts` is `1`, use `GET /agui/v1/threads/{threadId}/run-receipt?runId=...`. Encode each query value separately. Neither read delivers an answer handle or dispatches a tool.
 
 ## Packages
 

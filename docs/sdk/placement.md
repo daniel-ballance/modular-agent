@@ -86,7 +86,7 @@ To let a client run a tool such as `pick_color`, include its definition in `crea
 
 The app advertises the exact definitions it can run. On a live, eligible terminal event it runs or declines the named calls, then supplies the results in a later run. It does not execute from replay or use a tool message to approve a call. For a JSON result, send it as text or use a declared content part; this binding does not fill shared `ToolResult.value`. An application that needs durable result delivery can retain a report under the call ID until it is accepted or expires, subject to its own erasure policy.
 
-**Host reads, accepted, not yet implemented ([ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md)).** An app can use the [wait cursor](../bindings/agui.md#wait-closures) from a thread snapshot without holding presence. On kept history it can look up its own [run receipt](../bindings/agui.md#run-receipts) if the snapshot offers it. Neither read changes the answer or handoff API. There is no SDK object for an inbox spanning agents.
+**Host reads ([ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md)).** An app can use the [wait cursor](../bindings/agui.md#wait-closures) from a thread snapshot without holding presence. On kept history it can look up its own [run receipt](../bindings/agui.md#run-receipts) if the snapshot offers it. Neither read changes the answer or handoff API. There is no SDK object for an inbox spanning agents.
 
 ## Durability
 

@@ -8,7 +8,12 @@ The four SDKs and `ma` share one project version. The [SDK specification](docs/s
 - **Approvals that cover nested calls** (an [ADR 0034 amendment](docs/adr/0034-approvals-that-wait.md#amendment-approvals-that-cover-nested-calls)), in all four SDKs. With the operator option `approvalCoversNested`, an explicit allow for a top-level call also answers the approval check of each nested call it makes in that dispatch. Every other check still applies, the approval view says the allow covers nested calls, and each covered call's `toolStarted` records `approvalCoveredBy`.
 - **Approval in `ma`**, off by default: `--approval POLICY` or the global `approval` setting. A `codemode` script is approved as a whole and its writes and commands run under that allow. The terminal asks `y`/`n`; print mode refuses. Approvals wait past the turn only with `approvalWaitMaxMs` in `policy.json` and `approval_wait: "untilDeadline"`. ACP and AG-UI clients with the `settings` right can change the policy per session; AG-UI gains `POST /agui/v1/threads/{threadId}/settings` for this. A 28th reference check, `approval-covers-script`, passes in all four builds.
 - **Fixed:** Rust's rewind treated a call settled in a continuation turn as unfinished.
-- **Specified, not yet implemented:** [ADR 0035](docs/adr/0035-host-limits-from-the-ops-desk.md) (wait-closure feed, run receipts, named plugin callers).
+- **What a host can learn from one agent ([ADR 0035](docs/adr/0035-host-limits-from-the-ops-desk.md)), in all four SDKs and `ma --agui`.**
+  - A [wait-closure feed](docs/bindings/agui.md#wait-closures) per AG-UI thread: from the snapshot's `waitCursor`, each question or client tool wait that closed, in commit order, with its committed reason. It is gated per viewer, is not presence and cannot answer.
+  - [Run receipts](docs/bindings/agui.md#run-receipts) for kept sessions: `{ terminal, work }` for a run ID, so a host can learn how a lost AG-UI run ended (`unknown` if the agent died before recording its end) and how its work settled. No content, no replay.
+  - [Named callers](docs/bindings/websocket.md#named-callers) on one plugin listener: an operator table of token files and caller IDs; each connection gets a fresh plugin instance that is told the authenticated ID.
+  - The AG-UI kit has 48 cases (14 new) and the plugin kit a named-callers transcript.
+- **Fixed:** the ops desk station could hand a `start` the address of an agent process that was still stopping.
 - **Fixed:** in TypeScript, a shell command could start before its cleanup watcher was registered, so a `kill -9` at that moment could leave it running.
 
 ## 0.2.0

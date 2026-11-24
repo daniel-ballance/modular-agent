@@ -135,7 +135,7 @@ Triage and the verifier shared the event trace in both runs. Both runs predate t
 | Posts during a turn | Kept as plugin tools; Interface-run tools suit client actions |
 | One trace across agents | Resolved: `traceTrusted` in `ma`'s policy; a span link to the `hand_off` call waits for a later [telemetry version](../../docs/telemetry.md#what-later-versions-add) |
 | Approval in stock `ma` | [Open questions](../../docs/open-questions.md#a-host-driving-several-agents) |
-| Closure feed; run receipt; one token per service | [ADR 0035](../../docs/adr/0035-host-limits-from-the-ops-desk.md), accepted for 0.3.0; the desk still uses the workarounds above |
+| Closure feed; run receipt; one token per service | [ADR 0035](../../docs/adr/0035-host-limits-from-the-ops-desk.md), implemented in 0.3.0; the desk still uses the workarounds above until it moves to them |
 | Rust approval answers | Fixed |
 | AG-UI status text | Fixed |
 

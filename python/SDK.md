@@ -117,11 +117,6 @@ A plugin value gets a new registration and copy per connection. If the plugin ca
 
 Use the factory context, not setup or tool input, to select storage. For a working environment, `projects={caller_id: [root, ...]}` restricts each caller to its canonical project roots. A caller ID grants no session rights. Use separate services if the plugin cannot isolate its resources.
 
-#### Exact text for the Python section of docs/sdk/languages.md
-
-- For named plugin callers, use `await serve(factory, listen=address, callers=[{"caller_id": "desk", "token_file": path}])`. The synchronous factory takes a `CallerContext` with `context["caller_id"]` and returns a fresh `Plugin`. `PluginCaller` is the operator entry type. With `token_file=path` instead, an existing zero-argument factory or plugin value still works.
-- The listener returned by `await agent.serve_agui(...)` serves the host reads over HTTP. In the thread snapshot use `waitCursor` for `GET /agui/v1/threads/{threadId}/wait-closures?after=...`. When `runReceipts` is `1`, use `GET /agui/v1/threads/{threadId}/run-receipt?runId=...`. Encode each query value separately. Neither read delivers an answer handle or dispatches a tool.
-
 ## Serve AG-UI
 
 ```python
@@ -200,10 +195,6 @@ Call `await claude_provider.available()` before displaying account-specific mode
 ## Trace trust and spec findings
 
 The launcher of a stdio ACP host is trusted for per-request trace context unless `serve_acp(trace_trusted=False)` disables it. Set `trace_trusted=True` in an embedded network ACP `actors` entry only for a peer allowed to share trace IDs. Network principals are not trace-trusted by default. Configured history and plugin destinations get context per request. The SDK does not accept or send baggage. AG-UI can accept allowlisted vendor state on a trusted work POST.
-
-### ADR 0035 spec finding
-
-In [Run receipts](../docs/bindings/agui.md#run-receipts), replace “If freshness cannot be established, refuse with 503 `unavailable`.” with: “If an erasure intent covers a source of the receipt, return 404 `not_found`, including while deletion is pending. If the current erasure state cannot be checked, refuse with 503 `unavailable`.”
 
 ### ADR 0033 spec findings
 

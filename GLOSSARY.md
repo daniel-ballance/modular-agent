@@ -99,7 +99,7 @@ A session stored in the [shared format](docs/bindings/data.md#portable-sessions)
 One period of work by the Runtime, with zero or more steps. Waiting in place for an answer is part of the turn.
 _Avoid_: Run, agent run, task, prompt turn
 
-**Run receipt** (accepted in [ADR 0035], not yet implemented;(docs/adr/0035-host-limits-from-the-ops-desk.md)):
+**Run receipt** (from [ADR 0035](docs/adr/0035-host-limits-from-the-ops-desk.md)):
 A read-only account of how one AG-UI exchange ended, if known, and how the work it followed settled. It is not proof that the client received a terminal event.
 
 **Step**:
