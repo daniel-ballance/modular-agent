@@ -32,7 +32,7 @@ for agent in ('triage', 'coder', 'verifier'):
     project = str(root / 'trees' / claim)
     with connection((root / (agent + '-tools.token')).read_text().strip()) as ws:
         reg = rpc(ws, 'init', 'plugin/initialize', {
-            'binding': 'modular-agent-plugin/1', 'data': 'modular-agent-data/1',
+            'binding': 'modular-agent-plugin/1',
             'host': {'name': claim, 'version': '1'}, 'project': project, 'home': str(root / 'home'),
             'config': {'callerId': claim}
         })['result']
