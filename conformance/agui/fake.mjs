@@ -10,6 +10,7 @@ import { MAX, PATH, parse } from './wire.mjs';
 import { fakeFixture, makeSession } from './fake-fixture.mjs';
 import { fakeWaiting } from './fake-waiting.mjs';
 import { fakeClosures } from './fake-closures.mjs';
+import { fakeReceipts } from './fake-receipts.mjs';
 
 export const fixtureTokens = () => Object.fromEntries(['owner', 'rotated', 'watch', 'sibling', 'foreign', 'tenant', 'project'].map(key => [key, randomUUID()]));
 
@@ -30,7 +31,7 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault, sc
   let clock = Date.now();
   const waits = scenario?.startsWith('waiting-');
   const covers = (waits || scenario?.startsWith('approval')) && fault !== 'no-covered-approvals';
-  const fixture = scenario?.startsWith('closure-') ? fakeClosures(scenario, fault, model) : waits ? fakeWaiting(scenario, fault, model, covers) : scenario && fakeFixture(scenario, fault, model, covers);
+  const fixture = scenario?.startsWith('receipt-') ? fakeReceipts(scenario, fault) : scenario?.startsWith('closure-') ? fakeClosures(scenario, fault, model) : waits ? fakeWaiting(scenario, fault, model, covers) : scenario && fakeFixture(scenario, fault, model, covers);
   const declaration = { interfaceTools: true, telemetry: 1, ...(covers && { approvalCoversNested: true }), ...(waits && { approvalsOutlastTurns: true, portableSessions: true, questionsOutlastTurns: true, lateAnswersStartTurns: true }) };
   const sockets = new WebSocketServer({ noServer: true, handleProtocols: protocols => protocols.has('modular-agent-acp-1') ? 'modular-agent-acp-1' : false });
   const peer = request => Object.keys(tokens).find(key => request.headers.authorization === `Bearer ${tokens[key]}`);
@@ -90,7 +91,8 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault, sc
       }
       const threadId = path === '/run' ? data?.threadId : /^\/threads\/([^/]+)(?:\/(?:presence|wait-closures|run-receipt))?$/.exec(path)?.[1];
       const session = sessions.get(threadId);
-      if (!session || (['tenant', 'project'].includes(client) && fault !== 'outside-scope')) return missing(res);
+      if (!session || (['tenant', 'project'].includes(client) && fault !== 'outside-scope' && !(fault === 'tenant-receipt' && path.endsWith('/run-receipt')))) return missing(res);
+      if (req.method === 'GET' && path.endsWith('/run-receipt')) return fixture?.receipt ? fixture.receipt(session, client, url, res, json, error) : missing(res);
       fixture?.reopen(session);
       const snapshot = () => {
         const messages = structuredClone(session.messages);
@@ -129,7 +131,7 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault, sc
       const last = session.views.get(client) ?? { messages: [] };
       const cursor = req.headers['ma-history-cursor'];
       const found = session.runs.has(`${client}:${runId}`);
-      if ((cursor !== undefined && cursor !== last.cursor && fault !== 'stale-cursor') || (found && fault !== 'duplicate-run') ||
+      if ((cursor !== undefined && cursor !== last.cursor && fault !== 'stale-cursor') || (found && fault !== 'duplicate-run' && !fixture?.duplicate?.(session, data)) ||
           (!equal(messages.slice(0, last.messages.length).map(known), last.messages) && fault !== 'changed-history')) return conflict(res);
       const suffix = messages.slice(last.messages.length);
       if (session.invalidated && messages.some(m => m.id?.startsWith('ma:'))) return conflict(res);
