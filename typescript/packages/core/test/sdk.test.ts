@@ -56,7 +56,7 @@ test("a servable command and hooks keep their meaning on stdio", async t => {
     const a = await testAgent({ script: request("echo"), plugins: [plugin] });
     t.after(() => a.close());
     const s = await a.session();
-    assert.equal(await s.runCommand("/hello there"), "hello there");
+    assert.equal(await s.runCommand(`/hello   "one two"   three  `), `hello   "one two"   three  `);
     assert.equal((await s.prompt("/hello there")).disposition, "handled");
     const turn = await s.prompt("Echo");
     assert.equal(turn.toolResults()[0].text(), "new");

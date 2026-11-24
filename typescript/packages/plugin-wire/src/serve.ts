@@ -544,11 +544,12 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 	peer.handle("command/run", async (p, ctx) => {
 		const c = commands.get(String(p.name));
 		if (!c) throw new WireError("invalid_request", `No command ${p.name}`);
+		if (typeof p.args !== "string") throw new WireError("invalid_request", "Command arguments must be text");
 		// command/run carries only the session and actor ids; the session's project, which its
 		// environment calls use, comes from host/session (docs/sdk/api.md, Commands).
 		let project: Promise<string> | undefined;
 		const sessionProject = () => project ??= peer.request<{ project: string }>("host/session", { sessionId: p.sessionId }).then((s) => s.project);
-		const output = await currentParent.run(ctx.id, () => c.run(String(p.args ?? ""), { sessionId: p.sessionId, actorId: p.actorId, ...work(ctx, p.sessionId),
+		const output = await currentParent.run(ctx.id, () => c.run(p.args, { sessionId: p.sessionId, actorId: p.actorId, ...work(ctx, p.sessionId),
 			environment: async () => hostEnvironment(ctx.id, await sessionProject(), p.sessionId), startJob: startJob(ctx.id, ctx.signal, p.sessionId, p.actorId) }));
 		return typeof output === "string" ? { output } : {};
 	});

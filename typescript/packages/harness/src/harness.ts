@@ -728,7 +728,7 @@ export class Harness {
 	// ---------- commands ----------
 
 	private async runCommand(sessionId: string, line: string, actorId: string): Promise<string | void> {
-		const match = /^\/(\S+)\s*([\s\S]*)$/.exec(line.trim());
+		const match = /^\/(\S+)\s?([\s\S]*)$/.exec(line.trimStart());
 		if (!match) throw failure("invalid_params", "Not a command");
 		const session = this.session(sessionId);
 		await this.reconcilePending(session);
@@ -2145,7 +2145,7 @@ export class Harness {
 			if (earlier) return { ...earlier, duplicate: true };
 		}
 		let content = typeof options.content === "string" ? [text(options.content)] : options.content;
-		const typed = textOf(content).trim();
+		const typed = textOf(content).trimStart();
 		if (options.when !== "propose" && !options.delegatedBy && options.startedBy?.kind !== "job" && typed.startsWith("/") && this.commandTable.has(/^\/(\S+)/.exec(typed)?.[1] ?? "")) {
 			const output = await this.runCommand(sessionId, typed, options.actorId);
 			const receipt = { inputId: this.newId(), taken: "now" as const, handled: true, output: output ?? undefined };

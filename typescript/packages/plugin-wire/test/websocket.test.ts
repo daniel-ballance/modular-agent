@@ -174,6 +174,11 @@ test("a served command works in its session's project, which it learns from host
 	} }] });
 	const service = await servePluginService(make, { listen: "127.0.0.1:0", tokenFile: f.tokenFile });
 	try {
+		const socket = await connectWebSocket(service.url, f.tokenFile, PLUGIN_PROTOCOL, 5_000);
+		const peer = peerOf(socket);
+		await peer.request("plugin/initialize", init(f.dir));
+		await assert.rejects(peer.request("command/run", { name: "where", args: ["two", "words"], sessionId: "s", actorId: "user" }), { code: "invalid_request" });
+		peer.close();
 		const info = { project: f.dir, home: f.dir };
 		const external = await startPluginService({ url: service.url, tokenFile: f.tokenFile }, info);
 		const harness = new Harness(info);
