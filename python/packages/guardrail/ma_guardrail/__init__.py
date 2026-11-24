@@ -1,6 +1,7 @@
 """Optional output gate. Holds streams until final to catch secrets across pieces."""
 
-from ma_core import Plugin
+from ma_core import Plugin, clone
+from ma_core.redaction import redact_stream
 
 
 class Guardrail(Plugin):
@@ -44,8 +45,19 @@ class Guardrail(Plugin):
                 value.get("call"),
                 value["kind"],
             )
-            self.buffers[key] = self.buffers.get(key, "") + value["text"]
-            if not value.get("final"):
-                return {**d, "value": None}
-            value = {**value, "text": self.buffers.pop(key)}
+            if value["kind"] == "tool_progress":
+                parts = self.buffers.setdefault(key, [])
+                parts.extend(clone(value["content"]))
+                if not value.get("final"):
+                    return {**d, "value": None}
+                self.buffers.pop(key)
+                fields = [(p, "text") for p in parts if p["type"] == "text"]
+                for secret in self.secrets:
+                    redact_stream(fields, secret, "[REDACTED]")
+                value = {**value, "content": parts, "final": False}
+            else:
+                self.buffers[key] = self.buffers.get(key, "") + value["text"]
+                if not value.get("final"):
+                    return {**d, "value": None}
+                value = {**value, "text": self.buffers.pop(key)}
         return {**d, "value": self.redact(value)}

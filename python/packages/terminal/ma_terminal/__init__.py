@@ -44,8 +44,8 @@ class Terminal(Plugin):
             self.streamed.add(e["turn"])
             self.stdout.write(e["text"])
             self.stdout.flush()
-        elif e["kind"] == "tool_progress" and e["text"]:
-            self.stderr.write(e["text"])
+        elif e["kind"] == "tool_progress":
+            self.stderr.write(plain(e["content"]))
             self.stderr.flush()
         elif e["kind"] == "input_request_opened":
             self.stderr.write(

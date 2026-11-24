@@ -178,8 +178,7 @@ class ToolStartedEvent(_Event[Literal["toolStarted"], ToolStartedEventFields]):
 
 class ToolOutputEventFields(TypedDict):
     toolCallId: str
-    chunk: str
-    content: NotRequired[Content]
+    content: Content
 
 
 class ToolOutputEvent(_Event[Literal["toolOutput"], ToolOutputEventFields]):

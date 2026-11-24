@@ -77,7 +77,6 @@ class HostedRuntime(Runtime):
             "steering": bool(self.supports.get("inputDuringTurn")),
             "durable": bool(self.supports.get("continuesAfterRestart")),
             "waiting_through_restart": bool(self.supports.get("waitingThroughRestart")),
-            "nested_tools": False,
             "interface_tools": self.supports.get("interfaceTools") is True,
             "queued_input_after_restart": "run"
             if self.supports.get("continuesAfterRestart")
@@ -1247,9 +1246,8 @@ class TurnHost:
                     **self.scope,
                     step=step,
                     call=cid,
-                    text=piece.get("text", ""),
+                    content=piece["content"] if "content" in piece else content(piece["text"]),
                     final=False,
-                    **({"content": piece["content"]} if "content" in piece else {}),
                 )
 
             result = await self.api.call(

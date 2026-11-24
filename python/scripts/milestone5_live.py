@@ -111,7 +111,7 @@ def validate(output):
     assert (proof["runtime"], "tools", "run") in trace
     assert ("files", "environment", "bash") in trace
     events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
-    assert any(e["kind"] == "tool_progress" and MARKER in e.get("text", "") for e in events)
+    assert any(e["kind"] == "tool_progress" and MARKER in plain(e["content"]) for e in events)
     assert any(e["kind"] == "model_output" and e.get("text") for e in events)
     assert not [e for e in events if e["kind"] == "plugin_failed"]
     assert proof["cleanup"] and not proof["remaining_pids"]

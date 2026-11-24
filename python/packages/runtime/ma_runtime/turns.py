@@ -917,7 +917,7 @@ class Turns:
             },
         )
         await self.api.event(
-            "tool_progress", session=sid, turn=turn, step=step, call=call["id"], text="", final=True
+            "tool_progress", session=sid, turn=turn, step=step, call=call["id"], content=[], final=True
         )
 
     async def _tools(self, sid, turn, step, calls, tools, *, continuation_of=None):
@@ -1158,9 +1158,8 @@ class Turns:
                         turn=turn,
                         step=step,
                         call=call["id"],
-                        text=piece.get("text", ""),
+                        content=piece["content"] if "content" in piece else content(piece["text"]),
                         final=False,
-                        **({"content": piece["content"]} if "content" in piece else {}),
                     )
 
                 covering = covered_by

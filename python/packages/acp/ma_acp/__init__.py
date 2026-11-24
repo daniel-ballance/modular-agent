@@ -877,13 +877,13 @@ class ACP(Plugin):
             if entry["kind"] == "actor_left":
                 self.presence.get(sid, set()).discard(entry["data"]["actorId"])
             await self.entry(sid, entry)
-        elif e["kind"] == "tool_progress" and e.get("text"):
+        elif e["kind"] == "tool_progress" and e["content"]:
             key = sid, e["call"]
-            self.tool_output[key] = self.tool_output.get(key, "") + e["text"]
+            self.tool_output.setdefault(key, []).extend(e["content"])
             await self.update(
                 sid,
                 s.ToolCallProgress(
-                    tool_call_id=e["call"], content=tool_content(content(self.tool_output[key]))
+                    tool_call_id=e["call"], content=tool_content(self.tool_output[key])
                 ),
                 stream=True,
             )

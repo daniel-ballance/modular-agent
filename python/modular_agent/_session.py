@@ -120,8 +120,7 @@ def _events(d: dict[str, Any]) -> list[Event]:
                 "toolOutput",
                 {
                     "toolCallId": d["call"],
-                    "chunk": d["text"],
-                    **({"content": d["content"]} if "content" in d else {}),
+                    "content": d["content"],
                 },
                 **args,
             )

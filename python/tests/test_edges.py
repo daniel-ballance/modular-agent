@@ -107,7 +107,7 @@ async def test_default_bash_stream_reaches_interface_before_call_ends(agent):
     live = asyncio.Event()
 
     async def follow(e):
-        if e["kind"] == "tool_progress" and e["text"] == "live":
+        if e["kind"] == "tool_progress" and plain(e["content"]) == "live":
             assert not any(x["kind"] == "tool_result" for x in await entries(a, sid))
             live.set()
 

@@ -671,8 +671,7 @@ class Exchange:
                 "toolOutput",
                 {
                     "toolCallId": d["call"],
-                    "chunk": d.get("text", ""),
-                    "content": d.get("content", []),
+                    "content": d["content"],
                 },
             )
         elif d.get("plugin") and "." in kind:
