@@ -51,11 +51,11 @@ class Local(Plugin):
         api.on("session.suspend", self._close)
 
     async def save(self, d, emit):
-        s = await self.api.session("get", session=d["session"])
+        s = await self.api.session("get", session=d["session"], include_entries=False)
         return await self._points(self.points.save, d["session"], d.get("cwd") or s["project"])
 
     async def check_point(self, d, emit):
-        s = await self.api.session("get", session=d["session"])
+        s = await self.api.session("get", session=d["session"], include_entries=False)
         return {
             "exists": await self._points(
                 self.points.exists, d["session"], d.get("cwd") or s["project"], d["point"]
@@ -63,13 +63,13 @@ class Local(Plugin):
         }
 
     async def restore(self, d, emit):
-        s = await self.api.session("get", session=d["session"])
+        s = await self.api.session("get", session=d["session"], include_entries=False)
         return await self._points(
             self.points.restore, d["session"], d.get("cwd") or s["project"], d["point"]
         )
 
     async def _path(self, d):
-        s = await self.api.session("get", session=d["session"])
+        s = await self.api.session("get", session=d["session"], include_entries=False)
         p = Path(d["path"]).expanduser()
         return p if p.is_absolute() else Path(d.get("cwd") or s["project"]) / p
 
@@ -163,7 +163,7 @@ class Local(Plugin):
         await cleanup(record)
 
     async def bash(self, d, emit):
-        s = await self.api.session("get", session=d["session"])
+        s = await self.api.session("get", session=d["session"], include_entries=False)
         owner = owner_identity()
         group = delegated_root() / f"ma-py-{owner['pid']}-{owner['start']}-{identity()}"
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -297,7 +297,7 @@ class ProcessGroupLocal(Local):
         api.on("session.suspend", self._close)
 
     async def bash(self, d, emit):
-        s = await self.api.session("get", session=d["session"])
+        s = await self.api.session("get", session=d["session"], include_entries=False)
         read_fd, lifetime = os.pipe()
         with tempfile.TemporaryFile() as output:
             try:

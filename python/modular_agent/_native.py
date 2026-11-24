@@ -103,7 +103,9 @@ class _MemoryHistory(_NativePlugin):  # type: ignore[misc]  # Untyped base adapt
         api.provide("history", self)
 
     async def keep(self, d: dict[str, Any], emit: Any) -> JsonObject:
-        self._sessions[d["session"]["id"]] = d["session"]
+        meta = d["session"]
+        prior = self._sessions.get(meta["id"], {}).get("entries", [])
+        self._sessions[meta["id"]] = {**meta, "entries": [*prior, *d["entries"]]}
         return {}
 
     async def read(self, d: dict[str, Any], emit: Any) -> dict[str, Any] | None:

@@ -12,7 +12,7 @@ class Prompt(Plugin):
         api.on("turn.prepare", self.prepare)
 
     async def prepare(self, d):
-        s = await self.api.session("get", session=d["session"])
+        s = await self.api.session("get", session=d["session"], include_entries=False)
         sections = [
             "You are a helpful agent. Use the supplied tools for file and shell work. "
             "Never invent tool results. Follow the project instructions below.",

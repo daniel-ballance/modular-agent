@@ -9,6 +9,7 @@ from ma_core.wire import provider_projection, recorded_as
 
 from .authority import Authority, PERMISSIONS, read_tenants
 from .erasure import Erasure
+from .history_views import input_outcomes, pending_inputs, select_entries, saved_step
 from .interface_tools import (
     HANDOFF,
     SOURCE,
@@ -408,6 +409,12 @@ class Harness(Authority, Erasure, InterfaceTools):
                     )
                 definitions = [*definitions, *self.interface_definitions(sid, data.get("turn"))]
             return clone(definitions)
+        if target == "selection" and operation == "access":
+            access = await method(data, emit)
+            _, provider = self.capabilities[access["target"]]
+            # The composition is fixed while a session is open. A private
+            # Runtime need not round-trip the request to a nonexistent transform.
+            return clone({**access, "_host_prepares": hasattr(type(provider), "prepare_request")})
         if target == "runtime" and operation == "cancel" and self.interface_enabled():
             result = await method(data, emit)
             if sid in self.sessions and await self.interface_ready(sid):
@@ -761,7 +768,15 @@ class Harness(Authority, Erasure, InterfaceTools):
             ),
         ) as operation:
             commit = asyncio.create_task(
-                self.call("@harness", "history", "keep", {"session": session, "entries": entries})
+                self.call(
+                    "@harness",
+                    "history",
+                    "keep",
+                    {
+                        "session": {k: v for k, v in session.items() if k != "entries"},
+                        "entries": entries,
+                    },
+                )
             )
             try:
                 while True:
@@ -1441,12 +1456,43 @@ class Harness(Authority, Erasure, InterfaceTools):
                 return s
             return {k: v for k, v in s.items() if k != "entries"}
         if op == "entries":
-            # Select before call() copies the result across the plugin boundary.
-            entries = s["entries"]
-            for key in ("turn", "step", "call", "id", "kind"):
-                if key in d:
-                    entries = [e for e in entries if e.get(key) == d[key]]
-            return entries
+            return select_entries(s["entries"], d)
+        if op == "context_records":
+            # The context plugin needs visible records and call dispositions.
+            # Model intents are feedback barriers, not model context.
+            return [
+                {"kind": "model_started", "turn": e.get("turn")}
+                if e["kind"] == "model_started" and not e["visible"]
+                else e
+                for e in branch_entries(s)
+                if e["visible"]
+                or e["kind"] in {"tool_call", "tool_result"}
+                or (
+                    e.get("turn") == d.get("turn")
+                    and e["kind"] in {"model_started", "result_feedback"}
+                )
+            ]
+        if op == "pending_inputs":
+            ready = []
+            if not d.get("proposals") and any(e["kind"] == HANDOFF for e in s["entries"]):
+                ready = await self.interface_ready(sid)
+            return pending_inputs(s["entries"], d.get("proposals"), ready)
+        if op == "input_outcome":
+            return input_outcomes(s["entries"], d["input"]).get(d["input"])
+        if op == "input_outcomes":
+            return input_outcomes(s["entries"])
+        if op == "step_offer":
+            return next(
+                (
+                    e["data"].get("tools", [])
+                    for e in s["entries"]
+                    if e.get("step") == d["step"] and e["kind"] == "model_started"
+                ),
+                [],
+            )
+        if op == "step_checkpoint":
+            response, checkpoint = saved_step(s, d["turn"], d.get("step"))
+            return (response, checkpoint) if d.get("include_response") else checkpoint
         if op == "children":
             return [
                 child["id"]
@@ -1503,7 +1549,7 @@ class Harness(Authority, Erasure, InterfaceTools):
             await self.fire("@harness", "session.invalidate", d)
             return {}
         if op == "branch":
-            return branch_entries(s)
+            return select_entries(branch_entries(s), d)
         if op == "interface_dispatch":
             return await self.interface_dispatch(d)
         if op == "interface_settle":
