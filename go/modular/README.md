@@ -171,8 +171,6 @@ With a state plugin, set `StatePlugin` and supply its current revision and JSON 
 
 ### Specification findings
 
-**ADR 0034: detecting an empty continuation path.** Suggested replacement for “Declare support only for a path that can continue with no calls to dispatch after settlement” in `docs/sdk/api.md`: “Declare support only when the selected Runtime can continue an ended origin with an empty call list. The existing `interfaceTools: true` Runtime registration is sufficient evidence over the plugin binding. This does not require an Interface tool source or the session declaration `interfaceTools`.” Go uses this existing wire promise; it adds no Runtime RPC.
-
 None open. Both listing findings are in the AG-UI binding.
 
 ### Known gaps
