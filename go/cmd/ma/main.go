@@ -232,7 +232,7 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 		fmt.Fprintln(out, help)
 		return nil
 	case "version":
-		fmt.Fprintln(out, "ma 0.1.0 (go)")
+		fmt.Fprintf(out, "ma %s (go)\n", modular.Version)
 		return nil
 	}
 	d, err := directories()

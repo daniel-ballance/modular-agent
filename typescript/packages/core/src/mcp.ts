@@ -5,6 +5,10 @@ import { tool, type Tool } from "./tool.js";
 import type { Content } from "./data.js";
 import type { JSONSchema } from "./schema.js";
 import { pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
+
+const { version } = createRequire(import.meta.url)("../../package.json") as { version: string };
+
 export type McpServerConfig =
   | { command: string; args?: string[]; env?: Record<string, string>; cwd?: string }
   | { url: string; headers?: Record<string, string> };
@@ -41,7 +45,7 @@ export function standardMcpTools(options: Options) {
     let current = connections.get(id);
     if (!current) connections.set(id, current = []);
     for (const [server, config] of Object.entries(servers)) {
-      const client = new TracedMcpClient({ name: "modular-agent", version: "0.1.0", roots: [{ uri: pathToFileURL(project).href, name: "project" }] });
+      const client = new TracedMcpClient({ name: "modular-agent", version, roots: [{ uri: pathToFileURL(project).href, name: "project" }] });
       try {
         await client.connect("url" in config ? new StreamableHttpTransport({ url: config.url, headers: config.headers })
           : new StdioTransport({ command: config.command, args: config.args, env: config.env, cwd: config.cwd ?? project, stderr: "pipe" }));

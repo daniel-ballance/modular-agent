@@ -1,6 +1,6 @@
 {
   "name": "@modular-agent/claude",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "private": true,
   "description": "A modular-agent-plugin/1 Provider that reaches Claude models through the Claude Agent SDK and the Claude Code login",

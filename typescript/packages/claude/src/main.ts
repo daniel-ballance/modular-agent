@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 // Serve the Provider `claude` over modular-agent-plugin/1 on stdin and stdout.
-import { readFileSync } from "node:fs";
 import { ClaudeProvider } from "./provider.js";
-import { installedSdkVersion, type QueryFunction } from "./sdk.js";
+import { installedSdkVersion, packageVersion, type QueryFunction } from "./sdk.js";
 import { serve } from "./serve.js";
 
 // stdout carries the connection: nothing else may write to it.
@@ -10,8 +9,6 @@ const log = (message: string): void => void process.stderr.write(`[claude-sideca
 console.log = console.error;
 console.info = console.error;
 console.debug = console.error;
-
-const version = (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
 // TEST ONLY. Any value replaces the Agent SDK with the scripted one in testing/fake-sdk.ts, so
 // no Claude Code process starts and no request leaves the machine. `signed-out` also reports no login.
@@ -23,7 +20,7 @@ if (fake) {
 }
 
 const provider = new ClaudeProvider({
-	version,
+	version: packageVersion,
 	sdkVersion: fake ? "fake" : installedSdkVersion(),
 	query,
 	env: process.env,

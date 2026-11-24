@@ -470,7 +470,7 @@ impl State {
             );
             *client = Some(p["clientCapabilities"].clone());
             return Ok(
-                json!({"protocolVersion":1,"agentInfo":{"name":"modular-agent-rs","version":"0.1.0"},"authMethods":[],
+                json!({"protocolVersion":1,"agentInfo":{"name":"modular-agent-rs","version":env!("CARGO_PKG_VERSION")},"authMethods":[],
                 "agentCapabilities":{"loadSession":true,"mcpCapabilities":{"http":true,"sse":false},"promptCapabilities":{"image":false,"audio":false,"embeddedContext":false},"sessionCapabilities":{"list":{},"resume":{},"close":{}}},
                 "_meta":{"modular-agent":{"binding":binding,"declaration":declaration,"extensions":binding::EXTENSIONS,"actor":{"id":self.principal.id,"kind":self.principal.kind,"rights":self.principal.rights}}}}),
             );

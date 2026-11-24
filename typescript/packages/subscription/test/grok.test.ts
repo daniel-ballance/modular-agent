@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { createAgent, definePlugin, type AssistantMessage } from "@modular-agent/core";
 import { memoryEnvironment, overWire } from "@modular-agent/core/testing";
 import { grok, signIn, signOut, subscriptionLogins, type OAuth, type SignInStep } from "@modular-agent/subscription";
-import { body, fixture, loginFile } from "./fixtures.js";
+import { body, expectedUserAgent, fixture, loginFile } from "./fixtures.js";
 
 const exec = promisify(execFile);
 const client = "b1a00492-073a-47ea-816f-4c329264a828";
@@ -143,7 +143,7 @@ for (const served of [false, true]) {
       assert.equal(req.headers.authorization, "Bearer fixture-key");
       assert.equal(req.headers.accept, "text/event-stream");
       assert.equal(req.headers["content-type"], "application/json");
-      assert.equal(req.headers["user-agent"], "modular-agent/0.1.0");
+      assert.equal(req.headers["user-agent"], expectedUserAgent);
       for (const name of ["chatgpt-account-id", "openai-beta", "originator", "referrer", "session-id", "x-client-request-id"])
         assert.equal(req.headers[name], undefined, name);
       const request = JSON.parse(await body(req));

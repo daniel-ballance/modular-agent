@@ -1,6 +1,6 @@
 {
   "name": "@modular-agent/services",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "type": "module",
   "main": "dist/src/index.js",
@@ -8,11 +8,11 @@
   "exports": { ".": { "types": "./dist/src/index.d.ts", "import": "./dist/src/index.js" } },
   "bin": { "ma-service": "dist/src/serve.js" },
   "dependencies": {
-    "@modular-agent/harness": "0.1.0",
-    "@modular-agent/history-jsonl": "0.1.0",
-    "@modular-agent/env-local": "0.1.0",
-    "@modular-agent/provider-pi-ai": "0.1.0",
-    "@modular-agent/credentials-file": "0.1.0",
+    "@modular-agent/harness": "0.2.0",
+    "@modular-agent/history-jsonl": "0.2.0",
+    "@modular-agent/env-local": "0.2.0",
+    "@modular-agent/provider-pi-ai": "0.2.0",
+    "@modular-agent/credentials-file": "0.2.0",
     "@earendil-works/pi-ai": "1.5.2"
   }
 }

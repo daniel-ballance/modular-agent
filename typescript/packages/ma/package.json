@@ -1,6 +1,6 @@
 {
   "name": "@modular-agent/ma",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -11,10 +11,10 @@
   },
   "dependencies": {
     "@modular-agent/claude": "*",
-    "@modular-agent/core": "0.1.0",
+    "@modular-agent/core": "0.2.0",
     "@modular-agent/subscription": "*",
-    "@modular-agent/tools-files": "0.1.0",
-    "@modular-agent/tools-mcp": "0.1.0",
+    "@modular-agent/tools-files": "0.2.0",
+    "@modular-agent/tools-mcp": "0.2.0",
     "@opentelemetry/api": "^1.10.0",
     "@opentelemetry/context-async-hooks": "^3.1.1",
     "@opentelemetry/exporter-metrics-otlp-grpc": "^0.301.2",

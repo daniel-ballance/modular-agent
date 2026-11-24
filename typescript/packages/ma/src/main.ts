@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { realpath } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { spawn, spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -19,6 +20,8 @@ import { claude } from "@modular-agent/claude";
 import { chatgpt, grok, resolveClientIdentity, signIn, signOut, type ClientIdentityOptions, type SignInStep } from "@modular-agent/subscription";
 import { subscriptionModelOverrides } from "./subscription-model-overrides.js";
 import { formerProviderIds, modelRef, providerId } from "./provider-ids.js";
+
+const { version } = createRequire(import.meta.url)("../../package.json") as { version: string };
 
 function parse(argv: string[]) {
   const opts: { command?: string; project: string; runtime: "durable" | "transient"; session?: string; prompt?: string;
@@ -146,7 +149,7 @@ async function main(argv: string[]) {
   if (["login", "logout", "auth"].includes(argv[0])) return authCommand(argv, auth, identity);
   const opts = parse(argv);
   if (opts.help) { console.log(HELP); return 0; }
-  if (opts.version) { console.log("ma 0.1.0 (typescript)"); return 0; }
+  if (opts.version) { console.log(`ma ${version} (typescript)`); return 0; }
   const serving = opts.acp || opts.agui;
   if (opts.agui && !opts.listen) throw new Error("--agui requires --listen");
   if (opts.listen !== undefined && (!serving || !opts.listen || opts.command || opts.declaration)) throw new Error("--listen requires --acp or --agui");

@@ -230,7 +230,7 @@ func (s *server) Initialize(ctx context.Context, p acp.InitializeRequest) (acp.I
 	s.peer, _ = acp.AgentSideConnectionFromContext(ctx)
 	return acp.InitializeResponse{
 		ProtocolVersion:   acp.ProtocolVersion(acp.WireProtocolVersion),
-		AgentInfo:         &acp.Implementation{Name: "modular-agent-go", Version: "0.5"},
+		AgentInfo:         &acp.Implementation{Name: "modular-agent-go", Version: api.ImplementationVersion},
 		AgentCapabilities: acp.AgentCapabilities{LoadSession: true, McpCapabilities: acp.McpCapabilities{Http: true}, SessionCapabilities: acp.SessionCapabilities{List: &acp.SessionListCapabilities{}, Resume: &acp.SessionResumeCapabilities{}, Close: &acp.SessionCloseCapabilities{}}},
 		Meta: map[string]json.RawMessage{Namespace: api.JSON(map[string]any{
 			"binding": s.binding, "declaration": s.declaration(""),

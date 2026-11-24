@@ -34,7 +34,7 @@ func StartModelProcess(ctx context.Context, spec Spec, project, state, id string
 		_ = r.cmd.Process.Kill()
 		_ = r.cmd.Wait()
 	}()
-	init := object{"binding": Binding, "data": DataBinding, "host": object{"name": "modular-agent-go", "version": "1"}, "project": project, "home": state, "config": object{}}
+	init := object{"binding": Binding, "data": DataBinding, "host": object{"name": "modular-agent-go", "version": api.ImplementationVersion}, "project": project, "home": state, "config": object{}}
 	err := r.peer.Call(ctx, "plugin/initialize", init, &r.reg)
 	if err == nil {
 		err = r.validate()

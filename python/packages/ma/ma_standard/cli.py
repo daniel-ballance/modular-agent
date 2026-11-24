@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import getpass
+from importlib.metadata import version as _package_version
 import json
 import os
 from pathlib import Path
@@ -92,7 +93,12 @@ class Script(ScriptedProvider):
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ma", description="ma, the standard Modular Agent")
-    parser.add_argument("-V", "--version", action="version", version="ma 0.1.0 (Python)")
+    parser.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version=f"ma {_package_version('modular-agent-standard')} (Python)",
+    )
     parser.add_argument("--model", metavar="PROVIDER/ID")
     parser.add_argument("--thinking", choices=("off", "minimal", "low", "medium", "high", "xhigh"))
     parser.add_argument("--session", metavar="ID")
