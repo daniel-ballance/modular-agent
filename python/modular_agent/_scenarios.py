@@ -311,9 +311,15 @@ async def run_scenario(
     )
     with scratch as temp:
         directory = Path(temp)
-        # The telemetry kit copies the fixture to its own scenario.json.
+        # Use the scenario name because the telemetry kit copies the fixture.
+        # The waiting driver owns the clock and batch observer across writer stops.
         if scenario["scenario"].startswith("waiting-approval"):
             kit = Path(__file__).resolve().parents[2] / "conformance/sdk/waiting.mjs"
+            env = (
+                {**os.environ, "MODULAR_AGENT_TELEMETRY_RUN": str(telemetry.path)}
+                if telemetry
+                else None
+            )
             proc = await asyncio.create_subprocess_exec(
                 "node",
                 Path(__file__).resolve().parents[1] / "scripts/waiting-scenario.mjs",
@@ -323,6 +329,7 @@ async def run_scenario(
                 path,
                 placement,
                 *command,
+                env=env,
             )
             return (
                 []
