@@ -7,6 +7,8 @@ date: 2026-11-19
 
 Four rounds of review found about 350, then 108, 22 and 18 issues. The reviews made it clear which documents set rules and caught gaps in authority, recovery and the wire. Fewer findings did not tell us whether independent builders would still have to guess. We froze the first edition and had all five builders work from it rather than ask for another review.
 
+**Current rule:** use the [specification and kits at the same revision](../conformance.md#versioning). The decision below records the edition 3 handoff.
+
 ## Decision
 
 Hand off edition 3 as the specification, not any of the reference builds. [Conformance](../conformance.md#the-documents), [Contracts](../contracts.md), [Security](../security.md) and the four [bindings](../bindings/README.md) set the requirements. The [Implementer's guide](../implementers-guide.md), architecture, scenarios and decision records explain them. An edition pins the specification for acceptance; it is not a binding major version. See [Versioning](../conformance.md#versioning).
