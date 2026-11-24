@@ -11,11 +11,12 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { parseArgs, promisify } from 'node:util';
 import { advanced } from './advanced.mjs';
 import { cases as basic, offer } from './cases.mjs';
+import { closures } from './closures.mjs';
+import { receipts } from './receipts.mjs';
+import { waiting } from './waiting.mjs';
 import { at, deadline } from './wire.mjs';
 
-import { waiting } from './waiting.mjs';
-
-const cases = { ...basic, ...advanced, ...waiting };
+const cases = { ...basic, ...advanced, ...waiting, ...closures, ...receipts };
 const roles = ['owner', 'rotated', 'sibling', 'foreign', 'watch', 'tenant', 'project'];
 const usage = `node run.mjs [--only CASE[,CASE...]] -- /absolute/path/to/fixture [args...]
 node run.mjs --only CASE --url ORIGIN --token-file FILE [--ROLE-token-file FILE ...]

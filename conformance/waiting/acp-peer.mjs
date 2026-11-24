@@ -1,13 +1,16 @@
 // A second authenticated connection to the same writer, not a second writer.
 import { ACP_PROTOCOL, endpoint, socketPeer } from '../tools/websocket.mjs';
 
-export async function acpPeer(url, token) {
+export async function acpPeer(url, token, { holdPermissions = false } = {}) {
   const pending = new Map(), permissions = [];
   let id = 0;
   const wire = socketPeer({ url: endpoint(url), protocol: ACP_PROTOCOL, token }, (_, msg) => {
     if (!msg || !Object.hasOwn(msg, 'id')) return;
     if (msg.method) {
-      if (msg.method === 'session/request_permission') permissions.push(msg.params);
+      if (msg.method === 'session/request_permission') {
+        permissions.push(msg.params);
+        if (holdPermissions) return; // The kit decides through the authenticated polling route instead.
+      }
       wire.send(JSON.stringify({ jsonrpc: '2.0', id: msg.id, ...(msg.method === 'session/request_permission' ?
         { result: { outcome: { outcome: 'selected', optionId: 'refuse' } } } : { error: { code: -32601, message: 'Not supported' } }) }));
     } else {

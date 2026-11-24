@@ -15,7 +15,7 @@ export const input = (view, suffix = [], extra = {}) => ({
   messages: [...view.messages, ...suffix], tools: [], context: [], state: {}, forwardedProps: {}, ...extra,
 });
 
-function responseType(response, type) {
+export function responseType(response, type) {
   assert.equal(response.headers.get('content-type')?.split(';')[0].trim(), type, 'Content-Type');
   assert.match(response.headers.get('cache-control') ?? '', /\bno-(store|cache)\b/, 'response must not be cached');
   for (const key of ['traceparent', 'tracestate', 'baggage', 'set-cookie']) {
@@ -126,10 +126,10 @@ export async function refused(response, status, ...codes) {
 }
 
 // Validate framing before JSON decoding. Chunk boundaries can fall anywhere.
-export async function* sse(response) {
+export async function* sse(response, { allowReset = false } = {}) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
-  let parts = [], size = 0, ended = false;
+  let parts = [], size = 0, ended = false, pending;
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -143,19 +143,21 @@ export async function* sse(response) {
         if (size < 0) {
           assert.equal(segment.length, 0, 'SSE data line must end with LF LF');
           size = 0;
+          yield { data: pending }; // Even a live reader must receive the full frame before acting.
+          pending = undefined;
           continue;
         }
         parts.push(segment);
         assert.ok(size + segment.length <= MAX + 6, 'encoded SSE event exceeds 64 MiB');
         const line = decoder.decode(Buffer.concat(parts));
         parts = [];
-        if (line.startsWith(':')) { size = 0; yield { comment: true }; }
+        if (line.startsWith(':')) { size = 0; yield { comment: true, text: line.slice(1) }; }
         else {
           assert.ok(line.startsWith('data: '), 'only SSE comments and data lines are allowed (no SSE id)');
           const data = parse(line.slice(6));
           assert.ok(object(data), 'one JSON object per SSE data line');
           size = -1;
-          yield { data };
+          pending = data;
         }
       }
       if (start < bytes.length) {
@@ -167,6 +169,10 @@ export async function* sse(response) {
       }
     }
     assert.equal(size, 0, 'truncated SSE frame');
+  } catch (error) {
+    // Watch loss can reset an established feed. Never swallow a partial frame,
+    // a validation failure, or the reader's own deadline.
+    if (!allowReset || size !== 0 || !(error instanceof TypeError && error.message === 'terminated')) throw error;
   } finally {
     if (!ended) await reader.cancel().catch(() => {});
     reader.releaseLock();
