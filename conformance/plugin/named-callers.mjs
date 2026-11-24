@@ -23,7 +23,9 @@ async function launch(command, env, root, config, use) {
   closeSync(log);
   const exited = new Promise((resolve, reject) => { child.once('error', reject); child.once('close', (code, signal) => resolve({ code, signal })); });
   const stop = () => { if (child.pid) try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; } };
-  process.once('exit', stop);
+  let interrupted = false;
+  const interrupt = () => { interrupted = true; stop(); };
+  process.once('exit', stop); process.once('SIGINT', interrupt); process.once('SIGTERM', interrupt);
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
   const first = new Promise((resolve, reject) => {
     lines.once('line', line => { try { resolve(JSON.parse(line)); } catch { reject(Error('fixture must print a JSON startup result')); } });
@@ -32,7 +34,12 @@ async function launch(command, env, root, config, use) {
   try {
     const ready = await guarded(Promise.race([first, exited.then(() => { throw Error('fixture exited before readiness'); })]));
     await use(ready, () => guarded(exited));
-  } finally { lines.close(); stop(); await exited; process.off('exit', stop); }
+  } finally {
+    lines.close(); stop();
+    process.off('exit', stop); process.off('SIGINT', interrupt); process.off('SIGTERM', interrupt);
+    await exited;
+    if (interrupted) throw Error('named caller fixture interrupted');
+  }
 }
 
 export async function namedCallers(command, env, check, isolate) {
