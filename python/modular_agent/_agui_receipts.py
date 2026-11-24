@@ -154,7 +154,7 @@ class ReceiptStore:
                         )
 
 
-async def read_receipt(v: View, run: str, state: Obj) -> Obj:
+async def read_receipt(v: View, run: str) -> Obj:
     store = v.binding.receipts
     require(store is not None, "not_found")
     assert store is not None
@@ -163,6 +163,8 @@ async def read_receipt(v: View, run: str, state: Obj) -> Obj:
     require(row and row[0], "not_found")
     assert row is not None
     source, marker, raw = row
+    # Bracket the history read with marker reads. A remote read may yield.
+    state = await v.inspect(v.sid, receipt=True)
     entries = state["entries"]
     branch = branch_entries(state)
     visible = {
@@ -173,8 +175,14 @@ async def read_receipt(v: View, run: str, state: Obj) -> Obj:
     assert anchor is not None
     records, end = work_records(entries, anchor)
     detail = json.loads(raw)
-    for eid in dict.fromkeys([*(e["id"] for e in records), *detail.get("sources", [])]):
-        require(eid in visible and await v.entry(visible[eid]) is not None, "not_found")
+    sources = set(detail.get("sources", [])).union(e["id"] for e in records)
+    for eid in sources:
+        require(eid in visible, "not_found")
+        projected = await v.entry(visible[eid])
+        require(projected is not None, "not_found")
+        if end and eid == end["id"] and end["kind"] == "input_withdrawn":
+            assert projected is not None
+            require(projected["data"].get("reason") == end["data"].get("reason"), "not_found")
     if anchor["kind"] == "question_answer":
         op = next((e for e in records if e["kind"] == "question_open"), None)
         require(op and await question_fact(v, anchor, op), "not_found")
@@ -232,7 +240,9 @@ async def read_receipt(v: View, run: str, state: Obj) -> Obj:
                     for e in records_for(detail, visible)
                     if e["kind"] == "tool_started" and e["call"] == cid
                 )
+                projected = await v.entry(start)
                 call = start["data"]["call"]
+                require(projected and same_json(call, projected["data"]["call"]), "not_found")
                 for frame in triad(cid, call["name"], call["input"]):
                     require(same_json(await v.gate("event", frame), frame), "not_found")
         frame = event("RUN_FINISHED", **bounds, outcome=outcome)
@@ -248,7 +258,10 @@ async def read_receipt(v: View, run: str, state: Obj) -> Obj:
     await v.required("runReceipt", reply, exact=True)
     # Ordinary appends can advance work. They don't invalidate this watermark.
     current = await v.inspect(v.sid, receipt=True)
-    require(source in {e["id"] for e in branch_entries(current)}, "not_found")
+    require(
+        sources <= {e["id"] for e in branch_entries(current) if not e["data"].get("erased")},
+        "not_found",
+    )
     require(store.lookup(key) == row, "unavailable")
     return reply
 

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from contextvars import copy_context
+from ma_core import AgentError as HarnessError
+from ._types import AgentError
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -103,6 +106,8 @@ class WaitFeed:
 
     async def deliver(self, position: WaitPosition, eid: str, stream: Stream) -> None:
         v = self.v
+        # Flush previous backpressure before gating the next item.
+        await stream.write(b"")
         await v.check()
         rev = await v.h.erasure_revision(v.sid)
         branch = v.branch()
@@ -162,7 +167,12 @@ class WaitFeed:
                     live.put_nowait(e["id"])
 
         listeners = v.h.commit_listeners.setdefault(v.sid, set())
-        listeners.add(committed)  # No yield between the watermark and registration.
+        context = copy_context()
+
+        def notify(entries: list[Obj]) -> None:
+            context.run(committed, entries)  # Apply the viewer ceiling, not the writer ceiling.
+
+        listeners.add(notify)  # No yield between the watermark and registration.
         try:
             await stream.start()
             await stream.write(b": watching\n\n")
@@ -180,9 +190,9 @@ class WaitFeed:
         except asyncio.CancelledError:
             if not cutoff:
                 raise
-        except Failure:
+        except (Failure, HarnessError, AgentError):
             return  # No error frame or last cursor on loss of access.
         finally:
-            listeners.remove(committed)
+            listeners.remove(notify)
             if not listeners:
                 del v.h.commit_listeners[v.sid]

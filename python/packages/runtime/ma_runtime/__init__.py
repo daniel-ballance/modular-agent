@@ -146,7 +146,11 @@ class Runtime(Turns, Plugin):
                         "duplicate": True,
                     }
         entry_id = d.pop("_entry_id", None)
-        incoming = d if d.get("source") else await self.api.session("input", **d)
+        incoming = (
+            d
+            if d.get("source")
+            else await self.api.session("input", **d, _defer_command=bool(entry_id))
+        )
         if incoming.get("handled"):
             if entry_id:
                 await self.api.session(
@@ -160,6 +164,8 @@ class Runtime(Turns, Plugin):
                     data={"when": "now", "key": key, "authority": authority},
                     handled=True,
                 )
+                if cmd := incoming.get("command"):
+                    incoming["result"] = await self.api.session("command", **d, text=cmd)
                 return {**incoming, "input": entry_id}
             return incoming
         d = incoming

@@ -214,9 +214,10 @@ class Binding:
                         and len(req.query_params.getlist("runId")) == 1
                         and req.query_params["runId"]
                     )
-                    rev = await view.h.erasure_revision(view.sid)
-                    reply = await read_receipt(view, req.query_params["runId"], state)
-                    require(rev == await view.h.erasure_revision(view.sid), "not_found")
+                    with view.h.read_watermark(state):
+                        rev = await view.h.erasure_revision(view.sid)
+                        reply = await read_receipt(view, req.query_params["runId"])
+                        require(rev == await view.h.erasure_revision(view.sid), "not_found")
                     return Response(encode(reply), media_type="application/json", headers=headers)
                 if match[2] == "/wait-closures":
                     await view.inspect(match[1])
@@ -368,8 +369,6 @@ class View:
         state = self.h.sessions.get(sid)
         if receipt:
             require(self.binding.receipts is not None, "not_found")
-            if await self.h._pending_erasure(sid):
-                raise Failure("not_found")
         if receipt or state is None or state.get("writer_lost") or sid in self.h.interruptions:
             state = await self.agent._call("history", "read", session=sid)
         require(
@@ -378,7 +377,9 @@ class View:
             and self.h.can_open(state, self.actor, kind=self.principal["actor"]["kind"]),
             "not_found",
         )
-        self.sid, self.inspected = sid, state
+        if receipt and await self.h._pending_erasure(sid):
+            raise Failure("not_found")
+        self.sid, self.inspected = sid, state if receipt else None
         assert state is not None
         return cast(Obj, state)
 
@@ -409,7 +410,9 @@ class View:
         s = self.h.sessions.get(self.sid) or self.inspected
         return (
             set(self.h.permissions(s, self.actor, self.grants.get(self.sid, self.rights)))
-            if s and self.in_scope(s)
+            if s
+            and self.in_scope(s)
+            and s["actors"].get(self.actor, {}).get("kind") == self.principal["actor"]["kind"]
             else set()
         )
 
@@ -576,11 +579,15 @@ class View:
             return str(piece["delta"]) if piece else ""
         return text
 
-    def open_calls(self, branch: list[Obj]) -> dict[str, Obj]:
+    def open_calls(self, branch: list[Obj], state: Obj | None = None) -> dict[str, Obj]:
         return cast(
             dict[str, Obj],
             self.h.open_interface_calls(
-                self.h.sessions[self.sid], branch, self.actor, self.client, self.rights_now()
+                state or self.h.sessions[self.sid],
+                branch,
+                self.actor,
+                self.client,
+                self.rights_now(),
             ),
         )
 
@@ -670,7 +677,10 @@ class View:
         through: str | None = None,
         deliver_waits: bool = False,
     ) -> tuple[Obj, Cursor]:
+        if http and self.h.max_approval_wait_ms is not None:
+            await self.h.reconcile_waits(self.sid)
         rev = await self.h.erasure_revision(self.sid)
+        state = self.h.sessions[self.sid]
         branch = self.branch()
         if through is not None:
             stop = next((i for i, e in enumerate(branch) if e["id"] == through), None)
@@ -687,7 +697,7 @@ class View:
             if presence and deliver_waits:
                 self.h.forget_waits(self.sid, token=presence.route)
             qs = await self.questions(branch, offer_waits=deliver_waits, snapshot=True)
-            calls = self.open_calls(branch)
+            calls = self.open_calls(branch, state)
             reply = await self.required(
                 "snapshot",
                 {

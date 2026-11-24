@@ -194,6 +194,8 @@ class Exchange:
             except (asyncio.CancelledError, ConnectionError):
                 raise
             except Exception as exc:
+                if self.finished:
+                    return  # The terminal reached the transport. Never send a second one.
                 self.v.binding.cursors.pop(self.v.key, None)
                 err = event("RUN_ERROR", code=problem(exc), message="Run could not be delivered.")
                 data = await self.v.gate("error", err) if "watch" in self.v.rights_now() else None
@@ -202,7 +204,7 @@ class Exchange:
                 if self.store and self.source:
                     self.store.stage(
                         self.source,
-                        {"code": err["code"], "fallback": err["code"] == "output_withheld"},
+                        {"code": err["code"], "fallback": err["message"] == "Output withheld."},
                     )
                 await self.response.write(b"data: " + encode(err) + b"\n\n")
                 if self.store and self.source:
@@ -492,10 +494,10 @@ class Exchange:
             ]
             self.store.stage(self.source, {"sources": ids, "questions": qids, "calls": staged})
         await self.write(prefix + frames + snap + end)
+        self.finished = True
         if self.store and self.source:
             self.store.released(self.source, outcome["type"])
         v.remember(cursor)
-        self.finished = True
 
     async def project(self, d: Obj) -> None:
         v = self.v

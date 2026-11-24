@@ -202,6 +202,15 @@ class HostReads:
 
     def read_gate(self, ev):
         d = ev["data"]
+        if (
+            self.receipt_mode in ("terminal", "work")
+            and d.get("method") == "agui.runReceipt"
+            and d["clientId"] == "kit-primary"
+        ):
+            d["result"][self.receipt_mode] = {"terminal": "unknown", "work": "unsettled"}[
+                self.receipt_mode
+            ]
+            return {"redact": [ev]}
         if self.receipt_mode == "settlement" and ev["type"] == "turnEnded":
             return {"block": True}
         if (

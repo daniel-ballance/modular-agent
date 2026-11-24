@@ -124,19 +124,17 @@ class Questions(Plugin):
                 )
             ):
                 if not await self._answer_route(sid, q):
-                    await self._accept(sid, q, q["actor"], "declined", "noLongerAnswerable")
+                    await self._accept(
+                        sid,
+                        q,
+                        q["actor"],
+                        "declined",
+                        "refused" if q["kind"] == "approval" else "noLongerAnswerable",
+                    )
         return {}
 
-    def revoked_requests(self, h, before, after):
-        from ma_harness.interface_tools import branch_entries
-
-        sid = before["id"]
-        branch = branch_entries(before)
-        closed = {
-            e["data"]["request"]
-            for e in branch
-            if e["kind"] in ("question_answer", "question_closed", "secret_answer_accepted")
-        }
+    async def revoked_requests(self, d, emit):
+        sid = d["session"]
 
         def has_answerer(s, q):
             in_turn = not q.get("approvalWait") and (
@@ -144,15 +142,15 @@ class Questions(Plugin):
                 or q.get("timeout") is None
                 and not self.wait_for_unconnected
             )
-            for actor in s["actors"]:
-                rights = h.permissions(s, actor)
+            for actor, grant in s.items():
+                rights = set(grant)
                 if not eligible_question(q, actor, rights) or "watch" not in rights:
                     continue
                 if not in_turn:
                     return True
                 for route in self.connected.get(sid, {}).get(actor, ()):
                     principal = self.route_principals.get((sid, actor, route), actor)
-                    principal_rights = h.permissions(s, principal)
+                    principal_rights = set(s.get(principal, ()))
                     if (
                         eligible_question(q, actor, rights & principal_rights)
                         and "watch" in principal_rights
@@ -164,13 +162,14 @@ class Questions(Plugin):
             return False
 
         return [
-            e
-            for e in branch
-            if e["kind"] == "question_open"
-            and e["data"]["id"] not in closed
-            and has_answerer(before, e["data"])
-            and not has_answerer(after, e["data"])
+            q["id"]
+            for q in d["requests"]
+            if has_answerer(d["before"], q) and not has_answerer(d["after"], q)
         ]
+
+    async def notify_closed(self, d, emit):
+        self.signals.setdefault((d["session"], d["request"]), asyncio.Event()).set()
+        return {}
 
     async def _answer_route(self, sid, q):
         for actor, routes in self.connected.get(sid, {}).items():

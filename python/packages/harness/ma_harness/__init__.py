@@ -1232,17 +1232,48 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
                 "authority": grant["authority"],
             }
         if e["kind"] in {"authority", "actor_left", "limit"} and "questions" in self.capabilities:
-            questions = self.capabilities["questions"][1]
+            branch = branch_entries(s)
+            closed = {
+                row["data"]["request"]
+                for row in branch
+                if row["kind"] in ("question_answer", "question_closed", "secret_answer_accepted")
+            }
+            openings = {
+                row["data"]["id"]: row
+                for row in branch
+                if row["kind"] == "question_open" and row["data"]["id"] not in closed
+            }
             # Compare both views before publishing either the grant or its consequences.
             # A competing answer takes the same append lock.
             token = CONNECTION_AUTHORITY.set(None)
             try:
-                revoked = questions.revoked_requests(self, s, updated)
+                revoked = (
+                    await self.call(
+                        "@harness",
+                        "questions",
+                        "revoked_requests",
+                        {
+                            "session": sid,
+                            "requests": [opening["data"] for opening in openings.values()],
+                            "before": {a: sorted(self.permissions(s, a)) for a in s["actors"]},
+                            "after": {
+                                a: sorted(self.permissions(updated, a)) for a in updated["actors"]
+                            },
+                        },
+                    )
+                    if openings
+                    else []
+                )
             finally:
                 CONNECTION_AUTHORITY.reset(token)
-            for opening in revoked:
+            for qid in revoked:
+                opening = openings[qid]
                 q = opening["data"]
-                reason = "noLongerAnswerable"
+                reason = (
+                    "refused"
+                    if q["kind"] == "approval" and not q.get("approvalWait")
+                    else "noLongerAnswerable"
+                )
                 if q.get("approvalWait") and self.wait_reason(updated, opening) != (
                     reason,
                     "refused",
@@ -1745,8 +1776,9 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
             await self.fire("@harness", "session.leave", {**d, "entry": entry})
             return entry
         if op == "input":
+            defer_command = d.pop("_defer_command", False)
             result = await self.fire("@harness", "input.arrives", d)
-            if result.get("handled") and (command := result.get("command")):
+            if not defer_command and result.get("handled") and (command := result.get("command")):
                 result["result"] = await self.handle("command", {**d, "text": command}, emit)
             return result
         if op == "prepare":
@@ -1778,9 +1810,12 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
                 for closed in entries[1:]:
                     if closed["kind"] == "question_closed":
                         qid = closed["data"]["request"]
-                        self.capabilities["questions"][1].signals.setdefault(
-                            (sid, qid), asyncio.Event()
-                        ).set()
+                        await self.call(
+                            "@harness",
+                            "questions",
+                            "notify_closed",
+                            {"session": sid, "request": qid},
+                        )
                 await self.interface_kick(sid)
             if d["kind"] in {"limit", "authority", "actor_left", "setting"} and waiting_entries(
                 self.sessions[sid]

@@ -54,16 +54,16 @@ The five [live checks](../docs/sdk/testing.md#live-checks) in `tests/test_sdk_li
 ## What is checked
 
 - **Shared scenarios:** 405/405 with `MODULAR_AGENT_SDK_REQUIRE=all`: 45 in process, and the same 45 with each of the four SDKs' fixture programs on stdio and over WebSocket.
-- **Pytest:** 812 passed and five live checks skipped in each of four configurations: transient and durable Runtimes, with local and process bindings.
+- **Pytest:** 823 passed and five live checks skipped in each of four configurations: transient and durable Runtimes, with local and process bindings.
 - **Covered approvals:** 11 public SDK cases check the request view, each nested start, refusal by policy or another gate, exact input, restart and continuation with or without a marked parent view.
 - **Waiting approvals:** 61 public SDK cases cover the composition, rights, polling handles, deadlines, erasure, fork/move refusal and recovery. SIGKILL tests stop the writer after the origin ends, after the answer commits and after the counter increments. They use both Runtime tiers in process and served. The ADR 0034 runner adds `poll`, `decide`, `clock`, `barrier`, `change` and `stop`. With the shared fixtures, the 28 new scenarios passed in all nine placements (252/252; 405/405 including the 17 existing scenarios). The in-process telemetry check passed 16/16, including the four waits with export on and off. The eight waiting AG-UI cases passed against the real fixture listener.
 - **Interface tools:** 35 public SDK cases cover in-process and served Runtimes. They check approvals, exact gated handoff, reconnect, competing reports, expiry, cancellation, erasure, trace links and SIGKILL recovery before and after the origin ends. No shared scenario was added: its format has no authenticated Interface connection or result-report operation.
 - **Reference `ma`:** 28/28 on Linux. `approval-covers-script` checks that a refused script writes neither file and an allowed script writes both. It also checks a new writer can finish the script after a waiting decision.
 - **Telemetry:** eight offline SDK cases check span parentage and IDs, inference metrics, private sentinels, a job-linked report, both handshake omissions, exporter failure, and operation without the OpenTelemetry SDK. The crash fixture kills two durable segments and checks that the third span has the last saved parent and link. Fork copies have no trace checkpoint or turn trace field.
 - **Subscriptions:** Offline checks cover the shared catalog and login file, both ChatGPT sign-in flows, and Grok's device flow, including slow-down, denial, expiry and refusal of non-HTTPS verification addresses. Both Responses Providers are checked in process and over the plugin binding for request shape, encrypted reasoning replay and refused refresh. The Grok checks force two refreshers to contend for the login lock. Claude fixtures exercise account readiness, thinking settings, streaming and host tool dispatch.
-- **ACP kit against `ma`:** 190/190 on Linux stdio with crash, probe and job checks. With `--approval off` (feature loaded), 193/193 including the live coverage check and waiting-declaration checks. With a 60-second maximum, 118/118 public, crash and job checks, including the covered continuation. Adding the Runtime probes to the maximum-bound run gave 165/169: those four probes register Runtimes without the required continuation support, so composition refuses them. The separate `--waiting-approval-only` group passed its two declaration checks but not its 42 managed-fixture checks. Plain `ma` does not supply that kit's private clock, control listener or offline test principals. The WebSocket run passed 195/195. Separate-listener plugin isolation passed 14/14. The base build takes the opt-in policy with `modular-agent --acp` in conformance mode, without changing the legacy `--mode acp` composition.
+- **ACP kit against `ma`:** 190/190 on Linux stdio with crash, probe and job checks. With `--approval off` (feature loaded), 193/193 including the live coverage check and waiting-declaration checks. With a 60-second maximum, 118/118 public, crash and job checks, including the covered continuation. Adding the Runtime probes to the maximum-bound run gave 165/169: those four probes register Runtimes without the required continuation support, so composition refuses them. The separate `--waiting-approval-only` group passed its two declaration checks but not its 42 managed-fixture checks. Plain `ma` does not supply that kit's private clock, control listener or offline test principals. The WebSocket run passed 195/195. Separate-listener plugin isolation passed 14/14. The named-caller fixture passed 29/29. The base build takes the opt-in policy with `modular-agent --acp` in conformance mode, without changing the legacy `--mode acp` composition.
 - **Plugin kit:** 146/146 on stdio and 153/153 over WebSocket, with both Runtime tiers.
-- **Discovery and recovery:** 34/34 AG-UI cases, including the covered interrupt and nested dispatch after restart. The public Python tests cover page cursors, per-connection counts, revocation during delivery, a held writer, and durable and transient recovery after SIGKILL.
+- **Discovery and recovery:** 48/48 AG-UI cases, including replay and live wait closures, masked receipts, the covered interrupt and nested dispatch after restart. The public Python tests cover page cursors, per-connection counts, revocation during delivery, a held writer, and durable and transient recovery after SIGKILL.
 - **Demos:** ops desk passed all six scripted cases. Project notes passed both the scripted case and crash and reopen; each produced one file, one completed turn and two tool results.
 - **History kit:** 42/42 with restart and 42/42 with `--isolation-checks`, using two `serve_history(file_history(...))` services with different stores and tokens.
 - **Session publication:** six SDK cases cover file, HTTP and Registrar history with in-process and served Runtimes. Unused sessions leave no records on close or process loss. The first admission flushes setup in order, and forks publish the copied prefix and fresh setup together. A separate ACP case checks that `session/new` and close do not create an HTTP history record.
@@ -113,6 +113,15 @@ Both WebSocket servers return a listener with `url` (the bound address including
 
 A plugin value gets a new registration and copy per connection. If the plugin carries state in function closures or holds noncopyable resources, pass a zero-argument factory to `serve` so each connection gets fresh state. ACP's `actors` entries are `{"token_file": path, "actor": {"id": ..., "kind": ..., "rights": [...]}, "tenants": [...], "projects": [...]}`. Tenant scope defaults to no tenant; include `None` to allow it alongside named tenants. An explicit project list contains canonical project roots; omitting it allows the projects the serving composition admits. Tokens for the same actor id must agree on kind, but can impose different rights ceilings on the same recorded grants. An authorized second connection can attach to an open session's existing writer without sharing the first connection's ACP handshake or leaving the session suspended on its disconnect.
 
+### Named plugin callers
+
+Use the factory context, not setup or tool input, to select storage. For a working environment, `projects={caller_id: [root, ...]}` restricts each caller to its canonical project roots. A caller ID grants no session rights. Use separate services if the plugin cannot isolate its resources.
+
+#### Exact text for the Python section of docs/sdk/languages.md
+
+- For named plugin callers, use `await serve(factory, listen=address, callers=[{"caller_id": "desk", "token_file": path}])`. The synchronous factory takes a `CallerContext` with `context["caller_id"]` and returns a fresh `Plugin`. `PluginCaller` is the operator entry type. With `token_file=path` instead, an existing zero-argument factory or plugin value still works.
+- The listener returned by `await agent.serve_agui(...)` serves the host reads over HTTP. In the thread snapshot use `waitCursor` for `GET /agui/v1/threads/{threadId}/wait-closures?after=...`. When `runReceipts` is `1`, use `GET /agui/v1/threads/{threadId}/run-receipt?runId=...`. Encode each query value separately. Neither read delivers an answer handle or dispatches a tool.
+
 ## Serve AG-UI
 
 ```python
@@ -137,9 +146,13 @@ List kept threads with `GET /agui/v1/threads?limit=100`. The response contains `
 
 Send the latest committed messages with the new suffix. `MA-History-Cursor` is optional. On conflict, replace the local conversation with the authenticated thread snapshot, including its new message IDs. The optional presence stream allows an in-turn question to be answered on the same live route. It does not carry calls. Execute only after the terminal event, never from the snapshot.
 
+Follow wait closures from the snapshot's `waitCursor`, not its message cursor. Each SSE item contains a new cursor, a request or call ID and its committed reason. A settled call also gives its status. Save the cursor after processing the item. On HTTP 409 take a new snapshot. The feed does not mark presence.
+
+A run receipt on kept history separates the released terminal class from the disposition of the linked work. For example, an interrupt exchange may have `{"terminal":"interrupt","work":"completed"}` after another client answers. A crash before the terminal marker commits leaves `terminal` as `unknown`. Neither field proves receipt by the client. The deployment stores the marker apart from portable history and removes it with its sources.
+
 For shared state, set `state_plugin` to the emitting plugin's name and provide its async `state_snapshot(session_id)` reader. The reader returns `{revisionId, snapshot}` or `None` when no current snapshot can be supplied. The adapter requests it at run start and when a patch loses its base. Without a reader the plugin must publish a current snapshot before any delta. To allow explicitly foreign events, set `raw_sources={plugin_name: source}`. The plugin emits `modular-agent.agui.raw` with the foreign event as its payload.
 
-The [managed kit](../conformance/agui/README.md) checks 25 cases. History, encoding and the official client's ordinary conversation use the actual `ma` executable. The other 22 use the kit's scripted SDK composition. None are skipped.
+The [managed kit](../conformance/agui/README.md) runs history, encoding and the official client's ordinary conversation against the actual `ma` executable. The scripted SDK fixture supplies the operator gate, controlled clock and process kill boundaries.
 
 ## Covered approvals
 
@@ -187,6 +200,10 @@ Call `await claude_provider.available()` before displaying account-specific mode
 ## Trace trust and spec findings
 
 The launcher of a stdio ACP host is trusted for per-request trace context unless `serve_acp(trace_trusted=False)` disables it. Set `trace_trusted=True` in an embedded network ACP `actors` entry only for a peer allowed to share trace IDs. Network principals are not trace-trusted by default. Configured history and plugin destinations get context per request. The SDK does not accept or send baggage. AG-UI can accept allowlisted vendor state on a trusted work POST.
+
+### ADR 0035 spec finding
+
+In [Run receipts](../docs/bindings/agui.md#run-receipts), replace “If freshness cannot be established, refuse with 503 `unavailable`.” with: “If an erasure intent covers a source of the receipt, return 404 `not_found`, including while deletion is pending. If the current erasure state cannot be checked, refuse with 503 `unavailable`.”
 
 ### ADR 0033 spec findings
 
