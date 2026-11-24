@@ -12,28 +12,30 @@ import (
 func Plugin() api.Plugin {
 	return api.Plugin{Name: "commands", Setup: func(a api.API) error {
 		commands := map[string]api.Command{
-			"usage": func(ctx context.Context, id string, _ []string) (string, error) {
+			"usage": func(ctx context.Context, id string, _ string) (string, error) {
 				s, err := a.Snapshot(id)
 				return string(api.JSON(api.SessionUsage(s))), err
 			},
-			"help": func(context.Context, string, []string) (string, error) {
+			"help": func(context.Context, string, string) (string, error) {
 				return "/" + strings.Join(a.Commands(), ", /"), nil
 			},
-			"settings": func(ctx context.Context, id string, args []string) (string, error) {
+			"settings": func(ctx context.Context, id string, args string) (string, error) {
 				s, err := a.Snapshot(id)
 				return string(api.JSON(s.Settings)), err
 			},
-			"history": func(ctx context.Context, id string, args []string) (string, error) {
+			"history": func(ctx context.Context, id string, args string) (string, error) {
 				s, err := a.View(ctx, id)
 				return string(api.JSON(s)), err
 			},
-			"move": func(ctx context.Context, id string, args []string) (string, error) {
+			"move": func(ctx context.Context, id string, raw string) (string, error) {
+				args := strings.Fields(raw)
 				if len(args) != 1 {
 					return "", errors.New("usage: /move entry-id")
 				}
 				return "Moved.", a.Move(ctx, id, args[0], false)
 			},
-			"fork": func(ctx context.Context, id string, args []string) (string, error) {
+			"fork": func(ctx context.Context, id string, raw string) (string, error) {
+				args := strings.Fields(raw)
 				if len(args) > 1 {
 					return "", errors.New("usage: /fork [entry-id]")
 				}
@@ -43,13 +45,15 @@ func Plugin() api.Plugin {
 				}
 				return a.Fork(ctx, id, point)
 			},
-			"erase": func(ctx context.Context, id string, args []string) (string, error) {
+			"erase": func(ctx context.Context, id string, raw string) (string, error) {
+				args := strings.Fields(raw)
 				if len(args) != 1 {
 					return "", errors.New("usage: /erase entry-id")
 				}
 				return "Erased controlled history copies. Output already delivered is out of reach.", a.Erase(ctx, id, args)
 			},
-			"sessions": func(ctx context.Context, id string, args []string) (string, error) {
+			"sessions": func(ctx context.Context, id string, raw string) (string, error) {
+				args := strings.Fields(raw)
 				s, err := a.Snapshot(id)
 				if err != nil {
 					return "", err
@@ -70,7 +74,7 @@ func Plugin() api.Plugin {
 				}
 				return strings.Join(lines, "\n"), nil
 			},
-			"support": func(context.Context, string, []string) (string, error) {
+			"support": func(context.Context, string, string) (string, error) {
 				holding := false
 				if v, err := a.Get("output-policy"); err == nil {
 					holding = v.(bool)
@@ -106,7 +110,7 @@ func Plugin() api.Plugin {
 			if event.Input.Key != "" {
 				return api.Decision{}, errors.New("keyed slash commands are not supported; key model input instead")
 			}
-			result, err := a.Command(ctx, event.Session, strings.TrimSpace(line))
+			result, err := a.Command(ctx, event.Session, line)
 			if err != nil {
 				return api.Decision{}, err
 			}

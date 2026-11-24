@@ -112,6 +112,7 @@ func TestRewindReportsOutsideCallWithoutUndoingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtimetest.Publish(t, a, string(s.SessionId))
 	mark, err := a.Record(timeout(t), string(s.SessionId), api.Entry{Kind: "test.mark"})
 	if err != nil {
 		t.Fatal(err)
@@ -139,6 +140,7 @@ func TestOutsideTurnToolPointAndRewindRefusals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtimetest.Publish(t, a, id)
 	mark, err := a.Record(ctx, id, api.Entry{Kind: "test.mark"})
 	if err != nil {
 		t.Fatal(err)

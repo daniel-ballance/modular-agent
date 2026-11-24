@@ -147,7 +147,7 @@ func (s *Server) startup() error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	} else if len(files) > 0 {
-		return errors.New("history store has no prior lease bound; operator migration required")
+		return errors.New("history store has no prior lease bound; use a fresh isolated store")
 	}
 	return atomicFile(s.dir, boundPath, []byte(strconv.FormatInt(bound.Milliseconds(), 10)))
 }

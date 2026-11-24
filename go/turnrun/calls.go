@@ -40,9 +40,7 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 	if err != nil {
 		return nil, err
 	}
-	// Check model calls against the exact offer committed for the response,
-	// including when an answered step is recovered. A nil offer is an older
-	// journal without this field; its saved settings still apply.
+	// Check model calls against the exact offer committed for the response.
 	var offered *[]string
 	if model != "" && !isBound {
 		var sources []string
@@ -260,7 +258,7 @@ func (r *Runner) calls(ctx context.Context, t api.Turn, step, model string, call
 			p.result = &api.ToolResult{Status: "cancelled", Content: api.Text("Turn cancelled before this call.")}
 		case p.started && !safe:
 			p.result = &api.ToolResult{Status: "unknown", Content: api.Text(interrupted)}
-		case known && model != "" && !isBound && (offered != nil && !slices.Contains(*offered, p.call.Name) || offered == nil && !api.OffersModelTool(t.Settings, def)):
+		case known && model != "" && !isBound && (offered == nil || !slices.Contains(*offered, p.call.Name)):
 			p.result = &api.ToolResult{Status: "refused", Content: api.Text("tool was not offered to the model")}
 		case known && !api.CanCall(def, p.call.Origin):
 			p.result = &api.ToolResult{Status: "refused", Content: api.Text("tool does not allow this caller")}

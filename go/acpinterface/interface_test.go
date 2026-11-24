@@ -437,6 +437,7 @@ func TestACPMCPClientServersAreSessionScoped(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		runtimetest.Publish(t, a, string(other.SessionId))
 		prompt(t, conn, start.SessionId, "fact", "")
 		if !strings.Contains(c.text(), "verified MCP") {
 			t.Fatal(c.text())

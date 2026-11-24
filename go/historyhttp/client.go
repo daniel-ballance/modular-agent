@@ -106,7 +106,7 @@ func (c *Client) Verify() error {
 	if err != nil {
 		return err
 	}
-	if out.Binding != Binding || leaseDuration(out.TTLMS) <= 0 || out.TTLMS != float64(leaseDuration(out.TTLMS).Milliseconds()) {
+	if out.Binding != Binding || leaseDuration(out.TTLMS) <= 0 {
 		return errors.New("unsupported history binding or invalid history TTL")
 	}
 	version, ok := count(out.PendingErasure)
@@ -236,27 +236,26 @@ func (c *Client) takeLease(id string, wait bool, contexts ...context.Context) (_
 		}
 		lastHeld = err
 		delay := leaseDuration(held.RetryAfterMS)
+		if delay <= 0 {
+			return leaseReply{}, errors.New("held lease response lacks a positive retryAfterMs")
+		}
 		received := time.Now()
 		if deadline.IsZero() {
 			ttl := c.localTTL
 			if c.wire != nil {
-				ttl = delay // Older services omit ttlMs.
-				if info, e := (httpBackend{c.wire}).info(c.ctx); e == nil && leaseDuration(info.TTLMS) > 0 {
-					ttl = leaseDuration(info.TTLMS)
+				info, e := (httpBackend{c.wire}).info(operation)
+				if e != nil {
+					return leaseReply{}, e
 				}
+				if info.Binding != Binding {
+					return leaseReply{}, errors.New("unsupported history binding")
+				}
+				ttl = leaseDuration(info.TTLMS)
 			}
 			if ttl <= 0 {
-				return leaseReply{}, err
+				return leaseReply{}, errors.New("history discovery lacks a positive ttlMs")
 			}
 			deadline = received.Add(ttl + time.Second)
-			// Older services, including the supplied test service, omit
-			// retryAfterMs. Allow one retry after the full advertised TTL.
-			if delay <= 0 {
-				delay = ttl
-			}
-		}
-		if delay <= 0 {
-			return leaseReply{}, err
 		}
 		next := received.Add(delay)
 		if next.After(deadline) {
@@ -268,9 +267,9 @@ func (c *Client) takeLease(id string, wait bool, contexts ...context.Context) (_
 		timer := time.NewTimer(time.Until(next))
 		select {
 		case <-timer.C:
-		case <-c.ctx.Done():
+		case <-operation.Done():
 			timer.Stop()
-			return leaseReply{}, c.ctx.Err()
+			return leaseReply{}, operation.Err()
 		}
 	}
 }
@@ -336,7 +335,11 @@ func leaseDuration(ms float64) time.Duration {
 	if ms <= 0 || ms > float64((1<<63-1)/time.Millisecond) {
 		return 0
 	}
-	return time.Duration(ms * float64(time.Millisecond))
+	whole := time.Duration(ms)
+	if float64(whole) != ms {
+		return 0
+	}
+	return whole * time.Millisecond
 }
 
 func (l *lease) CheckWriter() error {

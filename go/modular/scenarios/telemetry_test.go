@@ -24,10 +24,10 @@ import (
 const telemetryRunEnv = "MODULAR_AGENT_TELEMETRY_RUN"
 
 type telemetryRequest struct {
-	Host, Scenario, Placement, AgentName, ScenarioPath, WorkDir, ReportPath, Handshake, ParkedURL string
-	SDK                                                                                           bool
-	Fixtures                                                                                      []fixtureSpec
-	Values                                                                                        struct{ Answer string }
+	Host, Scenario, Placement, AgentName, ScenarioPath, WorkDir, ReportPath, ParkedURL string
+	SDK                                                                                bool
+	Fixtures                                                                           []fixtureSpec
+	Values                                                                             struct{ Answer string }
 }
 
 type fixtureSpec struct {
@@ -115,7 +115,7 @@ func TestTelemetryScenario(t *testing.T) {
 		t.Fatal("telemetry request does not match the shared scenario")
 	}
 	r := run{dir: runCase.WorkDir, placement: p, telemetry: runCase}
-	if sc.Requires["approvalsOutlastTurns"] {
+	if strings.HasPrefix(sc.Name, "waiting-approval") {
 		r.checkWaiting(t, runCase.ScenarioPath, sc)
 	} else {
 		r.check(t, runCase.ScenarioPath, sc)
@@ -311,21 +311,7 @@ func (r run) writeEvidence(ctx context.Context, a *modular.Agent, s *modular.Ses
 		if err != nil {
 			return err
 		}
-		// Probe a compatible kept session separately; the first-turn case itself
-		// remains ephemeral. Only report a real session's ACP declaration.
-		probe, err := modular.New(ctx, modular.WithProject(filepath.Join(r.dir, "project")), modular.WithDataDir(filepath.Join(r.dir, "probe")), modular.WithDurability(modular.Kept), modular.WithLateAnswersStartTurns(true), modular.WithMaxApprovalWaitMs(5000), modular.WithApproval(modular.All), modular.WithSeveralActors(true), modular.WithPluginHost(true), modulartest.Script(`[{"text":"probe"}]`))
-		if err != nil {
-			return err
-		}
-		defer probe.Close(ctx)
-
-		// A separate writer can be live on this unused provisional session;
-		// no prompt, model work, or trace-bearing admission is needed.
-		waitingDecl, err := r.sessionDeclaration(ctx, probe, "")
-		if err != nil {
-			return err
-		}
-		report["declarations"] = map[string]any{"agent": a.Declaration(), "session": declaration, "waitingSession": waitingDecl}
+		report["declarations"] = map[string]any{"agent": a.Declaration(), "session": declaration}
 		if o.SDK {
 			report["commits"] = o.commits
 		}

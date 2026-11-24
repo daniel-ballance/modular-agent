@@ -197,7 +197,7 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 	if v, err := c.Get("history"); err == nil {
 		store := v.(api.Store)
 		s.provisional.Store(true)
-		if c.h.deferHistory {
+		if !c.h.volatileHistory {
 			s.pendingStore = store
 		} else {
 			s.lease, err = acquireNew(store, id)
@@ -310,6 +310,10 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor, interrupt
 		_ = lease.Close()
 		return api.ErrAuthority
 	}
+	if err := validateIntake(snap); err != nil {
+		_ = lease.Close()
+		return err
+	}
 	if interruptedOnly {
 		// Startup is not a new membership grant. Apply the recorded local
 		// actor's watch right, including the session and tenant ceilings.
@@ -328,10 +332,13 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor, interrupt
 	savedApproval := snap.Settings.Approval
 	if conf, err := c.Get("configuration"); err == nil {
 		if defaults, err := conf.(api.Configuration).Settings(snap.Project); err == nil {
-			snap.Settings = turnSettings(defaults, snap.Settings)
+			// Apply session settings over the configured defaults for new turns.
+			view := snap
+			view.Settings = defaults
+			view.Entries = slices.Clone(snap.Entries)
+			snap.Settings = portable.Session(view).Settings
 		}
 	}
-	snap.Settings.Model = c.h.currentModel(snap.Settings.Model)
 	project, err := filepath.EvalSymlinks(snap.Project)
 	if err != nil {
 		_ = lease.Close()
@@ -362,14 +369,6 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor, interrupt
 		_ = c.StopSession(id)
 		return err
 	}
-	s.mu.Lock()
-	err = c.repairJobReportsLocked(s)
-	snap = clone(s.data)
-	s.mu.Unlock()
-	if err != nil {
-		_ = c.StopSession(id)
-		return err
-	}
 	_, err = s.invokeWithErasureView(api.WithReopenedSession(ctx), "session.start", snap, clone(snap))
 	if err != nil {
 		_ = c.CloseSession(id)
@@ -396,7 +395,12 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor, interrupt
 			return true
 		})
 		if len(ids) > 0 {
-			if _, err = s.recordLocked(api.Entry{Kind: "input.returned", Data: api.JSON(ids)}, "harness", true); err != nil {
+			next := s.data
+			next.Entries = slices.Clip(next.Entries)
+			for _, id := range ids {
+				appendEntry(&next, api.Entry{Kind: "input.returned", InputRef: id, Data: api.JSON("restart")}, "harness", true)
+			}
+			if err = s.commitLocked(next); err != nil {
 				s.mu.Unlock()
 				_ = c.StopSession(id)
 				return err
@@ -586,8 +590,6 @@ func isSetup(e api.Entry) bool {
 	}
 }
 
-func startsLegacyHistory(e api.Entry) bool { return !isSetup(e) || e.Kind == "subagent.bound" }
-
 // Only admission and fork publication can start a persistent writer. Save the
 // already staged setup with the new entries before making the state visible.
 func (s *session) publishInitialLocked(next api.Session, contexts ...context.Context) error {
@@ -626,13 +628,9 @@ func (s *session) publishReservedInitialLocked(next api.Session, ctx context.Con
 func (s *session) commitSnapshotLocked(next api.Session, contexts ...context.Context) error {
 	return s.withErasureCheck(next, func() error {
 		return s.commitCapacity(next, func() error {
-			return s.traceCommit(next, s.savesSnapshot(next), contexts, func(ctx context.Context) error { return s.commitReservedSnapshotLocked(next, ctx) })
+			return s.traceCommit(next, s.lease != nil, contexts, func(ctx context.Context) error { return s.commitReservedSnapshotLocked(next, ctx) })
 		})
 	})
-}
-
-func (s *session) savesSnapshot(next api.Session) bool {
-	return s.pendingStore == nil && s.lease != nil && (s.h.deferHistory || next.ForkedFrom != "" || slices.ContainsFunc(next.Entries, startsLegacyHistory))
 }
 
 func (s *session) commitReservedSnapshotLocked(next api.Session, contexts ...context.Context) error {
@@ -647,9 +645,7 @@ func (s *session) commitReservedSnapshotLocked(next api.Session, contexts ...con
 		s.publishLocked(next)
 		return nil
 	}
-	// Outside the public persistent lifecycle, keep the original lazy
-	// save rule. An attached public persistent lease saves all changes.
-	if s.savesSnapshot(next) {
+	if s.lease != nil {
 		if err := saveHistory(ctx, s.lease, next); err != nil {
 			if s.rewindBlocked && !errors.Is(err, api.ErrWriterLost) && s.reconcileRewindCommit(next) {
 				return nil
@@ -783,7 +779,7 @@ func (c *client) move(ctx context.Context, id, target string, rewind bool, outsi
 		return err
 	}
 	if s.running || s.opening || s.closing || len(s.queue) > 0 || unfinished(s.data) {
-		return api.ErrMoveConflict
+		return api.ErrUnfinishedWork
 	}
 	branch := s.data.Branch()
 	i := slices.IndexFunc(branch, func(e api.Entry) bool { return e.ID == target })
@@ -824,10 +820,10 @@ func (c *client) Fork(ctx context.Context, id, target string) (string, error) {
 		return "", api.ErrAuthority
 	}
 	if running {
-		return "", errors.New("cancel turn before forking")
+		return "", api.ErrUnfinishedWork
 	}
 	if unfinished(snap) {
-		return "", errors.New("settle calls and jobs before forking")
+		return "", api.ErrUnfinishedWork
 	}
 	if target != "" {
 		snap.Position = target
@@ -1077,8 +1073,8 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (receipt a
 				next := s.data
 				next.Entries = slices.Clip(next.Entries)
 				in.Taken = "now"
-				appendEntry(&next, api.Entry{ID: entry, Kind: "input.accepted", Actor: in.Actor, Data: api.JSON(in), Content: in.Content}, "harness", true)
-				appendEntry(&next, api.Entry{Kind: "input.returned", Actor: in.Actor, InputRef: in.ID, Copies: []string{entry}, Wire: api.JSON(map[string]any{"data": map[string]string{"reason": "handled"}})}, "harness", true)
+				appendEntry(&next, api.Entry{ID: entry, Kind: "input.accepted", InputRef: in.ID, Actor: in.Actor, Data: api.JSON(in), Content: in.Content}, "harness", true)
+				appendEntry(&next, api.Entry{Kind: "input.returned", Actor: in.Actor, InputRef: in.ID, Copies: []string{entry}, Data: api.JSON("handled")}, "harness", true)
 				if err := s.publishInitialLocked(next, ctx); err != nil {
 					return api.Receipt{}, err
 				}
@@ -1160,7 +1156,7 @@ func (s *session) takeLocked(in api.Input, turn string) (api.Entry, error) {
 	var source string
 	actor := in.Actor
 	for _, e := range s.data.Entries {
-		if e.Kind == "input" && api.Decode[string](e.Data) == in.ID {
+		if e.Kind == "input" && e.InputRef == in.ID {
 			return e, nil
 		}
 		if e.Kind == "input.accepted" && api.Decode[api.Input](e.Data).ID == in.ID {
@@ -1176,7 +1172,7 @@ func (s *session) takeLocked(in api.Input, turn string) (api.Entry, error) {
 	if source != "" {
 		sources = append(sources, source)
 	}
-	return s.recordLocked(api.Entry{Kind: "input", Turn: turn, Visible: true, Content: in.Content, Actor: actor, Job: in.Job, Copies: sources, InputKey: in.Key, Data: api.JSON(in.ID)}, "harness", true)
+	return s.recordLocked(api.Entry{Kind: "input", Turn: turn, Visible: true, Content: in.Content, Actor: actor, Job: in.Job, Copies: sources, InputKey: in.Key, InputRef: in.ID}, "harness", true)
 }
 func (h *Harness) run(ctx context.Context, s *session, in api.Input) {
 	for {
@@ -1197,7 +1193,7 @@ func (h *Harness) run(ctx context.Context, s *session, in api.Input) {
 				next.Entries = slices.Clip(next.Entries)
 				for _, queued := range outcome.Returned {
 					appendEntry(&next, api.Entry{Kind: "input.returned", Actor: queued.Actor, InputRef: queued.ID,
-						Data: api.JSON(map[string]string{"reason": "cancelled"})}, "harness", true)
+						Data: api.JSON("cancelled")}, "harness", true)
 				}
 				if err := s.commitLocked(next); err != nil {
 					outcome.Error = err.Error()
@@ -1277,9 +1273,8 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 	}
 	selectionView := snap
 	if resume != nil {
-		selectionView.Settings = turnSettings(snap.Settings, api.Decode[api.TurnStart](resume.Data).Settings)
+		selectionView.Settings = api.Decode[api.TurnStart](resume.Data).Settings
 	}
-	selectionView.Settings.Model = h.currentModel(selectionView.Settings.Model)
 	access, resolveErr := selection.(api.Selection).Resolve(selectionView)
 	turnID := api.ID()
 	if resume != nil {
@@ -1303,11 +1298,22 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 		}
 	}
 	before := api.BeforeTurn{Session: snap, Turn: turnID, Input: in.Content, Tools: tools}
-	prepared, err := h.API().Invoke(ctx, "turn.prepare", before)
+	prepared := any(before)
+	if resume == nil {
+		prepared, err = h.API().Invoke(ctx, "turn.prepare", before)
+	} else {
+		recorded := api.Decode[api.TurnStart](resume.Data)
+		// Do not add newly registered tools to a saved offer.
+		tools = slices.DeleteFunc(tools, func(t api.Tool) bool {
+			return !slices.ContainsFunc(recorded.Tools, func(saved api.Tool) bool {
+				return saved.Name == t.Name && portable.EqualJSON(api.JSON(portable.Tool(saved)), api.JSON(portable.Tool(t)))
+			})
+		})
+	}
 	if err != nil {
 		if ctx.Err() != nil && !errors.Is(context.Cause(ctx), api.ErrProcessStopped) {
 			if in.ID != "" && resume == nil {
-				_, recordErr := h.API().Record(context.Background(), s.id, api.Entry{Kind: "input.returned", Data: api.JSON(in.ID)})
+				_, recordErr := h.API().Record(context.Background(), s.id, api.Entry{Kind: "input.returned", InputRef: in.ID, Data: api.JSON("cancelled")})
 				if recordErr != nil {
 					return api.Outcome{Status: "cancelled", Error: recordErr.Error()}
 				}
@@ -1425,7 +1431,7 @@ func (c *client) Withdraw(ctx context.Context, id, input string) (api.Input, err
 			if api.Acting(ctx) != in.Actor && !c.authorized(s.data, api.Acting(ctx), "input") {
 				return api.Input{}, errors.New("withdraw refused")
 			}
-			if _, err = s.recordLocked(api.Entry{Kind: "input.returned", Data: api.JSON([]string{input})}, "harness", true); err != nil {
+			if _, err = s.recordLocked(api.Entry{Kind: "input.returned", InputRef: input, Data: api.JSON("withdrawn")}, "harness", true); err != nil {
 				return api.Input{}, err
 			}
 			s.queue = append(s.queue[:i], s.queue[i+1:]...)
@@ -1628,27 +1634,6 @@ type turnPorts struct {
 	input     api.Input
 	model     api.Model
 	tools     []api.Tool
-}
-
-// Turn settings fall back to session settings for fields an older or foreign
-// host did not record. The selected model, when present, belongs to the turn.
-func turnSettings(session, recorded api.Settings) api.Settings {
-	if recorded.Model == "" {
-		recorded.Model = session.Model
-	}
-	if recorded.Thinking == "" {
-		recorded.Thinking = session.Thinking
-	}
-	if recorded.MaxSteps == 0 {
-		recorded.MaxSteps = session.MaxSteps
-	}
-	if recorded.MaxOutput == 0 {
-		recorded.MaxOutput = session.MaxOutput
-	}
-	if recorded.Approval == "" {
-		recorded.Approval = session.Approval
-	}
-	return recorded
 }
 
 func (p *turnPorts) Hook(ctx context.Context, name string, v any) (any, error) {
@@ -1919,10 +1904,10 @@ func (p *turnPorts) Record(ctx context.Context, e api.Entry) (api.Entry, error) 
 		}
 		if e.Kind == "input" {
 			if e.InputID() == "" {
-				e.Data = api.JSON(api.ID())
+				e.InputRef = api.ID()
 			}
-			in := api.Input{ID: e.InputID(), Key: e.InputKey, Actor: e.Actor, When: "steer", Content: e.Content, Copies: e.Copies}
-			accepted, err := p.c.Record(ctx, p.s.id, api.Entry{Kind: "input.accepted", Turn: p.id, Actor: e.Actor, Content: in.Content, Copies: in.Copies, Data: api.JSON(in)})
+			in := api.Input{ID: e.InputID(), Key: e.InputKey, Actor: e.Actor, When: "steer", Taken: "inTurn", ConnectionRights: p.input.ConnectionRights, Content: e.Content, Copies: e.Copies}
+			accepted, err := p.c.Record(ctx, p.s.id, api.Entry{Kind: "input.accepted", InputRef: in.ID, Turn: p.id, Actor: e.Actor, Content: in.Content, Copies: in.Copies, Data: api.JSON(in)})
 			if err != nil {
 				return api.Entry{}, err
 			}

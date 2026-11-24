@@ -125,9 +125,7 @@ func (r *remote) jobCallback(ctx context.Context, method string, v object, notif
 			ExternalTrace(string, string) context.Context
 		}); ok {
 			if scope := j.ExternalTrace(owner, id); scope != nil {
-				if r.peer.traceAgreed.Load() {
-					ctx = telemetry.Extract(ctx, readTrace(mustJSON(v)))
-				}
+				ctx = telemetry.Extract(ctx, readTrace(mustJSON(v)))
 				ctx = telemetry.InTrace(ctx, scope)
 				if !notification {
 					var span trace.Span

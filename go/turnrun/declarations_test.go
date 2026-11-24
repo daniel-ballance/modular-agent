@@ -87,7 +87,7 @@ func TestRecoveryNeverGuessesRepeatSafety(t *testing.T) {
 				}
 			}
 			call := api.Call{ID: "safe", Name: "safe", Input: api.JSON(map[string]string{})}
-			id := seed(t, root, turnStart(defs), api.Entry{Kind: "model.request", Turn: "original-turn", Step: "step", TracksStepAfter: true}, api.Entry{Kind: "model", Turn: "original-turn", Step: "step", Visible: true, Content: api.Content{{Type: "tool_call", Call: &call}}, Data: api.JSON(map[string]any{"Stop": "tools", "Usage": api.Usage{Input: 1}})}, api.Entry{Kind: "tool.call", Turn: "original-turn", Step: "step", Call: "safe", Data: api.JSON(call)}, api.Entry{Kind: "tool.started", Turn: "original-turn", Step: "step", Call: "safe", Data: api.JSON(call)})
+			id := seed(t, root, turnStart(defs), api.Entry{Kind: "model.request", Turn: "original-turn", Step: "step"}, api.Entry{Kind: "model", Turn: "original-turn", Step: "step", Visible: true, Content: api.Content{{Type: "tool_call", Call: &call}}, Data: api.JSON(map[string]any{"Stop": "tools", "Usage": api.Usage{Input: 1}})}, api.Entry{Kind: "tool.call", Turn: "original-turn", Step: "step", Call: "safe", Data: api.JSON(call)}, api.Entry{Kind: "tool.started", Turn: "original-turn", Step: "step", Call: "safe", Data: api.JSON(call)})
 			p := fake.New(fake.Script{Require: "outcome is unknown", Response: api.Response{Stop: "finished", Content: api.Text("checked")}})
 			h, err := vanilla.New(fakeOptions(root, p, true))
 			if err != nil {
@@ -193,19 +193,24 @@ func TestIntakeAndSteeringSurviveReopen(t *testing.T) {
 			t.Run(scenario, func(t *testing.T) {
 				root := t.TempDir()
 				in := api.Input{ID: "initial", Key: "initial-key", Actor: "local-user", When: "now", Content: api.Text("initial direction")}
-				entries := []api.Entry{{Kind: "input.accepted", Content: in.Content, Data: api.JSON(in)}}
-				if scenario != "accepted" {
-					entries = append(entries, api.Entry{Kind: "input", Visible: true, Content: in.Content, Data: api.JSON(in.ID)})
+				in.Taken = "now"
+				entries := []api.Entry{{Kind: "input.accepted", InputRef: in.ID, Content: in.Content, Data: api.JSON(in)}}
+				if scenario == "taken-before-start" {
+					entries = append(entries, api.Entry{Kind: "input", Visible: true, Content: in.Content, InputRef: in.ID})
 				}
 				if scenario != "accepted" && scenario != "taken-before-start" {
-					entries = append(entries, turnStart(nil), api.Entry{Kind: "model.request", Turn: "original-turn", Step: "first", TracksStepAfter: true}, api.Entry{Kind: "model", Turn: "original-turn", Step: "first", Visible: true, Content: api.Text("old answer"), Data: api.JSON(map[string]any{"Stop": "finished"})})
+					entries = append(entries, turnStart(nil), api.Entry{Kind: "input", Turn: "original-turn", Visible: true, Content: in.Content, InputRef: in.ID}, api.Entry{Kind: "model.request", Turn: "original-turn", Step: "first"}, api.Entry{Kind: "model", Turn: "original-turn", Step: "first", Visible: true, Content: api.Text("old answer"), Data: api.JSON(map[string]any{"Stop": "finished"})})
 					steer := api.Input{ID: "steer", Key: "steer-key", Actor: "local-user", When: "steer", Content: api.Text("new direction")}
 					if scenario == "queued-follow-up" {
 						steer.When = "after"
 					}
-					entries = append(entries, api.Entry{Kind: "input.accepted", Content: steer.Content, Data: api.JSON(steer)})
+					steer.Taken = "inTurn"
+					if steer.When == "after" {
+						steer.Taken = "after"
+					}
+					entries = append(entries, api.Entry{Kind: "input.accepted", InputRef: steer.ID, Content: steer.Content, Data: api.JSON(steer)})
 					if scenario == "taken-steering" {
-						entries = append(entries, api.Entry{Kind: "input", Visible: true, Content: steer.Content, Data: api.JSON(steer.ID)})
+						entries = append(entries, api.Entry{Kind: "input", Turn: "original-turn", Visible: true, Content: steer.Content, InputRef: steer.ID})
 					}
 				}
 				id := seed(t, root, entries...)
@@ -221,6 +226,12 @@ func TestIntakeAndSteeringSurviveReopen(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer h.Close()
+				if scenario == "taken-before-start" {
+					if err := h.API().Open(t.Context(), id); err == nil || len(p.Requests()) != 0 {
+						t.Fatal("opened an input without its turn start", err)
+					}
+					return
+				}
 				out := wait(t, h.API(), id)
 				wantsFailure := opt.Runtime.Name == "transient" && scenario == "taken-steering"
 				if wantsFailure {
@@ -233,7 +244,7 @@ func TestIntakeAndSteeringSurviveReopen(t *testing.T) {
 				snap, _ := h.API().Snapshot(id)
 				taken := 0
 				for _, e := range snap.Entries {
-					if e.Kind == "input" && api.Decode[string](e.Data) == "initial" {
+					if e.Kind == "input" && e.InputID() == "initial" {
 						taken++
 					}
 				}

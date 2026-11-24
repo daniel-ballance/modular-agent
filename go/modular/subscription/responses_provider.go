@@ -81,8 +81,8 @@ type ResponsesModelOverride struct {
 }
 
 type responsesConfig struct {
-	id, legacyID, label, endpoint string
-	systemMessage                 bool
+	id, label, endpoint string
+	systemMessage       bool
 }
 
 func responsesProvider(config responsesConfig, logins Logins, label *string, enrolled []modular.ModelInfo, overrides []ResponsesModelOverride, transport http.RoundTripper) (modular.Provider, error) {

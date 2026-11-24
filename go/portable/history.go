@@ -10,6 +10,16 @@ func ReadErased(raw json.RawMessage) bool {
 	return json.Unmarshal(raw, &v) == nil && v.Erased
 }
 
+// StoreEntry keeps opaque HTTP rows even if they are not valid portable work.
+func StoreEntry(raw json.RawMessage) api.Entry {
+	e, err := ReadEntry(raw)
+	if err != nil {
+		return api.Entry{ID: e.ID, Parent: e.Parent, Kind: api.InvalidHistoryKind, Wire: raw}
+	}
+	e.Wire = raw
+	return e
+}
+
 // HistoryEntry encodes a stored entry. For HTTP-originated sessions, retain
 // the exact binding object, including old or unknown fields, on disk.
 func HistoryEntry(s api.Session, e api.Entry) json.RawMessage {

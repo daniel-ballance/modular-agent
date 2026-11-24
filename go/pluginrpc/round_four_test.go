@@ -117,7 +117,7 @@ func TestServerProviderEraseAndCompleteResponseHook(t *testing.T) {
 		return nil, unknownMethod(str(v, "hook"))
 	}
 	go func() { _ = p.Run() }()
-	if err := p.Call(ctx, "plugin/initialize", object{"binding": Binding, "data": DataBinding, "project": t.TempDir(), "home": t.TempDir()}, nil); err != nil {
+	if err := p.Call(ctx, "plugin/initialize", object{"binding": Binding, "project": t.TempDir(), "home": t.TempDir()}, nil); err != nil {
 		t.Fatal(err)
 	}
 	params := object{"provider": "conformance", "sessionId": "s1"}
@@ -169,7 +169,7 @@ func TestServerExitsOnEOFWithAHandlerStillRunning(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- s.Serve(ctx, right, right) }()
 	go func() { _ = p.Run() }()
-	if err := p.Call(ctx, "plugin/initialize", object{"binding": Binding, "data": DataBinding, "project": t.TempDir(), "home": t.TempDir()}, nil); err != nil {
+	if err := p.Call(ctx, "plugin/initialize", object{"binding": Binding, "project": t.TempDir(), "home": t.TempDir()}, nil); err != nil {
 		t.Fatal(err)
 	}
 	go func() { _ = p.Call(ctx, "command/run", object{"name": "hold"}, nil) }()

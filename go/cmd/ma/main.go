@@ -108,11 +108,10 @@ func parse(args []string) (o options, err error) {
 					return o, errors.New("which provider? chatgpt, grok or claude")
 				}
 				i++
-				o.provider = currentProvider(args[i])
+				o.provider = args[i]
 			}
 		case "--model":
 			o.model, err = take()
-			o.model = currentModel(o.model)
 		case "--approval":
 			var v string
 			if v, err = take(); err == nil {
@@ -381,7 +380,7 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 		return err
 	}
 	if saved != nil && saved.Model != "" {
-		settings["model"] = currentModel(saved.Model)
+		settings["model"] = saved.Model
 	}
 	if o.model != "" {
 		settings["model"] = o.model
@@ -439,6 +438,7 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 			Compose: func(ctx context.Context, project string) (*modular.Agent, error) {
 				projectOptions := o
 				projectOptions.project = project
+				projectOptions.startupProject = true
 				projectSettings, err := d.settings(project)
 				if err != nil {
 					return nil, err
@@ -469,13 +469,6 @@ func run(ctx context.Context, args []string, in io.ReadCloser, out, stderr io.Wr
 				}
 				return d.compose(ctx, projectOptions, projectSettings, store, stderr)
 			},
-			ProjectMCP: func(project string) ([]modular.MCPServer, error) {
-				if config {
-					return nil, nil
-				}
-				return d.mcp(project, stderr), nil
-			},
-			WarnMCP: func(err error) { fmt.Fprintln(stderr, err) },
 		}
 		if o.listen == "" {
 			acpOptions.Represents = []string{}

@@ -23,16 +23,15 @@ import (
 )
 
 type Registration struct {
-	TraceContext int                      `json:"traceContext,omitempty"`
-	Binding      string                   `json:"binding"`
-	Name         string                   `json:"name"`
-	Providers    []ProviderRegistration   `json:"providers,omitempty"`
-	ToolSources  []SourceRegistration     `json:"toolSources,omitempty"`
-	Environment  *EnvironmentRegistration `json:"workingEnvironment,omitempty"`
-	Hooks        []HookRegistration       `json:"hooks,omitempty"`
-	Commands     []CommandRegistration    `json:"commands,omitempty"`
-	Runtime      *RuntimeRegistration     `json:"runtime,omitempty"`
-	Replaces     []string                 `json:"replaces,omitempty"`
+	Binding     string                   `json:"binding"`
+	Name        string                   `json:"name"`
+	Providers   []ProviderRegistration   `json:"providers,omitempty"`
+	ToolSources []SourceRegistration     `json:"toolSources,omitempty"`
+	Environment *EnvironmentRegistration `json:"workingEnvironment,omitempty"`
+	Hooks       []HookRegistration       `json:"hooks,omitempty"`
+	Commands    []CommandRegistration    `json:"commands,omitempty"`
+	Runtime     *RuntimeRegistration     `json:"runtime,omitempty"`
+	Replaces    []string                 `json:"replaces,omitempty"`
 }
 type ProviderRegistration struct {
 	ID       string `json:"id"`
@@ -111,9 +110,6 @@ func (s *Server) serve(ctx context.Context, p *Peer) error {
 	}
 	s.peer = p
 	p.Handle = func(call context.Context, method string, raw json.RawMessage) (any, error) {
-		if method == "plugin/initialize" && !offersTraceContext(ctx) {
-			call = WithoutTraceHandshake(call)
-		}
 		return s.handle(call, method, raw)
 	}
 	p.admitNotification = func(ctx context.Context, m envelope) (string, bool) {
@@ -266,7 +262,7 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 		if s.initialized {
 			return nil, fault("invalid_request", "already initialized")
 		}
-		if str(v, "binding") != Binding || str(v, "data") != DataBinding {
+		if str(v, "binding") != Binding {
 			return nil, fault("not_supported", "unsupported binding or data version")
 		}
 		if !filepath.IsAbs(str(v, "project")) || !filepath.IsAbs(str(v, "home")) {
@@ -299,12 +295,7 @@ func (s *Server) handle(ctx context.Context, method string, raw json.RawMessage)
 		}
 		s.initialized = true
 		reg := s.Registration
-		reg.TraceContext = 0
-		if n, ok := v["traceContext"].(json.Number); ok && string(n) == "1" && offersTraceContext(ctx) {
-			reg.TraceContext = 1
-		}
 		s.peer.traceName.Store(&reg.Name)
-		s.peer.traceAgreed.Store(reg.TraceContext == 1)
 		return reg, nil
 	}
 	ready := s.initialized && !s.stopping
@@ -615,10 +606,10 @@ func environmentRequest(ctx context.Context, env api.WorkingEnvironment, method 
 		return object{"exists": err == nil}, err
 	case "env/exec":
 		var timeout time.Duration
-		if has(v, "timeoutMs") {
+		if _, present := v["timeoutMs"]; present {
 			n, ok := v["timeoutMs"].(json.Number)
 			ms, err := n.Float64()
-			if !ok || err != nil || ms < 0 || ms >= float64((1<<63-1)/time.Millisecond) {
+			if !ok || err != nil || ms <= 0 || ms != float64(int64(ms)) || ms >= float64((1<<63-1)/time.Millisecond) {
 				return nil, fault("invalid_request", "invalid timeoutMs")
 			}
 			timeout = time.Duration(ms * float64(time.Millisecond))

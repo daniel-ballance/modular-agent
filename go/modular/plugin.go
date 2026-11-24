@@ -466,8 +466,8 @@ func loadPlugin(h *harness.Harness, p Plugin, defaults *api.Settings, durability
 			}
 		}
 		for _, c := range r.commands {
-			if err := a.RegisterCommand(c.Name, func(ctx context.Context, s string, args []string) (string, error) {
-				return runSDKCommand(ctx, a, nil, p.Name, s, api.Acting(ctx), c, strings.Join(args, " "), owner)
+			if err := a.RegisterCommand(c.Name, func(ctx context.Context, s string, args string) (string, error) {
+				return runSDKCommand(ctx, a, nil, p.Name, s, api.Acting(ctx), c, args, owner)
 			}); err != nil {
 				return err
 			}

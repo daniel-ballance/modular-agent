@@ -157,42 +157,43 @@ func (s *Store) load(id string) (api.Session, error) {
 }
 
 func decodeSnapshot(id string, b []byte) (api.Session, error) {
-	var snap api.Session
-	var disk struct {
-		Session api.Session       `json:"session"`
-		Entries []json.RawMessage `json:"entries"`
-	}
+	var disk snapshot
 	if err := json.Unmarshal(b, &disk); err != nil {
-		return snap, fmt.Errorf("history %s: %w", id, err)
+		return api.Session{}, fmt.Errorf("history %s: %w", id, err)
 	}
-	if disk.Session.ID == "" {
-		// Read old local files once so existing Go sessions are not stranded.
-		if err := json.Unmarshal(b, &snap); err != nil {
-			return snap, err
-		}
-	} else {
-		snap = disk.Session
-		for _, raw := range disk.Entries {
-			e, err := portable.ReadEntry(raw)
-			if err != nil {
-				return snap, err
-			}
-			snap.Entries = append(snap.Entries, e)
-		}
-		snap = portable.Session(snap)
-		if len(snap.HistoryMeta) != 0 {
-			for i, entry := range snap.Entries {
-				if entry.IsErased() && portable.ReadErased(disk.Entries[i]) {
-					snap.Entries[i].Wire = disk.Entries[i]
-				}
-			}
-		}
+	snap := disk.Session
+	if disk.Format != snapshotFormat || snap.Version != 1 || snap.ID != id || disk.Entries == nil || snap.Entries != nil {
+		return api.Session{}, errors.New("unsupported or mismatched history snapshot")
 	}
-	if snap.Version != 1 || snap.ID != id {
-		return snap, errors.New("unsupported or mismatched history snapshot")
+	for _, raw := range disk.Entries {
+		var e api.Entry
+		var err error
+		if len(snap.HistoryMeta) > 0 {
+			e = portable.StoreEntry(raw)
+		} else if e, err = portable.ReadEntry(raw); err != nil {
+			return api.Session{}, err
+		}
+		snap.Entries = append(snap.Entries, e)
+	}
+	snap = portable.Session(snap)
+	if len(snap.HistoryMeta) != 0 {
+		for i, entry := range snap.Entries {
+			if entry.IsErased() && portable.ReadErased(disk.Entries[i]) {
+				snap.Entries[i].Wire = disk.Entries[i]
+			}
+		}
 	}
 	return snap, nil
 }
+
+const snapshotFormat = "go-history/2"
+
+type snapshot struct {
+	Format  string            `json:"format"`
+	Session api.Session       `json:"session"`
+	Entries []json.RawMessage `json:"entries"`
+}
+
 func (l *lease) Load() (api.Session, error) {
 	l.s.mu.Lock()
 	defer l.s.mu.Unlock()
@@ -319,12 +320,7 @@ func (s *Store) writeSnapshot(snap api.Session, entries []json.RawMessage) ([]by
 	snap.Entries = nil
 	// Only store metadata that is outside the shared entry meanings here.
 	snap.Settings, snap.Position, snap.Actors = api.Settings{}, "", nil
-	// The legacy API also supports consumers of the disk store directly. No
-	// session metadata in this envelope is sent to an HTTP history service.
-	b, err := json.Marshal(struct {
-		Session api.Session       `json:"session"`
-		Entries []json.RawMessage `json:"entries"`
-	}{snap, entries})
+	b, err := json.Marshal(snapshot{snapshotFormat, snap, entries})
 	if err != nil {
 		return nil, err
 	}

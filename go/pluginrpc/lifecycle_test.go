@@ -3,6 +3,7 @@ package pluginrpc_test
 import (
 	"context"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/runtimetest"
 	"github.com/daniel-ballance/modular-agent/go/vanilla"
 	"os"
 	"path/filepath"
@@ -77,6 +78,7 @@ func TestExplicitToolCallersAreEnforced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtimetest.Publish(t, a, id)
 	result, err := a.CallTool(context.Background(), id, api.Call{Name: "ui-only", Input: api.JSON(map[string]any{})})
 	if err != nil || result.Status != "completed" || result.Content.Text() != "UI called it" {
 		t.Fatal(result, err)

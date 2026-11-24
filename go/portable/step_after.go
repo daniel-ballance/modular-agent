@@ -47,7 +47,7 @@ func LastAnsweredStep(session api.Session, turn string) (StepAfter, error) {
 			r := requests[e.Step]
 			d := asObject(obj(r.Wire)["data"])
 			answer := asObject(obj(e.Wire)["data"])
-			if boolean(d, "auxiliary") || str(d, "purpose") == "summary" || boolean(answer, "auxiliary") || boolean(answer, "recovery") {
+			if boolean(d, "auxiliary") || boolean(answer, "auxiliary") || boolean(answer, "recovery") {
 				continue
 			}
 			state.Request, state.Response = r, e
@@ -80,9 +80,6 @@ func LastAnsweredStep(session api.Session, turn string) (StepAfter, error) {
 			}
 		}
 		state.Committed = true
-	}
-	if !state.Committed && !state.Request.TracksStepAfter {
-		return StepAfter{}, fmt.Errorf("step %q does not track the gate decision", step)
 	}
 	return state, nil
 }

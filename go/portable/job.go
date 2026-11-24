@@ -26,10 +26,7 @@ func jobOut(e api.Entry, data object) {
 	}
 }
 
-func jobIn(e api.Entry, data object, wireKind string) api.Job {
-	if e.Kind == wireKind { // previous Go histories stored an in-process Job
-		return api.Decode[api.Job](api.JSON(data))
-	}
+func jobIn(e api.Entry, data object) api.Job {
 	j := api.Job{ID: e.Job, Session: e.Session, Turn: e.Turn, Call: e.Call, Actor: e.Actor, Owner: e.Writer}
 	if e.Kind == "job.start" {
 		j.Kind, j.Key, j.Detail, j.State = str(data, "kind"), str(data, "key"), api.JSON(data["detail"]), "running"

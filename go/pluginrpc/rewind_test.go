@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/acpinterface"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/internal/runtimetest"
 	"github.com/daniel-ballance/modular-agent/go/pluginrpc"
 	"github.com/daniel-ballance/modular-agent/go/vanilla"
 	"io/fs"
@@ -108,6 +109,7 @@ func TestRewindWithExternalEnvironmentAndTool(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			runtimetest.Publish(t, a, id)
 			mark, err := a.Record(ctx, id, api.Entry{Kind: "test.mark"})
 			if err != nil {
 				t.Fatal(err)
@@ -156,6 +158,7 @@ func TestExternalEnvironmentOwnsRewindPointsAcrossHostRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtimetest.Publish(t, a, id)
 	value, _ := a.Get("working-environment")
 	points, _ := api.Points(value.(api.WorkingEnvironment))
 	if err = points.RestorePoint(api.WithExecution(ctx, api.Execution{Session: id}), opt.Project, "unknown-point"); !errors.Is(err, fs.ErrNotExist) {

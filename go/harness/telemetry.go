@@ -89,7 +89,7 @@ func (h *Harness) runTraced(ctx context.Context, p *turnPorts, t api.Turn, resum
 		}
 		span.End()
 	}()
-	if w := telemetry.Own(parent, span); w != nil && (h.deferHistory || runtime.Declaration().Durable || h.SupportsInterfaceTools()) {
+	if w := telemetry.Own(parent, span); w != nil && (!h.volatileHistory && p.s.lease != nil || runtime.Declaration().Durable || h.SupportsInterfaceTools()) {
 		ctx = context.WithValue(ctx, turnWireKey{}, w)
 		if resume != nil {
 			p.s.mu.Lock()

@@ -18,8 +18,8 @@ var standard = map[string]string{
 }
 
 func kindOut(kind string) string {
-	if kind == "input.withdrawn" {
-		return "inputHandedBack"
+	if strings.HasPrefix(kind, "wire:") {
+		return strings.TrimPrefix(kind, "wire:")
 	}
 	if k, ok := standard[kind]; ok {
 		return k
@@ -34,6 +34,10 @@ func kindIn(kind string) string {
 		if v == kind {
 			return k
 		}
+	}
+	// A wire extension must never acquire the meaning of a native work record.
+	if _, collision := standard[kind]; collision || kind == "erased" || strings.HasPrefix(kind, "wire:") {
+		return "wire:" + kind
 	}
 	return kind
 }
@@ -67,7 +71,10 @@ func usageIn(o object) api.Usage {
 	return api.Usage{Input: number(o, "input"), Output: number(o, "output"), Cached: number(o, "cacheRead"), CacheWrite: number(o, "cacheWrite"), Cost: real(o, "cost")}
 }
 func settingsOut(s api.Settings) object {
-	v := object{"reasoning": s.Thinking, "maxSteps": s.MaxSteps, "maxOutput": s.MaxOutput}
+	v := object{}
+	set(v, "reasoning", s.Thinking, s.Thinking != "")
+	set(v, "maxSteps", s.MaxSteps, s.MaxSteps > 0)
+	set(v, "maxOutput", s.MaxOutput, s.MaxOutput > 0)
 	set(v, "model", ref(s.Model, ""), s.Model != "")
 	set(v, "approvalWait", s.ApprovalWait, s.ApprovalWait != "")
 	set(v, "approval", api.ApprovalWire(s.Approval), s.Approval != "")
@@ -88,12 +95,6 @@ func applySettings(s *api.Settings, v object) {
 			s.MaxOutput = number(v, k)
 		case "approvalWait":
 			s.ApprovalWait = str(v, k)
-		case "go.approval":
-			// Only older Go sessions used this key. The standard key wins
-			// if both appear, regardless of object iteration order.
-			if _, standard := v["approval"]; !standard {
-				s.Approval = api.ApprovalInternal(str(v, k))
-			}
 		case "approval":
 			s.Approval = api.ApprovalInternal(str(v, k))
 		case "modelTools":
@@ -152,6 +153,8 @@ func Entry(e api.Entry) map[string]any {
 			kind = e.OriginalKind
 			if canonical, known := standard[e.OriginalKind]; known {
 				kind = canonical
+			} else if strings.HasPrefix(e.OriginalKind, "wire:") {
+				kind = kindOut(e.OriginalKind)
 			}
 		}
 		v := object{"id": e.ID, "parentId": parent, "kind": kind, "erased": true}
@@ -162,7 +165,8 @@ func Entry(e api.Entry) map[string]any {
 		}
 		set(v, "sources", e.Copies, len(e.Copies) != 0)
 		set(v, "inputId", e.InputRef, e.InputRef != "")
-		set(v, "inputIds", e.InputRefs, e.InputRef == "" && len(e.InputRefs) > 0)
+		set(v, "requestId", e.RequestRef, e.RequestRef != "")
+		set(v, "continuesTurnId", e.ContinuesTurn, e.ContinuesTurn != "")
 		set(v, "writer", e.Writer, e.JobKey != "" && e.Writer != "")
 		set(v, "jobKey", e.JobKey, e.JobKey != "")
 		return v
@@ -181,10 +185,6 @@ func Entry(e api.Entry) map[string]any {
 		d["rights"] = api.Decode[[]string](e.Data)
 	case "input.accepted":
 		in := api.Decode[api.Input](e.Data)
-		if str(v, "kind") == "input.accepted" {
-			d = object{} // The old Go kind carried the native Input struct.
-			delete(v, "go.content")
-		}
 		if e.Actor == "" && in.Actor != "" {
 			v["actorId"] = in.Actor
 		}
@@ -194,33 +194,33 @@ func Entry(e api.Entry) map[string]any {
 		set(d, "taken", in.Taken, in.Taken != "")
 		set(d, "go.resultSchema", in.ResultSchema, len(in.ResultSchema) != 0)
 		set(d, "parked", in.Parked, in.Parked != nil)
-		if in.Job != "" && len(e.Wire) == 0 {
-			d["authorizers"] = []object{{"sessionId": e.Session, "jobId": in.Job}}
-			set(d, "rights", in.JobRights, in.JobRights != nil)
-		} else if in.ConnectionRights != nil && len(e.Wire) == 0 {
-			var authorizers []object
+		if len(e.Wire) == 0 {
+			rights := in.ConnectionRights
+			authorizers := []object{}
+			actors := []string{in.Actor, in.ViaActor, in.ReleasedBy}
+			if in.Job != "" {
+				authorizers = append(authorizers, object{"sessionId": e.Session, "jobId": in.Job})
+				actors = actors[1:]
+				rights = api.IntersectConnectionRights(rights, &in.JobRights)
+			}
 			seen := map[string]bool{}
-			for _, actor := range []string{in.Actor, in.ViaActor, in.ReleasedBy} {
+			for _, actor := range actors {
 				if actor != "" && !seen[actor] {
 					authorizers = append(authorizers, object{"sessionId": e.Session, "actorId": actor})
 					seen[actor] = true
 				}
 			}
-			d["authorizers"], d["rights"] = authorizers, *in.ConnectionRights
+			d["authorizers"] = authorizers
+			set(d, "rights", rights, rights != nil)
 		}
 		set(d, "key", in.Key, in.Key != "")
 		set(d, "releasedBy", in.ReleasedBy, in.ReleasedBy != "")
 		set(d, "submittedBy", in.ViaActor, in.ViaActor != "")
-		set(d, "go.connectionRights", in.ConnectionRights, in.ConnectionRights != nil)
-		delete(d, "go.viaActor")
 		set(d, "go.answer", in.Answer, in.Answer != "")
 		set(d, "go.calls", in.Calls, len(in.Calls) > 0)
-	case "input.returned", "input.withdrawn":
-		if e.InputRef != "" {
-			v["inputId"] = e.InputRef
-		} else {
-			d["inputIds"] = e.HandedBackIDs()
-		}
+	case "input.returned":
+		v["inputId"] = e.InputRef
+		d["reason"] = api.Decode[string](e.Data)
 	case "model.request":
 		m := api.Decode[api.Model](e.Data)
 		model := asObject(d["model"])
@@ -229,9 +229,6 @@ func Entry(e api.Entry) map[string]any {
 		}
 		d["model"] = model
 		d["safeToRepeat"] = e.SafeToRepeat != nil && *e.SafeToRepeat
-		if e.TracksStepAfter {
-			d["tracksStepAfter"] = true
-		}
 		if e.OfferedTools != nil {
 			d["tools"] = *e.OfferedTools
 		}
@@ -374,7 +371,6 @@ func Entry(e api.Entry) map[string]any {
 	case "question.answer":
 		a := api.Decode[api.Answer](e.Data)
 		set(v, "requestId", a.Request, a.Request != "")
-		d["requestId"] = a.Request
 		set(d, "approvalView", a.ApprovalView, a.ApprovalView != nil)
 		set(d, "actorId", a.Actor, a.Actor != "")
 		if a.Actor == "" {
@@ -445,7 +441,6 @@ func Entry(e api.Entry) map[string]any {
 			d["to"] = *p.To
 		}
 		set(d, "restore", p.Restore, p.Restore != nil)
-		set(d, "failed", p.Failed, p.Failed)
 	case "resultFeedback":
 		d["reason"] = api.Decode[string](e.Data)
 	case "erasure":
@@ -470,13 +465,6 @@ func Entry(e api.Entry) map[string]any {
 	return v
 }
 
-func association(entry, data object, key string) string {
-	if has(entry, key) {
-		return str(entry, key)
-	}
-	return str(data, key)
-}
-
 func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 	var v object
 	if err := json.Unmarshal(raw, &v); err != nil {
@@ -488,9 +476,7 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 	}
 	if boolean(v, "erased") {
 		e.InputRef, e.JobKey = str(v, "inputId"), str(v, "jobKey")
-		if _, present := v["inputId"]; !present {
-			e.InputRefs = api.Decode[[]string](api.JSON(v["inputIds"]))
-		}
+		e.RequestRef, e.ContinuesTurn = str(v, "requestId"), str(v, "continuesTurnId")
 		return e.Redacted(), nil
 	}
 	ms, _ := json.Number(fmt.Sprint(v["time"])).Int64()
@@ -512,7 +498,7 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 	case "limit":
 		e.Data = api.JSON(d["rights"])
 	case "input.accepted":
-		in := api.Input{ID: association(v, d, "inputId"), Key: str(d, "key"), Actor: e.Actor, When: str(d, "when"), ReleasedBy: str(d, "releasedBy"), ViaActor: str(d, "submittedBy"), Content: contentIn(d["content"]), Copies: e.Copies, Job: e.Job, Answer: str(d, "go.answer"), Calls: api.Decode[[]api.Call](api.JSON(d["go.calls"]))}
+		in := api.Input{ID: str(v, "inputId"), Key: str(d, "key"), Actor: e.Actor, When: str(d, "when"), ReleasedBy: str(d, "releasedBy"), ViaActor: str(d, "submittedBy"), Content: contentIn(d["content"]), Copies: e.Copies, Job: e.Job, Answer: str(d, "go.answer"), Calls: api.Decode[[]api.Call](api.JSON(d["go.calls"]))}
 		if b, ok := d["parked"].(bool); ok {
 			in.Parked = &b
 		}
@@ -520,34 +506,28 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 		if has(d, "go.resultSchema") {
 			in.ResultSchema = api.JSON(d["go.resultSchema"])
 		}
-		in.JobRights = api.Decode[[]string](api.JSON(d["rights"]))
-		if str(v, "kind") == "input.accepted" {
-			in = api.Decode[api.Input](api.JSON(v["data"]))
+		if has(d, "go.connectionRights") || has(d, "go.viaActor") {
+			return e, fmt.Errorf("admission %s has unsupported private authority fields", e.ID)
 		}
-		if in.Job == "" && has(d, "rights") {
+		e.InputRef = in.ID
+		if in.ID == "" {
+			return e, fmt.Errorf("admission %s lacks inputId", e.ID)
+		}
+		if in.Job != "" {
+			in.JobRights = api.Decode[[]string](api.JSON(d["rights"]))
+		} else {
 			in.ConnectionRights = api.Decode[*[]string](api.JSON(d["rights"]))
-		} else if has(d, "go.connectionRights") {
-			in.ConnectionRights = api.Decode[*[]string](api.JSON(d["go.connectionRights"]))
-		}
-		if !has(d, "submittedBy") && in.ViaActor == "" {
-			in.ViaActor = str(d, "go.viaActor")
 		}
 		if in.Job != "" {
 			in.Actor = api.JobActor(in.Job)
 		}
 		e.Data, e.Content = api.JSON(in), in.Content
 	case "input.returned":
-		if str(v, "kind") == "input.returned" {
-			e.Data = api.JSON(v["data"])
-		} else if _, present := v["inputId"]; present {
-			e.InputRef = str(v, "inputId")
-		} else if _, present := d["inputId"]; present {
-			e.Data = api.JSON(str(d, "inputId"))
-		} else {
-			e.Data = api.JSON(d["inputIds"])
+		e.InputRef, e.Data = str(v, "inputId"), api.JSON(str(d, "reason"))
+		if e.InputRef == "" {
+			return e, fmt.Errorf("hand-back %s lacks inputId", e.ID)
 		}
 	case "model.request":
-		e.TracksStepAfter = boolean(d, "tracksStepAfter")
 		m := asObject(d["model"])
 		e.Data = api.JSON(api.Model{ID: modelID(m), Provider: str(m, "provider")})
 		b := boolean(d, "safeToRepeat")
@@ -560,24 +540,28 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 		for _, plugin := range api.Decode[[]object](api.JSON(d["active"])) {
 			names = append(names, str(plugin, "name"))
 		}
-		if str(v, "kind") == "plugins.set" {
-			names = api.Decode[[]string](api.JSON(v["data"]))
-		}
 		e.Data = api.JSON(names)
 	case "input":
-		e.Data = api.JSON(association(v, d, "inputId"))
+		e.InputRef = str(v, "inputId")
 		e.InputKey = str(d, "key")
 	case "turn.start":
-		s := api.TurnStart{ContinuesTurn: association(v, d, "continuesTurnId"), StartedBy: api.Decode[api.TurnStarter](api.JSON(d["startedBy"])), System: str(d, "system"), Context: contentIn(d["context"]), Input: str(d, "go.initialInput")}
+		s := api.TurnStart{ContinuesTurn: str(v, "continuesTurnId"), StartedBy: api.Decode[api.TurnStarter](api.JSON(d["startedBy"])), System: str(d, "system"), Context: contentIn(d["context"]), Input: str(d, "go.initialInput")}
 		s.TraceContext = api.Decode[*telemetry.Wire](api.JSON(d["traceContext"]))
 		m := asObject(d["model"])
 		s.Settings.Model = modelID(m)
-		if !has(d, "context") {
-			s.Context = contentIn(d["go.context"])
+		if _, ok := d["tools"].([]any); !ok {
+			return e, fmt.Errorf("turn %s lacks its recorded tool offer", e.Turn)
+		}
+		if _, ok := d["settings"].(map[string]any); !ok {
+			return e, fmt.Errorf("turn %s lacks its recorded settings", e.Turn)
+		}
+		if _, ok := d["system"].(string); !ok || s.StartedBy.Kind == "" || s.StartedBy.ID == "" {
+			return e, fmt.Errorf("turn %s lacks its system or starter", e.Turn)
 		}
 		// Model identity doubles as the model setting for the running turn.
 		s.Model = api.Model{ID: s.Settings.Model, Provider: str(m, "provider")}
 		applySettings(&s.Settings, asObject(d["settings"]))
+		s.Settings.Model = s.Model.ID
 		for _, t := range api.Decode[[]object](api.JSON(d["tools"])) {
 			s.Tools = append(s.Tools, toolIn(t))
 		}
@@ -609,7 +593,10 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 		e.Data = api.JSON(r)
 	case "question.open":
 		r := asObject(d["request"])
-		q := api.Question{ID: str(r, "id"), Step: e.Step, Session: str(r, "sessionId"), Call: str(r, "toolCallId"), Actor: str(r, "go.actor"), Turn: e.Turn, Kind: str(r, "kind"), Prompt: str(r, "question"), Key: str(r, "key"), Credential: str(r, "credential"), Answerable: boolean(r, "answerable"), Wait: time.Duration(number(r, "timeLimitMs")) * time.Millisecond, Defer: str(r, "whenTimeLimit") == "leaveOpen"}
+		if str(v, "requestId") == "" || str(v, "requestId") != str(r, "id") {
+			return e, fmt.Errorf("request %s lacks a matching requestId", e.ID)
+		}
+		q := api.Question{ID: str(v, "requestId"), Step: e.Step, Session: str(r, "sessionId"), Call: str(r, "toolCallId"), Actor: str(r, "go.actor"), Turn: e.Turn, Kind: str(r, "kind"), Prompt: str(r, "question"), Key: str(r, "key"), Credential: str(r, "credential"), Answerable: boolean(r, "answerable"), Wait: time.Duration(number(r, "timeLimitMs")) * time.Millisecond, Defer: str(r, "whenTimeLimit") == "leaveOpen"}
 		if q.Session == "" {
 			q.Session = e.Session
 		}
@@ -652,9 +639,9 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 		}
 		e.Data = api.JSON(storedQuestion{q, str(r, "go.forwardSession"), str(r, "go.forwardRequest")})
 	case "question.secret":
-		e.Data = api.JSON(association(v, d, "requestId"))
+		e.Data = api.JSON(str(v, "requestId"))
 	case "question.answer":
-		e.Data = api.JSON(api.Answer{ApprovalView: api.Decode[*api.ApprovalView](api.JSON(d["approvalView"])), Request: association(v, d, "requestId"), Actor: str(d, "actorId"), Value: str(d, "value"), Reason: str(d, "reason"), Cause: str(d, "cause"), Stored: str(d, "stored"), Declined: boolean(d, "declined"), Via: api.Decode[[]api.ActorRef](api.JSON(d["go.via"]))})
+		e.Data = api.JSON(api.Answer{ApprovalView: api.Decode[*api.ApprovalView](api.JSON(d["approvalView"])), Request: str(v, "requestId"), Actor: str(d, "actorId"), Value: str(d, "value"), Reason: str(d, "reason"), Cause: str(d, "cause"), Stored: str(d, "stored"), Declined: boolean(d, "declined"), Via: api.Decode[[]api.ActorRef](api.JSON(d["go.via"]))})
 	case "turn.end":
 		outcome, r := asObject(d["outcome"]), asObject(d["result"])
 		o := api.Outcome{Status: str(outcome, "kind"), Error: str(outcome, "error"), Usage: usageIn(asObject(d["usage"])), Steps: number(d, "go.steps"), Copies: e.Copies}
@@ -685,7 +672,7 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 	case "actor.left":
 		e.Data = api.JSON(str(d, "actorId"))
 	case "job.start", "job.end":
-		e.Data = api.JSON(jobIn(e, d, str(v, "kind")))
+		e.Data = api.JSON(jobIn(e, d))
 	case "position":
 		e.Data = api.JSON(v["data"])
 		if _, err := api.ReadPosition(e.Data); err != nil {

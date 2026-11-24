@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/conformancemodel"
+	"github.com/daniel-ballance/modular-agent/go/internal/runtimetest"
 	"github.com/daniel-ballance/modular-agent/go/pluginrpc"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 	"github.com/daniel-ballance/modular-agent/go/vanilla"
@@ -41,7 +42,11 @@ func TestJobProtocolFixture(t *testing.T) {
 		case "jobs/cancel":
 			return obj{}, peer.Call(ctx, "host/jobs/end", obj{"jobId": p["jobId"], "outcome": obj{"kind": "cancelled"}, "report": false}, nil)
 		case "command/run":
-			args := api.Decode[[]string](api.JSON(p["args"]))
+			raw, ok := p["args"].(string)
+			args := strings.Fields(raw)
+			if !ok || len(args) != 2 {
+				return nil, fmt.Errorf("expected a verb and key in argument text")
+			}
 			switch args[0] {
 			case "start":
 				start := obj{"parentRequestId": pluginrpc.RequestID(ctx), "kind": "offline", "key": args[1], "detail": obj{"label": args[1], "future": []int{17, 23}}}
@@ -153,6 +158,7 @@ func TestRemoteJobOwnershipCancellationAndResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtimetest.Publish(t, a, session)
 	v, _ := a.Get("jobs")
 	jobs := v.(api.Jobs)
 	progress := make(chan struct{}, 8)

@@ -90,20 +90,11 @@ func (data contents) credentials() (credentialsData, error) {
 
 // Logins is a handle to the shared login file. Construct it with SubscriptionLogins.
 type Logins struct {
-	path    string
-	aliases map[string]string
+	path string
 }
 
 // SubscriptionLogins names a login file without opening it.
 func SubscriptionLogins(path string) Logins { return Logins{path: path} }
-
-// WithAliases maps former Provider ids to current ids. Reads prefer the
-// current id; the next write moves the old slots under the same file lock.
-// Each alias must point directly at a current id, not another alias.
-func (a Logins) WithAliases(aliases map[string]string) Logins {
-	a.aliases = maps.Clone(aliases)
-	return a
-}
 
 func privateFile(path string, flags int) (*os.File, error) {
 	fd, err := unix.Open(path, flags|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0600)
@@ -149,14 +140,6 @@ func (a Logins) read() (contents, error) {
 	for _, l := range data.Logins {
 		if l.Type != "oauth" && l.Type != "api_key" {
 			return contents{}, invalid()
-		}
-	}
-	for old, current := range a.aliases {
-		if login, ok := data.Logins[old]; ok && old != current {
-			if _, exists := data.Logins[current]; !exists {
-				data.Logins[current] = login
-			}
-			delete(data.Logins, old)
 		}
 	}
 	return data, nil

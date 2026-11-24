@@ -9,6 +9,7 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 	"github.com/daniel-ballance/modular-agent/go/turnrun"
+	"strings"
 )
 
 type manager struct{ a api.API }
@@ -41,7 +42,8 @@ func PluginWithCompaction(compact bool) api.Plugin {
 			return err
 		}
 		if compact {
-			if err := a.RegisterCommand("compact", func(ctx context.Context, id string, args []string) (string, error) {
+			if err := a.RegisterCommand("compact", func(ctx context.Context, id string, raw string) (string, error) {
+				args := strings.Fields(raw)
 				if len(args) > 0 {
 					return "", errors.New("usage: /compact")
 				}

@@ -24,6 +24,6 @@ type ChatGPTOptions struct {
 
 // ChatGPT constructs the chatgpt Provider. It reads the login file at request time.
 func ChatGPT(opts ChatGPTOptions) (modular.Provider, error) {
-	config := responsesConfig{id: "chatgpt", label: "ChatGPT", endpoint: chatGPTEndpoint, legacyID: "openai-codex"}
+	config := responsesConfig{id: "chatgpt", label: "ChatGPT", endpoint: chatGPTEndpoint}
 	return responsesProvider(config, opts.Logins, opts.ClientIdentity, opts.Models, opts.CatalogOverrides, opts.HTTPTransport)
 }

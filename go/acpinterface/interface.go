@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"unicode/utf8"
@@ -480,35 +481,37 @@ func (s *server) reopen(ctx context.Context, id, cwd string, servers []acp.McpSe
 		}
 		return s.openReply(ctx, id, st.actor, replay)
 	}
-	list, err := s.a.List(s.project)
-	if err != nil {
-		return result, err
-	}
-	found := false
-	for _, snap := range list {
-		if snap.ID == id && s.discoverable(snap) {
-			if s.principal.Actor.Rights != nil {
-				s.connectionRights.Store(id, s.intersectRecorded(snap))
-			}
-			found = true
-			break
+	// Another connection can attach to a known, authorized in-memory
+	// session. Listing it is neither necessary nor allowed before admission.
+	snap, openErr := s.a.Snapshot(id)
+	if openErr != nil {
+		list, err := s.a.List(s.project)
+		if err != nil {
+			return result, err
 		}
+		i := slices.IndexFunc(list, func(row api.Session) bool { return row.ID == id })
+		if i < 0 {
+			return result, acpError("forbidden")
+		}
+		snap = list[i]
 	}
-	if !found {
+	if !s.discoverable(snap) {
 		return result, acpError("forbidden")
+	}
+	if s.principal.Actor.Rights != nil {
+		s.connectionRights.Store(id, s.intersectRecorded(snap))
 	}
 	if len(servers) != 0 && !s.hasRight("tools") {
 		return result, acpError("forbidden")
 	}
-	_, alreadyOpen := s.a.Snapshot(id)
-	if alreadyOpen == nil && (!s.authorize(id, s.actor, "watch") || len(servers) != 0) {
+	if openErr == nil && (!s.authorize(id, s.actor, "watch") || len(servers) != 0) {
 		return result, acpError("forbidden")
 	}
 	specs, err := convertServers(servers)
 	if err != nil {
 		return result, err
 	}
-	if alreadyOpen != nil || s.shared == nil {
+	if openErr != nil || s.shared == nil {
 		if err = s.mcp().Add(ctx, id, specs); err != nil {
 			return result, err
 		}
@@ -518,7 +521,7 @@ func (s *server) reopen(ctx context.Context, id, cwd string, servers []acp.McpSe
 		}
 	}
 	st := s.attach(id, true)
-	if alreadyOpen != nil {
+	if openErr != nil {
 		if err = s.a.(actorSessions).OpenForHost(st.ctx, id, s.hostActor()); err != nil {
 			s.detach(id, st)
 			if held := heldError(err); held != nil {

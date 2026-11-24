@@ -55,7 +55,8 @@ func supports(levels []string, level string) bool {
 	}
 	return false
 }
-func (s *Selection) model(ctx context.Context, id string, args []string) (string, error) {
+func (s *Selection) model(ctx context.Context, id string, raw string) (string, error) {
+	args := strings.Fields(raw)
 	snap, err := s.a.Snapshot(id)
 	if err != nil {
 		return "", err
@@ -74,7 +75,8 @@ func (s *Selection) model(ctx context.Context, id string, args []string) (string
 	snap.Settings.Thinking = api.LowerReasoning(snap.Settings.Thinking, access.Model().Thinking)
 	return args[0], s.a.SetSettings(ctx, id, snap.Settings)
 }
-func (s *Selection) thinking(ctx context.Context, id string, args []string) (string, error) {
+func (s *Selection) thinking(ctx context.Context, id string, raw string) (string, error) {
+	args := strings.Fields(raw)
 	snap, err := s.a.Snapshot(id)
 	if err != nil {
 		return "", err

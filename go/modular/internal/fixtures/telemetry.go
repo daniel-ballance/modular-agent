@@ -16,7 +16,6 @@ import (
 )
 
 const EndpointEnv = "MODULAR_AGENT_TELEMETRY_OTLP"
-const HandshakeEnv = "MODULAR_AGENT_TELEMETRY_HANDSHAKE"
 
 // InstallTelemetry is used only by the shared scenario runner and fixture programs.
 func InstallTelemetry(ctx context.Context, endpoint string) (func() error, error) {

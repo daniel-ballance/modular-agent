@@ -9,10 +9,10 @@ import (
 
 func TestPortableIntakeUsesLatestStateButFirstReceipt(t *testing.T) {
 	raws := []string{
-		`{"id":"a","parentId":null,"kind":"inputAccepted","actorId":"proposer","data":{"inputId":"proposed","key":"retry","when":"propose","content":[{"type":"text","text":"proposed text"}]}}`,
-		`{"id":"b","parentId":"a","kind":"inputAccepted","actorId":"proposer","data":{"inputId":"waiting","when":"propose","content":[]}}`,
+		`{"id":"a","parentId":null,"kind":"inputAccepted","actorId":"proposer","inputId":"proposed","data":{"taken":"proposed","key":"retry","when":"propose","content":[{"type":"text","text":"proposed text"}]}}`,
+		`{"id":"b","parentId":"a","kind":"inputAccepted","actorId":"proposer","inputId":"waiting","data":{"taken":"proposed","when":"propose","content":[]}}`,
 		`{"id":"c","parentId":"b","kind":"inputAccepted","actorId":"other","inputId":"returned","data":{"key":"back","when":"after","content":[]}}`,
-		`{"id":"d","parentId":"c","kind":"inputHandedBack","erased":true,"inputIds":["returned"]}`,
+		`{"id":"d","parentId":"c","kind":"inputHandedBack","erased":true,"inputId":"returned"}`,
 		`{"id":"ready","parentId":"d","kind":"inputAccepted","actorId":"host","inputId":"ready","data":{"when":"after","taken":"after","content":[]}}`,
 		`{"id":"e","parentId":"ready","kind":"inputAccepted","actorId":"proposer","inputId":"proposed","data":{"key":"retry","when":"after","releasedBy":"host","content":[{"type":"text","text":"proposed text"}]}}`,
 		`{"id":"position","parentId":"e","kind":"position","data":{"to":"a"}}`,

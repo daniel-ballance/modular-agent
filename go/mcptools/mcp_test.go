@@ -81,6 +81,7 @@ func TestMCPTransportsAnnotationsResultsAndScope(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				runtimetest.Publish(t, a, id)
 				other, err := a.New(ctx, t.TempDir())
 				if err != nil {
 					t.Fatal(err)
@@ -210,6 +211,7 @@ func TestMCPListChangesAndCancellation(t *testing.T) {
 		ctx := deadline(t)
 		a, m := newAgent(t)
 		id, _ := a.New(ctx, t.TempDir())
+		runtimetest.Publish(t, a, id)
 		s := server()
 		handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil)
 		httpServer := httptest.NewServer(handler)

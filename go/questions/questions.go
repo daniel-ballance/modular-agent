@@ -55,7 +55,7 @@ func Plugin() api.Plugin {
 		if err := a.Provide("tools.questions", m); err != nil {
 			return err
 		}
-		if err := a.RegisterCommand("requests", func(ctx context.Context, id string, _ []string) (string, error) {
+		if err := a.RegisterCommand("requests", func(ctx context.Context, id string, _ string) (string, error) {
 			list, err := m.List(id)
 			return string(api.JSON(list)), err
 		}); err != nil {
@@ -764,6 +764,9 @@ func (m *Manager) resume(id string) {
 			has, answered := false, true
 			for _, st := range sts {
 				if st.q.Question.Call == c.ID && !st.closed {
+					if !api.HasQuestionCheckpoint(s, st.q.Question) {
+						all = false
+					}
 					has = true
 					if st.answer == nil {
 						answered = false

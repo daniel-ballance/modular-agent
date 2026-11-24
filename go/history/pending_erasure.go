@@ -20,6 +20,19 @@ func (s *Store) initPendingErasures() error {
 		return err
 	}
 	defer unlock()
+	if _, err := os.Lstat(filepath.Join(s.dir, pendingLock)); errors.Is(err, os.ErrNotExist) {
+		// A missing authority can only be created in a fresh namespace.
+		entries, err := os.ReadDir(s.dir)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			// The base environment keeps command supervision in this subdirectory.
+			if !entry.IsDir() || entry.Name() != "commands" {
+				return api.ErrErasureUnavailable
+			}
+		}
+	}
 	lock, err := os.OpenFile(filepath.Join(s.dir, pendingLock), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if errors.Is(err, os.ErrExist) {
 		return nil

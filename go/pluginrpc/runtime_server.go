@@ -246,7 +246,7 @@ func (p *runtimeClient) Record(ctx context.Context, e api.Entry) (api.Entry, err
 		if err != nil {
 			return e, err
 		}
-		e.Data = api.JSON(id)
+		e.InputRef = id
 	}
 	v := portable.Entry(e)
 	if e.Kind == "model" {

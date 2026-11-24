@@ -27,7 +27,7 @@ func TestRoundFivePortableShapes(t *testing.T) {
 			in := api.Decode[api.Input](e.Data)
 			return in.ID == "in" && in.Actor == "proposer" && in.Key == "once" && in.When == "after" && in.ReleasedBy == "host" && in.Content.Text() == "direction"
 		}},
-		{`"kind":"inputHandedBack","data":{"inputIds":["in","other"]}`, func(e api.Entry) bool { return reflect.DeepEqual(e.HandedBackIDs(), []string{"in", "other"}) }},
+		{`"kind":"inputHandedBack","inputId":"in","data":{"reason":"cancelled"}`, func(e api.Entry) bool { return e.InputRef == "in" }},
 		{`"kind":"modelRequest","stepId":"s","data":{"model":{"provider":"vendor","id":"test","future":9},"safeToRepeat":false}`, func(e api.Entry) bool {
 			return e.Step == "s" && api.Decode[api.Model](e.Data).ID == "vendor/test" && e.SafeToRepeat != nil && !*e.SafeToRepeat
 		}},
@@ -48,18 +48,12 @@ func TestRoundFivePortableShapes(t *testing.T) {
 	}
 }
 
-func TestRoundFiveReadsLegacyGoIntakeWithoutResubmitting(t *testing.T) {
-	accepted := readPortable(t, `{"id":"accept","kind":"input.accepted","data":{"ID":"old-input","Actor":"local-user","Key":"once","When":"after","Content":[{"type":"text","text":"old"}]}}`)
-	if in := api.Decode[api.Input](accepted.Data); in.ID != "old-input" || in.Key != "once" || in.Content.Text() != "old" {
-		t.Fatal(in)
-	}
-	returned := readPortable(t, `{"id":"return","kind":"input.returned","data":"old-input"}`)
-	if ids := returned.HandedBackIDs(); !reflect.DeepEqual(ids, []string{"old-input"}) {
-		t.Fatal(ids)
-	}
-	plugins := readPortable(t, `{"id":"plugins","kind":"plugins.set","data":["history"]}`)
-	if got := api.Decode[[]string](plugins.Data); !reflect.DeepEqual(got, []string{"history"}) {
-		t.Fatal(got)
+func TestPrivateKindsDoNotBecomeWork(t *testing.T) {
+	for _, kind := range []string{"input.accepted", "input.returned", "plugins.set", "turn.start"} {
+		e := readPortable(t, `{"id":"private","kind":"`+kind+`","data":{"ID":"not-work"}}`)
+		if e.Kind == kind || portable.Entry(e)["kind"] != kind || e.InputRef != "" {
+			t.Fatal(e)
+		}
 	}
 }
 

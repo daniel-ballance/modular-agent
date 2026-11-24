@@ -233,13 +233,17 @@ func seedStandardRuntimeHistory(t *testing.T, opt vanilla.Options, revoked bool)
 		s.Position = e.ID
 		s.Entries = append(s.Entries, e)
 	}
-	add("turnStart", map[string]any{"data": map[string]any{"startedBy": map[string]string{"kind": "actor", "id": s.Actor}, "model": map[string]string{"provider": "fake", "id": "fake"}, "tools": []any{}, "system": "test", "settings": map[string]any{"maxSteps": 3, "reasoning": "off"}}})
-	add("input", map[string]any{"data": map[string]string{"inputId": "original"}, "modelVisible": true, "message": map[string]any{"role": "user", "content": []any{map[string]string{"type": "text", "text": "do the work"}}}})
+	offer := []any{}
+	for _, tool := range (&recoverySource{}).Tools(s) {
+		offer = append(offer, portable.Tool(tool))
+	}
+	add("turnStart", map[string]any{"data": map[string]any{"startedBy": map[string]string{"kind": "actor", "id": s.Actor}, "model": map[string]string{"provider": "fake", "id": "fake"}, "tools": offer, "system": "test", "settings": map[string]any{"maxSteps": 3, "reasoning": "off", "approval": "off"}}})
+	add("input", map[string]any{"inputId": "original", "modelVisible": true, "message": map[string]any{"role": "user", "content": []any{map[string]string{"type": "text", "text": "do the work"}}}})
 	callNames := []string{"again", "again", "again", "unsafe-now", "fresh"}
 	callIDs := []string{"yes", "no-then", "already-done", "no-now", "new"}
 	add("modelRequest", map[string]any{"stepId": "first-step", "data": map[string]any{
 		"model": map[string]string{"provider": "fake", "id": "fake"}, "safeToRepeat": false,
-		"tools": []string{"again", "unsafe-now", "fresh"}, "tracksStepAfter": true,
+		"tools": []string{"again", "unsafe-now", "fresh"},
 	}})
 	var content []any
 	for i, id := range callIDs {

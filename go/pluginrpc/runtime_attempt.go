@@ -166,7 +166,6 @@ func (w *runtimeWork) model(ctx context.Context, id any, p *Peer, step string, r
 			return err
 		}
 		draft := turnrun.ModelRequest(step, t.Access.Model())
-		draft.TracksStepAfter = true
 		draft.Copies, draft.OfferedTools = a.sources, &names
 		draft.Wire = mustJSON(object{"data": object{"request": final}})
 		if !fitsHistoryEntry(t, draft) {
@@ -294,20 +293,23 @@ func modelIntentRequest(e api.Entry) object {
 
 func (w *runtimeWork) recoverAttempts(ctx context.Context, s api.Session, durable bool) error {
 	settled, auxiliarySteps := map[string]bool{}, map[string]bool{}
-	legacy := map[string]bool{}
+	intents := map[string]bool{}
 	branch := s.Branch()
 	for _, e := range branch {
 		if e.Turn != w.turn.ID {
 			continue
 		}
-		if e.Kind == "model.request" && boolean(asObject(obj(e.Wire)["data"]), "auxiliary") {
-			auxiliarySteps[e.Step] = true
+		if e.WasKind("model.request") {
+			intents[e.Step] = true
+			auxiliarySteps[e.Step] = boolean(asObject(obj(e.Wire)["data"]), "auxiliary")
 		}
 		if e.WasKind("model") {
+			if !intents[e.Step] {
+				return fmt.Errorf("response for %s has no preceding model request", e.Step)
+			}
 			settled[e.Step] = true
 			if !e.IsErased() && !auxiliarySteps[e.Step] {
 				w.usage.Add(api.Decode[struct{ Usage api.Usage }](e.Data).Usage)
-				legacy[e.Step] = true
 			}
 		}
 	}
@@ -316,9 +318,8 @@ func (w *runtimeWork) recoverAttempts(ctx context.Context, s api.Session, durabl
 		if e.Turn != w.turn.ID || !e.WasKind("model.request") {
 			continue
 		}
-		delete(legacy, e.Step)
 		names := asObject(obj(e.Wire)["data"])
-		auxiliary := boolean(names, "auxiliary") || str(names, "purpose") == "summary"
+		auxiliary := boolean(names, "auxiliary")
 		if !auxiliary {
 			w.attempts++
 		}
@@ -336,8 +337,6 @@ func (w *runtimeWork) recoverAttempts(ctx context.Context, s api.Session, durabl
 			return err
 		}
 	}
-	// Older portable logs may have a response without an intent.
-	w.attempts += len(legacy)
 	return nil
 }
 

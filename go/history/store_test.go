@@ -60,6 +60,45 @@ func TestSessionsSurviveRestartAndUnusedLeavesNothing(t *testing.T) {
 		t.Fatal("invalid identity allowed")
 	}
 }
+func TestDoNotReplaceMissingRegistryOverExistingState(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "kept.json"), []byte(`{"id":"kept"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := history.New(dir); err == nil {
+		t.Fatal("created a registry over existing history")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatal("changed unsupported store", err)
+	}
+}
+
+func TestRefuseUnsupportedSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	store, err := history.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := store.Acquire("fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	for _, contents := range []string{`{"version":1,"id":"fixture"}`, `{"session":{"version":1,"id":"fixture"},"entries":[]}`} {
+		path := filepath.Join(dir, "fixture.json")
+		if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := lease.Load(); err == nil {
+			t.Fatal("read unsupported snapshot")
+		}
+		if b, err := os.ReadFile(path); err != nil || string(b) != contents {
+			t.Fatal("changed refused snapshot", err)
+		}
+	}
+}
+
 func TestWriterLeaseAcrossProcesses(t *testing.T) {
 	if os.Getenv("MODULAR_LOCK_CHILD") == "1" {
 		s, err := history.New(os.Getenv("MODULAR_LOCK_DIR"))

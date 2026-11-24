@@ -252,8 +252,8 @@ func TestHooksAndCommandsInBothPlacements(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			cmd, err := s.RunCommand(ctx, "/repeat a b")
-			if err != nil || cmd != "a b" {
+			cmd, err := s.RunCommand(ctx, `/repeat  a "b  c" `)
+			if err != nil || cmd != ` a "b  c" ` {
 				t.Fatalf("command: %q %v", cmd, err)
 			}
 			got, err := s.Prompt(ctx, "tide")

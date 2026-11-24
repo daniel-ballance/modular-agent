@@ -21,7 +21,6 @@ import (
 )
 
 const Binding = "modular-agent-plugin/1"
-const DataBinding = "modular-agent-data/1"
 const MaxFrame = 64 * 1024 * 1024
 
 type RPCError struct {
@@ -197,7 +196,6 @@ type messageConn interface {
 type Peer struct {
 	traceHost     bool
 	traceName     atomic.Pointer[string]
-	traceAgreed   atomic.Bool
 	in            io.ReadCloser
 	out           io.Writer
 	wire          messageConn
@@ -244,7 +242,7 @@ func (p *Peer) Send(method string, params any) error {
 }
 
 func (p *Peer) sendWork(ctx context.Context, method string, params any) error {
-	return p.send(envelope{Method: method, Params: traceParams(mustJSON(params), ctx, p.traceAgreed.Load() && traceWork(method))})
+	return p.send(envelope{Method: method, Params: traceParams(mustJSON(params), ctx, traceWork(method))})
 }
 func mustJSON(v any) json.RawMessage { b, _ := json.Marshal(v); return b }
 func (p *Peer) send(m envelope) error {
@@ -311,7 +309,7 @@ func (p *Peer) call(ctx context.Context, method string, params any, out any, acc
 	raw := mustJSON(params)
 	// The initialize member is a capability version, not a W3C carrier.
 	if method != "plugin/initialize" {
-		raw = traceParams(raw, ctx, p.traceAgreed.Load() && traceWork(method))
+		raw = traceParams(raw, ctx, traceWork(method))
 	}
 	if err := p.send(envelope{ID: id, Method: method, Params: raw}); err != nil {
 		if Code(err) != "" {

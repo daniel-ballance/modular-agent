@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"slices"
-	"strings"
 	"sync"
 	"unicode/utf8"
 
@@ -269,11 +268,7 @@ func servePlugin(plugin Plugin, run func(*pluginrpc.Server) error) error {
 				str := func(key string) string { v, _ := p[key].(string); return v }
 				args, ok := p["args"].(string)
 				if !ok {
-					var legacy []string
-					if err := decodeInto(p["args"], &legacy); err != nil {
-						return nil, serveFault(&Error{Code: InvalidRequest, Message: "command args must be text"})
-					}
-					args = strings.Join(legacy, " ")
+					return nil, serveFault(&Error{Code: InvalidRequest, Message: "command args must be text"})
 				}
 				text, err := runSDKCommand(ctx, nil, server, plugin.Name, str("sessionId"), str("actorId"), c, args, owner)
 				return pluginrpc.Object{"output": text}, serveFault(err)

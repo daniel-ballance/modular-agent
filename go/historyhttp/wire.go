@@ -281,34 +281,8 @@ func tombstone(f fields) json.RawMessage {
 		t["sources"] = f["sources"]
 	}
 	d := objectOf(f["data"])
-	fallback := func(k string, values ...json.RawMessage) {
-		if _, present := f[k]; present {
-			return
-		}
-		for _, v := range values {
-			if idOf(v) != "" {
-				t[k] = v
-				return
-			}
-		}
-	}
 	var usage fields
 	switch kind {
-	case "inputAccepted", "input", "inputHandedBack":
-		fallback("inputId", d["inputId"])
-		_, top := f["inputId"]
-		_, inner := d["inputId"]
-		if kind == "inputHandedBack" && !top && !inner {
-			if _, ok := idsOf(d["inputIds"], false); ok {
-				t["inputIds"] = d["inputIds"]
-			}
-		}
-	case "inputRequest":
-		fallback("requestId", d["requestId"], objectOf(d["request"])["id"])
-	case "inputAnswer":
-		fallback("requestId", d["requestId"])
-	case "turnStart":
-		fallback("continuesTurnId", d["continuesTurnId"])
 	case "response":
 		usage = objectOf(objectOf(f["message"])["usage"])
 	case "jobEnded", "turnEnd":

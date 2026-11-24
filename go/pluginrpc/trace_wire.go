@@ -8,15 +8,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-type traceHandshakeKey struct{}
-
-// WithoutTraceHandshake disables the local handshake member for a compatibility check.
-func WithoutTraceHandshake(ctx context.Context) context.Context {
-	return context.WithValue(ctx, traceHandshakeKey{}, true)
-}
-
-func offersTraceContext(ctx context.Context) bool { return ctx.Value(traceHandshakeKey{}) != true }
-
 func traceWork(method string) bool {
 	switch method {
 	case "runtime/runTurn", "runtime/resumeTurn", "runtime/continueOpenCalls",
@@ -34,12 +25,12 @@ func traceWork(method string) bool {
 	return false
 }
 
-func traceParams(raw json.RawMessage, ctx context.Context, agreed bool) json.RawMessage {
+func traceParams(raw json.RawMessage, ctx context.Context, work bool) json.RawMessage {
 	var v map[string]json.RawMessage
 	if json.Unmarshal(raw, &v) != nil || v == nil {
 		return raw
 	}
-	if w := telemetry.Inject(ctx); agreed && w != nil {
+	if w := telemetry.Inject(ctx); work && w != nil {
 		v["traceContext"] = mustJSON(w)
 	} else {
 		if _, ok := v["traceContext"]; !ok {
@@ -70,7 +61,7 @@ func (p *Peer) receivedTrace(ctx context.Context, method string, raw json.RawMes
 	}
 	if p.traceHost {
 		parent := capturedParent(ctx)
-		if !parent.ok || !p.traceAgreed.Load() {
+		if !parent.ok {
 			return ctx
 		}
 		scope := trace.SpanContextFromContext(parent.ctx)
@@ -80,8 +71,5 @@ func (p *Peer) receivedTrace(ctx context.Context, method string, raw json.RawMes
 		}
 		return ctx
 	}
-	if p.traceAgreed.Load() {
-		return telemetry.Extract(ctx, readTrace(raw))
-	}
-	return ctx
+	return telemetry.Extract(ctx, readTrace(raw))
 }

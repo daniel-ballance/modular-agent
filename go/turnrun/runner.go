@@ -318,7 +318,6 @@ func (r *Runner) Run(ctx context.Context, t api.Turn) (out api.Outcome) {
 				modelCtx := ctx
 				finalDispatch := func(dispatchCtx context.Context, req api.Request) error {
 					draft := ModelRequest(step, t.Access.Model())
-					draft.TracksStepAfter = true
 					names := make([]string, 0, len(req.Tools))
 					for _, tool := range req.Tools {
 						names = append(names, tool.Name)

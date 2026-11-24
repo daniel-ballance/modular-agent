@@ -23,8 +23,9 @@ func TestClientWaitsForHeldLease(t *testing.T) {
 		missingHint   bool
 	}{
 		{"live owner with declared TTL", `{"binding":"modular-agent-history/1","ttlMs":75}`, true, false},
-		{"crashed owner with no declared TTL", `{"binding":"modular-agent-history/1"}`, false, false},
-		{"supplied service omits retry hint", `{"binding":"modular-agent-history/1","ttlMs":50}`, false, true},
+		{"available after expiry", `{"binding":"modular-agent-history/1","ttlMs":1000}`, false, false},
+		{"missing declared TTL", `{"binding":"modular-agent-history/1"}`, false, false},
+		{"missing retry hint", `{"binding":"modular-agent-history/1","ttlMs":50}`, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
@@ -68,6 +69,14 @@ func TestClientWaitsForHeldLease(t *testing.T) {
 			c := historyhttp.NewClient(servicehttp.NewClient(ts.URL, "token"))
 			defer c.Close()
 			l, err := c.Acquire("s")
+			if tc.missingHint || tc.name == "missing declared TTL" {
+				mu.Lock()
+				defer mu.Unlock()
+				if err == nil || len(attempts) != 1 {
+					t.Fatal("retried an invalid lease declaration", err, len(attempts))
+				}
+				return
+			}
 			if tc.staysHeld {
 				var held *servicehttp.ResponseError
 				if !errors.As(err, &held) || held.Code != "held" {
@@ -120,7 +129,7 @@ func TestReadAndAppendSessionWithNoCheckpoint(t *testing.T) {
 	if err := json.Unmarshal([]byte(`[
 		{"id":"m","parentId":null,"sessionId":"portable","kind":"setting","time":1000,"writer":"peer","modelVisible":false,"data":{"key":"model","value":{"provider":"conformance","id":"echo"}}},
 		{"id":"a","parentId":"m","sessionId":"portable","kind":"actorJoined","time":1001,"writer":"peer","modelVisible":false,"data":{"actor":{"id":"alice","kind":"user","rights":["input"]}}},
-		{"id":"i","parentId":"a","sessionId":"portable","kind":"input","time":1002,"writer":"peer","modelVisible":true,"actorId":"alice","turnId":"turn","message":{"role":"user","content":[{"type":"text","text":"kept"}]},"data":{"inputId":"admission","key":"only-once"}},
+		{"id":"i","parentId":"a","sessionId":"portable","kind":"input","time":1002,"writer":"peer","modelVisible":true,"actorId":"alice","turnId":"turn","message":{"role":"user","content":[{"type":"text","text":"kept"}]},"inputId":"admission","data":{"key":"only-once"}},
 		{"id":"cache","parentId":"i","sessionId":"portable","kind":"peer.cache","time":1003,"writer":"peer","modelVisible":false,"peerField":9007199254740993},
 		{"id":"p","parentId":"cache","sessionId":"portable","kind":"position","time":1004,"writer":"peer","modelVisible":false,"data":{"to":"i"}}
 	]`), &original); err != nil {

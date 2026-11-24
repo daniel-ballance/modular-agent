@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/harness"
+	"github.com/daniel-ballance/modular-agent/go/internal/runtimetest"
 	"github.com/daniel-ballance/modular-agent/go/questions"
 	"slices"
 	"testing"
@@ -22,6 +23,7 @@ func TestPortableImplicitKeysAndQuestionCloseReasons(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtimetest.Publish(t, a, id)
 	v, err := a.Get("questions")
 	if err != nil {
 		t.Fatal(err)

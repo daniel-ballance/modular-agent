@@ -21,14 +21,14 @@ import (
 )
 
 func (d layout) auth() subscription.Logins {
-	return subscription.SubscriptionLogins(filepath.Join(d.config, "auth.json")).WithAliases(providerAliases)
+	return subscription.SubscriptionLogins(filepath.Join(d.config, "auth.json"))
 }
 func (d layout) compose(ctx context.Context, o options, settings modular.Settings, store modular.HistoryStore, stderr io.Writer) (*modular.Agent, error) {
 	durability := modular.Durable
 	if o.transient {
 		durability = modular.Kept
 	}
-	opts := []modular.Option{modular.WithAgentName("ma"), modular.WithProject(o.project), modular.WithProviderAliases(providerAliases), modular.WithDataDir(d.state), modular.WithHistory(store), modular.WithDurability(durability), modular.WithPluginHost(o.acp || o.agui), modular.WithJobReportsStartTurns(true), modular.WithLateAnswersStartTurns(true), modular.WithRefusedSettingsDuringTurn()}
+	opts := []modular.Option{modular.WithAgentName("ma"), modular.WithProject(o.project), modular.WithDataDir(d.state), modular.WithHistory(store), modular.WithDurability(durability), modular.WithPluginHost(o.acp || o.agui), modular.WithJobReportsStartTurns(true), modular.WithLateAnswersStartTurns(true), modular.WithRefusedSettingsDuringTurn()}
 	opts = append(opts, modular.WithCapacityLimits(o.policy.Limits))
 	if o.approval != "" {
 		opts = append(opts, modular.WithApproval(o.approval), modular.WithApprovalCoversNested(true))
@@ -165,16 +165,9 @@ func (d layout) modelOverrides() (map[string][]subscription.ResponsesModelOverri
 	if err := readJSON(filepath.Join(d.config, "models.json"), &overrides); err != nil {
 		return nil, err
 	}
-	for old, current := range providerAliases {
-		if models, ok := overrides[old]; ok {
-			// Later entries replace earlier entries with the same model id.
-			overrides[current] = append(models, overrides[current]...)
-			delete(overrides, old)
-		}
-	}
 	out := make(map[string][]subscription.ResponsesModelOverride)
-	for provider, models := range overrides {
-		for _, model := range models {
+	for _, provider := range []string{"chatgpt", "grok"} {
+		for _, model := range overrides[provider] {
 			info := modular.ModelInfo{
 				ModelRef:      modular.ModelRef{ID: model.ID},
 				ContextWindow: model.Context,

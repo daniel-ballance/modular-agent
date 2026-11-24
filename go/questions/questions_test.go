@@ -33,6 +33,7 @@ func setup(t *testing.T, scripts ...fake.Script) (api.API, api.Questions, string
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtimetest.Publish(t, h.API(), id)
 	v, _ := h.API().Get("questions")
 	return h.API(), v.(api.Questions), id, p, h
 }

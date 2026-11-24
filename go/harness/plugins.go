@@ -38,8 +38,7 @@ type Harness struct {
 	interfaceTools       map[string]*interfaceSource
 	agentName            string
 	localActor           string
-	providerAliases      map[string]string
-	deferHistory         bool
+	volatileHistory      bool
 	handBackOnOpen       bool
 	parkJobReports       bool
 	refuseSettings       bool
@@ -83,23 +82,11 @@ func NewWithLocalActor(actor string) *Harness {
 	return h
 }
 
-// SetProviderAliases configures model-id migration before any sessions open.
-func (h *Harness) SetProviderAliases(aliases map[string]string) { h.providerAliases = aliases }
-
 func (h *Harness) SetAgentName(name string) { h.agentName = name }
 func (c *client) TelemetryProfile() int     { return 1 }
 
-func (h *Harness) currentModel(ref string) string {
-	provider, id, ok := strings.Cut(ref, "/")
-	if current := h.providerAliases[provider]; ok && current != "" {
-		return current + "/" + id
-	}
-	return ref
-}
-
-// DeferPersistentHistory keeps new public sessions provisional until admission.
-// Call before loading plugins.
-func (h *Harness) DeferPersistentHistory() { h.deferHistory = true }
+// UseVolatileHistory selects an in-memory store that cannot survive restart.
+func (h *Harness) UseVolatileHistory() { h.volatileHistory = true }
 
 // HandBackQueuedOnOpen selects the embedded SDK's recovery policy before loading plugins.
 func (h *Harness) HandBackQueuedOnOpen() { h.handBackOnOpen = true }
@@ -472,15 +459,15 @@ func (c *client) Command(ctx context.Context, id, line string) (string, error) {
 		_ = s.chargeCommandLocked(-reserved)
 		s.mu.Unlock()
 	}()
-	fields := strings.Fields(strings.TrimPrefix(line, "/"))
-	if len(fields) == 0 {
+	name, args := api.CommandLine(line)
+	if name == "" {
 		return "", errors.New("empty command")
 	}
 	c.h.mu.RLock()
-	r, ok := c.h.commands[fields[0]]
+	r, ok := c.h.commands[name]
 	c.h.mu.RUnlock()
 	if !ok {
-		return "", fmt.Errorf("unknown command /%s", fields[0])
+		return "", fmt.Errorf("unknown command /%s", name)
 	}
 	check := func(right string) error {
 		s.mu.Lock()
@@ -500,7 +487,7 @@ func (c *client) Command(ctx context.Context, id, line string) (string, error) {
 	if err := check("input"); err != nil {
 		return "", err
 	}
-	result, err := r.value.(api.Command)(ctx, id, fields[1:])
+	result, err := r.value.(api.Command)(ctx, id, args)
 	if errors.Is(context.Cause(ctx), api.ErrProcessStopped) {
 		return "", api.ErrSessionLost
 	}

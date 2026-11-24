@@ -48,23 +48,6 @@ func readJSON(path string, target any) error {
 	return nil
 }
 
-var providerAliases = map[string]string{"openai-codex": "chatgpt", "xai": "grok"}
-
-func currentProvider(id string) string {
-	if replacement := providerAliases[id]; replacement != "" {
-		return replacement
-	}
-	return id
-}
-
-func currentModel(ref string) string {
-	provider, id, ok := strings.Cut(ref, "/")
-	if !ok {
-		return ref
-	}
-	return currentProvider(provider) + "/" + id
-}
-
 func (d layout) settings(project string) (modular.Settings, error) {
 	settings := modular.Settings{"modelTools": []string{"codemode"}, "reasoning": "medium", "maxSteps": 500, "maxOutput": 32000}
 	keys := map[string]string{"model": "model", "thinking": "reasoning", "step_limit": "maxSteps", "output_limit": "maxOutput", "model_tools": "modelTools"}
@@ -78,9 +61,6 @@ func (d layout) settings(project string) (modular.Settings, error) {
 				settings[key] = v
 			}
 		}
-	}
-	if model := chosenModel(settings); model != "" {
-		settings["model"] = currentModel(model)
 	}
 	return settings, nil
 }

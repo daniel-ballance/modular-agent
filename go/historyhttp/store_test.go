@@ -47,7 +47,7 @@ func TestSharedStorePersistenceAndErasure(t *testing.T) {
 		l               api.Lease
 		id, entry, copy string
 	}{{one, "one", "source", ""}, {two, "two", "derived", "source"}} {
-		e := api.Entry{ID: v.entry, Kind: "input", Content: api.Text("erase me"), Data: api.JSON(v.entry + "-input")}
+		e := api.Entry{ID: v.entry, Kind: "input", Content: api.Text("erase me"), InputRef: v.entry + "-input"}
 		if v.copy != "" {
 			e.Copies = []string{v.copy}
 		}

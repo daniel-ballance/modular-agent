@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 )
@@ -14,7 +13,6 @@ type RestoreIntent struct {
 type PositionChange struct {
 	To      *string        `json:"to"`
 	Restore *RestoreIntent `json:"restore,omitempty"`
-	Failed  bool           `json:"failed,omitempty"` // legacy, never a completion
 }
 
 func (p PositionChange) Target() string {
@@ -26,13 +24,8 @@ func (p PositionChange) Target() string {
 
 func ReadPosition(data json.RawMessage) (PositionChange, error) {
 	var p PositionChange
-	data = bytes.TrimSpace(data)
-	if len(data) > 0 && data[0] == '"' { // native snapshots from before the journal
-		err := json.Unmarshal(data, &p.To)
-		return p, err
-	}
 	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil || fields["to"] == nil {
+	if err := json.Unmarshal(data, &fields); err != nil || fields["to"] == nil || fields["failed"] != nil {
 		return p, errors.New("position has no valid target")
 	}
 	if err := json.Unmarshal(data, &p); err != nil {

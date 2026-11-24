@@ -361,7 +361,7 @@ func resultFor(s api.Session, input string) *PromptResult {
 		if turn != "" && e.Kind == "turn.end" && e.Turn == turn {
 			return buildResult(s, e, input)
 		}
-		if turn == "" && (e.Kind == "input.returned" || e.Kind == "input.withdrawn") && slices.Contains(e.HandedBackIDs(), input) {
+		if turn == "" && e.WasKind("input.returned") && e.InputRef == input {
 			return &PromptResult{InputID: input, Disposition: HandedBack}
 		}
 	}
@@ -618,11 +618,11 @@ func (s *Session) RunCommand(ctx context.Context, line string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	fields := strings.Fields(strings.TrimPrefix(line, "/"))
-	if len(fields) == 0 {
+	name, _ := api.CommandLine(line)
+	if name == "" {
 		return "", &Error{Code: InvalidParams, Message: "command is empty"}
 	}
-	if !slices.Contains(commands, fields[0]) {
+	if !slices.Contains(commands, name) {
 		return "", &Error{Code: NotFound, Message: "command is not registered"}
 	}
 	text, err := s.agent.a.Command(s.ctx(ctx), s.id, line)
