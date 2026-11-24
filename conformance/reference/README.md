@@ -1,6 +1,6 @@
 # Reference checks
 
-The 27 checks test whether an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs, its ACP and AG-UI responses and the telemetry it exports. So one set of checks covers all four implementations.
+The 28 checks test whether an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs, its ACP and AG-UI responses and the telemetry it exports. So one set of checks covers all four implementations.
 
 Install the shared OTLP receiver's dependencies from this directory: `npm ci --prefix ../telemetry`.
 
@@ -19,6 +19,7 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 |---|---|
 | `print` | Print mode prints the final answer; the model is offered only `codemode` |
 | `client-identity` | `MA_CLIENT_IDENTITY` is checked at startup: an invalid value stops `ma` with status 1, a valid one is accepted |
+| `approval-covers-script` | Refusal leaves both files untouched. A live allow or an allow after restart runs both writes once, with the parent call and request on each start. |
 | `codemode-nested` | Code reads and writes files through `tools`; the nested calls stay out of the model's view |
 | `codemode-tools-values` | `import tools`, a tool function held in a variable, and positional arguments make the same calls |
 | `codemode-positional-order` | Positional arguments: required fields, then the rest in alphabetical order, as the prompt shows |
@@ -49,14 +50,14 @@ The default endpoint assertion listens on `127.0.0.1:4318` inside a private Linu
 
 ## Results
 
-All four builds passed the same 27 checks with `MODULAR_AGENT_REF_REQUIRE=all`. The ACP column records the earlier kit run against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` with `--crash-checks --probe-checks --job-checks`:
+All four builds passed the previous suite with `MODULAR_AGENT_REF_REQUIRE=all`. The new suite has 28 checks. The ACP column records the earlier kit run against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` with `--crash-checks --probe-checks --job-checks`:
 
 | Implementation | Reference checks | ACP kit |
 |---|---|---|
-| Rust | 27/27 | 188/188 |
-| TypeScript | 27/27 | 188/188 |
-| Go | 27/27 | 188/188 |
-| Python | 27/27 | 188/188 |
+| Rust | 27/28 checked | 188/188 |
+| TypeScript | 28/28 | 188/188 |
+| Go | 27/28 checked | 188/188 |
+| Python | 27/28 checked | 188/188 |
 
 All four run the identical set of 188 ACP checks, including the four that check an undeclared feature is refused, so they present the same agent over ACP.
 

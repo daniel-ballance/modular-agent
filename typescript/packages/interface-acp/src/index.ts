@@ -720,6 +720,7 @@ export class AcpInterface implements InterfaceCapability {
 			inputKeys: bool("inputKeys"),
 			portableSessions: bool("portableSessions"),
 			questionsOutlastTurns: bool("questionsOutlastTurns"),
+			...(scoped.approvalCoversNested === true && bool("approvalCoversNested") ? { approvalCoversNested: true } : {}),
 			...(scoped.approvalsOutlastTurns === true && bool("approvalsOutlastTurns") ? { approvalsOutlastTurns: true } : {}),
 			lateAnswersStartTurns: bool("questionsOutlastTurns"),
 			startsTurnsUnasked: d.startsTurnsUnasked && d.startsTurnsUnasked !== "never" ? "jobReports" : "never",
