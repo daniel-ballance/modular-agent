@@ -182,6 +182,11 @@ impl Answers {
     }
 }
 
+/// Freeze the Harness clock on first use and advance it by this many milliseconds.
+pub fn advance_clock(ms: u64) {
+    agent_api::advance_clock_for_test(ms)
+}
+
 /// An agent for tests: the scripted Provider and its model, ephemeral durability and a
 /// scratch project folder, unless told otherwise.
 pub fn test_agent() -> TestAgentBuilder {

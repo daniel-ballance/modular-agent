@@ -53,6 +53,20 @@ pub struct Conformance {
     host: Option<(PathBuf, PathBuf)>,
 }
 impl Conformance {
+    /// The same served Runtime as the base agent's --serve-plugin fixture.
+    pub fn runtime_only(durable: bool) -> Self {
+        Self {
+            parts: [if durable {
+                "durable-runtime"
+            } else {
+                "runtime"
+            }
+            .into()]
+            .into_iter()
+            .collect(),
+            ..Self::default()
+        }
+    }
     pub fn from_env() -> Result<Self> {
         let parts: BTreeSet<_> = std::env::var("MODULAR_AGENT_PLUGIN_PARTS")
             .unwrap_or("provider,tools,environment,hooks".into())

@@ -1177,6 +1177,11 @@ impl Session {
     /// the session. Proposed or parked input does not keep it busy.
     pub async fn wait_idle(&self) -> Result<()> {
         self.require("watch")?;
+        if self.inner.harness.max_approval_wait_ms().is_some() {
+            // Reconcile an elapsed deadline even if its clock notification has
+            // not yet been delivered. The driver returns at once for open waits.
+            self.drive();
+        }
         let mut events = self.inner.hub.events.subscribe();
         loop {
             {
