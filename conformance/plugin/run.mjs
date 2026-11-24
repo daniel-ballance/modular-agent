@@ -1212,7 +1212,8 @@ async function checkIsolation() {
 				const done = await rightReply;
 				check(`plugin isolation (${label}): cancel and close leave the other call to settle once`,
 					(code(cancelled) === "cancelled" || cancelled.status === "cancelled") && done.status === "completed" && JSON.stringify(done.content).includes(marker) &&
-					right.hostCalls.filter((m) => m.method === "host/env/exec").length === 1);
+					right.hostCalls.filter((m) => m.method === "host/env/exec").length === 1,
+					`cancelled call: ${JSON.stringify(cancelled?.status ?? code(cancelled) ?? cancelled?.message)}; other call: ${JSON.stringify(done?.status ?? code(done) ?? done?.message)}; its exec callbacks: ${right.hostCalls.filter((m) => m.method === "host/env/exec").length}`);
 			} finally {
 				allowLeft.finish("");
 				allowRight.finish("");
