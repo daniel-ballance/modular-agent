@@ -673,7 +673,7 @@ def question_signature(q):
 
 def entry_in(e, sid, default_actor="user"):
     if "session" in e and "sessionId" not in e:
-        return e  # SQLite data from before the shared storage format.
+        raise ValueError("History entry lacks its sessionId")
     from datetime import UTC
 
     kind = e["kind"]

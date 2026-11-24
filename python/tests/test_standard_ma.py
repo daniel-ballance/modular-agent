@@ -16,6 +16,7 @@ from pydantic_monty import AsyncFunctionSnapshot, AsyncMontySession, AsyncNameLo
 import pytest
 
 from modular_agent import (
+    AgentError,
     Answer,
     ApiKey,
     OAuth,
@@ -223,6 +224,37 @@ async def test_ma_requires_exact_subscription_id(ma_args, monkeypatch, key, prov
     assert logins.login(provider) == ApiKey("device-key")
     assert await cli._run(args("logout", provider)) == 0
     assert logins.login(provider) is None and logins.login(key) == ApiKey("unused")
+
+
+async def test_ma_does_not_rewrite_a_saved_unavailable_provider(ma_args, tmp_path):
+    config, args = ma_args
+    history = file_history(config / "state" / "sessions")
+    fixture = scripted_provider([{"text": "done"}])
+    fixture.id = "xai"
+    selection = "xai/" + fixture.models()[0]["id"]
+    async with create_agent(
+        project=tmp_path,
+        history=history,
+        data_dir=config / "state",
+        durability="kept",
+        providers=[fixture],
+        model=selection,
+    ) as agent:
+        session = await agent.session()
+        assert (await session.prompt("first")).text == "done"
+        before = await session.history()
+    with pytest.raises(AgentError, match="Unknown model: xai/"):
+        await cli._run(args("--runtime", "transient", "--session", session.id, "--history"))
+    async with create_agent(
+        project=tmp_path, data_dir=config / "state", history=history, durability="kept"
+    ) as agent:
+        saved = await agent.session_info(session.id)
+        assert saved["settings"]["model"]["provider"] == "xai"
+        reopened = await agent.open_session(session.id)
+        before_ids = {r["id"] for r in before}
+        assert not any(
+            e["kind"] == "setting" and e["id"] not in before_ids for e in await reopened.history()
+        )
 
 
 @pytest.mark.loopback

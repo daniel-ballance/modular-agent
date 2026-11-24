@@ -205,6 +205,8 @@ def test_portable_question_signature_includes_scope_and_policy():
     draft["signature"] = json.dumps({"kind": "text", "question": "Proceed?"}, sort_keys=True)
     with pytest.raises(ValueError, match="signature"):
         entry_in(row, "session")
+    with pytest.raises(ValueError, match="sessionId"):
+        entry_in({"session": "session", "kind": "question_open", "data": draft}, "session")
 
 
 async def test_timeout_leaves_no_result_then_late_answer_runs_new_turn(agent):
