@@ -2,7 +2,7 @@
 
 This kit checks [the Modular Agent AG-UI binding](../../docs/bindings/agui.md). It sends HTTP requests and checks SSE before handing JSON to the assertions. Two cases also run the official `@ag-ui/client` `HttpAgent` without a cursor or a presence stream. The app replaces provisional messages with each final snapshot. It waits for the terminal outcome before reporting a frontend result. It does not run anything from a snapshot.
 
-The runner lists 48 cases. Fourteen are the ADR 0035 host reads: seven for wait closures and seven for receipts. `npm test` runs 185 kit self-tests, including deliberately faulty servers. These counts are not SDK pass counts.
+The runner lists 49 cases. Fourteen are the ADR 0035 host reads: seven for wait closures and seven for receipts. `npm test` runs 190 kit self-tests, including deliberately faulty servers. These counts are not SDK pass counts.
 
 Use Node.js 22.12 or later. The TLS self-test also uses OpenSSL 3 to generate a disposable CA and certificates. Use a disposable agent, tokens and store. Do not point the kit at a production listener.
 
@@ -19,6 +19,8 @@ node run.mjs --only history --url http://127.0.0.1:39211 --token-file /path/to/d
 The first invocation of `run.mjs` with a command runs every case, with a fresh fixture per case. Use `--only case,case` to select cases. A URL selects one case and assumes the listener is already configured for it. The URL is the origin, not `/agui/v1/run`. Cleartext is allowed only on numeric loopback. The kit uses normal certificate and hostname verification for HTTPS. Use `NODE_EXTRA_CA_CERTS` when launching the runner to trust a test CA. Never disable verification. Supply token files, not token values. Use `--rotated-token-file`, `--sibling-token-file`, `--foreign-token-file`, `--watch-token-file`, `--tenant-token-file` and `--project-token-file` as required by the case.
 
 When a session declares `approvalCoversNested`, the approval cases check the marker in the interrupt metadata and in the recorded request. In `waiting-restart`, have `bump` increment the counter through a nested tool instead of incrementing it directly. The kit checks that the child's start names that parent and request. Without the declaration the coverage assertions are skipped with a reason.
+
+The `approval-call` case checks the optional `modular-agent.approvalCall` in the live interrupt and the thread snapshot. It expects the call after `tool.before` changes its input, not the model draft. The waiting cases check the parked call on each delivered interrupt. A missing field skips that check with a reason. The fixture's approval output gates withhold the whole interrupt if its exact view changes; they do not offer redacted arguments for approval.
 
 ## Waiting approval checks
 
