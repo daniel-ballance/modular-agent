@@ -33,6 +33,51 @@ async function project(t: TestContext) {
   const env = { PATH: process.env.PATH, HOME: home, MODULAR_AGENT_DATA_DIR: config, MODULAR_AGENT_SCRIPT: script, MODULAR_AGENT_SCRIPT_LOG: log };
   return { dir, home, config, work, script, log, env, put, run: (...args: string[]) => exec(process.execPath, [cli, ...args], { cwd: work, env }) };
 }
+test("approval is global, the command line wins, and print has no answerer", async t => {
+  const p = await project(t), declare = async (...args: string[]) => JSON.parse((await p.run(...args, "--declaration")).stdout);
+  await p.put(join(p.work, ".modular-agent.json"), '{"approval":"never","approval_wait":"untilDeadline"}');
+  await p.put(join(p.config, "policy.json"), '{"approvalWaitMaxMs":60000}');
+  const absent = await declare();
+  assert.equal(absent.approvalCoversNested, undefined);
+  assert.equal(absent.approvalsOutlastTurns, undefined);
+  await p.put(join(p.config, "settings.json"), '{"approval":"ask","approval_wait":"untilDeadline"}');
+  const enabled = await declare();
+  assert.equal(enabled.approvalCoversNested, true);
+  assert.equal(enabled.approvalsOutlastTurns, true);
+  const code = 'tools.write(path="effect", content="done")';
+  await p.put(p.script, JSON.stringify([{ toolCalls: [{ name: "codemode", input: {code} }] }, {text:"finished"}]));
+  const denied = await p.run("-p", "Write");
+  assert.match(denied.stderr, /refused/);
+  assert.equal(denied.stdout, "finished\n");
+  await assert.rejects(readFile(join(p.work, "effect")), {code:"ENOENT"});
+  await p.run("--approval", "off", "-p", "Write");
+  assert.equal(await readFile(join(p.work, "effect"), "utf8"), "done");
+  await p.put(join(p.config, "policy.json"), '{"approvalWaitMaxMs":0}');
+  await assert.rejects(declare(), /policy.json.*approvalWaitMaxMs/);
+  await assert.rejects(p.run("--approval", "sometimes"), /--approval.*approval/);
+});
+
+for (const response of ["y", "n"]) test("terminal shows the entire script before reading " + response, async t => {
+  const p = await project(t), code = "# " + "x".repeat(2100) + '\ntools.write(path="effect", content="done")';
+  await p.put(p.script, JSON.stringify([{ toolCalls: [{ name: "codemode", input: { code } }] }, { text: "finished" }]));
+  const child = spawn(process.execPath, [cli, "--approval", "ask"], { cwd: p.work, env: { ...p.env, TMPDIR:process.env.TMPDIR } });
+  const closed = once(child, "close");
+  t.after(async () => { child.kill(); await closed; });
+  let stderr = "", before = "", prompts = 0;
+  child.stderr.setEncoding("utf8").on("data", chunk => {
+    stderr += chunk;
+    if (!prompts && stderr.includes("Allow? (y/n)")) {
+      prompts++; before = stderr; child.stdin.end(response + "\n");
+    }
+  });
+  child.stdin.write("Write\n");
+  assert.equal((await closed)[0], 0, stderr);
+  assert.match(before, /covers its nested calls/);
+  assert.ok(before.includes(JSON.stringify(code)), "the view includes the last line");
+  if (response === "y") assert.equal(await readFile(join(p.work, "effect"), "utf8"), "done");
+  else await assert.rejects(readFile(join(p.work, "effect")), {code:"ENOENT"});
+});
+
 test("--resume-open has no effect in print mode", async t => {
   const p = await project(t);
   assert.equal((await p.run("--resume-open", "-p", "Hello")).stdout, "ok\n");

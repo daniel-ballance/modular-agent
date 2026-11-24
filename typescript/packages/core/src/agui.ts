@@ -75,13 +75,21 @@ export class AguiBinding {
       }
       const input = path === PATH + "/run" && method === "POST" ? runInput(await body(req), this.warn) : undefined;
       const match = method === "GET" && /^\/agui\/v1\/threads\/([\w-]+)(\/presence)?$/.exec(path ?? "");
-      const id = input?.threadId ?? (match && match[1]);
+      const settings = method === "POST" && this.host.root.agent.declaration().approvalCoversNested === true && /^\/agui\/v1\/threads\/([\w-]+)\/settings$/.exec(path ?? "");
+      const id = input?.threadId ?? (settings ? settings[1] : match && match[1]);
       if (!id || !/^[\w-]+$/.test(id)) fail("not_found");
       const t = await this.host.locate(p, id);
       const recovered = !t.h.liveSessionInfo(id);
       await t.h.openSession(id, p.actor);
       if (recovered) await t.api.waitForIdle(id);
       await current(t.api, id, p);
+      if (settings) {
+        if (!t.agent.declaration().approvalCoversNested || !rights(t.api, id, p).includes("settings")) fail("refused");
+        const change = await body(req);
+        if (Object.keys(change).length !== 1 || !["off", "ask", "all", "never"].includes(change.approval)) fail("invalid_request");
+        await t.api.setSetting(id, "approval", change.approval, p.actor.id);
+        return json(res, 200, await reply(t.api, id, p, "settings", { approval: change.approval }));
+      }
       const key = JSON.stringify([p.clientId, id]);
       let client = this.clients.get(key);
       if (!client) {

@@ -56,6 +56,8 @@ export async function line(agent: Agent, session: Session, json: boolean, verbos
   const io = createInterface({ input: process.stdin, output: process.stderr, terminal: !!process.stdin.isTTY });
   const out = sink(json, verbose, true);
   const waiting = new Map<string, (answer: Answer) => void>();
+  const approvals = new Map<string, { display: string; answer(a: Answer): void }>();
+  const firstApproval = () => approvals.values().next().value;
   if (!json) console.error(`Session ${session.id}`);
   const watch = (async () => {
     try { for await (const e of session.events((await session.history()).at(-1)?.id)) {
@@ -66,9 +68,19 @@ export async function line(agent: Agent, session: Session, json: boolean, verbos
   let eof = false;
   session.onQuestion((q, ctx) => new Promise(resolve => {
     if (eof) { resolve("decline"); return; }
-    const answer = (a: Answer) => { waiting.delete(q.id); resolve(a); };
+    const answer = (a: Answer) => {
+      const first = firstApproval();
+      waiting.delete(q.id); approvals.delete(q.id); resolve(a);
+      if (!eof && first?.answer === answer && firstApproval()) out.show(firstApproval()!.display);
+    };
     waiting.set(q.id, answer);
     ctx.cancelled.addEventListener("abort", () => answer("decline"), { once: true });
+    if (q.kind === "approval" && q.call) {
+      const display = `${q.question}\n${q.call.name} ${JSON.stringify(q.call.input, null, 2)}\nAllow? (y/n)`;
+      approvals.set(q.id, { display, answer });
+      if (approvals.size === 1) out.show(display);
+      return;
+    }
     out.show(`Question ${q.id}: ${q.question}${q.options ? " " + JSON.stringify(q.options) : ""}\nUse /answer REQUEST_ID VALUE`);
   }));
   const cancel = () => { void session.cancel().catch(error => out.show((error as Error).message)); };
@@ -82,7 +94,12 @@ export async function line(agent: Agent, session: Session, json: boolean, verbos
       if (!input.trim()) continue;
       const [word, value = ""] = /^([\S]+)(?:\s+(.*))?$/.exec(input.trim())?.slice(1) ?? [];
       try {
+        const approval = firstApproval();
         if (word === "/cancel") cancel();
+        else if (approval) {
+          if (/^[yn]$/i.test(input.trim())) approval.answer(input.trim().toLowerCase() === "y" ? "allow" : "decline");
+          else out.show("Answer y or n.");
+        }
         else if (word === "/after") { if (value) await session.send(value, "after"); }
         else if (word === "/answer") {
           const split = value.indexOf(" ");

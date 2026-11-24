@@ -51,7 +51,7 @@ async function principal(value: unknown, name: string, network = false) {
 }
 
 export async function loadPolicy(config: string, options: { policy?: string; listen?: string; tokenFile?: string; agui?: boolean }): Promise<{
-  stdio?: ServeAcpOptions; actors?: (AcpActorToken & { clientId?: string })[]; resourceReservations: ReservationOptions;
+  approvalWaitMaxMs?: number; stdio?: ServeAcpOptions; actors?: (AcpActorToken & { clientId?: string })[]; resourceReservations: ReservationOptions;
 }> {
   const path = options.policy === undefined ? join(config, "policy.json") : resolve(options.policy);
   try {
@@ -59,7 +59,11 @@ export async function loadPolicy(config: string, options: { policy?: string; lis
       if (options.policy === undefined && error.code === "ENOENT") return "{}";
       throw error;
     });
-    const value = object(JSON.parse(data), ["stdio", "actors", "limits"], "policy");
+    const value = object(JSON.parse(data), ["stdio", "actors", "limits", "approvalWaitMaxMs"], "policy");
+    const { approvalWaitMaxMs } = value;
+    if (approvalWaitMaxMs !== undefined && (typeof approvalWaitMaxMs !== "number" || !Number.isSafeInteger(approvalWaitMaxMs) || approvalWaitMaxMs <= 0)) {
+      throw new Error("approvalWaitMaxMs must be a positive integer in milliseconds");
+    }
     const stdio = value.stdio === undefined ? undefined : await principal(value.stdio, "stdio");
     let actors: (AcpActorToken & { clientId?: string })[] | undefined;
     if (value.actors !== undefined) {
@@ -94,6 +98,6 @@ export async function loadPolicy(config: string, options: { policy?: string; lis
       }
       if (resourceReservations[scope].controlBytes > resourceReservations[scope].storageBytes) throw new Error(`limits.${scope}.controlBytes exceeds storageBytes`);
     }
-    return { stdio, actors, resourceReservations };
+    return { stdio, actors, resourceReservations, approvalWaitMaxMs };
   } catch (error) { throw new Error(`Policy ${path}: ${(error as Error).message}`); }
 }
