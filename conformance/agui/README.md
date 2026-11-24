@@ -156,10 +156,4 @@ The fake checks whether the runner recognizes known good and deliberately wrong 
 
 ## Findings
 
-In [Runs and events](../../docs/bindings/agui.md#runs-and-events), the last sentence of the “Questions or call waits and closures” row still describes snapshot-only reconnect. Replace it with:
-
-> Never append a closure to a closed run. A snapshot gives the current waits, not the reasons for missed closures. A client with a wait cursor can follow committed closures from that cursor.
-
-In [Run receipts](../../docs/bindings/agui.md#run-receipts), distinguish a hidden source from a blocked final reply. Replace the first two sentences of the last paragraph with:
-
-> Return 404 `not_found` for a missing, foreign, off-branch, erased or undisclosable receipt or thread, including a receipt hidden by pending erasure or the settlement gate. If the receipt's existence is visible and its source facts pass, but the `agui.runReceipt` reply gate blocks the reply or changes either status, return 403 `output_withheld`.
+None open.

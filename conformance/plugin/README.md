@@ -96,6 +96,4 @@ The kit tests selected transcripts, not arbitrary schemas, credential handling, 
 
 ## Findings
 
-In [Named callers](../../docs/bindings/websocket.md#named-callers), “No ID or token is added to plugin messages” can be read as a ban on application data such as the desk's tool result. Replace that sentence with:
-
-> The binding adds no caller ID or token field to `plugin/initialize`, `tools/call` or callbacks. A caller name in configuration or tool input is application data, not the listener's authenticated identity.
+None open.
