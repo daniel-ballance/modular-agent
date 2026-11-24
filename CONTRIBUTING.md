@@ -17,6 +17,8 @@ The project has five layers, and each is made only from the layers below it ([AD
 - A change to `ma` starts in `docs/reference/standard-configuration.md`, with a reference check where the behavior can be seen from outside.
 - The four SDKs are one SDK in four languages, and the four `ma` builds are one program. A change to one language is a change to all four, or a recorded gap in the others.
 
+**No backward compatibility before 1.0.** The project's owner is its only user. Change or remove a rule, field, option or API outright; do not keep an old spelling, alias, fallback, migration or "optional for older builds" form beside the new one. Interoperability with outside protocols and clients (ACP, AG-UI, OpenTelemetry, model APIs) is not backward compatibility and stays.
+
 ## Writing
 
 The documents are plain, specific English: short sentences, one idea each, no marketing words. The capitalized keywords (MUST, SHOULD, MAY) have their [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) meanings and belong only in normative documents ([Conformance](docs/conformance.md#keywords)). Use the [glossary's](GLOSSARY.md) terms and avoid the words it lists under *Avoid*.
