@@ -125,11 +125,8 @@ def main() -> None:
         plugin = fixture(args.fixture)
         if endpoint := os.environ.get("MODULAR_AGENT_TELEMETRY_OTLP"):
             from ._scenario_telemetry import exporter
-            from ._serve import _serve
-
-            accept = os.environ.get("MODULAR_AGENT_TELEMETRY_HANDSHAKE") != "no-acceptance"
             with exporter(endpoint):
-                asyncio.run(_serve(plugin, trace_context=accept))
+                serve(plugin)
         else:
             serve(plugin)
         return

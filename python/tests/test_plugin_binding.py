@@ -330,7 +330,6 @@ async def test_served_environment_stops_active_work_on_stdin_eof(tmp_path):
             "plugin/initialize",
             {
                 "binding": "modular-agent-plugin/1",
-                "data": "modular-agent-data/1",
                 "project": str(tmp_path),
                 "home": str(tmp_path / "state"),
                 "config": {},

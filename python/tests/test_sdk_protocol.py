@@ -21,7 +21,6 @@ serve(Plugin("flagged", setup=lambda r: r.tool(private)))
         "method": "plugin/initialize",
         "params": {
             "binding": "modular-agent-plugin/1",
-            "data": "modular-agent-data/1",
             "config": {},
         },
     }

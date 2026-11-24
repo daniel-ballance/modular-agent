@@ -49,7 +49,6 @@ async def _serve(
     frames: WebSocketFrames | None = None,
     projects: frozenset[Path] = frozenset(),
     restrict_projects: bool = False,
-    trace_context: bool = True,
 ) -> None:
     environment_project: Path | None = None
     registrar: Registrar | None = None
@@ -755,7 +754,6 @@ async def _serve(
     )
     methods.update({f"env/{name}": bind_environment(name) for name in _METHODS})
     server = Server(registration, methods, initialize, stop)
-    server.trace_context = trace_context
     if frames is not None:
         await server.serve_frames(frames)
     elif streams is None:

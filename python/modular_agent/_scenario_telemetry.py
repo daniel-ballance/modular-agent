@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import sys
 import os
 import sqlite3
 from collections.abc import Iterator, Sequence
@@ -181,8 +179,6 @@ class TelemetryRun:
             return result
 
         class FixtureHost(External):  # type: ignore[misc]  # Untyped base adapter.
-            trace_context = run.request.get("handshake") != "no-offer"
-
             async def stop(self) -> None:
                 await super().stop()
                 if self.process is not None:
@@ -230,20 +226,7 @@ class TelemetryRun:
                 scope={"tenants": frozenset({None}), "represents": {}},
             )
             interface.api = agent._h.api()
-            # Probe a compatible session without exporting another session in this trace.
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-m",
-                "modular_agent._scenarios",
-                "--waiting-probe",
-                self.directory / "probe",
-                stdout=asyncio.subprocess.PIPE,
-            )
-            output, _ = await proc.communicate()
-            if proc.returncode:
-                raise RuntimeError("Waiting approval probe failed")
             report["declarations"] = {
-                "waitingSession": json.loads(output),
                 "agent": agent.declaration(),
                 "session": await interface.declaration(session.id),
             }

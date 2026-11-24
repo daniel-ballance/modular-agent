@@ -71,10 +71,6 @@ def work_method(method):
     )
 
 
-def trace_offer(value):
-    return type(value) is int and value == 1
-
-
 class Peer:
     def __init__(
         self,
@@ -105,7 +101,6 @@ class Peer:
         self.prepare_notification = prepare_notification
         self.outgoing_methods = {}
         self.trace_server = trace_server
-        self.trace_agreed = False
         self.trace_name = label
         self.outgoing_traces = {}
         self.request_notes = {}
@@ -176,15 +171,13 @@ class Peer:
                 await self.writer.drain()
 
     def _traced_params(self, method, params):
-        if method == "plugin/initialize":
-            return params
         result = {k: v for k, v in params.items() if k != "traceContext"}
         scoped = (
             not method.startswith("host/")
             or rpc_id(params.get("parentRequestId"))
             or method in {"host/jobs/progress", "host/jobs/end", "host/jobs/resume"}
         )
-        if self.trace_agreed and scoped and work_method(method) and (carrier := ot.inject()):
+        if scoped and work_method(method) and (carrier := ot.inject()):
             result["traceContext"] = carrier
         return result
 
@@ -194,7 +187,7 @@ class Peer:
     def _incoming_context(self, method, params):
         parent = params.get("parentRequestId")
         tracked = self.outgoing_traces.get(parent) if rpc_id(parent) else None
-        received = ot.extract(params.get("traceContext")) if self.trace_agreed else ot.extract(None)
+        received = ot.extract(params.get("traceContext"))
         if not work_method(method):
             return ot.extract(None)
         if tracked is not None:

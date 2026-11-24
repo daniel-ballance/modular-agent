@@ -15,7 +15,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from ma_core import telemetry as ot
-from ma_plugin.rpc import Peer, trace_offer
+from ma_plugin.rpc import Peer
 from ma_plugin.server import PluginServer
 from modular_agent import Plugin, ToolContext, create_agent, tool
 from modular_agent.testing import memory_environment, scripted_provider
@@ -214,8 +214,7 @@ class Frames:
         self.peer.queue.put_nowait(None)
 
 
-@pytest.mark.parametrize(("offer", "accept"), [(True, True), (True, False), (False, True)])
-async def test_plugin_context_requires_handshake(recorded, offer, accept):
+async def test_plugin_work_propagates_only_the_current_context(recorded):
     exporter, _ = recorded
     host_wire, plugin_wire = Frames(), Frames()
     host_wire.peer, plugin_wire.peer = plugin_wire, host_wire
@@ -229,20 +228,14 @@ async def test_plugin_context_requires_handshake(recorded, offer, accept):
     plugin = PluginServer(
         {"binding": "modular-agent-plugin/1", "name": "fixture"}, {"tools/call": work}
     )
-    plugin.trace_context = accept
     host = Peer(None, None, callback, frames=host_wire, label="fixture")
     server = asyncio.create_task(plugin.serve_frames(plugin_wire))
     try:
         response = await host.request(
             "plugin/initialize",
-            {
-                "binding": "modular-agent-plugin/1",
-                "data": "modular-agent-data/1",
-                **({"traceContext": 1} if offer else {}),
-            },
+            {"binding": "modular-agent-plugin/1"},
         )
-        host.trace_agreed = offer and trace_offer(response.get("traceContext"))
-        assert ("traceContext" in response) == (offer and accept)
+        assert "traceContext" not in response
         with ot.span("fixture.root"):
             assert await host.request("tools/call", {"traceContext": {"baggage": "BOGUS"}}) == {
                 "ok": True
@@ -255,19 +248,15 @@ async def test_plugin_context_requires_handshake(recorded, offer, accept):
         assert len(requests) == 2
         for line in requests:
             carrier = line["params"].get("traceContext")
-            assert (carrier is not None) == (offer and accept)
-            assert carrier is None or (
-                set(carrier) == {"traceparent"} and ot.valid(ot.extract(carrier))
-            )
-        if offer and accept:
-            spans = exporter.get_finished_spans()
-            pairs = [
-                s for s in spans if s.attributes.get("modular_agent.plugin.method") == "tools/call"
-            ]
-            sent = next(s for s in pairs if s.kind == trace.SpanKind.CLIENT)
-            received = next(s for s in pairs if s.kind == trace.SpanKind.SERVER)
-            assert received.parent.trace_id == sent.context.trace_id
-            assert received.parent.span_id == sent.context.span_id
+            assert set(carrier) == {"traceparent"} and ot.valid(ot.extract(carrier))
+        spans = exporter.get_finished_spans()
+        pairs = [
+            s for s in spans if s.attributes.get("modular_agent.plugin.method") == "tools/call"
+        ]
+        sent = next(s for s in pairs if s.kind == trace.SpanKind.CLIENT)
+        received = next(s for s in pairs if s.kind == trace.SpanKind.SERVER)
+        assert received.parent.trace_id == sent.context.trace_id
+        assert received.parent.span_id == sent.context.span_id
     finally:
         await host.close()
         await server

@@ -16,7 +16,7 @@ from modular_agent.testing import scripted_provider
 pytestmark = pytest.mark.loopback
 
 PROTOCOL = "modular-agent-plugin-1"
-INIT = {"binding": "modular-agent-plugin/1", "data": "modular-agent-data/1"}
+INIT = {"binding": "modular-agent-plugin/1"}
 
 
 @pytest.fixture
