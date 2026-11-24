@@ -3720,6 +3720,55 @@ fn saved_turn_trace(data: &SessionData, turn: Option<&str>) -> Option<Context> {
         .find_map(telemetry::extract)
 }
 
+/// A question alone does not show that its invocation stopped. Use only the
+/// pending record for this call, its cited questions, and its start (if any).
+fn pending_questions(branch: &[Entry], call: &Entry) -> bool {
+    let Some((index, pending)) = branch
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, p)| p.kind == "tool.pending" && p.scope.call == call.scope.call)
+    else {
+        return false;
+    };
+    let Some(proof) = &pending.content else {
+        return false;
+    };
+    if pending.scope.turn != call.scope.turn
+        || pending.scope.step != call.scope.step
+        || pending.scope.session != call.scope.session
+    {
+        return false;
+    }
+    let same_call = |e: &Entry| {
+        e.scope.turn == pending.scope.turn
+            && e.scope.step == pending.scope.step
+            && e.scope.call == pending.scope.call
+            && e.scope.session == pending.scope.session
+    };
+    let before = &branch[..index];
+    let start = before
+        .iter()
+        .rev()
+        .find(|e| e.kind == "tool.started" && same_call(e));
+    if start.is_some_and(|e| e.content.is_none())
+        || proof.get("toolStartedId") != start.map(|e| &e.id).map(|id| json!(id)).as_ref()
+    {
+        return false;
+    }
+    proof["requestIds"].as_array().is_some_and(|ids| {
+        !ids.is_empty()
+            && ids.iter().all(|id| {
+                id.is_string()
+                    && before.iter().any(|e| {
+                        e.kind == "request.open"
+                            && same_call(e)
+                            && e.content.as_ref().is_some_and(|q| q["id"] == *id)
+                    })
+            })
+    })
+}
+
 fn next_continuation(data: &SessionData) -> Result<Option<(Input, Vec<ToolCall>)>> {
     let branch = data.branch();
     let qs = questions(data)?;
@@ -3747,6 +3796,7 @@ fn next_continuation(data: &SessionData) -> Result<Option<(Input, Vec<ToolCall>)
             });
         let related: Vec<_> = qs.iter().filter(|q| q.scope.call == e.scope.call).collect();
         if ended
+            && pending_questions(&branch, e)
             && !related.is_empty()
             && related.iter().all(|q| !q.answerable)
             && related.iter().any(|q| q.answer.is_some())

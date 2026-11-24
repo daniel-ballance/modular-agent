@@ -1144,6 +1144,10 @@ pub(super) fn next_interface_continuation(data: &SessionData) -> Result<Option<C
                 };
                 sources.push(source.id.clone());
                 if !settled {
+                    if !super::pending_questions(&branch, source) {
+                        complete = false;
+                        break;
+                    }
                     calls.push(serde_json::from_value(source.content.clone().unwrap())?);
                 }
                 for (order, answer) in data.entries.iter().enumerate().filter(|(_, e)| {

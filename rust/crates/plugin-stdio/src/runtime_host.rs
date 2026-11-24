@@ -1063,7 +1063,10 @@ impl TurnWork {
         let mut gate_registration = None;
         let mut scope = scope.clone();
         let native = match name {
-            "turn.start" => json!({}),
+            "turn.start" => {
+                ensure!(!self.resumed, "an interrupted turn has already started");
+                json!({})
+            }
             "step.after" => {
                 let data = api.snapshot(&scope.session)?;
                 let response = data
@@ -1248,10 +1251,7 @@ impl TurnWork {
                     serde_json::from_value(entry.content.clone().unwrap_or_default())?;
                 let result = wire::result(&r);
                 ensure!(
-                    same_json(&result, &value["result"])
-                        || (result["status"] == "refused"
-                            && result["callId"] == value["result"]["callId"]
-                            && value["result"]["status"] == "refused"),
+                    same_json(&result, &value["result"]),
                     "tool.after result differs from committed result"
                 );
                 return Ok(json!({"call":value["call"],"result":result}));

@@ -622,7 +622,12 @@ async fn run_tool(host: &dyn Host, call: &Value, def: &Value, recovering: bool) 
             .get("result")
             .ok_or_else(|| anyhow!("missing committed tool result"))?;
         ensure!(
-            result["callId"] == call["id"] && result["status"].is_string(),
+            result["callId"] == call["id"]
+                && matches!(
+                    result["status"].as_str(),
+                    Some("refused" | "cancelled" | "outcomeUnknown" | "notStarted" | "failed")
+                )
+                && result["content"].is_array(),
             "invalid committed tool result"
         );
         result.clone()

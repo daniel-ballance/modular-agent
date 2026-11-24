@@ -353,6 +353,31 @@ async fn deadline_leaves_no_result_and_late_answer_starts_a_new_turn() {
     );
 }
 #[tokio::test]
+async fn answered_question_without_its_pending_invocation_cannot_start_work() {
+    let rig = Rig::new(vec![calls(vec![ToolCall::new(
+        "ask_user",
+        json!({"question":"Which?","timeout_ms":0}),
+    )])])
+    .await;
+    assert_eq!(rig.run("start").await.open_calls.len(), 1);
+    let q = open(&rig);
+    rig.h.close(&rig.id).await.unwrap();
+    let store = history_fs::FileHistory::new(&rig.root.path().join("sessions")).unwrap();
+    let mut data = store.load(&rig.id).unwrap();
+    let pending = data
+        .entries
+        .iter_mut()
+        .find(|e| e.kind == "tool.pending")
+        .unwrap();
+    pending.content = None;
+    store.save(&data).unwrap();
+    rig.h.open(&rig.id).await.unwrap();
+    answer(&rig, &q, json!("ok")).await;
+    assert!(rig.h.run_next(&rig.id).await.unwrap().is_none());
+    assert!(rig.results().is_empty());
+}
+
+#[tokio::test]
 async fn expired_approval_leaves_no_open_call_and_cannot_be_answered() {
     let rig = Rig::with(
         vec![calls(vec![ToolCall::new(
