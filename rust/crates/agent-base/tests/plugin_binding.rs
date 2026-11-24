@@ -195,7 +195,7 @@ fn supplied_plugin_kit_is_mandatory() {
     );
     // Strong containment is checked with a setsid escapee, process-group containment
     // (macOS) with an in-group child: the same number of checks either way.
-    assert!(stdout.contains("146/146 checks passed"), "{stdout}");
+    assert!(stdout.contains("150/150 checks passed"), "{stdout}");
 }
 #[test]
 fn supplied_acp_kit_with_two_external_plugins_is_mandatory() {
@@ -253,14 +253,7 @@ fn acp_crash_kit(part: Option<&str>) {
         "{stdout}\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // A Runtime served from another process does not run nested calls, so
-    // the agent does not declare them and the kit leaves those checks out.
-    let expected = if part.is_some() {
-        "113/113 checks passed"
-    } else {
-        "125/125 checks passed"
-    };
-    assert!(stdout.contains(expected), "{stdout}");
+    assert!(stdout.contains("125/125 checks passed"), "{stdout}");
 }
 #[tokio::test]
 async fn replacements_leave_local_items_out_and_route_tools_to_a_third_process() {
@@ -1171,7 +1164,7 @@ async fn every_host_callback_is_authorized_and_binary_environment_operations_rou
     rig.end(&id).await;
 }
 #[tokio::test]
-async fn forwarding_exec_treats_zero_null_and_absent_timeout_as_no_limit() {
+async fn forwarding_exec_requires_a_positive_timeout_when_present() {
     for remote_environment in [false, true] {
         let rig = Rig::new(vec![]).await;
         if remote_environment {
@@ -1214,6 +1207,10 @@ async fn forwarding_exec_treats_zero_null_and_absent_timeout_as_no_limit() {
         for (timeout, limited, result) in results {
             assert_eq!(result.status, ToolStatus::Completed, "{}", result.text);
             let reply: Value = serde_json::from_str(&result.text).unwrap();
+            if timeout.as_ref().is_some_and(|v| v.is_null() || v == 0) {
+                assert_eq!(reply["error"]["data"]["code"], "invalid_request");
+                continue;
+            }
             assert_eq!(
                 reply["timedOut"], limited,
                 "remote={remote_environment}, timeoutMs={timeout:?}: {reply}"

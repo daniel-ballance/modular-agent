@@ -95,6 +95,8 @@ async fn saved_step_decisions_preserve_final_answer_and_limit_without_another_re
                 Draft::new("step.start", false, json!({"index":index})),
             )
             .unwrap();
+            h.append(&scope, "test", Draft::new("model.request", false,
+                json!({"model":{"provider":"fake","id":"fake"},"tools":[],"safeToRepeat":false}))).unwrap();
             let mut response = ModelResponse::text("already generated");
             response.usage = Usage {
                 input_tokens: 10,

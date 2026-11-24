@@ -395,6 +395,39 @@ impl Engine {
             Ok(AttemptDecision::Settled(Ok(response)))
         }
     }
+    fn record_wait(&self, api: &Api, scope: &Scope, start: Option<&Entry>) -> Result<()> {
+        let branch = api.snapshot(&scope.session)?.branch();
+        // A waiting approval already has an atomic request and checkpoint.
+        if branch.iter().any(|e| {
+            e.kind == "tool.pending"
+                && e.scope.call == scope.call
+                && e.scope.turn == scope.turn
+                && e.content.is_some()
+        }) {
+            return Ok(());
+        }
+        let ids: Vec<_> = branch
+            .iter()
+            .filter(|e| {
+                e.kind == "request.suspended"
+                    && e.scope.turn == scope.turn
+                    && e.scope.call == scope.call
+            })
+            .filter_map(|e| e.content.as_ref()?.get("request")?.as_str())
+            .collect();
+        ensure!(!ids.is_empty(), "pending call has no committed question");
+        let mut pending = json!({"requestIds":ids});
+        if let Some(start) = start {
+            pending["toolStartedId"] = json!(start.id);
+        }
+        api.append(
+            scope,
+            self.writer(),
+            Draft::new("tool.pending", false, pending),
+        )?;
+        Ok(())
+    }
+
     async fn execute(
         &self,
         api: &Api,
@@ -549,6 +582,7 @@ impl Engine {
                 )
                 .await?;
             if reply.suspended {
+                self.record_wait(api, scope, None)?;
                 return Ok(ToolResult::new(
                     call,
                     ToolStatus::Waiting,
@@ -664,30 +698,7 @@ impl Engine {
                             )
                             .await;
                         if result.status == ToolStatus::Waiting {
-                            let data = api.snapshot(&scope.session)?;
-                            let request_ids: Vec<_> = data
-                                .entries
-                                .iter()
-                                .filter(|e| {
-                                    e.kind == "request.suspended"
-                                        && e.scope.turn == scope.turn
-                                        && e.scope.call == scope.call
-                                })
-                                .filter_map(|e| e.content.as_ref()?.get("request")?.as_str())
-                                .collect();
-                            ensure!(
-                                !request_ids.is_empty(),
-                                "pending call has no committed leaveOpen expiry"
-                            );
-                            api.append(
-                                scope,
-                                &started.writer,
-                                Draft::new(
-                                    "tool.pending",
-                                    false,
-                                    json!({"toolStartedId":started.id,"requestIds":request_ids}),
-                                ),
-                            )?;
+                            self.record_wait(api, scope, Some(&started))?;
                         }
                         result
                     }
