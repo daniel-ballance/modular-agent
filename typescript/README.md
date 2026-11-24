@@ -4,7 +4,7 @@ This directory contains the TypeScript base, the public SDK, and [`ma`](packages
 
 | Path | Holds |
 |---|---|
-| `packages/` | The edition 4 base and SDK, as npm workspaces |
+| `packages/` | The base and SDK, as npm workspaces |
 | `packages/core/` | Public SDK and testing kit |
 | `packages/ma/` | The standard configuration, with the `ma` executable |
 | `packages/fixtures/` | SDK fixture program and shared-scenario runner |
