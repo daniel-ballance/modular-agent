@@ -12,12 +12,14 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     sync::{mpsc, oneshot},
     task::JoinSet,
+    time::{Duration, Instant, timeout_at},
 };
 
 #[cfg(test)]
 mod trace_tests;
 
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
+const CANCEL_DEADLINE: Duration = Duration::from_secs(5);
 
 fn scope_from_params(params: &Value) -> Option<Scope> {
     let session = params["sessionId"]
@@ -224,27 +226,59 @@ pub struct Notification {
     pub(crate) run: BoxFuture<'static, ()>,
 }
 type OnEvent = Arc<dyn Fn(Value) + Send + Sync>;
+type Answer = (Reply, Option<CancellationToken>);
 struct Pending {
-    reply: oneshot::Sender<(Reply, Option<CancellationToken>)>,
+    reply: oneshot::Sender<Answer>,
     work: Option<Arc<Work>>,
     method: String,
     context: telemetry::Context,
     event: Option<OnEvent>,
+    abandoned: bool,
+    _parent: Option<mpsc::Sender<()>>,
 }
-// A host callback may be dropped while it is awaiting a nested RPC. Stop that
-// request too, and retire its parent scope rather than leaving it in the map.
+struct Incoming {
+    cancel: CancellationToken,
+    callbacks: mpsc::Sender<()>,
+}
 struct Outgoing<'a> {
     peer: &'a Peer,
     id: &'a str,
     key: &'a str,
-    cancel_sent: bool,
+    reply: Option<oneshot::Receiver<Answer>>,
+    cancel_deadline: Option<Instant>,
+}
+impl Outgoing<'_> {
+    fn cancel(&mut self) -> Instant {
+        *self.cancel_deadline.get_or_insert_with(|| {
+            self.peer.notify("$/cancel", json!({"id":self.id}));
+            Instant::now() + CANCEL_DEADLINE
+        })
+    }
 }
 impl Drop for Outgoing<'_> {
     fn drop(&mut self) {
-        let was_pending = self.peer.pending.lock().unwrap().remove(self.key).is_some();
-        if was_pending && !self.cancel_sent {
-            self.peer.notify("$/cancel", json!({"id":self.id}));
+        {
+            let mut pending = self.peer.pending.lock().unwrap();
+            let Some(entry) = pending.get_mut(self.key) else {
+                return;
+            };
+            // Retire callback authority and progress, not the wire request.
+            // The peer still owes one reply, even if no caller will use it.
+            entry.work = None;
+            entry.event = None;
+            entry.abandoned = true;
         }
+        let deadline = self.cancel();
+        let reply = self
+            .reply
+            .take()
+            .expect("outgoing request owns its receiver");
+        let closed = self.peer.closed.clone();
+        tokio::spawn(async move {
+            if timeout_at(deadline, reply).await.is_err() {
+                closed.cancel();
+            }
+        });
     }
 }
 pub struct Peer {
@@ -255,7 +289,7 @@ pub struct Peer {
     next: AtomicU64,
     pending: Mutex<BTreeMap<String, Pending>>,
     activity: tokio::sync::Notify,
-    incoming: Mutex<BTreeMap<String, CancellationToken>>,
+    incoming: Mutex<BTreeMap<String, Incoming>>,
     pub closed: CancellationToken,
     pub finished: CancellationToken,
 }
@@ -446,10 +480,10 @@ impl Peer {
                         .cloned()
                         .unwrap_or(json!({}));
                     if method == "$/cancel" {
-                        if let Some(token) =
+                        if let Some(request) =
                             p.incoming.lock().unwrap().get(&params["id"].to_string())
                         {
-                            token.cancel();
+                            request.cancel.cancel();
                         }
                     } else if let Some(id) = m.get("id") {
                         let id = id.clone();
@@ -458,10 +492,16 @@ impl Peer {
                         if used.len() == 65_536 || !used.insert(key.clone()) {
                             break;
                         }
-                        p.incoming
-                            .lock()
-                            .unwrap()
-                            .insert(key.clone(), cancel.clone());
+                        // Each pending callback holds a sender until its reply
+                        // arrives or the connection is lost. No messages are sent.
+                        let (callbacks, mut settled) = mpsc::channel(1);
+                        p.incoming.lock().unwrap().insert(
+                            key.clone(),
+                            Incoming {
+                                cancel: cancel.clone(),
+                                callbacks,
+                            },
+                        );
                         let p = p.clone();
                         let endpoint = endpoint.clone();
                         let method = method.to_string();
@@ -494,8 +534,13 @@ impl Peer {
                                 })
                             };
                             p.incoming.lock().unwrap().remove(&key);
-                            let end = shutdown_closes && method == "plugin/shutdown";
-                            p.respond_frame(id, reply, end);
+                            // An endpoint can stop polling a callback on cancel.
+                            // Its parent answer must still follow the callback's reply.
+                            settled.recv().await;
+                            if !p.closed.is_cancelled() {
+                                let end = shutdown_closes && method == "plugin/shutdown";
+                                p.respond_frame(id, reply, end);
+                            }
                         });
                     } else {
                         let context = p.incoming_context(method, &params).0;
@@ -546,8 +591,8 @@ impl Peer {
                 }
             }
             p.close();
-            for token in p.incoming.lock().unwrap().values() {
-                token.cancel()
+            for request in p.incoming.lock().unwrap().values() {
+                request.cancel.cancel();
             }
             worker.abort();
             let _ = worker.await;
@@ -815,7 +860,7 @@ impl Peer {
             .lock()
             .unwrap()
             .get(&id.to_string())
-            .is_some_and(|p| p.method == method)
+            .is_some_and(|p| p.method == method && !p.abandoned)
     }
     pub(crate) fn event_handler(&self, id: &Value, method: &str) -> Option<OnEvent> {
         self.pending
@@ -876,6 +921,13 @@ impl Peer {
         let id = format!("r{}", self.next.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = oneshot::channel();
         let key = json!(id).to_string();
+        let parent = params.get("parentRequestId").and_then(|id| {
+            self.incoming
+                .lock()
+                .unwrap()
+                .get(&id.to_string())
+                .map(|request| request.callbacks.clone())
+        });
         {
             let mut pending = self.pending.lock().unwrap();
             if pending.is_empty() {
@@ -889,6 +941,8 @@ impl Peer {
                     method: method.to_owned(),
                     context,
                     event,
+                    abandoned: false,
+                    _parent: parent,
                 },
             );
         }
@@ -910,15 +964,14 @@ impl Peer {
             peer: self,
             id: &id,
             key: &key,
-            cancel_sent: false,
+            reply: Some(rx),
+            cancel_deadline: None,
         };
-        tokio::pin!(rx);
         let reply = tokio::select! {
-            result = &mut rx => result,
+            result = outgoing.reply.as_mut().unwrap() => result,
             _ = cancel.cancelled() => {
-                self.notify("$/cancel", json!({"id":id}));
-                outgoing.cancel_sent = true;
-                match tokio::time::timeout(std::time::Duration::from_secs(5), &mut rx).await {
+                let deadline = outgoing.cancel();
+                match timeout_at(deadline, outgoing.reply.as_mut().unwrap()).await {
                     Ok(r) => r,
                     Err(_) => { self.close(); return Err(Fault::new("lost", "plugin did not settle cancellation within 5 seconds")) }
                 }
