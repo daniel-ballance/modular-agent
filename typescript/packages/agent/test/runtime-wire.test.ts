@@ -74,7 +74,7 @@ test("durable Runtime: failed wire resume preserves pending calls but not settle
 	const host = await wireHost(t, durableRuntime());
 	const decision = { refuse: "Committed refusal" };
 	const rows = [
-		{ kind: "modelRequest", data: { tracksStepAfter: true } },
+		{ kind: "modelRequest", data: { tools: ["ask"], safeToRepeat: false, model: turn.model } },
 		{ kind: "response", message: { ...response, content: [
 			{ type: "toolCall", id: "first-call", name: "ask", arguments: {} },
 			{ type: "toolCall", id: "settled-call", name: "ask", arguments: {} },

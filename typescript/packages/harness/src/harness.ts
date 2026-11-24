@@ -1431,8 +1431,10 @@ export class Harness {
 				if (pluginRecord && request?.coversNested !== undefined) throw failure("invalid_request", "Only the approval gate sets coverage");
 				if (request?.approvalWait !== undefined) {
 					if (pluginRecord || request.approvalWait !== "untilDeadline") throw failure("invalid_request", "Only the approval gate can park a call");
-					request.deadlineAt = entry.time + request.timeLimitMs!;
-					if (!Number.isSafeInteger(request.deadlineAt)) throw failure("invalid_request", "Unrepresentable approval deadline");
+				}
+				if (request?.timeLimitMs !== undefined) {
+					request.deadlineAt = entry.time + request.timeLimitMs;
+					if (!Number.isSafeInteger(request.timeLimitMs) || request.timeLimitMs < 0 || !Number.isSafeInteger(request.deadlineAt)) throw failure("invalid_request", "Unrepresentable question deadline");
 				}
 			}
 			if (pluginRecord && entry.kind === "inputAnswer" && entry.data && typeof entry.data === "object" && "approvalView" in entry.data) throw failure("invalid_request", "Only the Harness can attest to delivery");
@@ -2936,7 +2938,7 @@ export class Harness {
 					const [intent] = await this.commit(s, [{
 						kind: "modelRequest", writer: "harness", turnId, stepId, modelVisible: false,
 						actorId: turnId ? undefined : [...state.actors][0],
-						data: { model: scope.model, ...(model.supports.keepsState === true ? { keepsState: true } : {}), safeToRepeat, tracksStepAfter: !!turnId, tools: prepared.request.tools.map((t) => t.name), ...(safeToRepeat || !turnId ? { request: dispatched } : {}) },
+						data: { model: scope.model, ...(model.supports.keepsState === true ? { keepsState: true } : {}), safeToRepeat, tools: prepared.request.tools.map((t) => t.name), ...(safeToRepeat ? { request: dispatched } : {}) },
 						sources: state.sources.get(stepId),
 					}]);
 					try { await check(); }

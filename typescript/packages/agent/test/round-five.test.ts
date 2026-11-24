@@ -85,15 +85,15 @@ for (const scenario of ["due", "allow", "refuse", "unknown"] as const) {
 		const ids = { turnId: "turn", stepId: "step" };
 		const sid = await seed(store, dirs.project, [joined(), setting("model", model),
 			draft("turnStart", { turnId: ids.turnId, actorId: "user", data: { model, startedBy: { kind: "actor", id: "user" }, tools: [], settings: {}, system: "", rights: ALL_AUTHORITY } }),
-			draft("modelRequest", { ...ids, data: { model, safeToRepeat: false, tools: [], ...(scenario === "unknown" ? {} : { tracksStepAfter: true }) } }),
+			draft("modelRequest", { ...ids, data: { model, safeToRepeat: false, tools: [] } }),
 			draft("response", { ...ids, modelVisible: true, message: { role: "assistant", stop: "finished", content: [text("answer")] } }),
-			...(scenario === "allow" || scenario === "refuse" ? [draft("modular-agent.stepAfter", { ...ids, data: { decision: scenario === "allow" ? null : { refuse: "committed denial" } } })] : []),
+			...(scenario === "unknown" ? [draft("modular-agent.stepAfter", { ...ids, erased: true })] : scenario === "allow" || scenario === "refuse" ? [draft("modular-agent.stepAfter", { ...ids, data: { decision: scenario === "allow" ? null : { refuse: "committed denial" } } })] : []),
 		]);
 		await api.openSession(sid);
 		await api.waitForIdle(sid);
 		const history = api.history(sid);
 		assert.equal(gates, Number(scenario === "due"));
-		assert.equal(history.filter((e) => e.kind === "modular-agent.stepAfter").length, Number(scenario !== "unknown"));
+		assert.equal(history.filter((e) => e.kind === "modular-agent.stepAfter").length, 1);
 		const end = history.findLast((e) => e.kind === "turnEnd");
 		assert.deepEqual((end?.data as { outcome: unknown })?.outcome, scenario === "due" || scenario === "allow" ? { kind: "completed" } :
 			{ kind: "failed", error: scenario === "refuse" ? "committed denial" : "Cannot establish the last step's gate decision" });
@@ -176,7 +176,7 @@ test("durable reopen sends committed result feedback in its next request", async
 		draft("inputAccepted", { inputId: "admission", actorId: "user", data: { when: "now", taken: "now", content: [text("Question")] } }),
 		draft("turnStart", { turnId, actorId: "user", data: { model, tools: [], system: "", settings: {}, startedBy: { kind: "actor", id: "user" }, rights: ALL_AUTHORITY } }),
 		draft("input", { turnId, inputId: "admission", actorId: "user", modelVisible: true, message: { role: "user", content: [text("Question")] } }),
-		draft("modelRequest", { turnId, stepId: "first", data: { model, tools: [], safeToRepeat: false, tracksStepAfter: true } }),
+		draft("modelRequest", { turnId, stepId: "first", data: { model, tools: [], safeToRepeat: false } }),
 		draft("response", { turnId, stepId: "first", modelVisible: true, message: { role: "assistant", content: [text("An answer")], stop: "finished" } }),
 		draft("resultFeedback", { turnId, modelVisible: true, data: { reason } }),
 	]);

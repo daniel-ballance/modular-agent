@@ -90,7 +90,7 @@ test("durable: an answer given before the process stopped is not asked again", a
 	const { s, asked, abandoned } = await crashWhileAsking(d);
 	// Record the answer as the first process would have, then "crash" before the tool started.
 	const a = abandoned.api("t");
-	await a.append(s, { kind: "inputAnswer", writer: "harness", modelVisible: false, actorId: "user", data: { requestId: asked.id, actorId: "user", value: "allow" } });
+	await a.append(s, { kind: "inputAnswer", writer: "harness", modelVisible: false, actorId: "user", requestId: asked.id, turnId: asked.turnId, toolCallId: asked.toolCallId, data: { requestId: asked.id, actorId: "user", value: "allow" } });
 	await abandoned.stop();
 	const ui = fakeUi();
 	const h = await agent(d, [fauxAssistantMessage([fauxText("Paid.")])], [durableRuntime(), ui.plugin]);
@@ -109,7 +109,7 @@ test("durable: an answer given before the process stopped is not asked again", a
 test("durable: a recorded allow from someone who may no longer answer is not reused", async () => {
 	const d = dirs();
 	const { s, asked, abandoned } = await crashWhileAsking(d);
-	await abandoned.api("t").append(s, { kind: "inputAnswer", writer: "harness", modelVisible: false, actorId: "alice", data: { requestId: asked.id, actorId: "alice", value: "allow" } });
+	await abandoned.api("t").append(s, { kind: "inputAnswer", writer: "harness", modelVisible: false, actorId: "alice", requestId: asked.id, turnId: asked.turnId, toolCallId: asked.toolCallId, data: { requestId: asked.id, actorId: "alice", value: "allow" } });
 	await abandoned.stop();
 	const ui = fakeUi();
 	const h = await agent(d, [fauxAssistantMessage([fauxText("Not paid.")])], [durableRuntime(), ui.plugin]);
