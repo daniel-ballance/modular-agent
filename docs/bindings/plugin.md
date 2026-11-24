@@ -45,10 +45,10 @@ The host MUST treat unexpected EOF, process exit, an unusable stream, a required
 
 | Host request | Params | Result | Errors |
 |---|---|---|---|
-| `plugin/initialize` | `{ binding: string, data: string, host: { name: string, version: string }, project: string, home: string, config: object }` | `Registration` | `not_supported` for an unsupported version |
+| `plugin/initialize` | `{ binding: string, host: { name: string, version: string }, project: string, home: string, config: object }` | `Registration` | `not_supported` for an unsupported version |
 | `plugin/shutdown` | `{ reason: "stop" \| "reload" \| "refused", detail?: string }` | `{}` | Common errors only |
 
-The first frame MUST be `plugin/initialize`, with `binding: "modular-agent-plugin/1"` and `data: "modular-agent-data/1"`. `project` and `home` are absolute paths to the project and the plugin's state folder. `config` is the plugin's settings, `{}` if none. A plugin MUST reject a second initialize with `invalid_request`. Until registration is accepted, only initialize, ping, cancel, shutdown and `host/problem` are available; there is no separate acceptance frame. The host's first request for registered work signals acceptance.
+The first frame MUST be `plugin/initialize`, with `binding: "modular-agent-plugin/1"`. This binding uses the [shared data vocabulary](data.md). `project` and `home` are absolute paths to the project and the plugin's state folder. `config` is the plugin's settings, `{}` if none. A plugin MUST reject a second initialize with `invalid_request`. Until registration is accepted, only initialize, ping, cancel, shutdown and `host/problem` are available; there is no separate acceptance frame. The host's first request for registered work signals acceptance.
 
 **Registration**
 

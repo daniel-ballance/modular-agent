@@ -29,7 +29,7 @@ Tracing will grow in later versions: content capture, streaming detail, more met
 
 ## Consequences
 
-The draft makes no binding edits. Acceptance would require these compatible additions, with absent fields keeping current behavior:
+The binding rules for telemetry are:
 
 | Binding and section | Change |
 |---|---|

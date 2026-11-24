@@ -87,21 +87,10 @@ Each binding has a name and a major version, such as `modular-agent-plugin/1`. A
 
 - **ACP:** `initialize` selects `/1` by default, or `/2` when requested ([Versions](bindings/acp.md#versions)).
 - **AG-UI:** `GET /agui/v1` reports the binding. AG-UI's own version is declared in run input and `RUN_STARTED` ([Framing and versions](bindings/agui.md#framing-and-versions)).
-- **Plugin:** `plugin/initialize` names the plugin binding and shared data version ([Starting: the handshake](bindings/plugin.md#starting-the-handshake)).
+- **Plugin:** `plugin/initialize` names the plugin binding ([Starting: the handshake](bindings/plugin.md#starting-the-handshake)).
 - **History service:** `GET /v1` reports the binding ([What the service declares](bindings/history-http.md#what-the-service-declares)).
 
-A peer MUST refuse to proceed if a required version or feature is unavailable. A build MAY support several major versions. A conformance claim MUST identify the specification revision used for acceptance as well as the claimed binding versions. Major versions alone do not identify the historical snapshots before this edition.
-
-Within a major version, changes MUST preserve interoperability with existing conforming peers. Compatible changes include:
-
-- An optional field that older receivers can preserve as inert data under the [shared data rules](bindings/data.md#general-rules).
-- An optional extension method, request or entry kind offered only when declared or registered.
-- An error code for a case that was previously undefined, where existing peers can still handle the response.
-- A clarification that does not change how conforming builds behave.
-
-An incompatible change MUST use a new major version. Examples include removing or renaming a field, changing its type or meaning, making an optional field required, or changing a default.
-
-**This edition.** The bindings keep their current major versions. Their Changes sections record the rounds that led here; these entries are historical, not alternative rules. The compatibility rules above apply from this edition onward.
+Before 1.0, implement the current specification and kits from the same revision. Changes may break previous revisions. A peer MUST refuse to proceed if a required protocol or feature is unavailable. External protocol requirements still apply. A conformance claim MUST identify the revision tested and the bindings it covers.
 
 ## Reporting a defect
 
