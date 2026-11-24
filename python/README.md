@@ -10,7 +10,7 @@ Serve [AG-UI](../docs/bindings/agui.md) with `await agent.serve_agui(listen=...,
 
 Find kept threads without opening them with `GET /agui/v1/threads`. To recover interrupted turns before the service accepts clients, use [`ma --resume-open`](packages/ma/README.md#find-and-resume-interrupted-work). Recovery at startup is off by default.
 
-An embedded agent can [park a pre-dispatch approval until its deadline](SDK.md#approvals-that-wait). This requires kept history, an explicit operator maximum and a session opt-in. It does not change `ma`.
+An embedded agent can [let one approval cover a tool's nested calls](SDK.md#covered-approvals), or [let an approval wait past its turn](SDK.md#approvals-that-wait). Both are operator choices. In [`ma --approval ask`](packages/ma/README.md#approval), one allow covers the displayed script for that run. Without a configured policy, `ma` loads no approval feature.
 
 ## Install and check
 
