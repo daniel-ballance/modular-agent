@@ -162,7 +162,7 @@ A durable Runtime can't keep its promise alone.
 
 **Change:**
 - Add a **working environment** capability: where files live and where commands run, whether local, remote or in a sandbox. It is separate from the project the user is working on.
-- Allow plugins to define new capabilities and hook points for other plugins. Three rungs needed this, which settles the open question [Plugins building on plugins](../open-questions.md#plugins-building-on-plugins).
+- Allow plugins to define new capabilities and hook points for other plugins. Three rungs needed this, which settles the open question [Plugins building on plugins](../contracts.md#plugins-and-capabilities).
 
 ### 9. Complete the plugin API
 

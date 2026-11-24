@@ -45,10 +45,10 @@ The host MUST treat unexpected EOF, process exit, an unusable stream, a required
 
 | Host request | Params | Result | Errors |
 |---|---|---|---|
-| `plugin/initialize` | `{ binding: string, data: string, host: { name: string, version: string }, project: string, home: string, config: object }` | `Registration` | `not_supported` for an unsupported version |
+| `plugin/initialize` | `{ binding: string, host: { name: string, version: string }, project: string, home: string, config: object }` | `Registration` | `not_supported` for an unsupported version |
 | `plugin/shutdown` | `{ reason: "stop" \| "reload" \| "refused", detail?: string }` | `{}` | Common errors only |
 
-The first frame MUST be `plugin/initialize`, with `binding: "modular-agent-plugin/1"` and `data: "modular-agent-data/1"`. `project` and `home` are absolute paths to the project and the plugin's state folder. `config` is the plugin's settings, `{}` if none. A plugin MUST reject a second initialize with `invalid_request`. Until registration is accepted, only initialize, ping, cancel, shutdown and `host/problem` are available; there is no separate acceptance frame. The host's first request for registered work signals acceptance.
+The first frame MUST be `plugin/initialize`, with `binding: "modular-agent-plugin/1"`. This binding uses the [shared data vocabulary](data.md). `project` and `home` are absolute paths to the project and the plugin's state folder. `config` is the plugin's settings, `{}` if none. A plugin MUST reject a second initialize with `invalid_request`. Until registration is accepted, only initialize, ping, cancel, shutdown and `host/problem` are available; there is no separate acceptance frame. The host's first request for registered work signals acceptance.
 
 **Registration**
 
@@ -157,7 +157,7 @@ Example:
 
 ### Command lifetime
 
-- `command` is a string for the working environment's shell. The interpreter and shell syntax outside the fixture are deployment choices. `timeoutMs` MUST be a safe integer from 0 upwards. Omission and 0 both mean no requested deadline. The operator MAY set a shorter command deadline.
+- `command` is a string for the working environment's shell. The interpreter and shell syntax outside the fixture are deployment choices. Omit `timeoutMs` when no deadline is requested. If present, it MUST be a positive safe integer. The operator MAY impose an independent deadline.
 - The environment MUST decode stdout and stderr as UTF-8 with U+FFFD replacement and merge in observed order. `output` MUST concatenate the chunks the sender retained, not the subset delivered to a recipient. The environment MUST bound retained output to fit the result frame, stop retaining and emitting on overflow, and report `truncated: true` with the terminal status. The host MUST forward only authorized pieces before the answer.
 - An exit code MUST be an integer or `null` when killed. A command stopped by a deadline MUST return `timedOut: true` and `exitCode: null`. A wire cancel that wins the race MUST return `cancelled`, not a timeout result. The environment MUST stop a timed-out or cancelled command within the scope advertised below, within five seconds of timeout or cancel, or answer `lost` if that cleanup is unconfirmed.
 - A normal exec answer and cancellation of a later turn MUST NOT by themselves stop background processes left by that command. The host MUST request `env/sessionEnded` on close and not issue new work for that session while it closes. The environment MUST clean up only that session's processes in scope and settle its outstanding commands before acknowledging. Repeating `env/sessionEnded` is safe. Agent or worker loss follows [connection loss](#errors-and-connection-loss); unconfirmed cleanup is not proof an interrupted command is safe to repeat.
