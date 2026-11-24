@@ -20,7 +20,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 DEMO = Path(__file__).resolve().parent
 HOST = DEMO / 'host/dist/main.js'
-CASES = ['happy', 'refusal', 'verification', 'restart', 'duplicate', 'host-restart']
+CASES = ['happy', 'refusal', 'verification', 'restart', 'duplicate', 'host-restart', 'host-decline']
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -249,7 +249,7 @@ def run(d, case):
               not q['answerable'], 'wrong expired approval')
         check(not any(r['agent'] == 'verifier' for r in s['routes']), 'unapproved hand-off')
         check([(x['id'], x['status']) for x in s['inbox']] == [(q['id'], 'expired')], 'wrong inbox closure')
-        check(any('Approval refused' in p['text'] for p in s['posts']), 'missing refusal post')
+        check(any(f"Question {q['id']}: expired" == p['text'] for p in s['posts']), 'missing expiry post')
         try:
             d.answer(q)
         except HTTPError as error:
@@ -263,10 +263,21 @@ def run(d, case):
               'deadline changed the checkout')
         return
     q = d.approval()
-    if case == 'host-restart':
+    if case in ('host-restart', 'host-decline'):
         d.proc.kill()
         check(d.proc.wait() == -signal.SIGKILL, 'host was not killed')
         d.proc.stdout.close()
+        if case == 'host-decline':
+            # Commit the decision directly on the coder while no desk can observe the run.
+            subprocess.run(['node', DEMO / 'scripts/decline.mjs', q['thread'], q['id']],
+                           cwd=d.root, check=True, timeout=20)
+            d.proc, d.url = d.launch()
+            s = d.settled()
+            check([(item['id'], item['status']) for item in s['inbox']] == [(q['id'], 'declined')],
+                  'host missed the decline committed while it was down')
+            check(d.tree('coder', 'rev-parse', 'HEAD') == seed and not d.tree('coder', 'status', '--porcelain'),
+                  'declined script wrote files')
+            return
         # Erase both shortcuts. The route and event are the host's own data.
         with sqlite3.connect(d.root / 'desk.sqlite') as db:
             db.execute('DELETE FROM inbox')

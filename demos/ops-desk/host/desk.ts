@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import { HttpError, LostExchange, Agui, admission, type Decision, type Snapshot } from './agui.js';
 import { Control } from './control.js';
 import { Projects } from './processes.js';
@@ -8,6 +9,7 @@ class Slot {
   route?: Route;
   process?: Process;
   presence?: AbortController;
+  feed?: AbortController;
   waiting = false;
   ended = false;
   recovering = false;
@@ -103,7 +105,7 @@ export class Desk {
     for await (const row of api.threads(parent)) {
       const { threadId: thread, waiting } = row;
       let r = this.db.activeThread(a, thread);
-      if (waiting.turn === 'none' && !waiting.questions && !waiting.toolCalls) {
+      if (waiting.turn === 'none' && !waiting.questions && !waiting.toolCalls && !(r && this.db.questions(r).length)) {
         // Recovery may have finished before the listener started. A kept
         // thread for this delivery is not a reason to submit the input again.
         if (r) {
@@ -129,8 +131,10 @@ export class Desk {
       this.db.admitted(r);
       // A parked approval needs a fresh delivery on this host's presence.
       await this.holdPresence(s, api, r);
-      this.db.observe(r, (await api.snapshot(r)).waiting.questions);
+      const current = await api.snapshot(r);
+      this.db.seedWaits(r, current.waitCursor, current.waiting.questions);
       s.waiting = true;
+      this.follow(a, api, r);
       this.poll(a);
     }
   }
@@ -172,6 +176,8 @@ export class Desk {
     }
   }
   private detach(s: Slot) {
+    s.feed?.abort();
+    s.feed = undefined;
     s.presence?.abort();
     s.presence = undefined;
     s.waiting = false;
@@ -195,6 +201,7 @@ export class Desk {
         this.db.thread(r, await api.create(r));
       }
       const view = await api.snapshot(r); // GET reopens the same session and runs recovery.
+      this.db.seedWaits(r, view.waitCursor, view.waiting.questions);
       await this.holdPresence(s, api, r);
       if (view.messages.some((m) => m.role === 'user')) {
         // Each thread belongs to one input route. A committed user message is
@@ -202,12 +209,12 @@ export class Desk {
         this.db.admitted(r);
         const current = await api.snapshot(r);
         if (current.waiting.questions.length)
-          this.outcome(a, { type: 'interrupt', interrupts: current.waiting.questions });
+          this.outcome(a, api, { type: 'interrupt', interrupts: current.waiting.questions });
         else this.finish(a, 'reopened', `${a} reopened the interrupted session. No new input was sent.`);
         return;
       }
       const outcome = await api.run(r, view, undefined, () => this.db.admitted(r));
-      this.outcome(a, outcome);
+      this.outcome(a, api, outcome);
     } catch (e) {
       await this.problem(a, e);
     }
@@ -229,20 +236,57 @@ export class Desk {
   }
   private outcome(
     a: Agent,
+    api: Agui,
     outcome: { type: string; interrupts?: Question[]; pendingToolCallIds?: string[] }
   ) {
     const s = this.slots[a];
-    if (outcome.type === 'success' && outcome.pendingToolCallIds?.length) {
-      // The desk has no executor. Never run a tool from a listing or snapshot.
+    if (outcome.type === 'success' && (outcome.pendingToolCallIds?.length || this.db.questions(s.route!).length)) {
+      // A successful answer exchange is not a closure notice.
       s.waiting = true;
+      this.follow(a, api, s.route!);
       this.poll(a);
     } else if (outcome.type === 'success') this.finish(a, 'done');
     else if (outcome.type === 'interrupt' && outcome.interrupts?.length) {
       this.db.observe(s.route!, outcome.interrupts);
       s.waiting = true;
+      this.follow(a, api, s.route!);
       this.notify();
       this.poll(a);
     } else this.finish(a, 'failed', `${a}: ${outcome.type}`);
+  }
+  private follow(a: Agent, api: Agui, r: Route) {
+    const s = this.slots[a];
+    if (s.feed) return;
+    const stop = (s.feed = new AbortController());
+    const signal = AbortSignal.any([api.signal, stop.signal]);
+    const read = async () => {
+      while (!signal.aborted) {
+        try {
+          for await (const item of api.closures(r, this.db.waitCursor(r)!, signal)) {
+            if (signal.aborted) return;
+            this.db.waitClosed(r, item);
+            this.notify();
+          }
+        } catch (e) {
+          if (signal.aborted) return;
+          if (e instanceof HttpError && e.status === 409 && e.message.endsWith('cursor_expired')) {
+            await s.serial(async () => {
+              if (signal.aborted) return;
+              const view = await api.snapshot(r);
+              this.db.resetWaits(r, view.waitCursor, view.waiting.questions);
+              this.notify();
+            });
+            continue;
+          }
+          if (!(e instanceof LostExchange || (e instanceof TypeError && e.cause))) throw e;
+        }
+        // EOF can mean a slow reader was disconnected. Follow from the last commit, not a new snapshot.
+        await delay(100, undefined, { signal });
+      }
+    };
+    void read().catch(e => s.serial(async () => {
+      if (!signal.aborted) await this.problem(a, e);
+    }));
   }
   private poll(a: Agent) {
     const s = this.slots[a];
@@ -252,7 +296,18 @@ export class Desk {
         () =>
           void s.serial(async () => {
             try {
-              await this.refresh(a);
+              // Listing tracks work, not closure reasons. Do not read a snapshot to poll a question.
+              const r = s.route;
+              if (r && s.waiting && !this.db.questions(r).length && (s.ended || s.recovering)) {
+                const api = await s.process!.ready;
+                for await (const row of api.threads(r.parent)) {
+                  if (row.threadId !== r.thread) continue;
+                  if (row.waiting.questions) await this.refresh(a);
+                  else if (!row.waiting.toolCalls && row.waiting.turn === 'none')
+                    this.finish(a, s.recovering ? 'reopened' : 'done');
+                  break;
+                }
+              }
             } catch (e) {
               await this.problem(a, e);
             }
@@ -276,26 +331,8 @@ export class Desk {
       if (e instanceof HttpError && e.status === 409) return;
       throw e;
     }
-    // Only the same presence's current answerable projection can enable a button.
-    for (const q of this.db.questions(r))
-      if (!view.waiting.questions.some((v) => v.id === q.id)) {
-        this.db.resolve(r, q, q.expiresAt && Date.parse(q.expiresAt) <= Date.now() ? 'expired' : 'closed');
-        this.notify();
-      }
+    // This read delivers a current view. Its missing rows are not decisions.
     this.db.observe(r, view.waiting.questions);
-    if (!view.waiting.questions.length && !view.waiting.toolCalls.length) {
-      if (s.ended) this.finish(a, s.recovering ? 'reopened' : 'done');
-      else if (s.recovering) {
-        for await (const row of (await s.process.ready).threads(r.parent))
-          if (
-            row.threadId === r.thread &&
-            row.waiting.turn === 'none' &&
-            !row.waiting.questions &&
-            !row.waiting.toolCalls
-          )
-            this.finish(a, 'reopened');
-      }
-    }
     return view;
   }
   async answer(id: number, answers: Decision[]) {
@@ -328,21 +365,9 @@ export class Desk {
           throw new HttpError(400, 'Invalid answer');
       }
       try {
-        const outcome = await (
-          await s.process!.ready
-        ).run(r, view, answers, () => {
-          for (const q of questions) {
-            const ans = answers.find((v) => v.interruptId === q.id)!;
-            this.db.resolve(
-              r,
-              q,
-              ans.status === 'cancelled' || (ans.payload as { allow?: unknown })?.allow === false
-                ? 'declined'
-                : 'answered'
-            );
-          }
-        });
-        this.outcome(r.agent, outcome);
+        const api = await s.process!.ready;
+        const outcome = await api.run(r, view, answers, () => {});
+        this.outcome(r.agent, api, outcome);
       } catch (e) {
         if (!(e instanceof HttpError)) {
           await this.problem(r.agent, e);
@@ -357,7 +382,10 @@ export class Desk {
   }
   async state() {
     const views = await Promise.all(
-      agents.filter((a) => this.slots[a].waiting).map((a) => this.slots[a].serial(() => this.refresh(a)))
+      agents.filter((a) => {
+        const s = this.slots[a];
+        return s.waiting && s.route && this.db.questions(s.route).length;
+      }).map((a) => this.slots[a].serial(() => this.refresh(a)))
     );
     const inbox = this.db.inbox().map((q) => ({
       ...q,

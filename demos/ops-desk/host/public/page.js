@@ -32,7 +32,7 @@ async function refresh() {
   byId('closed').replaceChildren(
     ...inbox
       .filter((q) => q.status !== 'open')
-      .map((q) => el('li', q.agent + ' · ' + q.status + ': ' + q.message))
+      .map((q) => el('li', q.agent + ' · ' + q.status + ': ' + (q.message ?? q.id)))
   );
   if (previous === JSON.stringify(open)) return;
   previous = JSON.stringify(open);

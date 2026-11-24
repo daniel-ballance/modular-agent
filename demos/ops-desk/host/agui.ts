@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import type { Question, Route } from './store.js';
+import type { Question, Route, WaitClosure } from './store.js';
 import { operation } from './trace.js';
 
 export type Snapshot = {
   threadId: string;
   messages: { role: string; content?: unknown }[];
   cursor: string;
+  waitCursor: string;
   waiting: { questions: Question[]; toolCalls: { toolCallId: string; expiresAt: string }[] };
 };
 export type Decision = { interruptId: string; status: 'resolved' | 'cancelled'; payload?: unknown };
@@ -25,6 +26,30 @@ export class HttpError extends Error {
     message: string
   ) {
     super(message);
+  }
+}
+async function* events(res: Response) {
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  const reader = res.body!.getReader();
+  let rest = '';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      rest += decoder.decode(value, { stream: true });
+      let newline;
+      while ((newline = rest.indexOf('\n')) !== -1) {
+        const line = rest.slice(0, newline).trimEnd();
+        rest = rest.slice(newline + 1);
+        if (!line || line.startsWith(':')) continue;
+        if (!line.startsWith('data: ')) throw Error('Invalid AG-UI SSE frame');
+        yield JSON.parse(line.slice(6));
+      }
+      if (rest.length > 64 * 1024 * 1024) throw Error('Oversized AG-UI frame');
+    }
+    if (rest || decoder.decode()) throw new LostExchange('Incomplete AG-UI frame');
+  } finally {
+    await reader.cancel().catch(() => {});
   }
 }
 export class Agui {
@@ -90,12 +115,24 @@ export class Agui {
     const s = await (await this.request(this.path(r), r.parent)).json();
     if (
       s.threadId !== r.thread ||
+      typeof s.waitCursor !== 'string' || !s.waitCursor ||
       !Array.isArray(s.messages) ||
       !Array.isArray(s.waiting?.questions) ||
       !Array.isArray(s.waiting.toolCalls)
     )
       throw Error('Invalid thread snapshot');
     return s;
+  }
+  async *closures(r: Route, after: string, signal: AbortSignal): AsyncGenerator<WaitClosure> {
+    const path = this.path(r) + '/wait-closures?' + new URLSearchParams({ after });
+    const res = await this.request(path, r.parent, { signal, headers: { Accept: 'text/event-stream' } });
+    for await (const item of events(res)) {
+      const question = typeof item.requestId === 'string' && ['answered', 'declined', 'expired', 'revoked',
+        'cancelled', 'noLongerAnswerable', 'refused', 'superseded'].includes(item.reason);
+      const tool = typeof item.toolCallId === 'string' && item.reason === 'settled' && typeof item.status === 'string';
+      if (typeof item.cursor !== 'string' || !item.cursor || (!question && !tool)) throw Error('Invalid wait closure');
+      yield item;
+    }
   }
   async presence(r: Pick<Route, 'thread' | 'parent'>, stop: AbortController, lost: () => void) {
     const signal = AbortSignal.any([this.signal, stop.signal]);
@@ -144,37 +181,17 @@ export class Agui {
         ...(decisions ? { resume: decisions } : {})
       })
     });
-    let started = false,
-      terminal: Outcome | undefined,
-      rest = '';
-    const decoder = new TextDecoder('utf-8', { fatal: true });
-    const reader = res.body!.getReader();
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        rest += decoder.decode(value, { stream: true });
-        let newline;
-        while ((newline = rest.indexOf('\n')) !== -1) {
-          const line = rest.slice(0, newline).trimEnd();
-          rest = rest.slice(newline + 1);
-          if (!line || line.startsWith(':')) continue;
-          if (!line.startsWith('data: ')) throw Error('Invalid AG-UI SSE frame');
-          const e = JSON.parse(line.slice(6));
-          if (e.type === 'RUN_STARTED') {
-            if (e.threadId !== r.thread || e.runId !== runId || started) throw Error('Wrong run identity');
-            started = true;
-            admitted();
-          } else if (e.type === 'RUN_ERROR') throw Error('Agent ended the run: ' + e.code);
-          else if (e.type === 'RUN_FINISHED' && started && e.threadId === r.thread && e.runId === runId)
-            terminal = e.outcome;
-        }
-        if (rest.length > 64 * 1024 * 1024) throw Error('Oversized AG-UI frame');
-      }
-    } finally {
-      await reader.cancel().catch(() => {});
+    let started = false, terminal: Outcome | undefined;
+    for await (const e of events(res)) {
+      if (e.type === 'RUN_STARTED') {
+        if (e.threadId !== r.thread || e.runId !== runId || started) throw Error('Wrong run identity');
+        started = true;
+        admitted();
+      } else if (e.type === 'RUN_ERROR') throw Error('Agent ended the run: ' + e.code);
+      else if (e.type === 'RUN_FINISHED' && started && e.threadId === r.thread && e.runId === runId)
+        terminal = e.outcome;
     }
-    if (rest || !terminal) throw new LostExchange('AG-UI stream ended without a terminal event');
+    if (!terminal) throw new LostExchange('AG-UI stream ended without a terminal event');
     return terminal;
   }
 }

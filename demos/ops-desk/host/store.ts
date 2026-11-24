@@ -24,6 +24,10 @@ export type Question = {
   responseSchema?: { enum?: string[] };
   metadata?: Record<string, unknown>;
 };
+export type WaitClosure = { cursor: string } & (
+  | { requestId: string; reason: string }
+  | { toolCallId: string; reason: 'settled'; status: string }
+);
 const pending = "('queued','sending','admitted')";
 
 export class Store {
@@ -49,6 +53,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS routes(id INTEGER PRIMARY KEY, event INTEGER NOT NULL REFERENCES events(seq), agent TEXT NOT NULL, attempt INTEGER NOT NULL,
         task TEXT NOT NULL, runKey TEXT NOT NULL, revision TEXT NOT NULL, thread TEXT, state TEXT NOT NULL DEFAULT 'queued', UNIQUE(event,agent,attempt));
       CREATE TABLE IF NOT EXISTS posts(id INTEGER PRIMARY KEY, event INTEGER NOT NULL REFERENCES events(seq), route INTEGER REFERENCES routes(id), kind TEXT NOT NULL, text TEXT NOT NULL, callId TEXT, UNIQUE(route,callId));
+      CREATE TABLE IF NOT EXISTS wait_feeds(agent TEXT NOT NULL, thread TEXT NOT NULL, cursor TEXT NOT NULL, PRIMARY KEY(agent,thread));
       CREATE TABLE IF NOT EXISTS inbox(route INTEGER REFERENCES routes(id), question TEXT NOT NULL, view TEXT NOT NULL, status TEXT NOT NULL, PRIMARY KEY(route,question));`);
   }
   close() {
@@ -143,7 +148,6 @@ export class Store {
           .prepare("INSERT INTO posts(event,route,kind,text) VALUES(?,?,'notice',?)")
           .run(r.event, r.id, note);
       this.db.prepare('UPDATE routes SET state=? WHERE id=?').run(status, r.id);
-      this.db.prepare("UPDATE inbox SET status='closed' WHERE route=? AND status='open'").run(r.id);
     });
   }
   post(r: Route, call: string, kind: string, text: string) {
@@ -173,22 +177,40 @@ export class Store {
     );
     for (const q of questions) upsert.run(r.id, q.id, JSON.stringify(q));
   }
-  resolve(r: Route, q: Question, status: string) {
+  waitCursor(r: Route) {
+    return this.db.prepare('SELECT cursor FROM wait_feeds WHERE agent=? AND thread=?')
+      .get(r.agent, r.thread)?.cursor as string | undefined;
+  }
+  seedWaits(r: Route, cursor: string, questions: Question[]) {
     this.atomic(() => {
-      const changed = this.db
-        .prepare("UPDATE inbox SET status=? WHERE route=? AND question=? AND status='open'")
-        .run(status, r.id, q.id);
-      if (changed.changes && (status === 'expired' || status === 'declined')) {
-        const action =
-          status === 'expired'
-            ? q.reason === 'approval'
-              ? 'Approval refused at its deadline'
-              : 'Question closed at its deadline'
-            : 'Declined';
-        this.db
-          .prepare("INSERT INTO posts(event,route,kind,text) VALUES(?,?,'notice',?)")
-          .run(r.event, r.id, `${action}: ${q.message}`);
+      this.db.prepare('INSERT OR IGNORE INTO wait_feeds VALUES(?,?,?)').run(r.agent, r.thread, cursor);
+      this.observe(r, questions);
+    });
+  }
+  resetWaits(r: Route, cursor: string, questions: Question[]) {
+    this.atomic(() => {
+      // An expired cursor loses the gap. The snapshot can restore waits, not reasons.
+      this.db.prepare("DELETE FROM inbox WHERE route=? AND status='open'").run(r.id);
+      this.observe(r, questions);
+      this.db.prepare('INSERT OR REPLACE INTO wait_feeds VALUES(?,?,?)').run(r.agent, r.thread, cursor);
+    });
+  }
+  waitClosed(r: Route, item: WaitClosure) {
+    this.atomic(() => {
+      if ('requestId' in item) {
+        const id = item.requestId;
+        // The host may have missed the opening interrupt. Do not reconstruct a prompt.
+        const changed = this.db.prepare(`INSERT INTO inbox VALUES(?,?,?,?)
+          ON CONFLICT(route,question) DO UPDATE SET status=excluded.status WHERE status='open'`)
+          .run(r.id, id, JSON.stringify({ id }), item.reason);
+        if (changed.changes && ['declined', 'expired', 'revoked'].includes(item.reason)) {
+          this.db.prepare("INSERT INTO posts(event,route,kind,text) VALUES(?,?,'notice',?)")
+            .run(r.event, r.id, `Question ${id}: ${item.reason}`);
+        }
       }
+      // No Interface tools are registered. Their closures confer no right to execute.
+      this.db.prepare('UPDATE wait_feeds SET cursor=? WHERE agent=? AND thread=?')
+        .run(item.cursor, r.agent, r.thread);
     });
   }
   questions(r: Route): Question[] {

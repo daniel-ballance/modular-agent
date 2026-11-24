@@ -78,8 +78,9 @@ for (const a of agents) {
               }
             })
           );
-        reg.on('turn.end', ({ sessionId }) => {
-          notify({ event: 'ended', agent: a, thread: sessionId });
+        reg.on('turn.end', ({ sessionId, result }) => {
+          // A parked script ends its origin turn with an open call.
+          if (!result.openToolCalls.length) notify({ event: 'ended', agent: a, thread: sessionId });
         });
       }
     },
