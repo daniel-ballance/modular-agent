@@ -118,7 +118,7 @@ Each SDK's README lists its own gaps.
 
 ## The specification
 
-The specification says **what** each part does, what passes between the parts, and what must always hold, not how a part works inside. Optional **bindings** fix the wire where two builds work together: ACP for hosts, a plugin protocol, and an HTTP history service. [AG-UI](docs/bindings/agui.md) is a proposed application binding, not yet implemented. The current edition is [edition 4](docs/adr/0027-sdk-0-1-and-edition-4.md).
+The specification says **what** each part does, what passes between the parts, and what must always hold, not how a part works inside. Optional **bindings** fix the wire where two builds work together: ACP for hosts, [AG-UI](docs/bindings/agui.md) for applications, a plugin protocol, and an HTTP history service. Implement the current normative documents and run the kits from the same revision.
 
 It was proven before any SDK existed. Five builds were made from the documents alone, four of them clean-room builds in Rust, Python, Go and Elixir. In the final swap round every build ran with every other build's parts and reopened every other build's sessions, through real `kill -9` crashes: 125 of 125 pairings passed ([status](docs/status.md#production-edition-3), [build notes](docs/build-notes.md#round-seven)). The SDKs and the four `ma` builds now repeat that check on every change: each SDK runs the [shared scenarios](conformance/sdk/README.md) with parts served by every other SDK.
 

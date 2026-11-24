@@ -5,7 +5,7 @@ date: 2026-11-21
 
 # Close the remaining production gaps
 
-[ADR 0021](0021-production-edition.md) left four gaps. Secret staging and recovery are now specified under [Secrets](../contracts.md#secrets) and shipped in all four SDKs. This record specifies the other three and settles the choices they raised. It does not change the edition to pin or claim implementation coverage.
+[ADR 0021](0021-production-edition.md) left four gaps. Secret staging and recovery are now specified under [Secrets](../contracts.md#secrets) and shipped in all four SDKs. This record specifies the other three and settles the choices they raised. It does not claim implementation coverage.
 
 ## Per-connection isolation
 
