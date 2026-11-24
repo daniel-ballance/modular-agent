@@ -104,4 +104,4 @@ The operator MUST NOT enable or keep enabled a production path that cannot enfor
 - There is no hard tenant budget, cross-deployment quota or general protocol to reconcile unknown external effects or erase and restore backups. Erasure cannot recall data already delivered.
 - Cross-session deletion is not atomic. [Cross-session coordination](contracts.md#cross-session-coordination) makes pending content unavailable before per-session deletion. Raw `/1` readers bypass the Harness. The operator MUST restrict their access to components that enforce pending marks or keep such readers outside a deployment that promises complete shared erasure. The binding does not define a portable pending-state service.
 - There is no portable reconciliation for an initial create whose acknowledgement was lost.
-- A legacy history store with no recorded TTL bound needs an offline migration.
+- A store with an unsupported private schema, unverifiable lease bounds or missing erasure authority stays unavailable. Fence its writers and keep its outstanding erasure obligations. Start new work only in a fresh, isolated store.

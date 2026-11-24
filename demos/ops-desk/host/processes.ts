@@ -115,7 +115,7 @@ export function launch(projects: Projects, agent: Agent, pluginUrl: string, appr
     if (live) {
       // Keep ma's configuration and HOME private to the desk. Only Claude Code needs its sign-in.
       childEnv.CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR;
-      childEnv.MODULAR_AGENT_CLAUDE_SIDECAR = resolve(demo, '../../typescript/sidecars/claude/dist/main.js');
+      childEnv.MODULAR_AGENT_CLAUDE_SIDECAR = resolve(demo, '../../typescript/packages/claude/dist/src/main.js');
       copyFileSync(join(demo, 'coder/instructions.md'), join(data, 'AGENTS.md'));
     } else childEnv.MODULAR_AGENT_SCRIPT = join(demo, 'coder', 'model.json');
     const policy = join(data, 'policy.json');

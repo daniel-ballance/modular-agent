@@ -91,14 +91,14 @@ Pydantic AI separates four things that are often blurred:
 
 ## Ideas worth taking
 
-1. **Three ways to resolve a waiting call:** answer in place, wait on a resume token, or end the run. The middle one is the piece our open question [Waiting for the user](../open-questions.md#waiting-for-the-user) proposal lacks: an answer that arrives later can resume the *same* turn, provided something durable holds it.
+1. **Three ways to resolve a waiting call:** answer in place, wait on a resume token, or end the run. The middle one is the piece our open question [Waiting for the user](../contracts.md#questions) proposal lacks: an answer that arrives later can resume the *same* turn, provided something durable holds it.
 2. **Kinds of waiting** (`approval`, `question`, `external`) on one mechanism, instead of separate approval and question systems.
-3. **Middleware composition with declared ordering** (`position`, `wraps`, `wrapped_by`, `requires`) answers part of open questions [How handlers combine](../open-questions.md#how-handlers-combine) and [Plugin lifecycle](../open-questions.md#plugin-lifecycle): how handlers combine, and how a plugin says where it must sit and what it needs.
+3. **Middleware composition with declared ordering** (`position`, `wraps`, `wrapped_by`, `requires`) answers part of open questions [How handlers combine](../contracts.md#hook-execution) and [Plugin lifecycle](../open-questions.md#plugin-lifecycle): how handlers combine, and how a plugin says where it must sit and what it needs.
 4. **"Durability is not storage"** separates our open questions [What history records](../open-questions.md#what-history-records) and [Transient and durable Runtimes](../open-questions.md#transient-and-durable-runtimes). A transient and a durable Runtime can share one agent definition if every outside effect is a recordable operation: model requests, tool calls, and operations that plugins declare.
-5. **The core versus Harness rule:** core holds only what needs deep integration with the loop or the model, and everything else ships separately. That is a concrete test for open question [What the Harness keeps](../open-questions.md#what-the-harness-keeps).
+5. **The core versus Harness rule:** core holds only what needs deep integration with the loop or the model, and everything else ships separately. That is a concrete test for open question [What the Harness keeps](../contracts.md#plugins-and-capabilities).
 6. **Plugins the model loads on demand.** A plugin's tools and instructions can stay hidden until the model asks for them, as Agent Skills do. This bears on open question [Plugin scope](../open-questions.md#plugin-scope).
-7. **Namespaced plugin events, including decision events a listener can veto**, as a way for plugins to build on each other (open question [Plugins building on plugins](../open-questions.md#plugins-building-on-plugins)).
-8. **The workspace as a typed environment** that tools reach through one handle, with many swappable backends (open question [Working environment](../open-questions.md#working-environment)).
+7. **Namespaced plugin events, including decision events a listener can veto**, as a way for plugins to build on each other (open question [Plugins building on plugins](../contracts.md#plugins-and-capabilities)).
+8. **The workspace as a typed environment** that tools reach through one handle, with many swappable backends (open question [Working environment](../contracts.md#harness-and-working-environment)).
 
 ## Cautions
 
