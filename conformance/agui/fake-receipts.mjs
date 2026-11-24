@@ -69,7 +69,7 @@ export function fakeReceipts(name, fault) {
       let r, outcome = { type: 'success' };
       if (resume.length) {
         if (!s.question || !s.presence.has(client) || resume[0].interruptId !== s.question.id) return [409, 'conflict'];
-        append(s, 'inputAnswer', { requestId: s.question.id }); delete s.question;
+        append(s, 'inputAnswer', {}, { requestId: s.question.id }); delete s.question;
         r = bind(s, client, data, s.origin); end(s, s.origin, 'completed');
       } else if (suffix[0]?.role === 'tool') {
         if (!s.open || suffix[0].toolCallId !== s.open) return [409, 'conflict'];
