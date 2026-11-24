@@ -413,7 +413,7 @@ class InterfaceTools:
                     rights &= self.permissions(
                         s, e["actor"], data.get("authority", data.get("rights"))
                     )
-                    for key in ("releasedBy", "acting_for"):
+                    for key in ("releasedBy", "acting_for", "submittedBy"):
                         if data.get(key):
                             rights &= self.permissions(s, data[key])
             start = next(

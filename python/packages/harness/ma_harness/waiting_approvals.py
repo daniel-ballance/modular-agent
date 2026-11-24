@@ -159,8 +159,15 @@ class WaitingApprovals:
         sid, turn, step, call = (d[k] for k in ("session", "turn", "step", "call"))
         s = self.sessions[sid]
         if self.waiting_request(s, call["id"]):
-            # The continuation cannot rebind this identity. Final verification runs
-            # after all gates, even when a later policy no longer asks.
+            # Verify at the gate that asked, and independently after all gates.
+            status, _ = await self.check_wait_dispatch(sid, turn, step, call, d.get("definition"))
+            if status:
+                return {
+                    **d,
+                    "refused": True,
+                    "wait_status": status,
+                    "reason": "The recorded approval no longer applies",
+                }
             return d
         definition = d.get("definition")
         if not (
@@ -256,6 +263,7 @@ class WaitingApprovals:
         ot.question_event("open", sid, q)
         self.arm_wait(sid, batch[0])
         await self.emit_wait_entries(sid, batch)
+        await self._emit({"kind": "input_request_opened", "session": sid, "request": q})
         return {**d, "open": True, "request": qid, "gate_checkpoint": True}
 
     async def emit_wait_entries(self, sid, entries):
@@ -320,6 +328,11 @@ class WaitingApprovals:
             delivery = self.approval_deliveries.get(key)
             route = delivery[0] if delivery and delivery[1] == principal else None
             rights = await self.wait_route_rights(s, e, actor, principal, route, d.get("authority"))
+            await self._assert_writable(sid)
+            if await self._pending_erasure(sid) or any(
+                s.get(k) for k in ("closing", "moving", "writer_lost", "suspending")
+            ):
+                raise AgentError("Approval route is no longer available", "conflict")
             why = self.wait_reason(s, e)
             if why:
                 records = await self.settle_wait(s, e, *why)
@@ -438,6 +451,11 @@ class WaitingApprovals:
                     if timer := self.approval_deadlines.pop((sid, e["id"]), None):
                         timer.cancel()
             await self.emit_wait_entries(sid, records)
+            if records and records[0]["kind"] == "question_answer":
+                answer = {k: v for k, v in records[0]["data"].items() if k != "approvalView"}
+                await self._emit(
+                    {"kind": "input_request_answered", "session": sid, "answer": answer}
+                )
 
     async def reconcile_waits(self, sid, *, reason=None, turn=None, affected=None, kick=True):
         closures = []
@@ -467,9 +485,7 @@ class WaitingApprovals:
                     continue
                 why = (reason, "not_started") if reason else self.wait_reason(s, e)
                 if not why:
-                    if answer and (
-                        answer["kind"] == "question_closed" or answer["data"].get("declined")
-                    ):
+                    if answer and not self.wait_answer_authorized(s, e, answer):
                         why = ("refused", "refused")
                     else:
                         self.arm_wait(sid, e)
@@ -483,6 +499,28 @@ class WaitingApprovals:
             await self.after_wait_decision(sid, e, records)
         if closures and kick:
             await self.interface_kick(sid)
+
+    def wait_answer_authorized(self, s, entry, answer):
+        data = answer["data"]
+        proof = data.get("approvalView")
+        if not (
+            answer["kind"] == "question_answer"
+            and data.get("value") == "allow"
+            and isinstance(proof, dict)
+            and isinstance(proof.get("rights"), list)
+            and proof.get("requestEntryId") == entry["id"]
+            and entry["id"] in answer["copies"]
+        ):
+            return False
+        scope = CONNECTION_AUTHORITY.set(None)
+        try:
+            return bool(
+                self.wait_eligible(
+                    s, entry["data"], data.get("actor"), proof.get("submittedBy"), proof["rights"]
+                )
+            )
+        finally:
+            CONNECTION_AUTHORITY.reset(scope)
 
     async def check_wait_dispatch(self, sid, turn, step, call, definition, *, started=False):
         """Return the terminal status, or None and the proof sources for this handoff."""
@@ -539,11 +577,7 @@ class WaitingApprovals:
         data = answer["data"]
         proof = data.get("approvalView") or {}
         if not (
-            answer["kind"] == "question_answer"
-            and data.get("value") == "allow"
-            and proof.get("requestEntryId") == e["id"]
-            and e["id"] in answer["copies"]
-            and isinstance(proof.get("rights"), list)
+            self.wait_answer_authorized(s, e, answer)
             and s["settings"].get("approval") in ("off", "ask always", "ask unless read-only")
         ):
             return denied
@@ -560,7 +594,8 @@ class WaitingApprovals:
         binding = q.get("approval_registration") or {}
         bound = binding.get("call") or {}
         if not (
-            json_equal(self.registration(sid, definition)[1], offer)
+            json_equal(self.registration(sid, definition)[0], source)
+            and json_equal(self.registration(sid, definition)[1], offer)
             and json_equal(source, binding.get("source"))
             and json_equal(offer, binding.get("definition"))
             and bound.get("id") == call["id"]

@@ -1060,6 +1060,8 @@ class Turns:
                     "definition": definition,
                 },
             )
+            if terminal := gate.get("wait_terminal"):
+                return terminal
             authority = await self.api.session(
                 "authority", session=sid, actor=call["actor"], ceiling=call.get("authority")
             )

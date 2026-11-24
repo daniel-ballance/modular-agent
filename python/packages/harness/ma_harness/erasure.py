@@ -53,7 +53,11 @@ class Erasure:
             calls = {e.get("call") for e in entries if e["kind"] == "tool_deferred"}
             calls -= {e.get("call") for e in entries if e["kind"] == "tool_result"}
             affected = {p["id"] for p in pending}
-            await self.reconcile_waits(sid, reason="cancelled", affected=affected, kick=False)
+            token = CONNECTION_AUTHORITY.set(None)
+            try:
+                await self.reconcile_waits(sid, reason="cancelled", affected=affected, kick=False)
+            finally:
+                CONNECTION_AUTHORITY.reset(token)
             calls -= {
                 e.get("call") for e in self.sessions[sid]["entries"] if e["kind"] == "tool_result"
             }

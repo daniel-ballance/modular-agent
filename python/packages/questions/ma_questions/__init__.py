@@ -705,11 +705,15 @@ class Questions(Plugin):
 
     async def invalidate(self, d):
         if d.get("reason") == "cancelled":
-            if any(q.get("approvalWait") for q in (await self._state(d["session"])).values()):
+            if not d.get("preserve_waits") and any(
+                q.get("approvalWait") for q in (await self._state(d["session"])).values()
+            ):
                 await self.api._harness.reconcile_waits(
                     d["session"], reason="cancelled", kick=False
                 )
             for q in (await self._state(d["session"])).values():
+                if d.get("preserve_waits") and q.get("approvalWait"):
+                    continue
                 if q.get("call") and not q.get("answer") and not q.get("closed"):
                     await self._close_question(d["session"], q)
         elif d.get("reason") == "move":

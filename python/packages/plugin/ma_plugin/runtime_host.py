@@ -1003,6 +1003,14 @@ class TurnHost:
             # Use only transformed input, never a handler's change to caller identity.
             call = {**d["call"], "input": a["call"]["input"]}
             value["call"] = call_out(call)
+            if result := a.get("wait_terminal"):
+                self.gating.discard(cid)
+                self.results[cid] = result_out({**result, "call": cid})
+                return {
+                    "value": value,
+                    "refused": "Call already settled",
+                    "result": self.results[cid],
+                }
             if "checked_input" in a and a["checked_input"] != call["input"]:
                 a = {**a, "refused": True, "reason": "Tool input changed after approval"}
             if a.get("open") and isinstance(a.get("pending"), dict) and not a.get("refused"):
@@ -1296,6 +1304,8 @@ class TurnHost:
             "position_move",
             "tool_started",
             "toolStarted",
+            "inputRequest",
+            "inputAnswer",
             "toolPending",
             "model_started",
             "modelRequest",
@@ -1305,7 +1315,7 @@ class TurnHost:
             HANDOFF,
             ot.TURN_TRACE,
             ot.DISCLOSURE,
-        } or kind.startswith(("question_", "job_")):
+        } or kind.removeprefix("python.").startswith(("question_", "job_")):
             raise WireError("Entry kind is owned by the host", "invalid_request")
         sources = list(entry.get("sources") or [])
         if kind == "response":

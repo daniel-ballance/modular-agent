@@ -479,6 +479,8 @@ class Exchange:
             await self.write(snap)
             v.remember(stamp)
         if kind == "input_request_opened":
+            if d["request"].get("approvalWait"):
+                return  # Offer this interrupt at completed turn end, never at publication.
             if not self.p or v.binding.presence.get(v.key) is not self.p:
                 return
             qid = d["request"]["id"]

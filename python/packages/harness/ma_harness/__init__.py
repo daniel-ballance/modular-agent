@@ -368,17 +368,25 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
                 return answer.value
             elif answer is not None:
                 value = answer
-            if rule == "gate" and value.get("refused"):
+            if rule == "gate" and (value.get("refused") or value.get("gate_checkpoint")):
                 break
         if (
             name == "tool.before"
             and not value.get("gate_checkpoint")
             and (s := self.sessions.get(data["session"]))
-            and self.waiting_request(s, data["call"]["id"])
+            and (request := self.waiting_request(s, data["call"]["id"]))
         ):
             status, _ = await self.check_wait_dispatch(
                 s["id"], data["turn"], data["step"], value["call"], value.get("definition")
             )
+            if terminal := self.wait_state(self.sessions[s["id"]], request)[2]:
+                return {
+                    **value,
+                    "wait_terminal": {
+                        "status": terminal["data"].get("status", "not_started"),
+                        "content": terminal["content"],
+                    },
+                }
             if status or value.get("pending"):
                 return {
                     **value,
@@ -443,6 +451,17 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
                 await self.interface_kick(sid)
             return clone(result)
         if target != "tools" or operation != "run" or "call" not in data:
+            if (
+                operation == "run"
+                and data.get("_checked_definition")
+                and (scope := self.tool_dispatches.get(data.get("dispatch")))
+                and scope.pop("initial_wait_handoff", False)
+                and target == scope["data"]["definition"].get("target")
+            ):
+                # The router has validated the input synchronously. This call is
+                # still inside the guarded first handoff; do not insert another
+                # lease RPC between its final deadline check and the executor.
+                return clone(await method(data, emit))
             if effect:
                 return clone(
                     await self._effect(
@@ -496,6 +515,7 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
                         sid, data.get("turn"), data.get("step"), call, data["definition"], result
                     )
                     return result
+                scope["initial_wait_handoff"] = True
                 return await self._execute_tool(
                     sid,
                     method,
