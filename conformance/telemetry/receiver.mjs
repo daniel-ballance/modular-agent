@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import { once, EventEmitter } from "node:events";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
@@ -42,13 +43,20 @@ function spansIn(body) {
   return spans;
 }
 
-export async function startReceiver({ port = 0 } = {}) {
+export async function startReceiver({ port = 0, observeParked = false } = {}) {
+  const marker = observeParked ? `/fixture/parked/${randomUUID()}` : undefined;
+  let atPark;
   const spans = [], payloads = [], errors = [];
   let connections = 0;
   const events = new EventEmitter();
   events.setMaxListeners(0);
   const snapshot = () => structuredClone({ spans, payloads, errors });
   const server = createServer(async (req, res) => {
+    if (marker && req.url === marker && req.method === "POST") {
+      if (atPark) { errors.push("Repeated parked checkpoint"); res.writeHead(409).end(); return; }
+      atPark = snapshot(); // Captured here, before the adapter can proceed to a decision.
+      res.writeHead(204).end(); return;
+    }
     if (req.url !== "/v1/traces" || req.method !== "POST") {
       res.writeHead(req.url === "/v1/traces" ? 405 : 404).end();
       return;
@@ -119,6 +127,8 @@ export async function startReceiver({ port = 0 } = {}) {
   return {
     endpoint: `http://127.0.0.1:${server.address().port}/v1/traces`,
     snapshot,
+    parkedUrl: marker && `http://127.0.0.1:${server.address().port}${marker}`,
+    parkedSnapshot: () => atPark,
     get connections() { return connections; },
     waitFor,
     async close() {

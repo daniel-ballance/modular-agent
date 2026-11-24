@@ -1,0 +1,13 @@
+{
+  "scenario": "waiting-approval-incompatible",
+  "about": "Reject a waiting-approval composition without a positive maximum and a kept store.",
+  "rules": ["contracts.md#approvals-that-wait","bindings/data.md#waiting-approval-records","sdk/api.md#questions"],
+  "requires": {"approvalsOutlastTurns":true},
+  "agent": {"durability":"ephemeral","plugins":["counter"],"approval":"all","maxApprovalWaitMs":100,"settings":{}},
+  "model": [
+    {"toolCalls":[{"name":"bump","input":{"hold":false,"note":"kit-counter"}}]},
+    {"text":"Done."}
+  ],
+  "steps": [],
+  "expectCreateError": {"code":"invalid_composition"}
+}

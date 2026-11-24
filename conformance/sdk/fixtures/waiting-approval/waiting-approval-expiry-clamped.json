@@ -1,0 +1,19 @@
+{
+  "scenario": "waiting-approval-expiry-clamped",
+  "about": "The lesser of the requested limit and operator maximum closes an unstarted call at its deadline.",
+  "rules": ["contracts.md#approvals-that-wait","bindings/data.md#waiting-approval-records","sdk/api.md#questions"],
+  "requires": {"approvalsOutlastTurns":true},
+  "agent": {"durability":"kept","plugins":["counter"],"approval":"all","maxApprovalWaitMs":100,"settings":{"approvalWait":"untilDeadline"}},
+  "model": [
+    {"toolCalls":[{"name":"bump","input":{"hold":false,"note":"kit-counter"}}]},
+    {"text":"Done."}
+  ],
+  "steps": [
+    {"prompt":"Bump the counter.","expect":{"outcome":"completed","openToolCalls":["$call"],"toolResults":[],"parked":{"timeLimitMs":100},"count":0}},
+    {"poll":{"present":true},"expect":{"view":"exact"}},
+    {"clock":{"deadlineOffsetMs":0}},
+    {"decide":"allow","expect":{"accepted":false}},
+    {"wait":true,"expect":{"settled":{"status":"notStarted","decision":"timeLimit"},"count":0}}
+  ],
+  "fixture": {"requestedApprovalMs":150}
+}

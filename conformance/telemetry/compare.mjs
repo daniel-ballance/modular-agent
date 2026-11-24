@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { inspectWire, parseContext } from "./plugin-check.mjs";
 import { rejectBaggage, scanExports } from "./privacy.mjs";
+import { parked, settled } from "../waiting/records.mjs";
+import { waitingCases, waitingRequirements } from "./waiting-cases.mjs";
 
 const conversation = "gen_ai.conversation.id", turn = "modular_agent.turn.id", step = "modular_agent.step.id";
 const operation = "gen_ai.operation.name", callId = "modular_agent.tool.call.id", parentCallId = "modular_agent.tool.parent_call.id";
@@ -173,7 +175,7 @@ const counts = {
   "durable-crash": [2, ["bump"]], "kept-crash": [1, ["bump"]],
 };
 
-export function compareTrace({ testCase, report, received, connections = [], scriptedReplies = [], sentinels }) {
+export function compareTrace({ testCase, report, received, atPark, connections = [], scriptedReplies = [], sentinels }) {
   const { scenario, placement, handshake, sdk } = testCase;
   const { sessionId, turnId } = report;
   assert.equal(report.scenario, scenario, "Runner reported the wrong scenario");
@@ -188,12 +190,13 @@ export function compareTrace({ testCase, report, received, connections = [], scr
     assert.equal(report.declarations?.agent?.telemetry, 1, "Agent telemetry declaration");
     assert.equal(report.declarations?.session?.telemetry, 1, "Session telemetry declaration");
   }
-  assert(Object.hasOwn(counts, scenario), "Unknown telemetry scenario");
+  const waiting = Object.hasOwn(waitingCases, scenario);
+  assert(waiting || Object.hasOwn(counts, scenario), "Unknown telemetry scenario");
   assert.equal(report.outcome, scenario === "kept-crash" ? "failed" : "completed", "Scenario turn outcome");
   if (!sdk) {
-    assert.equal(scenario, "first-turn", "Only first-turn runs without an OpenTelemetry SDK");
+    assert(waiting || scenario === "first-turn", "Unexpected no-SDK scenario");
     assert.equal(received.spans.length, 0, "Spans exported without an OpenTelemetry SDK");
-    return;
+    if (!waiting) return;
   }
   const spans = received.spans.map(s => ({ ...s, a: attributes(s) }));
   const spanIds = new Set();
@@ -205,6 +208,7 @@ export function compareTrace({ testCase, report, received, connections = [], scr
     spanIds.add(identity);
     checkSupporting(span);
   }
+  if (waiting) return checkWaiting({ testCase, report, received, atPark, spans, scriptedReplies });
   const scope = { [conversation]: sessionId, [turn]: turnId };
   const crashing = scenario.endsWith("-crash");
   const invocations = spans.filter(s => op(s) === "invoke_agent");
@@ -309,6 +313,89 @@ export function compareTrace({ testCase, report, received, connections = [], scr
 function findEvents(spans, name) {
   return spans.flatMap(span => (span.events ?? []).filter(e => e.name === name)
     .map(e => ({ event: { ...e, a: attributes(e) }, span })));
+}
+
+// The receiver took atPark while the answer route was still closed. Export
+// order at shutdown cannot establish this boundary. Compare on work IDs, not
+// on a wall-clock estimate of how long a person might have been away.
+function checkWaiting({ testCase, report, received, atPark, spans, scriptedReplies }) {
+  const { scenario, sdk, agentName } = testCase, { sessionId, waiting: w } = report;
+  const expected = waitingCases[scenario], killed = expected.decision === 'timeLimit';
+  assert(atPark, 'Missing receiver checkpoint before decision');
+  for (const key of ['telemetry', ...waitingRequirements(scenario)]) {
+    assert.equal(report.declarations?.session?.[key], key === 'telemetry' ? 1 : true, `Waiting session declaration: ${key}`);
+  }
+  const entry = parked(w.originBatches, 'bump', scriptedReplies[0].toolCalls[0].input);
+  const es = w.finalBatches.flat(); settled(es, entry, expected);
+  assert.equal(w.counterAtPark, 0, 'Effect before late decision');
+  assert.equal(w.counterAfter, Number(expected.status === 'completed'), 'Actual dispatch count');
+  assert.equal(report.turnId, entry.turnId);
+  const bound = es.find(e => e.id === entry.id);
+  assert.deepEqual(bound, entry, 'Final store preserves the original request');
+  const next = one(es.filter(e => e.kind === 'turnStart' && e.continuesTurnId === entry.turnId), 'Recorded continuation');
+  const proof = es.find(e => e.kind === 'inputAnswer').data.approvalView;
+  scanExports(received.payloads, [entry.data.request.question, 'approvalView', ...(proof ? [JSON.stringify(proof)] : [])], { exactValues: ['allow', ...(proof ? [proof.routeId] : [])] });
+  if (!sdk) { assert.equal(atPark.spans.length, 0); return; }
+  assert.deepEqual(w.activeWorkAtPark, [], 'No waiting operation may keep a span open');
+  const early = atPark.spans.map(s => ({ ...s, a: attributes(s) }));
+  const earlyHas = span => early.some(s => same(s, span));
+  const invocations = spans.filter(s => op(s) === 'invoke_agent');
+  const original = invocations.filter(s => s.a[turn] === entry.turnId);
+  assert(original.length === 1 || (killed && !original.length), 'Origin invocation count');
+  const origin = original[0];
+  const continuation = one(invocations.filter(s => s.a[turn] === next.turnId), 'Continuation invocation');
+  assert.equal(invocations.length, original.length + 1, 'No unrelated turn span');
+  for (const s of invocations) {
+    shape(s, agentName ? `invoke_agent ${agentName}` : 'invoke_agent', 'INTERNAL');
+    attrs(s, { [conversation]: sessionId, [operation]: 'invoke_agent', [outcome]: 'completed', [resumed]: undefined });
+  }
+  assert(!earlyHas(continuation), 'Continuation started before a decision');
+  const saved = w.originBatches.flat().find(e => e.kind === 'turnStart')?.data?.traceContext;
+  const linkTarget = killed ? (saved && parseContext(saved)) : origin;
+  if (linkTarget) one((continuation.links ?? []).filter(l => same(l, linkTarget)), 'Continuation link to origin');
+  assert(!early.some(s => op(s) === 'execute_tool'), 'Execution span before dispatch');
+  const originSteps = spans.filter(s => s.name === 'modular_agent.step' && s.a[turn] === entry.turnId && s.a[step] === entry.stepId);
+  assert(originSteps.length === 1 || (killed && !originSteps.length), 'Origin step count');
+  if (origin && originSteps[0]) parent(originSteps[0], origin);
+  if (!killed) assert(earlyHas(origin) && earlyHas(originSteps[0]), 'Origin step and turn must end and export before the decision');
+  const q = { [question + 'id']: entry.requestId, [question + 'kind']: 'approval' };
+  const opening = findEvents(spans, question + 'open');
+  if (!killed || opening.length) {
+    const opened = one(opening, 'Waiting question open event'); attrs(opened.event, q);
+    attrs(opened.span, { [conversation]: sessionId, [turn]: entry.turnId, [step]: entry.stepId });
+    if (!killed) assert(earlyHas(opened.span), 'Question must open on the origin operation');
+  }
+  assert.equal(findEvents(early, question + 'close').length, 0, 'Close recorded on the ended origin');
+  const closed = one(findEvents(spans, question + 'close'), 'Waiting question closure');
+  attrs(closed.event, { ...q, [question + 'disposition']: { allow: 'answered', decline: 'declined', timeLimit: 'timeLimit' }[expected.decision] });
+  attrs(closed.span, { [conversation]: sessionId });
+  assert(!earlyHas(closed.span), 'Closure on an ended operation');
+  if (killed) assert(['modular_agent.session.open', 'modular_agent.question.answer'].includes(closed.span.name), 'Expiry is recorded by the reconciling writer');
+  else assert.equal(closed.span.name, question + 'answer', 'Late answer closes on the answer operation');
+  const nano = (value, what) => { assert(/^[1-9][0-9]*$/.test(String(value)), `Missing ${what} timestamp`); return BigInt(value); };
+  const closeTime = nano(closed.event.timeUnixNano, 'closure');
+  if (!killed) assert(closeTime >= nano(origin.endTimeUnixNano, 'origin end'), 'Question closed before the origin ended');
+  for (const s of spans) {
+    const start = nano(s.startTimeUnixNano, 'start'), end = nano(s.endTimeUnixNano, 'end');
+    assert(end >= start, 'Span ends before it starts');
+    if (!killed && !earlyHas(s)) assert(!(start < BigInt(origin.endTimeUnixNano) && end >= closeTime), 'Span covers the idle wait');
+  }
+  const ran = expected.status === 'completed', executions = spans.filter(s => op(s) === 'execute_tool');
+  assert.equal(executions.length, Number(ran), 'Only actual dispatch has an execution span');
+  const dispositions = findEvents(spans, 'modular_agent.tool.disposition');
+  assert.equal(dispositions.length, Number(!ran), 'Pre-dispatch terminal disposition count');
+  if (ran) {
+    const tool = executions[0]; shape(tool, 'execute_tool bump', 'INTERNAL');
+    attrs(tool, { [conversation]: sessionId, [turn]: next.turnId, [step]: entry.stepId, [callId]: entry.toolCallId,
+      [operation]: 'execute_tool', 'gen_ai.tool.name': 'bump', 'modular_agent.tool.status': 'completed' });
+    const work = one(spans.filter(s => s.name === 'modular_agent.step' && s.a[turn] === next.turnId && s.a[step] === entry.stepId), 'Continuation step for inherited call');
+    parent(tool, work); parent(work, continuation);
+    assert(BigInt(tool.startTimeUnixNano) >= closeTime && BigInt(tool.startTimeUnixNano) >= BigInt(continuation.startTimeUnixNano), 'Execution started before decision or continuation');
+  } else {
+    const [{ span, event }] = dispositions;
+    assert(!earlyHas(span), 'Disposition on the ended origin'); attrs(span, { [conversation]: sessionId });
+    attrs(event, { [callId]: entry.toolCallId, 'modular_agent.tool.status': expected.status });
+  }
 }
 
 function checkQuestion(report, spans, tools) {

@@ -16,6 +16,7 @@ import { historyService } from "./history.mjs";
 import { portableProblems } from "./portable.mjs";
 import { manageServices } from "./service.mjs";
 import { capacity, erasure, isolation } from "./production.mjs";
+import { waitingChecks } from "./waiting.mjs";
 import { ACP_PROTOCOL, checkUpgrades, CONTROL_MS, readToken, socketPeer, websocketOptions } from "../tools/websocket.mjs";
 
 const args = process.argv.slice(2);
@@ -64,6 +65,12 @@ const portableChecks = argv.includes("--portable-checks");
 const productionChecks = [
 	["--isolation-checks", isolation], ["--capacity-checks", capacity], ["--erasure-checks", erasure],
 ].filter(([flag]) => argv.includes(flag));
+const waitingOnly = argv.includes("--waiting-approval-only");
+const waiting = waitingOnly || argv.includes("--waiting-approval-checks");
+async function runWaiting() {
+	if (!canConfigure) { console.log("SKIP  waiting approvals (clock and restart controls require --service-command)"); return; }
+	await waitingChecks({ root: probeDir, project, command, second, connect, stop, crash, check, attempt, within });
+}
 const productionOnly = argv.includes("--production-only");
 if (productionOnly && !productionChecks.length) {
 	console.error("--production-only needs an ADR 0030 check option");
@@ -334,6 +341,7 @@ function validateDeclaration(label, d) {
 }
 let decl = {};
 let extensions = [];
+if (waitingOnly) { await runWaiting(); await finish(); }
 if (productionOnly) {
 	await runProduction();
 	await finish();
@@ -1974,6 +1982,7 @@ if (portableChecks) {
 
 
 if (productionChecks.length) await runProduction();
+if (waiting) await runWaiting();
 await finish();
 
 async function runProduction() {

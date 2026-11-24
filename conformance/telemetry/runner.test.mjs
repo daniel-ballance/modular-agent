@@ -11,18 +11,25 @@ import { readWire } from "./wire.mjs";
 
 test("matrix covers all four hosts and each cross-language handshake variation", () => {
   const cases = sdks.flatMap(caseMatrix);
-  assert.equal(cases.length, 104);
+  assert.equal(cases.length, 136);
   assert.equal(new Set(cases.map(JSON.stringify)).size, cases.length);
   for (const host of sdks) {
     const own = caseMatrix(host);
-    assert.equal(own.filter(c => c.placement === "inProcess").length, 8);
-    assert.equal(own.filter(c => !c.sdk).length, 1);
+    assert.equal(own.filter(c => c.placement === "inProcess" && !c.requires).length, 8);
+    assert.equal(own.filter(c => !c.sdk && !c.requires).length, 1);
+    assert.equal(own.filter(c => c.requires?.includes('approvalsOutlastTurns')).length, 8);
     for (const peer of sdks.filter(sdk => sdk !== host)) {
       for (const scenario of ["tool-call", "nested-call"]) {
         assert.deepEqual(own.filter(c => c.placement === `process:${peer}` && c.scenario === scenario)
           .map(c => c.handshake), ["agreed", "no-acceptance", "no-offer"]);
       }
     }
+  }
+});
+
+test("undeclared waiting cases skip without launching an adapter", async () => {
+  for (const c of caseMatrix("rust").filter(c => c.requires)) {
+    assert.match((await runCase(c, [], { declaration: { questionsOutlastTurns: true } })).skipped, /approvalsOutlastTurns/);
   }
 });
 

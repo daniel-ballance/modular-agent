@@ -11,18 +11,20 @@ if (!sdks.includes(host) || !(action === "--list" && command.length === 0 || act
 } else if (action === "--list") {
   for (const item of caseMatrix(host).filter(selected)) console.log(JSON.stringify(item));
 } else {
-  let passed = 0;
+  let passed = 0, skipped = 0, declaration;
   const matrix = caseMatrix(host).filter(selected);
   for (const testCase of matrix) {
     const label = [host, testCase.scenario, testCase.placement, testCase.handshake ?? (testCase.sdk ? "SDK" : "no SDK")].join(" ");
     try {
-      const { spans } = await runCase(testCase, command);
-      console.log(`${label}: pass (${spans} spans)`);
+      const result = await runCase(testCase, command, { declaration });
+      if (result.skipped) { skipped++; console.log(`${label}: SKIP (${result.skipped})`); continue; }
+      if (result.declaration) declaration = result.declaration;
+      console.log(`${label}: pass (${result.spans} spans)`);
       passed++;
     } catch (error) {
       console.error(`${label}: fail: ${error.message}`);
     }
   }
-  console.log(`${passed}/${matrix.length} telemetry cases passed`);
-  if (passed !== matrix.length) process.exitCode = 1;
+  console.log(`${passed}/${matrix.length - skipped} telemetry cases passed${skipped ? `; ${skipped} skipped` : ""}`);
+  if (passed + skipped !== matrix.length) process.exitCode = 1;
 }

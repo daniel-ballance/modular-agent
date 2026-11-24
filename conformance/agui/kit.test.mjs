@@ -11,7 +11,9 @@ import { advanced } from './advanced.mjs';
 import { fake } from './fake.mjs';
 import { at, deadline } from './wire.mjs';
 
-const cases = { ...basic, ...advanced };
+import { waiting } from './waiting.mjs';
+
+const cases = { ...basic, ...advanced, ...waiting };
 const here = name => fileURLToPath(new URL(name, import.meta.url));
 const exec = promisify(execFile);
 
@@ -34,17 +36,63 @@ test('runner connects to an existing scripted agent with a token file', async ()
   }
 });
 
+test('undeclared session skips the waiting case before requiring controls or restart', async () => {
+  const server = await fake();
+  const folder = await mkdtemp(join(tmpdir(), 'agui-no-wait-'));
+  try {
+    const path = join(folder, 'owner.token');
+    await writeFile(path, server.tokens.owner, { mode: 0o600 });
+    const { stdout } = await exec(process.execPath, [here('run.mjs'), '--only', 'waiting-restart', '--url', server.origin, '--token-file', path], { signal: deadline() });
+    assert.match(stdout, /SKIP  waiting-restart \(session does not declare approvalsOutlastTurns\)/);
+    assert.match(stdout, /0\/0 AG-UI cases passed; 1 skipped/);
+  } finally { await server.close(); await rm(folder, { recursive: true, force: true }); }
+});
+
 async function run(name, fault) {
   const scenario = cases[name];
   const server = await fake({ model: scenario.model, fault, scenario: scenario.control ? name : undefined });
   const peer = () => ({ ...server, api: at(server.origin, server.tokens.owner), restart });
   const restart = async () => { await server.restart(); return peer(); };
-  try { await scenario.run(peer()); }
+  try { assert.equal((await scenario.run(peer()))?.skipped, undefined, 'fake must exercise this case'); }
   finally { await server.close(); }
 }
 
 for (const name of Object.keys(cases)) test(`fake passes ${name}`, () => run(name));
 for (const [name, fault, diagnosis] of [
+  ['waiting-live', 'wait-live-opt-in', /exactly one toolResult/],
+  ['waiting-routes', 'wait-accept-without-presence', /report is refused/],
+  ['waiting-routes', 'wait-list-grants', /report is refused/],
+  ['waiting-routes', 'wait-keep-delivery', /report is refused/],
+  ['waiting-routes', 'wait-close-on-loss', /fresh delivery/],
+  ['waiting-routes', 'wait-gate', /report is refused/],
+  ['waiting-routes', 'wait-watch', /deep-equal/],
+  ['waiting-routes', 'wait-sibling-delivery', /report is refused/],
+  ['waiting-restart', 'wait-no-presence', /snapshot without presence/],
+  ['waiting-restart', 'wait-restore-delivery', /report is refused/],
+  ['waiting-restart', 'wait-name', /unchanged prompt/],
+  ['waiting-restart', 'wait-args', /unchanged prompt/],
+  ['waiting-restart', 'wait-id', /same call ID/],
+  ['waiting-restart', 'wait-expiry-view', /original absolute expiry/],
+  ['waiting-restart', 'wait-split-batch', /one ordered batch/],
+  ['waiting-restart', 'wait-early-start', /parked call has no toolStarted/],
+  ['waiting-restart', 'wait-early-effect', /counter is zero/],
+  ['waiting-restart', 'wait-triad', /no triad/],
+  ['waiting-restart', 'wait-result', /no triad/],
+  ['waiting-restart', 'wait-pending-id', /terminal pending IDs/],
+  ['waiting-restart', 'wait-offline-interrupt', /run outcome/],
+  ['waiting-restart', 'wait-list-needs-presence', /waits are counted/],
+  ['waiting-restart', 'wait-list-tool', /waits are counted/],
+  ['waiting-restart', 'wait-list-running', /waits are counted/],
+  ['waiting-restart', 'wait-snapshot-tool', /not an Interface tool/],
+  ['waiting-restart', 'wait-ignore-coverage', /report is refused/],
+  ['waiting-restart', 'wait-new-input', /exactly one inputAccepted/],
+  ['waiting-restart', 'wait-unlinked', /continuation links/],
+  ['waiting-decline', 'wait-decline-runs', /initial dispatch/],
+  ['waiting-expiry', 'wait-late-answer', /report is refused/],
+  ['waiting-expiry', 'wait-expiry-refused', /notStarted/],
+  ['waiting-race', 'wait-double-race', /deep-equal/],
+  ['waiting-mixed-report-first', 'wait-early-ready', /first settlement/],
+  ['waiting-mixed-answer-first', 'wait-rehandoff', /released exactly once/],
   ['listener', 'anonymous', /HTTP status/],
   ['tls', 'tls-client-only', /does not replace bearer/],
   ['listener', 'outside-scope', /HTTP status/],

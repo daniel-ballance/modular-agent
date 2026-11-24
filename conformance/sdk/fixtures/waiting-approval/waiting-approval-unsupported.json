@@ -1,0 +1,15 @@
+{
+  "scenario": "waiting-approval-unsupported",
+  "about": "Ordinary late questions alone do not permit opting in.",
+  "rules": ["contracts.md#approvals-that-wait","bindings/data.md#waiting-approval-records","sdk/api.md#questions"],
+  "requires": {"approvalsOutlastTurns":true},
+  "agent": {"durability":"kept","plugins":["counter"],"approval":"all","settings":{}},
+  "model": [
+    {"toolCalls":[{"name":"bump","input":{"hold":false,"note":"kit-counter"}}]},
+    {"text":"Done."}
+  ],
+  "steps": [
+    {"change":{"setting":{"approvalWait":"untilDeadline"}},"expect":{"error":"not_supported"}}
+  ],
+  "expectDeclaration": {"questionsOutlastTurns":true,"lateAnswersStartTurns":true,"approvalsOutlastTurns":false}
+}

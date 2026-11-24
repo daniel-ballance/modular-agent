@@ -1,0 +1,21 @@
+{
+  "scenario": "waiting-approval-reopen-durable-origin",
+  "about": "Reopen durable work after origin. Never restore delivery or spend the allow twice.",
+  "rules": ["contracts.md#approvals-that-wait","bindings/data.md#waiting-approval-records","sdk/api.md#questions"],
+  "requires": {"approvalsOutlastTurns":true},
+  "agent": {"durability":"durable","plugins":["counter"],"approval":"all","maxApprovalWaitMs":100,"settings":{"approvalWait":"untilDeadline"}},
+  "model": [
+    {"toolCalls":[{"name":"bump","input":{"hold":false,"note":"kit-counter"}}]},
+    {"text":"Done."}
+  ],
+  "steps": [
+    {"prompt":"Bump the counter.","expect":{"outcome":"completed","openToolCalls":["$call"],"toolResults":[],"parked":{"timeLimitMs":100},"count":0}},
+    {"poll":{"present":true},"expect":{"view":"exact"}},
+    {"stop":"close"},
+    {"reopen":true,"expect":{"parked":{"timeLimitMs":100},"count":0}},
+    {"decide":"allow","expect":{"accepted":false}},
+    {"poll":{"present":true},"expect":{"view":"exact"}},
+    {"decide":"allow","expect":{"accepted":true}},
+    {"wait":true,"expect":{"settled":{"status":"completed","decision":"allow","actor":"user"},"count":1}}
+  ]
+}

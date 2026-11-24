@@ -1,0 +1,17 @@
+{
+  "scenario": "waiting-approval-minimal-approver",
+  "about": "The approver needs watch and approve, not the worker's tools right.",
+  "rules": ["contracts.md#approvals-that-wait","bindings/data.md#waiting-approval-records","sdk/api.md#questions"],
+  "requires": {"approvalsOutlastTurns":true,"severalActors":true},
+  "agent": {"durability":"kept","plugins":["counter"],"approval":"all","maxApprovalWaitMs":100,"settings":{"approvalWait":"untilDeadline"},"actors":[{"id":"worker","kind":"user","rights":["watch","input","tools"]},{"id":"reviewer","kind":"user","rights":["watch","approve"]}],"severalActors":true},
+  "model": [
+    {"toolCalls":[{"name":"bump","input":{"hold":false,"note":"kit-counter"}}]},
+    {"text":"Done."}
+  ],
+  "steps": [
+    {"prompt":"Bump the counter.","as":"worker","expect":{"outcome":"completed","openToolCalls":["$call"],"toolResults":[],"parked":{"timeLimitMs":100},"count":0}},
+    {"poll":{"present":true},"as":"reviewer","expect":{"view":"exact"}},
+    {"decide":"allow","as":"reviewer","expect":{"accepted":true}},
+    {"wait":true,"expect":{"settled":{"status":"completed","decision":"allow","actor":"reviewer"},"count":1}}
+  ]
+}
