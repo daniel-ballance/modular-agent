@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { compareTrace } from "./compare.mjs";
 import { startReceiver } from "./receiver.mjs";
 import { readWire } from "./wire.mjs";
+import { waitingCases, waitingRequirements } from "./waiting-cases.mjs";
 
 export const sdks = ["rust", "typescript", "go", "python"];
 const cases = ["first-turn", "tool-call", "nested-call", "gate-refusal", "question-answered", "durable-crash", "kept-crash"];
@@ -21,6 +22,9 @@ export function caseMatrix(host) {
   assert(sdks.includes(host), "Unknown host SDK");
   const result = cases.map(scenario => ({ host, scenario, placement: "inProcess", sdk: true }));
   result.push({ host, scenario: "first-turn", placement: "inProcess", sdk: false });
+  for (const scenario of Object.keys(waitingCases)) for (const sdk of [true, false]) {
+    result.push({ host, scenario, placement: "inProcess", sdk, requires: waitingRequirements(scenario) });
+  }
   for (const peer of sdks.filter(sdk => sdk !== host)) {
     for (const scenario of ["tool-call", "nested-call"]) {
       for (const handshake of handshakes) result.push({ host, scenario, placement: `process:${peer}`, handshake, sdk: true });
@@ -32,10 +36,12 @@ export function caseMatrix(host) {
 // Keep the shared checks. Change only fixture content and its corresponding
 // expected value. The choice fixture needs the configured replacement for yes.
 async function preparedScenario(scenarioName) {
-  const scenario = await load(join(repo, "conformance/sdk/scenarios", `${scenarioName}.json`));
+  const waiting = Object.hasOwn(waitingCases, scenarioName);
+  const scenario = await load(join(repo, waiting ? "conformance/sdk/fixtures/waiting-approval" : "conformance/sdk/scenarios", `${scenarioName}.json`));
   const prefix = `ma-fixture-${randomUUID()}`;
   const values = Object.fromEntries(["prompt", "model", "tool", "question", "answer", "secret"].map(key => [key, `${prefix}-${key}`]));
   values.diagnostic = "the gate refused it";
+  if (waiting) values.route = `${prefix}-answer-route`;
   for (const step of scenario.steps) {
     if (step.prompt) step.prompt += ` ${values.prompt} ${values.secret}`;
     if (step.expect?.text) step.expect.text += ` ${values.model}`;
@@ -72,15 +78,18 @@ async function fixtureSpecs(placement, names, dir, endpoint, handshake) {
   });
 }
 
-export async function runCase(testCase, command) {
+export async function runCase(testCase, command, { declaration } = {}) {
   assert(caseMatrix(testCase.host).some(c => c.scenario === testCase.scenario && c.placement === testCase.placement &&
     c.handshake === testCase.handshake && c.sdk === testCase.sdk), "Not a shared telemetry case");
+  const requires = waitingRequirements(testCase.scenario);
+  const missing = requires.filter(k => declaration?.[k] !== true);
+  if (missing.length) return { skipped: `session does not declare ${missing.join(", ")}` };
   assert(command?.length, "Missing SDK adapter command");
   const workspace = await mkdtemp(join(tmpdir(), "ma-telemetry-"));
   let receiver;
   let passed = false;
   try {
-    receiver = await startReceiver();
+    receiver = await startReceiver({ observeParked: requires.length > 0 });
     const { scenario, values } = await preparedScenario(testCase.scenario);
     const scenarioPath = join(workspace, "scenario.json");
     const reportPath = join(workspace, "report.json");
@@ -89,7 +98,7 @@ export async function runCase(testCase, command) {
     const home = join(workspace, "home");
     const fixtures = await fixtureSpecs(testCase.placement, scenario.agent.plugins, workspace, receiver.endpoint, testCase.handshake);
     await Promise.all([mkdir(home), mkdir(workDir), writeFile(scenarioPath, JSON.stringify(scenario)),
-      writeFile(requestPath, JSON.stringify({ ...testCase, scenarioPath, reportPath, workDir, fixtures, values }))]);
+      writeFile(requestPath, JSON.stringify({ ...testCase, scenarioPath, reportPath, workDir, fixtures, values, parkedUrl: receiver.parkedUrl }))]);
     const log = await open(join(workspace, "runner.log"), "wx", 0o600);
     try {
       const env = Object.fromEntries(["PATH", "LANG", "LC_ALL", "TZ", "TMPDIR"].flatMap(key =>
@@ -107,9 +116,10 @@ export async function runCase(testCase, command) {
     const received = receiver.snapshot();
     const report = await load(reportPath);
     const connections = fixtures.map(({ name, wire }) => ({ plugin: name, frames: readWire(wire) }));
-    compareTrace({ testCase, report, received, connections, scriptedReplies: scenario.model, sentinels: Object.values(values) });
+    compareTrace({ testCase, report, received, atPark: receiver.parkedSnapshot(), connections, scriptedReplies: scenario.model, sentinels: Object.values(values) });
     passed = true;
-    return { spans: received.spans.length, exports: received.payloads.length };
+    return { spans: received.spans.length, exports: received.payloads.length, ...(testCase.scenario === "first-turn" && testCase.sdk &&
+      { declaration: report.declarations.waitingSession ?? report.declarations.session }) };
   } catch (error) {
     throw new Error(`${error.message}; artifacts: ${workspace}`, { cause: error });
   } finally {

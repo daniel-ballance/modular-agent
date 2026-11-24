@@ -14,21 +14,28 @@ node run.mjs rust -- /absolute/path/to/built/adapter
 ```
 
 The command takes a built SDK adapter. This kit does not build or wire the four adapters.
-Run it once per host SDK: 26 cases for each host, 104 in all. A missing fixture is a failure,
+Run it once per host SDK: 26 unconditional and up to eight waiting cases per host. A missing fixture for an applicable case is a failure,
 not a skip. The commands and build hints come from the [fixture registry](../sdk/fixtures/).
 A failed case leaves its workspace and runner log on disk and prints their location.
 The kit never retries a case. The library entry points are `startReceiver` in
 `receiver.mjs`, `compareTrace` in `compare.mjs`, and `caseMatrix` and
 `runCase` in `runner.mjs`.
 
-## Planned checks for ADR 0034
+## Waiting approval checks
 
-Not part of the current telemetry results. For [a waiting approval](../../docs/contracts.md#approvals-that-wait), compare records, the fixture counter and spans at the receiver:
+Opt in by declaring `approvalsOutlastTurns: true` on a supported kept session with an approval gate and finite operator maximum. The runner discovers support from the ordinary `first-turn` report. If that test uses an ephemeral composition, also report `declarations.waitingSession` from a separate, compatible session probe (with several actors enabled if supported). Do not change the first-turn test's session or invent declaration values. Without a positive declaration the CLI prints a skip reason and does not launch waiting cases. Library callers pass the same observed `{declaration}` as the third argument to `runCase`.
 
-- Pause after the completed origin. Its `invoke_agent` and step spans end. Observe `modular_agent.question.open` with the request ID; there is no `execute_tool` and no span held open for the wait.
-- Accept a late allow. The close event belongs to the answer operation, not the ended step. The continuation gets a new turn span linked to the origin when its context is available. Only the actual dispatch has an execution span, under the continuation with the original call ID.
-- Decline, expire while stopped, and revoke authority after allow but before dispatch. Expect the factual question closure and pre-dispatch disposition, no tool execution span. Recovery does not invent spans for the idle interval or require a killed process to have exported.
-- Look for fixture sentinels in every exported field. The approval text, arguments, answer body and view/route proof never appear. Export being off does not change any decision or counter.
+Four [SDK fixtures](../sdk/README.md#waiting-approval-scenarios) run in process, each with and without an OpenTelemetry SDK: allow, decline, expire while stopped and revoke the approver after allow. Revocation uses the fixture's second member and also requires `severalActors`. All four still check the records and counter with export off. Do not use telemetry to decide when work is ready.
+
+**Adapter checkpoint.** In these cases the run request includes a one-shot loopback `parkedUrl`. When the origin prompt has returned, and **before** polling, answering, advancing the clock or killing the writer:
+
+1. Save the origin's committed batches and read the counter file. With instrumentation, have a test span processor identify work spans of this session that started but have not ended. Record their names in `activeWorkAtPark`; no turn, step, call or question operation should still be waiting. Do not count an independent lease renewal as a waiting operation.
+2. In the non-crash cases force-flush ended spans and wait for the receiver's export acknowledgements. POST an empty body to `parkedUrl` and wait for 204. This captures a receiver snapshot **before** the decision, not an adapter claim about which spans were exported. Also mark this boundary with export off. In the stopped-writer case do not require a flush from the killed process.
+3. Resume the fixture's steps. Use the ordinary bare SDK answer operation, with no enclosing test span. Expiry on reopen is a system closure. On a normal shutdown flush as usual. Never send observations to the trace endpoint as a substitute for an exporter.
+
+**Evidence.** In addition to the common report fields, give the actual session declaration and `waiting: {originBatches, finalBatches, counterAtPark, counterAfter, activeWorkAtPark?}`. Take both sets of batches from the store, not a recipient projection. `turnId` is the origin. Preserve both independent counter readings. Include the test processor observations only with instrumentation. Use the supplied synthetic fixture values in content; put `values.answer` in the optional decline reason and use `values.route` for the answer route where the fixture assigns it. Do not change the approval value `allow`. Report files with this disposable evidence are not telemetry.
+
+The kit matches the opening event to the saved request ID, and the close and its disposition to the later answer or system operation. It checks that the origin turn and step ended at the parked checkpoint. A continuation is a new invocation linked to the origin, not a resumed origin. Across process loss a link is required if the origin context was saved; the original span need not have reached the receiver. An allowed `bump` has one execution span under its continuation step with the old call ID. Decline, expiry and revocation have a pre-dispatch disposition and no execution span. Content and private proof checks include resource attributes, links and events as well as span fields.
 
 ## Adapter contract
 

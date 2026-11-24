@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 
 const contentKey = /^(?:baggage|authorization|proxy.authorization|credential(?:s|.value)?|password|secret(?:.value)?|access.token|api.key|launch.env(?:ironment)?|gen_ai\.(?:prompt|completion|system_instructions|input\.messages|output\.messages|tool\.definitions|tool\.call\.(?:arguments|result)|output\.reasoning)|exception\.(?:message|stacktrace)|(?:modular_agent\.)?(?:input\.content|question\.(?:text|body|answer)|tool\.(?:arguments|input|result|output)|history\.(?:body|payload|entries)|error\.message))$/i;
 
-export function scanExports(payloads, sentinels) {
+export function scanExports(payloads, sentinels, { exactValues = [] } = {}) {
   assert(sentinels.length && sentinels.every(text => typeof text === "string" && text.length), "Missing fixture sentinels");
   function scan(text, path) {
-    assert(!sentinels.some(sentinel => text.includes(sentinel)), `Fixture content exported at ${path}`);
+    assert(!exactValues.includes(text) && !sentinels.some(sentinel => text.includes(sentinel)), `Fixture content exported at ${path}`);
   }
   function walk(value, path) {
     if (value === null || value === undefined) return;
@@ -17,9 +17,10 @@ export function scanExports(payloads, sentinels) {
     for (const [key, child] of Object.entries(value)) {
       const at = `${path}.${index++}`;
       scan(key, at);
-      assert(!contentKey.test(key), `Forbidden telemetry field at ${at}`);
+      const proofKey = /(?:^|[._])(?:approval_?view|route_?id|question\.(?:route|value|rights))$/i;
+      assert(!proofKey.test(key) && !contentKey.test(key), `Forbidden telemetry field at ${at}`);
       if (key === "key" && typeof child === "string") {
-        assert(!contentKey.test(child), `Forbidden telemetry attribute at ${at}`);
+        assert(!proofKey.test(child) && !contentKey.test(child), `Forbidden telemetry attribute at ${at}`);
       }
       if (key === "bytesValue" && typeof child === "string") scan(Buffer.from(child, "base64").toString("utf8"), at);
       if (key === "status" && child && typeof child === "object") {

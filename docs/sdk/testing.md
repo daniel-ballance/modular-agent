@@ -28,7 +28,7 @@ The [AG-UI kit](../../conformance/agui/README.md) uses a scripted Provider, a co
 
 The [shared format](../../conformance/sdk/README.md#waiting-approval-scenarios) would need setup for the maximum and declared capabilities, authenticated polling on a session handle, a controlled clock, and barriers at answer commit and dispatch. Add assertions for absent records, exact counts, IDs, associations, `openToolCalls` and deadlines; the existing ordered `records` assertion alone cannot prove these cases. Run applicable tool placements in all four SDKs. Use commit barriers, not sleeps or retries.
 
-The binding kits own checks the single-session scenario runner cannot make: [ACP](../../conformance/acp/README.md#waiting-approval-checks) for polling, actor races and portable reopen; [AG-UI](../../conformance/agui/README.md#waiting-approval-checks) for presence routes, snapshots and mixed waits; [telemetry](../../conformance/telemetry/README.md#planned-checks-for-adr-0034) for spans. No real Provider or credentials are needed.
+The binding kits own checks the single-session scenario runner cannot make: [ACP](../../conformance/acp/README.md#waiting-approval-checks) for polling, actor races and portable reopen; [AG-UI](../../conformance/agui/README.md#waiting-approval-checks) for presence routes, snapshots and mixed waits; [telemetry](../../conformance/telemetry/README.md#waiting-approval-checks) for spans. No real Provider or credentials are needed.
 
 ## The testing kit
 
