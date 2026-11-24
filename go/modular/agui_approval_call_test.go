@@ -1,6 +1,7 @@
 package modular_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -72,6 +73,31 @@ func agApprovalViews(t *testing.T, opts ...modular.Option) (agApprovalOutcome, [
 		t.Fatalf("snapshot: HTTP %d (%v)", res.StatusCode, err)
 	}
 	return outcome, snapshot.Waiting.Questions
+}
+
+func TestAGUIWaitingApprovalRespectsQuestionGate(t *testing.T) {
+	for _, mode := range []string{"block", "redact"} {
+		t.Run(mode, func(t *testing.T) {
+			gate := modular.Plugin{Name: "hide-call", Setup: func(r *modular.Registrar) error {
+				return r.OnOutput(func(_ context.Context, b modular.OutputBatch) (modular.OutputDecision, error) {
+					for i, e := range b.Events {
+						if b.Recipient == "browser" && e.Type == "question.open" {
+							if mode == "block" {
+								return modular.OutputDecision{Block: true}, nil
+							}
+							b.Events[i].Data = bytes.ReplaceAll(e.Data, []byte("model draft"), []byte("redacted"))
+							return modular.OutputDecision{Events: &b.Events}, nil
+						}
+					}
+					return modular.OutputDecision{}, nil
+				})
+			}}
+			run, snapshot := agApprovalViews(t, modular.WithPlugin(gate), modular.WithDurability(modular.Kept), modular.WithDataDir(t.TempDir()), modular.WithLateAnswersStartTurns(true), modular.WithMaxApprovalWaitMs(30000), modular.WithSettings(modular.Settings{"approvalWait": "untilDeadline"}))
+			if run.Type != "success" || len(run.Interrupts) != 0 || len(snapshot) != 0 {
+				t.Fatalf("gated approval was offered: outcome %q, run interrupts %d, snapshot questions %d", run.Type, len(run.Interrupts), len(snapshot))
+			}
+		})
+	}
 }
 
 func TestAGUILiveApprovalCallUsesRewrittenInput(t *testing.T) {
