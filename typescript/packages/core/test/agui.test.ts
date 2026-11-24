@@ -111,6 +111,32 @@ test("listing counts committed waits per client, pages in change order and does 
   assert.deepEqual(recovered, []); assert.deepEqual(opened, [call]);
 });
 
+for (const covered of [false, true]) test(`${covered ? "covered" : "live"} approval shows the transformed call in the interrupt and snapshot`, async t => {
+  const code = 'note = "review this"\ntools.note(text=note)';
+  const rewrite = definePlugin({name:"set-code", setup(r) {
+    r.on("tool.before", ({call}) => call.name === "codemode" ? {change:{code}} : undefined, "first");
+  }});
+  const {thread, run, request} = await setup(t, {approval:"all", approvalCoversNested:covered, plugins:[rewrite],
+    tools:[tool({name:"codemode", description:"Run a script", input:{type:"object"}, run:()=>"Ran"})],
+    providers:[scriptedProvider([{toolCalls:[{name:"codemode", input:{code:"model draft"}}]}, {text:"Done"}])]});
+  const id = await thread(), path = "/threads/" + id, presence = await request(path + "/presence");
+  try {
+    const end = (await events(await run(id, [prompt("Propose a script")]))).at(-1);
+    assert.equal(end.type, "RUN_FINISHED"); assert.equal(end.outcome.type, "interrupt");
+    const [live] = end.outcome.interrupts;
+    const snap = await (await request(path)).json() as any;
+    const [copy] = snap.waiting.questions;
+    assert.equal(copy.id, live.id);
+    for (const q of [live, copy]) {
+      assert.deepEqual(q.metadata?.["modular-agent.approvalCall"], {name:"codemode", input:{code}});
+      assert.equal(q.metadata["modular-agent.coversNested"], covered || undefined);
+      assert.ok(q.message.includes(JSON.stringify({code}))); assert.doesNotMatch(q.message, /model draft/);
+    }
+    const decline = [{interruptId:live.id, status:"resolved", payload:{allow:false}}];
+    assert.equal((await events(await run(id, snap.messages, {resume:decline}))).at(-1).outcome.type, "success");
+  } finally { await presence.body?.cancel(); }
+});
+
 test("a presence opened after the turn receives a waiting approval only on its own snapshot", async t => {
   const dir = await mkdtemp(join(tmpdir(), "agui-approval-")); t.after(() => rm(dir,{recursive:true,force:true}));
   let effects = 0;
@@ -126,6 +152,7 @@ test("a presence opened after the turn receives a waiting approval only on its o
     const snap = await (await request(path)).json() as any;
     const [q] = snap.waiting.questions;
     assert.equal(q.reason,"approval"); assert.match(q.message,/bump.*amount/s); assert.ok(Date.parse(q.expiresAt));
+    assert.deepEqual(q.metadata?.["modular-agent.approvalCall"], {name:"bump", input:{amount:1}});
     const resume = [{interruptId:q.id, status:"resolved", payload:{allow:true}}];
     const other = await (await request(path,undefined,1)).json() as any;
     assert.deepEqual(other.waiting.questions,[]);
@@ -133,6 +160,37 @@ test("a presence opened after the turn receives a waiting approval only on its o
     const continuation = await events(await run(id,snap.messages,{resume}));
     assert.equal(continuation.at(-1).outcome.type,"success"); assert.equal(effects,1);
   } finally { await presence.body?.cancel(); }
+});
+
+test("changing or blocking the approval call at the output gate withholds the entire interrupt", async t => {
+  let policy: "rewrite" | "block" | "allow" = "allow";
+  const gate = definePlugin({name:"hide-code", hooks:{output({events}) {
+    const data = events[0].data as any;
+    const call = data?.interrupt?.metadata?.["modular-agent.approvalCall"];
+    if (data?.method !== "agui.interrupt" || call?.name !== "script") return;
+    if (policy === "block") return "block";
+    if (policy === "rewrite") { call.input.code = "redacted"; return {redact:events}; }
+  }}});
+  const dataDir = await mkdtemp(join(tmpdir(),"agui-gated-call-")); t.after(()=>rm(dataDir,{recursive:true,force:true}));
+  const call = {name:"script", input:{code:"PRIVATE_SCRIPT"}};
+  const {thread, run, request} = await setup(t, {dataDir, durability:"kept", approval:"all", maxApprovalWaitMs:60_000,
+    questionsOutlastTurns:true, settings:{approvalWait:"untilDeadline"}, plugins:[gate],
+    tools:[tool({name:"script", description:"Run code", input:{type:"object"}, run:()=>"Ran"})],
+    providers:[scriptedProvider([{toolCalls:[call]}])]});
+  for (const mode of ["rewrite", "block"] as const) {
+    policy = mode;
+    const id = await thread(), path = "/threads/" + id, presence = await request(path + "/presence");
+    try {
+      const es = await events(await run(id, [prompt("Run a script")]));
+      assert.deepEqual(es.at(-1).outcome, {type:"success"});
+      const hidden = await (await request(path)).json() as any;
+      assert.deepEqual(hidden.waiting.questions, []);
+      assert.doesNotMatch(JSON.stringify([es, hidden]), /PRIVATE_SCRIPT|modular-agent\.approvalCall/);
+      policy = "allow";
+      const visible = await (await request(path)).json() as any;
+      assert.deepEqual(visible.waiting.questions[0].metadata["modular-agent.approvalCall"], call);
+    } finally { await presence.body?.cancel(); }
+  }
 });
 
 test("a closure cursor replays a decision to its own client without delivering an approval", {timeout:10000}, async t => {

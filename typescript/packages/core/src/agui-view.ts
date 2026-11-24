@@ -43,11 +43,12 @@ export function pending(entries: HistoryEntry[], p: Principal): Pending[] {
 }
 export async function interrupt(api: PluginApi, id: string, p: Principal, r: InputRequest, entry: HistoryEntry, inTurn: boolean, statusOnly = false): Promise<InterruptView | undefined> {
   if (r.kind === "secret" || !statusOnly && !rights(api, id, p).includes(r.kind === "approval" ? "approve" : "answer") || r.answerers.length && !r.answerers.includes(p.actor.id)) return;
-  const call = object(entry.data) ? entry.data.call as ToolCall | undefined : undefined;
+  const call = r.kind === "approval" && object(entry.data) ? entry.data.call as ToolCall | undefined : undefined;
   if (r.kind === "approval" && (!call || call.id !== r.toolCallId)) return;
-  const wire: Interrupt = { id: r.id, reason: r.kind, message: r.kind === "approval" ? `${r.question}\n${call!.name} ${JSON.stringify(call!.input)}` : r.question,
+  const wire: Interrupt = { id: r.id, reason: r.kind, message: call ? `${r.question}\n${call.name} ${JSON.stringify(call.input)}` : r.question,
     ...(r.toolCallId ? { toolCallId: r.toolCallId } : {}), ...(r.timeLimitMs === undefined || r.whenTimeLimit === "leaveOpen" ? {} : { expiresAt: new Date(entry.time + r.timeLimitMs).toISOString() }),
-    ...(r.coversNested ? { metadata: { "modular-agent.coversNested": true } } : {}),
+    ...(call ? { metadata: { "modular-agent.approvalCall": { name: call.name, input: call.input },
+      ...(r.coversNested ? { "modular-agent.coversNested": true } : {}) } } : {}),
     ...(r.kind === "link" && r.details ? { metadata: { "modular-agent.link": r.details } } : {}),
     responseSchema: r.kind === "approval" ? { type: "object", properties: { allow: { type: "boolean" } }, required: ["allow"], additionalProperties: false }
       : r.kind === "choice" ? { type: "string", enum: r.options } : { type: "string" } };
