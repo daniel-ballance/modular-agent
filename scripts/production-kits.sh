@@ -19,7 +19,8 @@ case "$language" in
   python) base=("$repo/python/.venv/bin/modular-agent" --acp) ;;
   *) echo "unknown language: $language" >&2; exit 2 ;;
 esac
-mapfile -t ma < <(node -e '
+ma=()
+while IFS= read -r arg; do ma+=("$arg"); done < <(node -e '
   const [repo, language] = process.argv.slice(1);
   for (const arg of require(`${repo}/conformance/reference/agents/${language}.json`).command)
     console.log(arg.replaceAll("{repo}", repo));
@@ -153,22 +154,22 @@ fi
 openssl rand -hex 32 >"$work/acp-token"
 unset MODULAR_AGENT_HISTORY_URL MODULAR_AGENT_HISTORY_TOKEN_FILE MODULAR_AGENT_PLUGINS
 cd "$repo/conformance/acp"
-options=(--isolation-checks --capacity-checks --erasure-checks)
-if $erasure_only; then options=(--erasure-checks); fi
-for option in "${options[@]}"; do
-  if [ "$option" = --erasure-checks ]; then
+groups=(isolation capacity erasure)
+if $erasure_only; then groups=(erasure); fi
+for group in "${groups[@]}"; do
+  if [ "$group" = erasure ]; then
     history_service "$work/erasure"
     export MODULAR_AGENT_HISTORY_URL="$history_url" MODULAR_AGENT_HISTORY_TOKEN_FILE="$work/erasure/token"
   fi
   for launcher in ma base; do
     if [ "$launcher" = ma ]; then command=("${ma[@]}")
     else command=("${base[@]}"); fi
-    run "ACP $launcher stdio $option" node run.mjs --production-only "$option" -- "${command[@]}"
+    run "ACP $launcher stdio $group" node run.mjs --group "$group" -- "${command[@]}"
     # Go's base CLI has no ACP listener; Go ma does.
     if [ "$language:$launcher" = go:base ]; then continue; fi
     # Each production profile writes an actors policy and supplies its own token files.
     printf -v service_command '%q ' "${command[@]}"
-    run "ACP $launcher WebSocket $option" node run.mjs --production-only "$option" \
+    run "ACP $launcher WebSocket $group" node run.mjs --group "$group" \
       --connect "ws://127.0.0.1:$(free_port)/" --token-file "$work/acp-token" \
       --service-command "exec $service_command --listen \"\$MODULAR_AGENT_CONFORMANCE_URL\""
   done
