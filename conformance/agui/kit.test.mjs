@@ -12,8 +12,9 @@ import { fake } from './fake.mjs';
 import { at, deadline } from './wire.mjs';
 
 import { waiting } from './waiting.mjs';
+import { closures } from './closures.mjs';
 
-const cases = { ...basic, ...advanced, ...waiting };
+const cases = { ...basic, ...advanced, ...waiting, ...closures };
 const here = name => fileURLToPath(new URL(name, import.meta.url));
 const exec = promisify(execFile);
 
@@ -46,6 +47,14 @@ test('undeclared session skips the waiting case before requiring controls or res
     assert.match(stdout, /SKIP  waiting-restart \(session does not declare approvalsOutlastTurns\)/);
     assert.match(stdout, /0\/0 AG-UI cases passed; 1 skipped/);
   } finally { await server.close(); await rm(folder, { recursive: true, force: true }); }
+});
+
+test('wait feed absent: skip before looking for controls or other credentials', async () => {
+  const server = await fake();
+  try {
+    const peer = { api: at(server.origin, server.tokens.owner) };
+    for (const c of Object.values(closures)) assert.deepEqual(await c.run(peer), { skipped: 'thread snapshot does not offer waitCursor' });
+  } finally { await server.close(); }
 });
 
 async function run(name, fault) {
@@ -96,6 +105,26 @@ for (const [name, fault, diagnosis] of [
   ['waiting-race', 'wait-double-race', /deep-equal/],
   ['waiting-mixed-report-first', 'wait-early-ready', /first settlement/],
   ['waiting-mixed-answer-first', 'wait-rehandoff', /released exactly once/],
+  ['closure-order', 'miss-catchup', /closure in commit order/],
+  ['closure-order', 'repeat-cutover', /closure in commit order/],
+  ['closure-order', 'repeat-after', /closure in commit order/],
+  ['closure-order', 'deadline-is-decline', /closure in commit order/],
+  ['closure-order', 'lose-revocation', /closure in commit order/],
+  ['closure-order', 'unrecorded-revocation', /recorded revocation/],
+  ['closure-order', 'answer-in-notice', /closure in commit order/],
+  ['closure-routes', 'route-is-closure', /closure in commit order/],
+  ['closure-routes', 'feed-can-answer', /report is refused/],
+  ['closure-presence', 'feed-is-presence', /feed alone is not presence/],
+  ['closure-left-open', 'timeout-is-closure', /closure in commit order/],
+  ['closure-interface', 'wrong-settlement', /closure in commit order/],
+  ['closure-buffered', 'skip-source-gate', /closure in commit order/],
+  ['closure-buffered', 'skip-decision-gate', /closure in commit order/],
+  ['closure-buffered', 'changed-notice', /closure in commit order/],
+  ['closure-buffered', 'skip-watch-recheck', /no final notice/],
+  ['closure-buffered', 'comment-disclosure', /heartbeat disclosed/],
+  ['closure-cursor', 'missing-after', /HTTP status/],
+  ['closure-cursor', 'stale-wait-cursor', /cursor_expired/],
+  ['closure-cursor', 'foreign-wait-cursor', /cursor_expired/],
   ['listener', 'anonymous', /HTTP status/],
   ['tls', 'tls-client-only', /does not replace bearer/],
   ['listener', 'outside-scope', /HTTP status/],
