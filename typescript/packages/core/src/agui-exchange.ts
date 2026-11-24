@@ -32,6 +32,8 @@ export class Exchange {
   get boundary() { return { threadId: this.r.id, runId: this.runId }; }
   eligible(q: InputRequest) { return this.turn !== undefined && q.turnId === this.turn; }
   private include = (e: AgentEvent) => {
+    // Keep only the reopening flag so a live snapshot can recheck the same opening event.
+    if (e.type === "input.request.opened" && e.data.reopened && this.eligible(e.data.request)) this.r.c.presence?.reopened.add(e.data.request.id);
     if (e.type === "model.output" && e.data?.type === "text" && e.stepId) this.pieces.set(e.stepId, 1 + (this.pieces.get(e.stepId) ?? 0));
     if (e.type.startsWith(statePrefix) && e.source === this.r.binding.host.statePlugin?.name && e.data?.revisionId) this.originals.set(e.data.revisionId, { data: e.data, serial: ++this.stateSerial });
     if (e.type === "entry.added") {
