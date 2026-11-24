@@ -137,10 +137,9 @@ not change the OAuth client IDs. See the [SDK subscription API](crates/sdk/READM
 
 Telemetry checks cover endpoint and protocol selection. A scripted loopback run sent no requests without an endpoint or with `OTEL_SDK_DISABLED=true`. The OTLP receiver observed `service.name=ma-rust` on traces and metrics. A scripted turn against Phoenix showed `invoke_agent ma`, `chat script` and `execute_tool codemode` in the same trace. No model service was called. This run passed 24/24 reference checks, 188/188 stdio ACP checks and 193/193 WebSocket ACP checks.
 
-Run from `rust/` with `TMPDIR` off `/tmp`. Run the ACP kit after builds complete; it measures command startup and cancellation against fixed deadlines.
+Run from `rust/`. Run the ACP kit after builds complete; it measures command startup and cancellation against fixed deadlines.
 
 ```sh
-export TMPDIR="$HOME/.cache/ma-std-tmp"; mkdir -p "$TMPDIR"
 (cd ../conformance/acp && npm ci)
 (cd ../conformance/tools && npm ci)
 (cd ../conformance/telemetry && npm ci)
@@ -150,7 +149,7 @@ node ../conformance/reference/run.mjs --agent rust
 MODULAR_AGENT_CONFORMANCE=1 node ../conformance/acp/run.mjs -- "$PWD/target/debug/ma" --acp
 MODULAR_AGENT_CONFORMANCE=1 node ../conformance/acp/run.mjs --crash-checks -- "$PWD/target/debug/ma" --acp
 MODULAR_AGENT_CONFORMANCE=1 node ../conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- "$PWD/target/debug/ma" --acp
-mise exec -- cargo test --workspace --no-fail-fast -- --test-threads=1 > "$TMPDIR/ma-workspace.log" 2>&1
+mise exec -- cargo test --workspace --no-fail-fast -- --test-threads=1
 mise exec -- cargo fmt --all -- --check
 mise exec -- cargo clippy --workspace --all-targets -- -D warnings
 ../scripts/websocket-kits.sh rust

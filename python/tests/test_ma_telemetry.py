@@ -95,7 +95,7 @@ async def test_scripted_ma_sends_metadata_only(tmp_path, sampling):
             env = {
                 "PATH": os.environ["PATH"],
                 "HOME": str(home),
-                "TMPDIR": os.environ["TMPDIR"],
+                "TMPDIR": os.environ.get("TMPDIR") or str(tmp_path),
                 "MODULAR_AGENT_SCRIPT": str(script),
                 "OTEL_SERVICE_NAME": "ma-python-test",
                 "OTEL_EXPORTER_OTLP_HEADERS": "x-test=BASE_SENTINEL",

@@ -75,10 +75,9 @@ The telemetry tests use the OpenTelemetry in-memory exporter, a failing exporter
 From `rust/`:
 
 ```sh
-export TMPDIR="$HOME/.cache/ma-std-tmp"; mkdir -p "$TMPDIR"
 (cd ../conformance/acp && npm ci)
 (cd ../conformance/tools && npm ci)
-MODULAR_AGENT_SDK_REQUIRE=all mise exec -- cargo test --workspace --no-fail-fast -- --test-threads=1 > "$TMPDIR/rust-workspace.log" 2>&1
+MODULAR_AGENT_SDK_REQUIRE=all mise exec -- cargo test --workspace --no-fail-fast -- --test-threads=1
 mise exec -- cargo fmt --all -- --check
 mise exec -- cargo clippy --workspace --all-targets -- -D warnings
 ```

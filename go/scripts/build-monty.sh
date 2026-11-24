@@ -2,8 +2,7 @@
 # Build the exact worker that this Go client speaks to. Only build time needs network access.
 set -euo pipefail
 root=$(cd -- "$(dirname -- "$0")/../.." && pwd)
-export TMPDIR=${TMPDIR:-$HOME/.cache/ma-std-tmp}
-mkdir -p "$TMPDIR" "$root/go/.bin"
+mkdir -p "$root/go/.bin"
 bin=$root/go/.bin
 source=$bin/monty-v1.6.0-source
 revision=3f89dcbf82071896efb5e3ded507db4191e8d829
