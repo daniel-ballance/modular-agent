@@ -102,6 +102,8 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - Interface-run tools: `modular.WithInterfaceTools(...)` registers them. A binding attaches an executor with `Agent.ConnectInterfaceTools`, then pulls handoffs with `NextHandoff` (Go's form of `onHandoff`) and reports with `ReportToolResult`.
 - Approvals that wait: `WithMaxApprovalWaitMs(ms)` sets the operator bound; a session opts in with `SessionOptions.Settings["approvalWait"]` or `SetSetting(ctx, "approvalWait", "untilDeadline")`. `Questions(ctx, modular.QuestionsOptions{Present: true})` is an answerable delivery on that handle; a plain listing is not.
 - Covered approvals: `WithApprovalCoversNested(true)` with the approval plugin, default false. The approval view carries `coversNested`; each covered start records `approvalCoveredBy`.
+- For AG-UI host reads use `host := modular.AGUIHost{Origin: service.URL, Client: client}`, where `client` is an authenticated `*http.Client`. `host.WaitClosures(ctx, threadID, after)` returns `iter.Seq2[modular.WaitClosure, error]`. `host.RunReceipt(ctx, threadID, runID)` returns `(modular.RunReceipt, error)`.
+- Serve named plugin callers with `modular.ServeNamedServiceFactory(ctx, factory, modular.ServeOptions{Listen: addr, Callers: callers})`. Use `factory func(callerID string) modular.Plugin` and `callers []modular.PluginCaller`. Each entry has `CallerID`, `TokenFile` and optional `Projects`. The single-token `ServeService` and `ServeServiceFactory` forms are unchanged.
 
 ## Python
 

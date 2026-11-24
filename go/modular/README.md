@@ -185,24 +185,9 @@ With a state plugin, set `StatePlugin` and supply its current revision and JSON 
 - The dedicated Go history service implements the optional `pendingErasure: 1` profile. Keep all participating readers and writers on a coordinated service. A file/snapshot adapter that can have writers outside the service lock does not offer HTTP erasure coordination. Existing raw Go service stores without a registry do not advertise it; do not initialize an empty registry to recover missing state. The operator must fence restores. The registry blocks stale copy publication and new views. It does not serialize an external dispatch or a transport write already in progress with intent publication.
 - The Harness reconciles on acquire or authorized use and retains Provider deletion debt across restart. It has no autonomous sweep of unopened sessions. Interrupted work is settled without Runtime replay; unconfirmed physical job cleanup is recorded, not asserted. A held destination with an active job still needs its writer to stop the job or yield the lease. The kit passed **18/18** on each launcher in isolated runs. One concurrent run lost the writer before reaching the third injected fault on each launcher (**13/14** each); the cause was not established. Fault-injection failures now report the phase and recent history proxy timing and status without recording lease tokens or entry contents. A separate regression test shows that a blocked history response could prevent another session's lease from renewing. Valid renewals on the file-backed history service no longer wait for storage operations.
 
-### Exact text for docs/sdk/languages.md, Go
-
-- For AG-UI host reads use `host := modular.AGUIHost{Origin: service.URL, Client: client}`, where `client` is an authenticated `*http.Client`. `host.WaitClosures(ctx, threadID, after)` returns `iter.Seq2[modular.WaitClosure, error]`. `host.RunReceipt(ctx, threadID, runID)` returns `(modular.RunReceipt, error)`.
-- Serve named plugin callers with `modular.ServeNamedServiceFactory(ctx, factory, modular.ServeOptions{Listen: addr, Callers: callers})`. Use `factory func(callerID string) modular.Plugin` and `callers []modular.PluginCaller`. Each entry has `CallerID`, `TokenFile` and optional `Projects`. The single-token `ServeService` and `ServeServiceFactory` forms are unchanged.
-
 ### Specification findings
 
-In [Runs and events](../../docs/bindings/agui.md#runs-and-events), replace the final sentence of the “Questions or call waits and closures” row with:
-
-> Never append a closure to a closed run. A snapshot gives the current waits, not the reasons for missed closures. A client with a wait cursor can follow committed closures from that cursor.
-
-In [Run receipts](../../docs/bindings/agui.md#run-receipts), replace the first two sentences of the last paragraph with:
-
-> Return 404 `not_found` for a missing, foreign, off-branch, erased or undisclosable receipt or thread, including a receipt hidden by pending erasure or the settlement gate. If the receipt's existence is visible and its source facts pass, but the `agui.runReceipt` reply gate blocks the reply or changes either status, return 403 `output_withheld`.
-
-In [Named callers](../../docs/bindings/websocket.md#named-callers), replace “No ID or token is added to plugin messages” with:
-
-> The binding adds no caller ID or token field to `plugin/initialize`, `tools/call` or callbacks. A caller name in configuration or tool input is application data, not the listener's authenticated identity.
+None open.
 
 ### Known gaps
 
