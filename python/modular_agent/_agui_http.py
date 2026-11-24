@@ -221,7 +221,7 @@ async def listen_agui(
                     scope.get("method") == "GET"
                     and (
                         scope["path"] == "/agui/v1/threads"
-                        or scope["path"].endswith("/wait-closures")
+                        or scope["path"].endswith(("/wait-closures", "/run-receipt"))
                     )
                 )
             )

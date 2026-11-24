@@ -234,7 +234,7 @@ class Questions(Plugin):
             result.append({**q, "answerable": answerable})
         return result
 
-    async def _record(self, sid, kind, data, actor=None):
+    async def _record(self, sid, kind, data, actor=None, entry_id=None):
         es = await self.api.session("branch", session=sid)
         copies = [
             e["id"]
@@ -262,6 +262,7 @@ class Questions(Plugin):
             "append",
             session=sid,
             kind=kind,
+            **({"id": entry_id} if entry_id else {}),
             writer=self.name,
             data=data,
             copies=copies,
@@ -546,6 +547,7 @@ class Questions(Plugin):
             declined=declined,
             acting_for=d.get("acting_for"),
             actor_decision=True,
+            entry_id=d.get("_entry_id"),
         )
         if accepted is False:
             raise AgentError("Question is closed or no longer answerable", "refused")
@@ -606,6 +608,7 @@ class Questions(Plugin):
         activation=False,
         acting_for=None,
         actor_decision=False,
+        entry_id=None,
     ):
         with ot.question_answer(sid, q):
             return await self._accept_answer(
@@ -618,6 +621,7 @@ class Questions(Plugin):
                 activation=activation,
                 acting_for=acting_for,
                 actor_decision=actor_decision,
+                entry_id=entry_id,
             )
 
     async def _accept_answer(
@@ -632,6 +636,7 @@ class Questions(Plugin):
         activation=False,
         acting_for=None,
         actor_decision=False,
+        entry_id=None,
     ):
         if q["kind"] == "approval" and value == "refuse":
             value, declined = "declined", True
@@ -657,7 +662,7 @@ class Questions(Plugin):
             **{k: q[k] for k in ("call", "turn", "step") if q.get(k)},
         }
         try:
-            await self._record(sid, "question_answer", answer, actor)
+            await self._record(sid, "question_answer", answer, actor, entry_id)
         except AgentError as exc:
             if exc.code == "refused":
                 return False

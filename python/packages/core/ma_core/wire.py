@@ -496,7 +496,7 @@ def entry_out(e):
         }
     elif kind == "inputHandedBack":
         ids = d.get("inputIds") or [d["input"]]
-        r["data"] = {"inputIds": ids}
+        r["data"] = {"inputIds": ids, **({"reason": d["reason"]} if d.get("reason") else {})}
         if len(ids) == 1:
             r["inputId"] = ids[0]
     elif kind == "input":

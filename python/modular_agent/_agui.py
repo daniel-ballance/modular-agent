@@ -17,6 +17,7 @@ from starlette.responses import Response
 from starlette.types import Send
 from ._agui_http import Stream
 from ._agui_waits import WaitFeed, WaitPosition
+from ._agui_receipts import read_receipt
 from ma_core import telemetry as ot
 from ma_core.wire import provider_projection, settings_in
 from ma_harness.authority import CONNECTION_AUTHORITY
@@ -66,6 +67,7 @@ class Binding:
         from ._agent import _acp_rights, _acp_scope
 
         self.agent = agent
+        self.receipts = agent._receipt_store
         self.actors = deepcopy(list(actors))
         self.tenant = tenant
         if state_snapshot and not state_plugin:
@@ -201,16 +203,31 @@ class Binding:
                     "threads", {"threadId": view.sid, "declaration": self.agent.declaration()}
                 )
             elif req.method == "GET" and (
-                match := re.fullmatch(r"/threads/([\w-]+)(/presence|/wait-closures)?", path)
+                match := re.fullmatch(
+                    r"/threads/([\w-]+)(/presence|/wait-closures|/run-receipt)?", path
+                )
             ):
-                await view.attach(match[1])
+                if match[2] == "/run-receipt":
+                    state = await view.inspect(match[1], receipt=True)
+                    require(
+                        list(req.query_params) == ["runId"]
+                        and len(req.query_params.getlist("runId")) == 1
+                        and req.query_params["runId"]
+                    )
+                    rev = await view.h.erasure_revision(view.sid)
+                    reply = await read_receipt(view, req.query_params["runId"], state)
+                    require(rev == await view.h.erasure_revision(view.sid), "not_found")
+                    return Response(encode(reply), media_type="application/json", headers=headers)
                 if match[2] == "/wait-closures":
+                    await view.inspect(match[1])
                     require(
                         list(req.query_params.keys()) == ["after"]
                         and len(req.query_params.getlist("after")) == 1
                     )
+                    require(view.sid in view.h.sessions, "cursor_expired")
                     await WaitFeed(view).serve(req.query_params["after"], Stream(send, headers))
                     return None
+                await view.attach(match[1])
                 if match[2]:
                     await view.keep_present(Stream(send, headers))
                     return None
@@ -275,6 +292,7 @@ class View:
         self.grants: dict[str, set[str]] = {}
         self.scope = binding.scopes[self.client]
         self.sid = ""
+        self.inspected: Obj | None = None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -344,6 +362,26 @@ class View:
                 pages.popitem(last=False)
         return reply
 
+    async def inspect(self, sid: str, *, receipt: bool = False) -> Obj:
+        """Read without acquiring a writer or running recovery."""
+        require(sid.isalnum(), "not_found")
+        state = self.h.sessions.get(sid)
+        if receipt:
+            require(self.binding.receipts is not None, "not_found")
+            if await self.h._pending_erasure(sid):
+                raise Failure("not_found")
+        if receipt or state is None or state.get("writer_lost") or sid in self.h.interruptions:
+            state = await self.agent._call("history", "read", session=sid)
+        require(
+            state
+            and self.in_scope(state)
+            and self.h.can_open(state, self.actor, kind=self.principal["actor"]["kind"]),
+            "not_found",
+        )
+        self.sid, self.inspected = sid, state
+        assert state is not None
+        return cast(Obj, state)
+
     async def attach(self, sid: str) -> None:
         require(sid.isalnum(), "not_found")
         async with self.agent._lock:
@@ -368,7 +406,7 @@ class View:
         await self.check()
 
     def rights_now(self) -> set[str]:
-        s = self.h.sessions.get(self.sid)
+        s = self.h.sessions.get(self.sid) or self.inspected
         return (
             set(self.h.permissions(s, self.actor, self.grants.get(self.sid, self.rights)))
             if s and self.in_scope(s)
@@ -380,7 +418,8 @@ class View:
         rights = self.rights_now()
         require("watch" in rights, "not_found")
         require(permission in rights, "refused")
-        require(not self.h.sessions[self.sid].get("writer_lost"), "unavailable")
+        if self.inspected is None:
+            require(not self.h.sessions[self.sid].get("writer_lost"), "unavailable")
 
     async def gate(self, method: str, value: Obj) -> Obj | None:
         if self.sid:
@@ -657,6 +696,7 @@ class View:
                     "messages": messages,
                     "cursor": cursor,
                     **({"waitCursor": wait_cursor} if wait_position else {}),
+                    **({"runReceipts": 1} if self.binding.receipts else {}),
                     "lastMessageId": messages[-1]["id"] if messages else None,
                     "waiting": {
                         "questions": [i for _, i in qs.values()],
@@ -675,6 +715,7 @@ class View:
             or (
                 reply["cursor"] == cursor
                 and reply.get("waitCursor") == wait_cursor
+                and same_json(reply.get("runReceipts"), 1 if self.binding.receipts else None)
                 and same_json(
                     reply["waiting"],
                     {

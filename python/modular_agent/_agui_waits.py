@@ -85,7 +85,8 @@ async def tool_fact(v: View, entry: Obj, branch: list[Obj]) -> Obj | None:
     if not matches(cp):
         return None
     start_view, cp_view, result = await v.entry(start), await v.entry(cp), await v.entry(entry)
-    if not (start_view and cp_view and matches(cp_view) and result):
+    if not (start_view and cp_view and result):
+        # The checkpoint's route is private authority, not a display field.
         return None
     status = entry_out(entry)["data"]["status"]
     if result.get("call") != cid or entry_out(result)["data"].get("status") != status:
@@ -143,14 +144,19 @@ class WaitFeed:
         task = asyncio.current_task()
         assert task is not None
 
+        cutoff = False
+
         def committed(entries: list[Obj]) -> None:
+            nonlocal cutoff
             # This runs at the commit cutoff, not from an async gated live event.
             for e in entries:
                 if e["kind"] == "position_move" or "watch" not in v.rights_now():
+                    cutoff = True
                     task.cancel()
                     return
                 if e["kind"] in _CLOSING:
                     if live.full():
+                        cutoff = True
                         task.cancel()
                         return
                     live.put_nowait(e["id"])
@@ -171,6 +177,9 @@ class WaitFeed:
                     await stream.write(b": watching\n\n")
                     continue
                 await self.deliver(saved, eid, stream)
+        except asyncio.CancelledError:
+            if not cutoff:
+                raise
         except Failure:
             return  # No error frame or last cursor on loss of access.
         finally:

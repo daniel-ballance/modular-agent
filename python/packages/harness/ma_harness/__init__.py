@@ -66,6 +66,7 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
         self.tool_dispatches = {}
         self.followers = []
         self.delivery_observers = {}
+        self.erase_host_reads = None
         self.commit_listeners = {}  # Per-session synchronous notifications after publication.
         self.output_streams = {}
         self.continuation_waiters = {}
@@ -1144,6 +1145,17 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
             setup.append(aborted)
             e["parent"] = aborted["id"]
         batch = [*setup, e]
+        if d.get("handled") and e["kind"] == "input_queued":
+            batch.append(
+                {
+                    **e,
+                    "kind": "input_withdrawn",
+                    "id": identity(),
+                    "parent": e["id"],
+                    "content": [],
+                    "data": {"input": e["id"], "reason": "handled"},
+                }
+            )
         paired = {"turn_start": ("first_input", "input"), "job_end": ("job_report", "input_queued")}
         field, kind = paired.get(e["kind"], (None, None))
         if field in d:

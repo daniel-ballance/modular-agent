@@ -116,6 +116,8 @@ class Erasure:
                 )
             # Discard before lifting the pending mark. A failed remote request does
             # not give evidence of deletion or allow a subsequent affected model call.
+            if self.erase_host_reads:
+                self.erase_host_reads(self.sessions[sid], targets)
             for plugin in self.plugins.values():
                 if erase_provider := getattr(type(plugin), "erase_provider", None):
                     result = await erase_provider(plugin, sid, targets)

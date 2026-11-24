@@ -145,8 +145,22 @@ class Runtime(Turns, Plugin):
                         ),
                         "duplicate": True,
                     }
+        entry_id = d.pop("_entry_id", None)
         incoming = d if d.get("source") else await self.api.session("input", **d)
         if incoming.get("handled"):
+            if entry_id:
+                await self.api.session(
+                    "append",
+                    session=sid,
+                    kind="input_queued",
+                    id=entry_id,
+                    actor=actor,
+                    writer=self.name,
+                    content=d["content"],
+                    data={"when": "now", "key": key, "authority": authority},
+                    handled=True,
+                )
+                return {**incoming, "input": entry_id}
             return incoming
         d = incoming
         mode = d.get("when", "now")
@@ -167,6 +181,7 @@ class Runtime(Turns, Plugin):
             "append",
             session=sid,
             kind="input_queued",
+            **({"id": entry_id} if entry_id else {}),
             actor=actor,
             writer=self.name,
             content=d["content"],
