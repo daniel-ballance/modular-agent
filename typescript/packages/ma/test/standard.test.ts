@@ -80,6 +80,24 @@ for (const response of ["y", "n"]) test("terminal shows the entire script before
   else await assert.rejects(readFile(join(p.work, "effect")), {code:"ENOENT"});
 });
 
+test("--agui offers wait closures and receipts on the thread, not in the declaration", async t => {
+  const p=await project(t), tokenFile=join(p.dir,"token"), token=randomBytes(24).toString("hex");
+  await writeFile(tokenFile,token,{mode:0o600});
+  const child=spawn(process.execPath,[cli,"--agui","--listen","127.0.0.1:0","--token-file",tokenFile],{cwd:p.work,env:{...p.env,TMPDIR:process.env.TMPDIR},stdio:["ignore","pipe","inherit"]});
+  const closed=once(child,"exit"); t.after(async()=>{child.kill();await closed;});
+  const [url]=await Promise.race([once(createInterface({input:child.stdout}),"line"),closed.then(()=>{throw Error("ma exited before listening");})]);
+  const http=(path:string,body?:unknown)=>fetch(url+"/agui/v1"+path,{method:body===undefined?"GET":"POST",headers:{authorization:"Bearer "+token,"content-type":"application/json"},body:JSON.stringify(body)});
+  const {threadId,declaration}=await (await http("/threads",{})).json() as any;
+  assert.equal(declaration.waitCursor,undefined); assert.equal(declaration.runReceipts,undefined);
+  const path="/threads/"+threadId, view=await (await http(path)).json() as any;
+  assert.equal(view.runReceipts,1); assert.equal(typeof view.waitCursor,"string");
+  const feed=await http(path+"/wait-closures?"+new URLSearchParams({after:view.waitCursor}));
+  assert.equal(feed.headers.get("content-type"),"text/event-stream"); await feed.body!.cancel();
+  const run=await http("/run",{threadId,runId:"first",protocolVersion:"1.0",messages:[{role:"user",id:"msg",content:"Hello"}]});
+  assert.match(await run.text(),/RUN_FINISHED/);
+  assert.deepEqual(await (await http(path+"/run-receipt?runId=first")).json(),{terminal:"success",work:"completed"});
+});
+
 test("--resume-open has no effect in print mode", async t => {
   const p = await project(t);
   assert.equal((await p.run("--resume-open", "-p", "Hello")).stdout, "ok\n");
