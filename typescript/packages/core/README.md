@@ -208,12 +208,6 @@ await serve(({ callerId }) => makePluginFor(callerId), {
 
 The factory gets the authenticated ID on each successful upgrade. Pick the caller's project bounds and retained state there. Keep live calls and callbacks on that instance. The ID grants no session rights. A wrong token gets 401 before the factory runs. Empty or ambiguous tables, unsafe files, a plugin object instead of a factory, and combining `callers` with `tokenFile` fail with `invalid_composition`. The single-token service and the client's load options are unchanged.
 
-**Exact text for `docs/sdk/languages.md`, TypeScript.** Add these bullets after the service bullet:
-
-> - For named plugin callers, use `await serve(({ callerId }) => makePluginFor(callerId), { listen, callers })`. Add `tls` for a TLS listener. Each operator entry is `{ callerId, tokenFile }`. The listener authenticates before calling the factory. Neither the token nor a caller claim goes in a plugin message.
-> - `await agent.serveAgui({ listen, actors })` serves both host reads. From the thread snapshot, pass `waitCursor` as the `after` query value on `wait-closures`. When `runReceipts === 1`, pass the original `runId` as one query value on `run-receipt`. Use authenticated HTTP; neither read needs a presence stream.
-
-**Spec finding — duplicate query values.** In `docs/bindings/agui.md`, replace “A missing `after` is 400 `invalid_request`.” with “Exactly one `after` query value is required; a missing or repeated value is 400 `invalid_request`.” After “Encode the run ID as one query value.” add “After masking an inaccessible thread, return 400 `invalid_request` for a missing, empty or repeated `runId`.” This keeps adapters from choosing different values for the same request.
 
 #### Listing and resuming threads
 

@@ -81,6 +81,8 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - Subscription Providers come from `@modular-agent/subscription` (`subscriptionLogins(path)`, `chatgpt({ logins, … })`, `grok({ logins, … })`, `signIn(provider, logins, options)` and `signOut(provider, logins)`, with `provider` `"chatgpt"` or `"grok"`) and `@modular-agent/claude` (`claude(options)`, in process on Anthropic's Agent SDK). The Claude package also has the program the Rust and Go SDKs start.
 - Approvals that wait: set `maxApprovalWaitMs` in `createAgent`; a session opts in with `approvalWait: "untilDeadline"` at creation or through `session.setSetting`. `session.questions({ present: true })` is an answerable delivery on that handle; a plain listing is not.
 - Covered approvals: `createAgent({ approval: "ask", approvalCoversNested: true })`, default false. The approval view carries `coversNested`; each covered start records `approvalCoveredBy`.
+- For named plugin callers, use `await serve(({ callerId }) => makePluginFor(callerId), { listen, callers })`. Add `tls` for a TLS listener. Each operator entry is `{ callerId, tokenFile }`. The listener authenticates before calling the factory. Neither the token nor a caller claim goes in a plugin message.
+- `await agent.serveAgui({ listen, actors })` serves both host reads. From the thread snapshot, pass `waitCursor` as the `after` query value on `wait-closures`. When `runReceipts === 1`, pass the original `runId` as one query value on `run-receipt`. Use authenticated HTTP; neither read needs a presence stream.
 
 ## Go
 
