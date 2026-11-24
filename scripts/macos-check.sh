@@ -71,7 +71,7 @@ step 'Python: install ma and Monty' bash -c 'cd python && uv sync --locked --pyt
 step 'Rust: workspace tests' bash -c 'cd rust && mise exec -- cargo test --locked --workspace --no-fail-fast -- --test-threads=1'
 step 'TypeScript: tests' bash -c 'cd typescript && npm test'
 step 'TypeScript: tests with remote parts' bash -c 'cd typescript && MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test'
-step 'TypeScript: Claude sidecar tests' bash -c 'cd typescript/sidecars/claude && npm ci --silent && npm test'
+step 'TypeScript: Claude sidecar tests' bash -c 'cd typescript && npm test --workspace @modular-agent/claude'
 step 'Go: tests' bash -c 'cd go && mise exec -- go test -count=1 ./...'
 step 'Go: race detector' bash -c 'cd go && mise exec -- go test -race -count=1 ./modular/... ./cmd/ma/...'
 for runtime in transient durable; do

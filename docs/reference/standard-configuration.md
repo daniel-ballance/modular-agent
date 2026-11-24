@@ -7,7 +7,7 @@ The standard configuration is the reference implementation of layer 4 ([ADR 0024
 ## Rules for every implementation
 
 - **Built only on its language's SDK.** It uses the public API of that SDK ([`docs/sdk`](../sdk/README.md)) and nothing else from the base build. When it needs something the SDK cannot give, the SDK gains it first, then the SDK specification records it.
-- **One language.** It is written in its own language. The one exception is the Claude Provider, which needs the Claude Agent SDK for TypeScript: the Rust, Go and Python implementations load [`typescript/sidecars/claude`](../../typescript/sidecars/claude/README.md) as a process plugin. The TypeScript implementation may load it in process.
+- **One language.** It is written in its own language. Rust and Go load the [TypeScript Claude Provider](../../typescript/packages/claude/README.md) as a process plugin. TypeScript and Python can use their native Claude Agent SDKs.
 - **The same product.** Commands, options, file names and formats, tool names, inputs, descriptions and limits, the prompt's structure and wording, and error messages a person reads are the same in all four. The Rust implementation's texts are the reference: the tool definitions in `rust/crates/tools-files` and `rust/crates/tools-code`, the prompt in `rust/crates/standard/src/prompt.rs` and the skills listing in `rust/crates/standard/src/skills.rs`. A difference is a bug in one of them, fixed by changing this page or the code that is wrong.
 - **Shared configuration, separate state.** All four read the same configuration folder, so a person can switch implementation without setting anything up again. Each keeps its sessions in its own state folder, because their native session files differ.
 
