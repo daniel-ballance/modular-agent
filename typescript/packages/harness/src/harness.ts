@@ -827,7 +827,7 @@ export class Harness {
 				const unit = this.reservations.limits.settlementBytes;
 				for (const e of own) {
 					if (e.kind === "inputRequest" && !e.erased && !closed.has(requestIdOf(e))) {
-						this.reservations.reserve(s, `question:${requestIdOf(e) ?? readRequest(e).id}`, { storageBytes: 3 * unit }, true);
+						this.reservations.reserve(s, `question:${e.requestId}`, { storageBytes: 3 * unit }, true);
 					}
 					if (e.kind === "turnStart" && e.turnId && !ended.has(e.turnId)) this.reservations.reserve(s, `turn:${e.turnId}`, { storageBytes: 2 * unit }, true);
 					if (e.kind === "modelRequest" && e.stepId && !answered.has(e.stepId) && !ended.has(e.turnId)) {
@@ -2164,8 +2164,8 @@ export class Harness {
 			if (this.receiptOperation.getStore()) {
 				await this.commit(s, [
 					{kind:"inputAccepted", writer:"harness", modelVisible:false, inputId, actorId:options.actorId,
-						data:{inputId, key:options.key, when:"now", taken:"now", content}},
-					{kind:"inputHandedBack", writer:"harness", modelVisible:false, inputId, data:{inputId, reason:"handled"}},
+						data:{key:options.key, when:"now", taken:"now", content}},
+					{kind:"inputHandedBack", writer:"harness", modelVisible:false, inputId, data:{reason:"handled"}},
 				]);
 			}
 			let output: string | void = undefined;
@@ -2232,7 +2232,7 @@ export class Harness {
 		try { await this.commit(s, [{
 			kind: "inputAccepted", writer: "harness", modelVisible: false, actorId: q.actorId, inputId: q.id, sources: q.sources,
 			jobId: q.startedBy.kind === "job" ? q.startedBy.id : undefined,
-			data: { inputId: q.id, key: q.key, when: q.when, ...(q.startedBy.kind === "job" && !q.releasedBy ? { parked: q.when === "propose" } : {}), content: q.content, releasedBy: q.releasedBy, submittedBy: q.delegatedBy, taken, connectionRights: q.connectionRights, rights: q.startingRights,
+			data: { key: q.key, when: q.when, ...(q.startedBy.kind === "job" && !q.releasedBy ? { parked: q.when === "propose" } : {}), content: q.content, releasedBy: q.releasedBy, submittedBy: q.delegatedBy, taken, connectionRights: q.connectionRights, rights: q.startingRights,
 				authorizers: authorizers.map(actorId => ({ sessionId: s.id, actorId })) },
 		}]); }
 		catch (error) {
@@ -2281,7 +2281,7 @@ export class Harness {
 
 	private async handBack(s: Session, queued: QueuedInput[], reason: string): Promise<void> {
 		const inputIds = queued.filter((q) => s.admissions.has(q.id)).map((q) => q.id);
-		if (inputIds.length) await this.commit(s, inputIds.map((inputId) => ({ kind: "inputHandedBack", writer: "harness", modelVisible: false, inputId, data: { inputId, reason } })));
+		if (inputIds.length) await this.commit(s, inputIds.map((inputId) => ({ kind: "inputHandedBack", writer: "harness", modelVisible: false, inputId, data: { reason } })));
 		for (const q of queued) this.emit(s, reason === "withdrawn" ? "input.withdrawn" : "input.handedBack",
 			{ inputId: q.id, content: q.content, reason }, "harness");
 	}
@@ -2666,7 +2666,7 @@ export class Harness {
 		const sources = jobId ? s.order.filter((id) => { const e = s.entries.get(id)!; return e.jobId === jobId && e.kind === "jobEnded"; }) : undefined;
 		return {
 			kind: "input", writer: "harness", modelVisible: true, turnId, actorId: q.actorId, jobId, inputId: q.id, sources: [...(sources ?? []), ...(q.sources ?? [])],
-			message: { role: "user", content: q.content }, data: { inputId: q.id, key: q.key, releasedBy: q.releasedBy, delegatedBy: q.delegatedBy, authorityActors: q.authorityActors, connectionRights: q.connectionRights, rights: q.startingRights },
+			message: { role: "user", content: q.content }, data: { key: q.key, releasedBy: q.releasedBy, delegatedBy: q.delegatedBy, authorityActors: q.authorityActors, connectionRights: q.connectionRights, rights: q.startingRights },
 		};
 	}
 
@@ -4023,7 +4023,7 @@ export class Harness {
 	private recordedOpenQuestionEntries(s: Session, branch: HistoryEntry[]) {
 		const settled = new Set(s.order.map(id => s.entries.get(id)!).filter(e =>
 			e.kind === "inputAnswer" || e.kind === "inputClosed" || e.kind === "secretAnswerAccepted").map(requestIdOf));
-		return branch.filter(e => e.kind === "inputRequest" && !s.copied.has(e.id) && !e.erased && !settled.has(e.requestId ?? readRequest(e).id));
+		return branch.filter(e => e.kind === "inputRequest" && !s.copied.has(e.id) && !e.erased && e.requestId && !settled.has(e.requestId));
 	}
 
 	private recordedOpenRequests(s: Session): InputRequest[] {
@@ -4048,7 +4048,7 @@ export class Harness {
 		const bound = (request as BoundRequest).boundCall;
 		if (bound && !isDeepStrictEqual(bound, draft.boundCall)) return undefined;
 		if (branch.some((e) => e.kind === "inputClosed" && (e.data as { requestId: string }).requestId === request.id)) return undefined;
-		const answered = branch.find((e) => e.kind === "inputAnswer" && !e.erased && (e.data as { requestId: string }).requestId === request.id);
+		const answered = branch.find((e) => e.kind === "inputAnswer" && !e.erased && e.requestId === request.id);
 		if (!answered) return { request };
 		const body = answered.data as Answer & { answer?: Answer };
 		const answer = body.answer ?? body;
@@ -4509,7 +4509,7 @@ export class Harness {
 		const branch = s.branch();
 		const kept = s.order.map((id) => s.entries.get(id)!);
 		const results = new Set(kept.filter((e) => e.kind === "toolResult").map((e) => e.toolCallId));
-		const continued = new Set(kept.filter((e) => e.kind === "turnStart").map((e) => e.continuesTurnId ?? (e.data as { continuesTurnId?: string } | undefined)?.continuesTurnId));
+		const continued = new Set(kept.filter((e) => e.kind === "turnStart").map((e) => e.continuesTurnId));
 		const open = new Set(branch.flatMap((e) => e.kind === "turnEnd" && !e.erased && (origin ? e.turnId === origin : !continued.has(e.turnId)) ? (e.data as { result?: TurnOutcome["result"] }).result?.openToolCalls ?? [] : []));
 		const calls: InterruptedTurn["calls"] = [];
 		const handoffs = this.interfaceRecords(s);
@@ -4724,7 +4724,7 @@ export class Harness {
 							queued = { id: this.newId(), actorId: job.actorId ?? "harness", when: this.jobReportsStartTurns ? "after" : "propose", key: `job:${job.id}`, kind: "input",
 								startedBy: { kind: "job", id: job.id }, startingRights: rights, sources: [end.id!], content: content ?? [] };
 							drafts.push({ kind: "inputAccepted", writer: "harness", modelVisible: false, inputId: queued.id, actorId: queued.actorId, jobId: job.id,
-								sources: queued.sources, data: { inputId: queued.id, key: queued.key, content: queued.content, when: queued.when, taken: queued.when === "propose" ? "proposed" : "after", parked: queued.when === "propose", rights, authorizers: (kept.actors ?? []).map(actorId => ({ sessionId: s.id, actorId })) } });
+								sources: queued.sources, data: { key: queued.key, content: queued.content, when: queued.when, taken: queued.when === "propose" ? "proposed" : "after", parked: queued.when === "propose", rights, authorizers: (kept.actors ?? []).map(actorId => ({ sessionId: s.id, actorId })) } });
 						}
 						await this.commit(s, drafts);
 						if (queued) this.reservations.transfer(s, `job:${job.id}`, `input:${queued.id}`, {
@@ -5143,8 +5143,8 @@ function eraseCopies(origin: Session, ids: string[], sessions: Map<string, Sessi
 						seen.add(id);
 					}
 				}
-				const inputId = e.inputId ?? (e.data as { inputId?: string } | undefined)?.inputId;
-				const takingInput = inputId && erased.some((x) => (x.inputId ?? (x.data as { inputId?: string } | undefined)?.inputId) === inputId);
+				const inputId = e.inputId;
+				const takingInput = inputId && erased.some((x) => x.inputId === inputId);
 				if (links || callCopy || turnResult || endedTurnStart || jobCopy || startedByCall || ancestry || takingInput) grew = add(session, e.id) || grew;
 			}
 		}
@@ -5163,11 +5163,12 @@ function approvalKey(binding?: ApprovalBinding): string {
 type BoundRequest = InputRequestDraft & { coversNested?: true; boundCall?: Pick<ToolCall, "name" | "input"> };
 
 function requestIdOf(entry: HistoryEntry): string | undefined {
-	return entry.requestId ?? (entry.data as { requestId?: string } | undefined)?.requestId;
+	return entry.requestId;
 }
 
 function readRequest(entry: HistoryEntry): InputRequest {
 	const request = (entry.data as { request: InputRequest }).request;
+	if (!entry.requestId || entry.requestId !== request.id) throw failure("unavailable", "Question identity does not match its envelope");
 	return { ...request, sessionId: entry.sessionId, answerers: request.answerers ?? [], toolCallId: entry.toolCallId ?? request.toolCallId ?? undefined, turnId: entry.turnId ?? request.turnId ?? undefined };
 }
 

@@ -4,14 +4,7 @@ import { erasedEntry } from "./types.js";
 import type { Actor, AgentEvent, Answer, ContentPart, HistoryEntry, InputRequest, Job, ModelMessage, StoredSession } from "./types.js";
 
 export function inputIdOf(entry: HistoryEntry): string | undefined {
-	return entry.inputId ?? (entry.data as { inputId?: string } | undefined)?.inputId;
-}
-
-export function inputHandedBackIds(entry: HistoryEntry): string[] {
-	if (entry.inputId) return [entry.inputId];
-	if (entry.inputIds) return entry.inputIds;
-	const id = inputIdOf(entry);
-	return id ? [id] : (entry.data as { inputIds?: string[] } | undefined)?.inputIds ?? [];
+	return entry.inputId;
 }
 
 export function inputKeyScope(key: string, actorId?: string, submittedBy = actorId): string {
@@ -130,8 +123,8 @@ export class Session {
 		// A key is remembered for the session's life, across restarts, so it is rebuilt from the record.
 
 		if (entry.erased) {
-			if (entry.kind === "input" || entry.kind === "inputHandedBack") {
-				for (const id of entry.inputId ? [entry.inputId] : entry.inputIds ?? []) { this.admissions.delete(id); this.proposals.delete(id); }
+			if ((entry.kind === "input" || entry.kind === "inputHandedBack") && entry.inputId) {
+				this.admissions.delete(entry.inputId); this.proposals.delete(entry.inputId);
 			}
 			if (!existing && entry.kind !== "position") this.position = entry.id;
 			return;
@@ -143,7 +136,8 @@ export class Session {
 					connectionRights?: QueuedInput["connectionRights"];
 					key?: string; content: ContentPart[]; when: InputTiming; releasedBy?: string; submittedBy?: string; delegatedBy?: string; taken?: InputReceipt["taken"]; parked?: boolean;
 				};
-				const inputId = inputIdOf(entry)!;
+				const inputId = entry.inputId;
+				if (!inputId || !Array.isArray(content) || !entry.jobId && !taken) throw new Error("Incomplete input admission");
 				const actorId = entry.actorId!;
 				const startedBy = entry.jobId ? { kind: "job" as const, id: entry.jobId } : { kind: "actor" as const, id: actorId };
 				const queued = { id: inputId, actorId, key, content, when, releasedBy, delegatedBy, time: entry.time, kind: "input", startedBy, connectionRights, startingRights: rights };
@@ -151,19 +145,16 @@ export class Session {
 				if (when === "propose" || parked === true && !releasedBy) this.proposals.set(inputId, queued);
 				else this.proposals.delete(inputId);
 				const scoped = key && inputKeyScope(key, actorId, submittedBy ?? delegatedBy);
-				if (scoped && !this.keys.has(scoped) && !this.erasedKeys.has(scoped)) this.keys.set(scoped, { inputId, taken: taken ?? (when === "propose" ? "proposed" : when === "steer" ? "inTurn" : when) });
+				if (scoped && !this.keys.has(scoped) && !this.erasedKeys.has(scoped)) this.keys.set(scoped, { inputId, taken: taken ?? (parked ? "proposed" : "after") });
 				break;
 			}
 			case "inputHandedBack":
-				for (const id of entry.inputId ? [entry.inputId] : (entry.data as { inputIds?: string[]; inputId?: string })?.inputIds ?? ((entry.data as { inputId?: string })?.inputId ? [(entry.data as { inputId: string }).inputId] : [])) { this.admissions.delete(id); this.proposals.delete(id); }
+				if (entry.inputId) { this.admissions.delete(entry.inputId); this.proposals.delete(entry.inputId); }
 				break;
 			case "input": {
-				const { key, delegatedBy } = (entry.data ?? {}) as { key?: string; delegatedBy?: string };
 				const inputId = inputIdOf(entry);
 				if (inputId) {
 					this.admissions.delete(inputId);
-					const scoped = key && inputKeyScope(key, entry.actorId, delegatedBy);
-					if (scoped && !this.keys.has(scoped) && !this.erasedKeys.has(scoped)) this.keys.set(scoped, { inputId, taken: "now" });
 				}
 				break;
 			}

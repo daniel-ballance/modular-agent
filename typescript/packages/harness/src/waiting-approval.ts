@@ -36,7 +36,7 @@ export function waitingApprovals(s: Session): Map<string, WaitingApproval> {
 		const cp = pending?.data as { requestIds?: string[]; toolStartedId?: string } | undefined;
 		const response = branch.find(e => entry.sources?.includes(e.id) && e.kind === "response" && !e.erased && e.turnId === entry.turnId && e.stepId === entry.stepId);
 		const offer = branch.find(e => e.kind === "modelRequest" && !e.erased && e.turnId === entry.turnId && e.stepId === entry.stepId);
-		const decisions = own.filter(e => e.kind === "inputAnswer" && (e.requestId ?? (e.data as Answer)?.requestId) === r.id);
+		const decisions = own.filter(e => e.kind === "inputAnswer" && e.requestId === r.id);
 		const decision = decisions[0], answer = decision?.data as (Answer & { approvalView?: ApprovalProof }) | undefined;
 		const proof = answer?.approvalView;
 		const end = branch.find(e => e.kind === "turnEnd" && !e.erased && e.turnId === entry.turnId && (e.data as TurnOutcome)?.outcome?.kind === "completed" && (e.data as TurnOutcome)?.result?.openToolCalls?.includes(id));

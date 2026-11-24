@@ -48,15 +48,7 @@ export function historyTombstone(e: JsonObject): JsonObject {
 		if (typeof e[k] === "string") t[k] = e[k];
 	}
 	const d = object(e.data) ? e.data : undefined;
-	if (kind === "inputAccepted" || kind === "input" || kind === "inputHandedBack") {
-		if (!Object.hasOwn(e, "inputId") && id(d?.inputId)) t.inputId = d.inputId;
-		if (kind === "inputHandedBack" && !Object.hasOwn(e, "inputId") && !(d && Object.hasOwn(d, "inputId")) && ids(d?.inputIds) && d.inputIds.length) t.inputIds = d.inputIds;
-	}
-	if ((kind === "inputRequest" || kind === "inputAnswer") && !Object.hasOwn(e, "requestId")) {
-		if (id(d?.requestId)) t.requestId = d.requestId;
-		else if (kind === "inputRequest" && object(d?.request) && id(d.request.id)) t.requestId = d.request.id;
-	}
-	if (kind === "turnStart" && !Object.hasOwn(e, "continuesTurnId") && id(d?.continuesTurnId)) t.continuesTurnId = d.continuesTurnId;
+
 	if (ids(e.sources)) t.sources = e.sources;
 	const usage = kind === "response" && object(e.message) ? e.message.usage : kind === "jobEnded" || kind === "turnEnd" ? d?.usage : undefined;
 	if (object(usage) && ["input", "output", "cacheRead", "cacheWrite"].every((k) => count(usage[k]) !== undefined) && nonnegativeNumber(usage.cost)) {
