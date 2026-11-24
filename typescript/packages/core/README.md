@@ -219,7 +219,6 @@ Use `encodeHistoryJson`, `parseHistoryJson` and `equalHistoryJson` to preserve o
 
 ## Findings
 
-**Empty continuation over the plugin binding.** The current served Runtime registers `interfaceTools: true` to accept an empty inherited call list. There need not be an Interface tool in the session. The approval deadline or a decline can settle the only call before the continuation starts. In [the plugin binding](../../../docs/bindings/plugin.md#the-host-asks-the-runtime), replace “An empty `calls` does not skip the continuation's model work.” with: “An empty `calls` does not skip the continuation's model work. When the session declares `approvalsOutlastTurns`, the host also sends an empty list if all waiting calls have already settled. It does not need to offer Interface tools to do this.”
 
 These are proposed documentation replacements, not changes to the specification.
 
