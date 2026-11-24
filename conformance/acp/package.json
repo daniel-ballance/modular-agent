@@ -5,5 +5,6 @@
   "type": "module",
   "description": "Conformance kit for the modular-agent-acp/1 ACP host binding",
   "bin": { "ma-acp-conformance": "run.mjs" },
+  "scripts": { "test": "node --test *.test.mjs" },
   "dependencies": { "@agentclientprotocol/sdk": "2.7.0" }
 }
