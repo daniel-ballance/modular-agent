@@ -38,3 +38,4 @@ The records keep the original decisions and evidence. [Contracts](../contracts.m
 | [0032](0032-telemetry.md) | Harness-owned OpenTelemetry instrumentation and trace continuity across restart | Accepted | [Telemetry profile](../telemetry.md) |
 | [0033](0033-interface-tools-and-ag-ui.md) | Interface-run tools and AG-UI over HTTP and SSE | Accepted | [AG-UI binding](../bindings/agui.md) |
 | [0034](0034-approvals-that-wait.md) | Let a session keep an unstarted call for a later approval, with a deadline | Accepted | [Approval policy](../contracts.md#approval-policy) |
+| [0035](0035-host-limits-from-the-ops-desk.md) | Report wait closures and run receipts per thread; authenticate named callers at a plugin listener | Proposed | Today: [AG-UI reconnect](../bindings/agui.md#output-gate-errors-and-reconnect), [plugin services](../sdk/placement.md#services) |
