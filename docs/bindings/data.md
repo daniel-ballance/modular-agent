@@ -147,7 +147,7 @@ A supplied key MUST NOT start with `call:`. For an unkeyed tool question the hos
 
 ### Waiting approval records
 
-Accepted with `approvalsOutlastTurns`, not yet implemented ([core rules](../contracts.md#approvals-that-wait)). Only the Harness writes the following fields. A question draft, Runtime record, Interface answer or client copy of history cannot set them.
+Under `approvalsOutlastTurns` ([core rules](../contracts.md#approvals-that-wait)). Only the Harness writes the following fields. A question draft, Runtime record, Interface answer or client copy of history cannot set them.
 
 1. **Open.** In one batch commit `inputRequest` then `toolPending` in the origin's turn, step and call scope. The request has `kind: "approval"`, `answerable: false` at publication, `approvalWait: "untilDeadline"` (a field on the recorded request, absent on all other requests), effective `timeLimitMs`, absolute `deadlineAt` and `whenTimeLimit: "decline"`. It is not a `leaveOpen` timeout. Keep the exact call, source and definition alongside the request as for live approval. List the response entry in the request entry's `sources`. The pending record names just this request in `data.requestIds`, with no `toolStartedId`. There can be no earlier start or terminal result for this call. Neither record authorizes execution.
 2. **Answer.** Only a non-copied completed `turnEnd` listing the call on the current branch makes this request answerable. Bind each unchanged delivery to its request entry, recipient and live answer route. Recheck current eligibility and the unchanged view before accepting. For a committed allow, `inputAnswer.data` is the usual value Answer plus `approvalView: { requestEntryId: Id, submittedBy: Id, routeId: Id, rights: Rights }`. List the request entry ID in `sources`. `actorId` is the answering actor; `submittedBy` is the authenticated principal, even when they are the same. `rights` is their effective intersection including the connection ceiling. `routeId` identifies the operator's binding route and scope, not a socket or credential. These fields attest to delivery of the unchanged approval view of that immutable request. They are not a saved allowance. The Harness MUST omit `approvalView` from model and ordinary recipient views. A decline or system closure needs no such proof.
@@ -334,7 +334,7 @@ On reopen the Harness MUST repair a legacy reported end without a matching admis
 | `maxSteps` | positive Count | Agent's configured default, otherwise no cap |
 | `maxOutput` | positive Count | Agent's configured default, otherwise Provider default |
 | `approval` | `off`, `ask`, `all` or `never` | [Core default](../contracts.md#tool-dispatch) |
-| `approvalWait` (accepted, not yet implemented; requires `approvalsOutlastTurns`) | `live` or `untilDeadline` | `live` |
+| `approvalWait` (requires `approvalsOutlastTurns`) | `live` or `untilDeadline` | `live` |
 | `modelTools` | Array of tool names, or `null` | Same as `null`: every registered tool that allows the model as a caller. See [Settings](../contracts.md#settings). |
 | `settings` | Object of changes by key; no nested `settings` | No change |
 
@@ -447,7 +447,7 @@ While an intent is unresolved, the Harness MUST block project work and keep othe
 
 ## Changes
 
-- **Accepted 2026-11-23, not yet implemented ([ADR 0034](../adr/0034-approvals-that-wait.md)).** Under `approvalsOutlastTurns`, add the `approvalWait` setting, a marked request paired with a pre-dispatch `toolPending`, and a private view binding on a late allow. No new record kind or input starts the continuation.
+- **Accepted 2026-11-23, implemented in 0.3.0 ([ADR 0034](../adr/0034-approvals-that-wait.md)).** Under `approvalsOutlastTurns`, add the `approvalWait` setting, a marked request paired with a pre-dispatch `toolPending`, and a private view binding on a late allow. No new record kind or input starts the continuation.
 
 - **Accepted with [ADR 0033](../adr/0033-interface-tools-and-ag-ui.md).** Add a private Interface handoff checkpoint and result-only continuations. Existing call and question forms are unchanged.
 

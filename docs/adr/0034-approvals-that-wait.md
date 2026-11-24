@@ -32,7 +32,7 @@ The [ops desk](../../demos/ops-desk/DESIGN.md#findings) uses three-minute deadli
 
 Accepted as recommended on 2026-11-23: the per-session opt-in for the pre-dispatch gate on top-level model calls to server tools; an explicit finite operator maximum, applied through dispatch; and consent only from fresh, unchanged delivery on the answering route. The specification is accepted in 0.2.0; implementations follow in 0.3.0.
 
-This changes no edition to pin. No build implements it yet.
+This changes no edition to pin. All four SDKs implement it from 0.3.0, including the amendment below; `ma` uses it when approval is configured.
 
 ## Amendment: approvals that cover nested calls
 
