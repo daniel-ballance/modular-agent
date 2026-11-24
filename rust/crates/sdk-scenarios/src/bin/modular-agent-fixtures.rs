@@ -1,5 +1,8 @@
 //! The Rust fixture program (docs/sdk/testing.md#the-fixture-plugins): serves the named
 //! fixture plugin over stdio or WebSocket.
+#[path = "acp_waiting/mod.rs"]
+mod acp_waiting;
+
 use modular_agent::{ServeOptions, serve, serve_websocket, testing::fixtures::fixture};
 use sdk_scenarios::telemetry;
 use std::io::Write;
@@ -7,6 +10,13 @@ use std::io::Write;
 #[tokio::main]
 async fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args == ["acp-waiting"] {
+        if let Err(error) = acp_waiting::serve().await {
+            eprintln!("ACP waiting fixture: {error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let (name, options) = match args.as_slice() {
         [name] => (name, None),
         [name, flag, listen, token_flag, token_file]
@@ -51,8 +61,6 @@ async fn main() {
             Ok(stopped?)
         }
         .await
-    } else if std::env::var(telemetry::HANDSHAKE).as_deref() == Ok("no-acceptance") {
-        modular_agent::testing::serve_without_trace_acceptance(plugin).await
     } else {
         serve(plugin).await
     };

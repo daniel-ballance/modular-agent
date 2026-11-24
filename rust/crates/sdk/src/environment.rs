@@ -259,16 +259,8 @@ impl Adapter {
                 json!({})
             }
             "env/exec" => {
-                let timeout = match p.get("timeoutMs") {
-                    None | Some(Value::Null) => None,
-                    Some(v) => {
-                        let ms = v
-                            .as_u64()
-                            .filter(|ms| *ms <= 9_007_199_254_740_991)
-                            .ok_or_else(|| Error::new(Code::InvalidRequest, "invalid timeout"))?;
-                        (ms > 0).then(|| Duration::from_millis(ms))
-                    }
-                };
+                let timeout = agent_api::wire::exec_timeout(&p)
+                    .map_err(|e| Error::new(Code::InvalidRequest, e.to_string()))?;
                 cx.output = Some(Arc::new(move |chunk| {
                     peer.notify("env/output", json!({"parentRequestId":id,"chunk":chunk}));
                     Box::pin(async { Ok(()) })

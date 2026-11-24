@@ -87,7 +87,7 @@ fn matches_registration(decision: &Allowance, current: Option<&(Value, ToolDefin
 impl Runtime for RemoteRuntime {
     fn declaration(&self) -> Value {
         let s = &self.registration["supports"];
-        json!({"id":self.registration["id"],"transient":s["continuesAfterRestart"]!=true,"input_during_turn":s["inputDuringTurn"]==true,"continues_after_restart":s["continuesAfterRestart"]==true,"waits_through_restart":s["waitingThroughRestart"]==true,"rewinding":false,"cancel_cancels_jobs":false,"interface_tools":s["interfaceTools"]==true})
+        json!({"id":self.registration["id"],"transient":s["continuesAfterRestart"]!=true,"input_during_turn":s["inputDuringTurn"]==true,"continues_after_restart":s["continuesAfterRestart"]==true,"waits_through_restart":s["waitingThroughRestart"]==true,"rewinding":false,"cancel_cancels_jobs":false,"interface_tools":s["interfaceTools"]==true,"nested_tools":self.ui_runtime.as_ref().is_some_and(|local| local.declaration()["nested_tools"] == true)})
     }
     async fn run(&self, api: Api, input: TurnInput) -> Result<TurnResult> {
         let continuation = api
@@ -115,28 +115,28 @@ impl Runtime for RemoteRuntime {
             .into_iter()
             .find(|e| e.kind == "turn.start" && e.scope.turn == scope.turn)
             .ok_or_else(|| anyhow!("missing turn start"))?;
-        let state = start.content.unwrap_or(Value::Null);
-        let model = if let Some(name) = state["model"]["name"].as_str() {
-            let mut providers = api
-                .capability_names("provider.")
-                .iter()
-                .map(|key| capability::<dyn Provider>(api.as_ref(), key))
-                .collect::<Result<Vec<_>>>()?;
-            providers.retain(|p| p.catalog().iter().any(|m| m.name == name));
-            ensure!(providers.len() == 1, "saved model is unavailable: {name}");
-            providers[0].bind(name)?
-        } else {
-            capability::<dyn ModelSelection>(api.as_ref(), "model.selection")?
-                .select(api.clone(), &scope)
-                .await?
-        };
+        let state = start.content.ok_or_else(|| anyhow!("erased turn start"))?;
+        let name = wire::string(&state["model"], "name")?;
+        let mut providers = api
+            .capability_names("provider.")
+            .iter()
+            .map(|key| capability::<dyn Provider>(api.as_ref(), key))
+            .collect::<Result<Vec<_>>>()?;
+        providers.retain(|p| p.catalog().iter().any(|m| m.name == name));
+        ensure!(providers.len() == 1, "saved model is unavailable: {name}");
+        ensure!(state["settings"].is_object(), "missing saved turn settings");
         let input = TurnInput {
-            model,
-            system: state["system"].as_str().unwrap_or_default().into(),
-            tools: serde_json::from_value(state["tools"].clone()).unwrap_or_default(),
-            settings: state.get("settings").cloned().unwrap_or(data.settings),
+            model: providers[0].bind(name)?,
+            system: wire::string(&state, "system")?.into(),
+            tools: serde_json::from_value(state["tools"].clone())?,
+            settings: state["settings"].clone(),
             cancel: api.cancellation(&scope.session)?,
-            resume: serde_json::from_value(state["resume"].clone()).unwrap_or_default(),
+            resume: state
+                .get("resume")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()?
+                .unwrap_or_default(),
             scope: scope.clone(),
         };
         api.emit(Event::new(&scope, "turn.resumed", json!({})))
@@ -146,6 +146,19 @@ impl Runtime for RemoteRuntime {
             .await?;
         api.emit(Event::new(&scope, "turn.result", json!(result)))
             .await
+    }
+    async fn nested_tool(
+        &self,
+        api: Api,
+        scope: Scope,
+        call: ToolCall,
+        cancel: CancellationToken,
+    ) -> Result<ToolResult> {
+        let local = self
+            .ui_runtime
+            .as_ref()
+            .ok_or_else(|| anyhow!("no host Runtime for nested calls"))?;
+        local.nested_tool(api, scope, call, cancel).await
     }
     async fn tool(&self, api: Api, scope: Scope, call: ToolCall) -> Result<ToolResult> {
         let ui = self
@@ -169,18 +182,16 @@ impl RemoteRuntime {
             .find(|e| e.kind == "turn.start" && e.scope.turn == scope.turn);
         let started_by = start
             .as_ref()
-            .and_then(|e| e.content.as_ref())
+            .and_then(|s| s.content.as_ref())
             .and_then(|v| v.get("startedBy"))
-            .cloned()
-            .unwrap_or_else(|| {
-                if !input.resume.is_empty() {
-                    json!({"kind":"answer","id":input.resume[0].id})
-                } else if let Some(job) = &scope.job {
-                    json!({"kind":"job","id":job})
-                } else {
-                    json!({"kind":"actor","id":scope.actor})
-                }
-            });
+            .filter(|by| {
+                by["id"].is_string()
+                    && matches!(
+                        by["kind"].as_str(),
+                        Some("actor" | "job" | "plugin" | "answer" | "toolResult")
+                    )
+            })
+            .ok_or_else(|| anyhow!("missing or invalid turn starter"))?;
         let model = input.model.info();
         let mut settings = json!({"maxSteps":input.settings["step_limit"].as_u64().unwrap_or(12),"maxOutput":input.settings["output_limit"].as_u64().unwrap_or(model.output_limit)});
         if let Some(level) = input.settings["thinking"].as_str() {
@@ -1063,7 +1074,10 @@ impl TurnWork {
         let mut gate_registration = None;
         let mut scope = scope.clone();
         let native = match name {
-            "turn.start" => json!({}),
+            "turn.start" => {
+                ensure!(!self.resumed, "an interrupted turn has already started");
+                json!({})
+            }
             "step.after" => {
                 let data = api.snapshot(&scope.session)?;
                 let response = data
@@ -1248,10 +1262,7 @@ impl TurnWork {
                     serde_json::from_value(entry.content.clone().unwrap_or_default())?;
                 let result = wire::result(&r);
                 ensure!(
-                    same_json(&result, &value["result"])
-                        || (result["status"] == "refused"
-                            && result["callId"] == value["result"]["callId"]
-                            && value["result"]["status"] == "refused"),
+                    same_json(&result, &value["result"]),
                     "tool.after result differs from committed result"
                 );
                 return Ok(json!({"call":value["call"],"result":result}));

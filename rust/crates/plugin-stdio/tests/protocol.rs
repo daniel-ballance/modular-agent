@@ -55,7 +55,7 @@ async fn rpc_is_bidirectional_and_nested_requests_do_not_deadlock() {
     b.finished.cancelled().await;
 }
 #[tokio::test]
-async fn serving_exec_treats_zero_null_and_absent_timeout_as_no_limit() {
+async fn serving_exec_requires_a_positive_timeout_when_present() {
     let project = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let (a, b) = tokio::io::duplex(1024 * 1024);
@@ -71,7 +71,7 @@ async fn serving_exec_treats_zero_null_and_absent_timeout_as_no_limit() {
         .call(
             "plugin/initialize",
             json!({
-                "binding":"modular-agent-plugin/1", "data":"modular-agent-data/1",
+                "binding":"modular-agent-plugin/1",
                 "host":{"name":"test","version":"1"},
                 "project":project.path(), "home":home.path(), "config":{}
             }),
@@ -97,6 +97,10 @@ async fn serving_exec_treats_zero_null_and_absent_timeout_as_no_limit() {
     client.finished.cancelled().await;
     server.finished.cancelled().await;
     for (timeout, result) in results {
+        if timeout.as_ref().is_some_and(|v| v.is_null() || v == 0) {
+            assert_eq!(result.unwrap_err().code, "invalid_request");
+            continue;
+        }
         assert_eq!(
             result.unwrap(),
             json!({"exitCode":0,"output":"no-limit","timedOut":false}),

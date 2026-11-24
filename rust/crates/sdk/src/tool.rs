@@ -919,10 +919,17 @@ pub(crate) async fn execute(tool: &Tool, input: Value, cx: ToolContext) -> Optio
     let run = (tool.run)(input, cx);
     let outcome = tokio::select! {
         biased;
-        _ = cancel.cancelled() => {
-            return Some(Settled { status: ToolStatus::Cancelled, text: "The call was cancelled.".into(), value: None, content: None });
-        }
-        outcome = run => outcome,
+        _ = cancel.cancelled() => None,
+        outcome = run => Some(outcome),
+    };
+    // Cancellation can arrive while polling run, even when its callback is ready.
+    let Some(outcome) = outcome.filter(|_| !cancel.is_cancelled()) else {
+        return Some(Settled {
+            status: ToolStatus::Cancelled,
+            text: "The call was cancelled.".into(),
+            value: None,
+            content: None,
+        });
     };
     Some(match outcome {
         Err(ref e) if e.is_left_open() => return None,

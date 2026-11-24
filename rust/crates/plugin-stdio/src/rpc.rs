@@ -250,7 +250,6 @@ impl Drop for Outgoing<'_> {
 pub struct Peer {
     tx: mpsc::UnboundedSender<(Value, bool)>,
     plugin: OnceLock<String>,
-    trace_agreed: AtomicBool,
     serves_plugin: AtomicBool,
     jobs: Mutex<BTreeMap<String, (Scope, telemetry::Operation)>>,
     next: AtomicU64,
@@ -316,7 +315,6 @@ impl Peer {
         let peer = Arc::new(Self {
             tx,
             plugin: OnceLock::new(),
-            trace_agreed: false.into(),
             serves_plugin: false.into(),
             jobs: Mutex::default(),
             next: AtomicU64::new(1),
@@ -605,11 +603,10 @@ impl Peer {
         });
     }
 
-    /// Call after a successful handshake. Agreement is not authority.
-    pub fn configure_trace(&self, name: &str, agreed: bool, serves_plugin: bool) {
+    /// Record the peer's identity and direction after initialization.
+    pub fn configure_trace(&self, name: &str, serves_plugin: bool) {
         let _ = self.plugin.set(name.to_owned());
         self.serves_plugin.store(serves_plugin, Ordering::Release);
-        self.trace_agreed.store(agreed, Ordering::Release);
     }
 
     fn span(
@@ -639,7 +636,7 @@ impl Peer {
             p.remove("traceContext");
         }
         let callback = self.serves_plugin.load(Ordering::Acquire);
-        if self.trace_agreed.load(Ordering::Acquire)
+        if self.plugin.get().is_some()
             && work_method(method).is_some()
             && (!callback || !params["parentRequestId"].is_null() || job_callback(method, params))
             && let Some(carrier) = telemetry::carrier(cx)
@@ -657,11 +654,10 @@ impl Peer {
         if work_method(method).is_none() {
             return (telemetry::Context::new(), None);
         }
-        let remote = if self.trace_agreed.load(Ordering::Acquire) {
-            telemetry::extract(&params["traceContext"])
-        } else {
-            None
-        };
+        let remote = self
+            .plugin
+            .get()
+            .and_then(|_| telemetry::extract(&params["traceContext"]));
         if self.serves_plugin.load(Ordering::Acquire) {
             return (remote.unwrap_or_default(), scope_from_params(params));
         }

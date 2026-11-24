@@ -1,6 +1,6 @@
 //! Wire and durable records for the pending-erasure profile. No payload or keys.
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet};
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -147,58 +147,37 @@ impl Registry {
             .filter_map(move |intent| intent.plan(session))
     }
 
-    // Adopt an existing Rust store without losing either pending or completed marks.
-    pub fn migrate(value: agent_api::Value) -> agent_api::Result<Self> {
-        #[derive(Deserialize)]
-        struct LegacyRegistry {
-            intents: Vec<LegacyIntent>,
-        }
-        #[derive(Deserialize)]
-        struct LegacyIntent {
-            source: String,
-            targets: Vec<String>,
-            copies: BTreeMap<String, LegacyPlan>,
-        }
-        #[derive(Deserialize)]
-        struct LegacyPlan {
-            record: String,
-            targets: Vec<String>,
-            #[serde(default)]
-            confirmed: BTreeSet<String>,
-        }
-        let old: LegacyRegistry = serde_json::from_value(value)?;
-        let mut intents = Vec::new();
-        for old in old.intents {
-            let id = agent_api::id();
-            let plans = old
-                .copies
-                .into_iter()
-                .map(|(sid, plan)| {
-                    (
-                        sid,
-                        Plan {
-                            intent_id: id.clone(),
-                            source_session_id: old.source.clone(),
-                            record_id: plan.record,
-                            copies: plan
-                                .targets
-                                .into_iter()
-                                .map(|entry_id| Copy {
-                                    complete: plan.confirmed.contains(&entry_id),
-                                    entry_id,
-                                })
-                                .collect(),
-                        },
-                    )
+    pub fn consistent(&self) -> bool {
+        let mut intents = HashSet::new();
+        let mut operations = HashSet::new();
+        let mut records = HashSet::new();
+        self.intents.iter().all(|intent| {
+            let mut sessions = HashSet::new();
+            path_id(&intent.id)
+                && intents.insert(&intent.id)
+                && operations.insert((&intent.source, &intent.targets))
+                && !intent.targets.is_empty()
+                && intent.plan(&intent.source).is_some_and(|source| {
+                    intent
+                        .targets
+                        .iter()
+                        .all(|id| source.copies.iter().any(|c| c.entry_id == *id))
                 })
-                .collect();
-            intents.push(Intent {
-                id,
-                source: old.source,
-                targets: old.targets.into_iter().collect(),
-                plans,
-            });
-        }
-        Ok(Self { intents })
+                && intent.plans.iter().all(|(sid, plan)| {
+                    let mut entries = HashSet::new();
+                    path_id(sid)
+                        && sessions.insert(sid)
+                        && plan.intent_id == intent.id
+                        && plan.source_session_id == intent.source
+                        && !plan.record_id.is_empty()
+                        && records.insert((sid, &plan.record_id))
+                        && !plan.copies.is_empty()
+                        && plan.copies.iter().all(|c| {
+                            !c.entry_id.is_empty()
+                                && c.entry_id != plan.record_id
+                                && entries.insert(&c.entry_id)
+                        })
+                })
+        })
     }
 }

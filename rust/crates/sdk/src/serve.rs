@@ -21,14 +21,10 @@ tokio::task_local! { static CATALOG_PARENT: Value; }
 /// Serve a plugin on stdin and stdout until the agent closes the connection. A plugin
 /// program writes nothing else to stdout.
 pub async fn serve(plugin: Plugin) -> Result<()> {
-    serve_stdio(plugin, true).await
-}
-
-pub(crate) async fn serve_stdio(plugin: Plugin, accept_trace_offer: bool) -> Result<()> {
     if let Some(item) = plugin.local_items.first() {
         return Err(cannot_serve(item));
     }
-    let endpoint = Served::with_scope(plugin, None, true, accept_trace_offer);
+    let endpoint = Served::new(plugin);
     let peer = Peer::start(tokio::io::stdin(), tokio::io::stdout(), endpoint.clone());
     peer.finished.cancelled().await;
     endpoint.startup_error().map_or(Ok(()), Err)
@@ -58,7 +54,7 @@ pub async fn serve_websocket(
         &options.listen,
         options.token_file,
         options.tls,
-        move || Served::with_scope(plugin.clone(), Some(projects.clone()), false, true),
+        move || Served::with_scope(plugin.clone(), Some(projects.clone()), false),
     )
     .await?)
 }
@@ -74,7 +70,7 @@ pub async fn serve_websocket_factory(
         &options.listen,
         options.token_file,
         options.tls,
-        move || Served::with_scope(factory(), Some(projects.clone()), true, true),
+        move || Served::with_scope(factory(), Some(projects.clone()), true),
     )
     .await?)
 }
@@ -141,7 +137,7 @@ pub async fn serve_websocket_named(
         &options.listen,
         options.tls,
         entries,
-        move |(caller, projects)| Served::with_scope(factory(caller), Some(projects), true, true),
+        move |(caller, projects)| Served::with_scope(factory(caller), Some(projects), true),
     )
     .await
     .map_err(|e| {
@@ -174,7 +170,6 @@ pub(crate) struct Served {
     plugin: Plugin,
     projects: Option<Arc<[std::path::PathBuf]>>,
     fresh_instance: bool,
-    accept_trace_offer: bool,
     registered: Mutex<Option<Arc<Registrar>>>,
     initializing: tokio::sync::Mutex<()>,
     startup: Mutex<Option<Error>>,
@@ -184,20 +179,19 @@ pub(crate) struct Served {
 
 impl Served {
     pub(crate) fn new(plugin: Plugin) -> Arc<Self> {
-        Self::with_scope(plugin, None, true, true)
+        Self::with_scope(plugin, None, true)
     }
 
     fn with_scope(
         plugin: Plugin,
         projects: Option<Arc<[std::path::PathBuf]>>,
         fresh_instance: bool,
-        accept_trace_offer: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             plugin,
             projects,
             fresh_instance,
-            accept_trace_offer,
+
             registered: Mutex::default(),
             initializing: tokio::sync::Mutex::new(()),
             startup: Mutex::default(),
@@ -363,7 +357,7 @@ impl Endpoint for Served {
     ) -> Reply {
         match method {
             "plugin/initialize" => {
-                if p["binding"] != BINDING || p["data"] != "modular-agent-data/1" {
+                if p["binding"] != BINDING {
                     return Err(Fault::new("not_supported", "unsupported binding"));
                 }
                 if let Some(item) = self.plugin.local_items.first() {
@@ -407,7 +401,7 @@ impl Endpoint for Served {
                         }
                     })));
                 }
-                let mut v = registration(&self.plugin.name, &self.plugin.replaces, &r);
+                let v = registration(&self.plugin.name, &self.plugin.replaces, &r);
                 let environment = r.environment.is_some() || r.portable_environment.is_some();
                 if environment && let Some(projects) = &self.projects {
                     if !self.fresh_instance {
@@ -450,11 +444,7 @@ impl Endpoint for Served {
                     *self.environment.lock().unwrap() = Some(Arc::new(env));
                 }
                 *self.registered.lock().unwrap() = Some(Arc::new(r));
-                let agreed = self.accept_trace_offer && p["traceContext"] == 1;
-                if agreed {
-                    v["traceContext"] = json!(1);
-                }
-                peer.configure_trace(&self.plugin.name, agreed, true);
+                peer.configure_trace(&self.plugin.name, true);
                 Ok(v)
             }
             "plugin/shutdown" => Ok(json!({})),
@@ -731,6 +721,7 @@ impl Endpoint for Served {
                     .iter()
                     .find(|c| p["name"] == c.name)
                     .ok_or_else(|| Fault::new("not_found", "unknown command"))?;
+                let args = base::wire::string(&p, "args")?;
                 // command/run carries only the session and actor ids; the session's project,
                 // which the command's environment calls use, comes from host/session
                 // (docs/sdk/api.md, Commands).
@@ -769,9 +760,7 @@ impl Endpoint for Served {
                     work,
                     can_ask: false,
                 };
-                let text = (command.run)(p["args"].as_str().unwrap_or_default().into(), cx)
-                    .await
-                    .map_err(to_fault)?;
+                let text = (command.run)(args.into(), cx).await.map_err(to_fault)?;
                 Ok(command_reply(text))
             }
             "jobs/cancel" => {

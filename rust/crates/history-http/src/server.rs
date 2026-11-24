@@ -231,6 +231,22 @@ fn lease_ttl_ms(lease_ttl: Duration) -> agent_api::Result<u64> {
     }
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Control {
+    history_ttl_bound: u64,
+    pending_erasure_v1: Registry,
+}
+
+impl Control {
+    fn read(data: &SessionData) -> Option<Self> {
+        let control: Self = serde_json::from_value(data.settings.clone()).ok()?;
+        ((1..=MAX_COUNT).contains(&control.history_ttl_bound)
+            && control.pending_erasure_v1.consistent())
+        .then_some(control)
+    }
+}
+
 impl SnapshotStore {
     pub fn new(
         store: Arc<dyn HistoryStore>,
@@ -265,13 +281,10 @@ impl SnapshotStore {
     ) -> agent_api::Result<(bool, Option<Instant>)> {
         let (prior, mut control) = match store.load(CONTROL) {
             Ok(data) => {
-                let Some(bound) = data.settings["historyTtlBound"]
-                    .as_u64()
-                    .filter(|ms| (1..=MAX_COUNT).contains(ms))
-                else {
+                let Some(control) = Control::read(&data) else {
                     return Ok((false, None));
                 };
-                (Some(bound), data)
+                (Some(control.history_ttl_bound), data)
             }
             Err(e) if missing(&e) && store.list(None).is_ok_and(|rows| rows.is_empty()) => (
                 None,
@@ -281,29 +294,11 @@ impl SnapshotStore {
                     vec![],
                 ),
             ),
-            // There is no proof that old leases have expired. Do not recreate
-            // the control record or serve any history until an operator repairs it.
+            // A nonempty or unreadable store cannot establish fresh authority.
             Err(_) => return Ok((false, None)),
         };
         let bound = ttl_ms.max(prior.unwrap_or(0));
-        let migrated = if !control.settings["pendingErasure"].is_null() {
-            if control.settings.get("pendingErasureV1").is_none()
-                && let Ok(registry) = Registry::migrate(control.settings["pendingErasure"].clone())
-            {
-                control.settings["pendingErasureV1"] = json!(registry);
-                control
-                    .settings
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("pendingErasure");
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        if prior != Some(bound) || migrated {
+        if prior != Some(bound) {
             control.settings["historyTtlBound"] = json!(bound);
             store.save(&control)?;
         }
@@ -339,8 +334,9 @@ impl SnapshotStore {
             .store
             .load(CONTROL)
             .map_err(|_| Failure::unavailable())?;
-        let registry = serde_json::from_value(control.settings["pendingErasureV1"].clone())
-            .map_err(|_| Failure::unavailable())?;
+        let registry = Control::read(&control)
+            .ok_or_else(Failure::unavailable)?
+            .pending_erasure_v1;
         Ok((control, registry))
     }
 
@@ -1046,30 +1042,6 @@ fn tombstone(entry: &Value) -> Value {
         }
     }
     let data = &entry["data"];
-    let fallback: Option<(&str, &[&Value])> = match kind {
-        Some("inputAccepted" | "input" | "inputHandedBack") => {
-            Some(("inputId", &[&data["inputId"]]))
-        }
-        Some("inputRequest") => Some(("requestId", &[&data["requestId"], &data["request"]["id"]])),
-        Some("inputAnswer") => Some(("requestId", &[&data["requestId"]])),
-        Some("turnStart") => Some(("continuesTurnId", &[&data["continuesTurnId"]])),
-        _ => None,
-    };
-    if let Some((key, choices)) = fallback
-        && entry.get(key).is_none()
-        && let Some(value) = choices.iter().find(|v| valid_id(v))
-    {
-        out[key] = (*value).clone();
-    }
-    if kind == Some("inputHandedBack")
-        && entry.get("inputId").is_none()
-        && data.get("inputId").is_none()
-        && data["inputIds"]
-            .as_array()
-            .is_some_and(|a| !a.is_empty() && a.iter().all(valid_id))
-    {
-        out["inputIds"] = data["inputIds"].clone();
-    }
     if entry["sources"]
         .as_array()
         .is_some_and(|a| a.iter().all(valid_id))

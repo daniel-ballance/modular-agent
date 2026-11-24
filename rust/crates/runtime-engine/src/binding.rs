@@ -622,7 +622,12 @@ async fn run_tool(host: &dyn Host, call: &Value, def: &Value, recovering: bool) 
             .get("result")
             .ok_or_else(|| anyhow!("missing committed tool result"))?;
         ensure!(
-            result["callId"] == call["id"] && result["status"].is_string(),
+            result["callId"] == call["id"]
+                && matches!(
+                    result["status"].as_str(),
+                    Some("refused" | "cancelled" | "outcomeUnknown" | "notStarted" | "failed")
+                )
+                && result["content"].is_array(),
             "invalid committed tool result"
         );
         result.clone()
@@ -669,7 +674,7 @@ mod tests {
     fn resume_rejects_missing_or_conflicting_gate_state_and_unsettled_unsafe_call() {
         let call = json!({"id":"c","name":"bash","input":{},"stepId":"s","started":true,"safeToRepeat":false});
         let mut history = vec![
-            json!({"kind":"modelRequest","stepId":"s","data":{"tracksStepAfter":true}}),
+            json!({"kind":"modelRequest","stepId":"s","data":{"tools":[]}}),
             json!({"kind":"response","stepId":"s","message":{"role":"assistant","stop":"toolUse",
                 "content":[{"type":"toolCall","id":"c","name":"bash","arguments":{}}]}}),
             json!({"kind":"toolStarted","toolCallId":"c","data":{"safeToRepeat":false}}),

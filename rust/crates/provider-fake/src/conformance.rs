@@ -107,10 +107,16 @@ impl ModelAccess for Echo {
                 bail!("{reason}");
             }
             if let Some(tool) = text.strip_prefix("tool:") {
-                if let Some(result) = branch
+                let origin = branch
                     .iter()
-                    .find(|e| e.kind == "tool.result" && e.scope.turn == scope.turn)
-                {
+                    .rev()
+                    .find(|e| e.kind == "turn.start" && e.scope.turn == scope.turn)
+                    .and_then(|start| start.content.as_ref()?.get("continuesTurnId")?.as_str());
+                if let Some(result) = branch.iter().rev().find(|e| {
+                    e.kind == "tool.result"
+                        && (e.scope.turn == scope.turn
+                            || origin.is_some_and(|id| e.scope.turn.as_deref() == Some(id)))
+                }) {
                     let text = result
                         .content
                         .as_ref()

@@ -23,7 +23,6 @@ use std::{
 
 const REQUEST: &str = "MODULAR_AGENT_TELEMETRY_RUN";
 pub const ENDPOINT: &str = "MODULAR_AGENT_TELEMETRY_OTLP";
-pub const HANDSHAKE: &str = "MODULAR_AGENT_TELEMETRY_HANDSHAKE";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,7 +37,6 @@ pub struct Request {
     work_dir: PathBuf,
     fixtures: Vec<Fixture>,
     values: Values,
-    handshake: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -90,12 +88,8 @@ impl Request {
         plugin
     }
 
-    pub fn configure(&self, mut builder: TestAgentBuilder) -> TestAgentBuilder {
-        builder = builder.agent_name(&self.agent_name);
-        if self.handshake.as_deref() == Some("no-offer") {
-            builder = builder.omit_plugin_trace_offer();
-        }
-        builder
+    pub fn configure(&self, builder: TestAgentBuilder) -> TestAgentBuilder {
+        builder.agent_name(&self.agent_name)
     }
 }
 

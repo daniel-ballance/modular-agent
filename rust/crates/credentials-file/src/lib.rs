@@ -38,12 +38,7 @@ impl FileCredentials {
 impl CredentialStore for FileCredentials {
     fn get(&self, name: &str) -> Result<String> {
         ensure!(self.accepts(name), "invalid answer credential name");
-        if let Some(value) = self.answers().read_optional(name)? {
-            return Ok(value);
-        }
-        // Read names kept by older base builds. New writes go to the journal.
-        std::fs::read_to_string(self.openai_key.with_file_name("answers").join(name))
-            .map_err(|_| anyhow!("credential unavailable"))
+        self.answers().read(name)
     }
     fn provider(&self, claim: &CredentialClaim, name: &str) -> Result<String> {
         ensure!(
@@ -88,10 +83,9 @@ impl CredentialStore for FileCredentials {
 /// The file is a deployment-local namespace. Its owner controls its directory.
 pub struct SecretFile(pub PathBuf);
 #[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Contents {
-    #[serde(default)]
     answers: BTreeMap<String, String>,
-    #[serde(default)]
     staging: SecretJournal,
 }
 pub fn valid_name(name: &str) -> bool {
@@ -155,11 +149,10 @@ impl SecretFile {
         committed.map_err(|_| anyhow!("credential store commit failed"))?;
         Ok(result)
     }
-    fn read_optional(&self, name: &str) -> Result<Option<String>> {
-        Ok(self.load()?.answers.remove(name))
-    }
     pub fn read(&self, name: &str) -> Result<String> {
-        self.read_optional(name)?
+        self.load()?
+            .answers
+            .remove(name)
             .ok_or_else(|| anyhow!("credential unavailable"))
     }
     pub fn write(&self, name: &str, value: &str) -> Result<()> {

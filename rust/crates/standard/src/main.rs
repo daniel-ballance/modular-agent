@@ -6,7 +6,7 @@ use modular_agent_mcp::{Mcp, Server};
 use serde_json::json;
 use standard::terminal::TerminalOptions;
 use standard::{
-    Standard, builder, canonical_model, canonical_provider,
+    Standard, builder,
     terminal::{Mode, Questions},
 };
 
@@ -175,7 +175,7 @@ fn login_options(mut args: impl Iterator<Item = String>) -> Result<(&'static str
     let raw = args
         .next()
         .ok_or_else(|| anyhow!("which provider? chatgpt, grok or claude"))?;
-    let provider = match canonical_provider(&raw) {
+    let provider = match raw.as_str() {
         "chatgpt" => "chatgpt",
         "grok" => "grok",
         "claude" => "claude",
@@ -191,17 +191,14 @@ fn login_options(mut args: impl Iterator<Item = String>) -> Result<(&'static str
 
 #[cfg(test)]
 #[test]
-fn login_aliases_route_to_the_canonical_sign_in_flows() {
-    for (alias, id) in [("openai-codex", "chatgpt"), ("xai", "grok")] {
+fn login_accepts_only_subscription_names_and_keeps_device_mode() {
+    for id in standard::PROVIDERS {
         assert_eq!(
-            login_options([alias, "--device"].map(str::to_owned).into_iter()).unwrap(),
+            login_options([id, "--device"].map(str::to_owned).into_iter()).unwrap(),
             (id, true)
         );
-        assert_eq!(
-            login_options([alias].map(str::to_owned).into_iter()).unwrap(),
-            (id, false)
-        );
     }
+    assert!(login_options(["xai".into()].into_iter()).is_err());
 }
 
 async fn login(standard: &Standard, args: impl Iterator<Item = String>) -> Result<()> {
@@ -253,7 +250,7 @@ fn subscription_label(provider: &str) -> Option<&'static str> {
 }
 
 async fn auth_status(standard: &Standard) -> Result<()> {
-    let auth = standard.auth();
+    let auth = standard.auth().subscription_logins();
     for (id, label) in standard::PROVIDERS
         .into_iter()
         .filter_map(|id| subscription_label(id).map(|label| (id, label)))
@@ -326,10 +323,9 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
             if provider == "claude" {
                 bail!("Claude Code holds that sign-in; run `claude auth logout`");
             }
-            let canonical = canonical_provider(&provider);
-            let label = subscription_label(canonical)
+            let label = subscription_label(&provider)
                 .ok_or_else(|| anyhow!("unknown provider {provider}"))?;
-            sdk::sign_out(canonical, &standard.auth().subscription_logins()).await?;
+            sdk::sign_out(&provider, &standard.auth().subscription_logins()).await?;
             eprintln!("Signed out of {label}.");
             return Ok(());
         }
@@ -430,9 +426,7 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
             "--listen" => listen = Some(take(&mut args, &arg)?),
             "--token-file" => token_file = Some(take(&mut args, &arg)?),
             "--trust-project" => trust = true,
-            "--model" => {
-                terminal.settings["model"] = json!(canonical_model(&take(&mut args, &arg)?))
-            }
+            "--model" => terminal.settings["model"] = json!(take(&mut args, &arg)?),
             "--thinking" => terminal.settings["thinking"] = json!(take(&mut args, &arg)?),
             "--runtime" => {
                 standard.durable = match take(&mut args, &arg)?.as_str() {
@@ -497,7 +491,7 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
         let mut model = terminal.settings["model"]
             .as_str()
             .or(configured["model"].as_str())
-            .map(canonical_model);
+            .map(str::to_owned);
         if standard.scripted.is_some() {
             model = Some(SCRIPTED_MODEL.into());
         } else if model.is_none() && !standard.conformance {
@@ -634,8 +628,7 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
         .as_str()
         .map(str::to_owned)
         .or(recorded)
-        .or(configured)
-        .map(|model| canonical_model(&model));
+        .or(configured);
     let inspecting = terminal.history;
     let chosen = if standard.scripted.is_some() {
         Some(SCRIPTED_MODEL.into())

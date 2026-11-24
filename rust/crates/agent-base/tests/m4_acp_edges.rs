@@ -37,20 +37,15 @@ async fn cancel_is_dispatched_while_permission_and_prompt_are_pending() {
         cx.send_notification(CancelNotification::new(id.clone()))?;
         assert_eq!(pending.await?.stop_reason, StopReason::Cancelled);
         assert!(!cwd.join("never").exists());
-        let qs = rpc(&cx, "_modular/questions", json!({"sessionId":id})).await?;
-        assert!(
-            qs.as_array()
-                .unwrap()
-                .iter()
-                .all(|q| q["answerable"] == false)
-        );
-        let h = rpc(&cx, "_modular/history", json!({"sessionId":id})).await?;
+        let qs = rpc(&cx, "_modular-agent/requests", json!({"sessionId":id})).await?;
+        assert!(qs["requests"].as_array().unwrap().is_empty());
+        let h = rpc(&cx, "_modular-agent/history", json!({"sessionId":id})).await?;
         assert_eq!(
             h["entries"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .filter(|e| e["kind"] == "tool.result")
+                .filter(|e| e["kind"] == "toolResult")
                 .count(),
             1
         );
@@ -63,7 +58,12 @@ async fn cancel_is_dispatched_while_permission_and_prompt_are_pending() {
 }
 #[tokio::test]
 async fn host_mcp_is_session_local_unrecorded_and_reaped_on_close() {
-    let r = Rig::new(json!([]));
+    let r = Rig::new(json!([
+        call("mcp_host__echo", json!({"text":"scope"})),
+        "done",
+        call("mcp_host__echo", json!({"text":"scope"})),
+        "done"
+    ]));
     let cwd = r.project.path().to_path_buf();
     let pid = r.root.path().join("host.pid");
     r.client(Some(true), true, async move |cx| {
@@ -79,17 +79,25 @@ async fn host_mcp_is_session_local_unrecorded_and_reaped_on_close() {
             .block_task()
             .await?
             .session_id;
-        let tool = agent_api::ToolCall::new("mcp_host__echo", json!({"text":"scope"}));
-        let result = rpc(&cx, "_modular/tool", json!({"sessionId":id,"call":tool})).await?;
-        assert_eq!(result["text"], "host:scope");
-        let not_there = rpc(
-            &cx,
-            "_modular/tool",
-            json!({"sessionId":other,"call":agent_api::ToolCall::new("mcp_host__echo",json!({}))}),
-        )
-        .await?;
-        assert_ne!(not_there["status"], "completed");
-        let h = rpc(&cx, "_modular/history", json!({"sessionId":id})).await?;
+        for (sid, offered) in [(&id, true), (&json!(other), false)] {
+            rpc(
+                &cx,
+                "session/prompt",
+                json!({"sessionId":sid,"prompt":[{"type":"text","text":"call echo"}]}),
+            )
+            .await?;
+            let history = rpc(&cx, "_modular-agent/history", json!({"sessionId":sid})).await?;
+            let entries = history["entries"].as_array().unwrap();
+            let result = entries.iter().find(|e| e["kind"] == "toolResult").unwrap();
+            assert_eq!(result["data"]["status"] == "completed", offered);
+            assert_eq!(
+                result["message"]["content"]
+                    .to_string()
+                    .contains("host:scope"),
+                offered
+            );
+        }
+        let h = rpc(&cx, "_modular-agent/history", json!({"sessionId":id})).await?;
         assert!(!h.to_string().contains("host-private-env-123"));
         assert!(!h.to_string().contains("mcp-fixture.py"));
         rpc(&cx, "session/close", json!({"sessionId":id})).await?;
@@ -104,26 +112,81 @@ async fn host_mcp_is_session_local_unrecorded_and_reaped_on_close() {
 }
 #[tokio::test]
 async fn project_mcp_never_starts_before_explicit_external_trust() {
-    let r = Rig::new(json!([]));
+    let r = Rig::new(json!([
+        call("mcp_project__echo", json!({"text":"trusted"})),
+        "done"
+    ]));
     let cwd = r.project.path().to_path_buf();
     let pid = r.root.path().join("project.pid");
     std::fs::write(cwd.join(".modular-agent.json"),serde_json::to_vec(&json!({"thinking":"high","_parent":{"session":"forged"},"plugins":[{"name":"tools.mcp","options":{"servers":[{"transport":"stdio","name":"project","command":"/usr/bin/python3","args":[format!("{}/../../scripts/mcp-fixture.py",env!("CARGO_MANIFEST_DIR")),pid]}]}}]})).unwrap()).unwrap();
-    r.client(Some(true),true,async move |cx| {
-  let before=cx.send_request(NewSessionRequest::new(cwd.clone())).block_task().await?;
-  assert_eq!(serde_json::to_value(&before).unwrap()["configOptions"][1]["currentValue"],"high");
-  assert!(!pid.exists());
-  let settings=rpc(&cx,"_modular/command",json!({"sessionId":before.session_id,"name":"settings"})).await?; assert!(settings.get("_parent").is_none());
-  assert!(rpc(&cx,"_modular/trust_project",json!({"cwd":cwd,"confirm":false})).await.is_err());
-  rpc(&cx,"_modular/trust_project",json!({"cwd":cwd,"confirm":true})).await?;
-  assert!(!pid.exists());
-  cx.send_request(CloseSessionRequest::new(before.session_id)).block_task().await?;
-  let after=cx.send_request(NewSessionRequest::new(cwd.clone())).block_task().await?;
-  assert!(pid.exists());
-  let result=rpc(&cx,"_modular/tool",json!({"sessionId":after.session_id,"call":agent_api::ToolCall::new("mcp_project__echo",json!({"text":"trusted"}))})).await?; assert_eq!(result["status"],"completed");
-  cx.send_request(CloseSessionRequest::new(after.session_id)).block_task().await?;
-  let pid:i32=std::fs::read_to_string(&pid).unwrap().parse().unwrap(); until(||unsafe {libc::kill(pid,0)} != 0).await;
-  Ok(())
- }).await;
+    r.client(Some(true), true, async move |cx| {
+        let before = cx
+            .send_request(NewSessionRequest::new(cwd.clone()))
+            .block_task()
+            .await?;
+        assert_eq!(
+            serde_json::to_value(&before).unwrap()["configOptions"][1]["currentValue"],
+            "high"
+        );
+        assert!(!pid.exists());
+        let settings = rpc(
+            &cx,
+            "_modular-agent/command",
+            json!({"sessionId":before.session_id,"name":"settings"}),
+        )
+        .await?;
+        assert!(settings.get("_parent").is_none());
+        assert!(
+            rpc(
+                &cx,
+                "_modular-agent/trust-project",
+                json!({"sessionId":before.session_id,"cwd":cwd,"confirm":false})
+            )
+            .await
+            .is_err()
+        );
+        rpc(
+            &cx,
+            "_modular-agent/trust-project",
+            json!({"sessionId":before.session_id,"cwd":cwd,"confirm":true}),
+        )
+        .await?;
+        assert!(!pid.exists());
+        cx.send_request(CloseSessionRequest::new(before.session_id))
+            .block_task()
+            .await?;
+        let after = cx
+            .send_request(NewSessionRequest::new(cwd.clone()))
+            .block_task()
+            .await?;
+        assert!(pid.exists());
+        rpc(
+            &cx,
+            "session/prompt",
+            json!({"sessionId":after.session_id,"prompt":[{"type":"text","text":"call echo"}]}),
+        )
+        .await?;
+        let history = rpc(
+            &cx,
+            "_modular-agent/history",
+            json!({"sessionId":after.session_id}),
+        )
+        .await?;
+        assert!(
+            history["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["kind"] == "toolResult" && e["data"]["status"] == "completed")
+        );
+        cx.send_request(CloseSessionRequest::new(after.session_id))
+            .block_task()
+            .await?;
+        let pid: i32 = std::fs::read_to_string(&pid).unwrap().parse().unwrap();
+        until(|| unsafe { libc::kill(pid, 0) } != 0).await;
+        Ok(())
+    })
+    .await;
 }
 #[tokio::test]
 async fn output_gate_covers_streams_rpc_results_and_replay_but_not_the_record() {
@@ -149,12 +212,12 @@ async fn output_gate_covers_streams_rpc_results_and_replay_but_not_the_record() 
         assert!(!response.to_string().contains("secret-canary"));
         let settings = rpc(
             &cx,
-            "_modular/command",
+            "_modular-agent/command",
             json!({"sessionId":id,"name":"settings"}),
         )
         .await?;
         assert_eq!(settings["label"], "[REDACTED]");
-        let h = rpc(&cx, "_modular/history", json!({"sessionId":id})).await?;
+        let h = rpc(&cx, "_modular-agent/history", json!({"sessionId":id})).await?;
         assert!(!h.to_string().contains("secret-canary"));
         cx.send_request(CloseSessionRequest::new(id.clone()))
             .block_task()
@@ -190,7 +253,7 @@ async fn reconnect_keeps_key_receipts_and_host_can_fork_move_and_withdraw() {
     let save = saved.clone();
     r.client(Some(true),true,async move |cx| {
   let id=cx.send_request(NewSessionRequest::new(cwd)).block_task().await?.session_id; *save.lock().unwrap()=id.to_string();
-  rpc(&cx,"session/prompt",json!({"sessionId":id,"prompt":[{"type":"text","text":"context from another agent"}],"_meta":{"modular-agent-rs/inputKey":"stable"}})).await?;
+  rpc(&cx,"session/prompt",json!({"sessionId":id,"prompt":[{"type":"text","text":"context from another agent"}],"_meta":{"modular-agent":{"key":"stable"}}})).await?;
   // EOF closes the Interface and releases the writer lease, without an explicit close.
   Ok(())
  }).await;
@@ -198,17 +261,23 @@ async fn reconnect_keeps_key_receipts_and_host_can_fork_move_and_withdraw() {
     let id = saved.lock().unwrap().clone();
     r.client(Some(true),true,async move |cx| {
   let id:SessionId=id.into(); cx.send_request(LoadSessionRequest::new(id.clone(),cwd.clone())).block_task().await?;
-  let dup=rpc(&cx,"session/prompt",json!({"sessionId":id,"prompt":[{"type":"text","text":"context from another agent"}],"_meta":{"modular-agent-rs/inputKey":"stable"}})).await?; assert_eq!(dup["_meta"]["modular-agent"]["duplicate"],true);
-  let queued=rpc(&cx,"_modular/submit",json!({"sessionId":id,"text":"withdraw me","timing":"after","key":"queued"})).await?;
-  let returned=rpc(&cx,"_modular/withdraw",json!({"sessionId":id,"input":queued["input"]})).await?; assert_eq!(returned["text"],"withdraw me");
-  let h=rpc(&cx,"_modular/history",json!({"sessionId":id})).await?;
-  assert_eq!(h["entries"].as_array().unwrap().iter().filter(|e|e["kind"] == "model.response").count(),1);
-  let position=h["position"].clone();
-  assert!(rpc(&cx,"_modular/move",json!({"sessionId":id,"position":position,"rewind":true})).await.is_err());
-  let still=rpc(&cx,"_modular/history",json!({"sessionId":id})).await?; assert_eq!(still["position"],position);
-  let fork=rpc(&cx,"_modular/fork",json!({"sessionId":id,"position":position})).await?; let fork_id:SessionId=fork["sessionId"].as_str().unwrap().to_string().into();
+  let dup=rpc(&cx,"session/prompt",json!({"sessionId":id,"prompt":[{"type":"text","text":"context from another agent"}],"_meta":{"modular-agent":{"key":"stable"}}})).await?; assert_eq!(dup["_meta"]["modular-agent"]["duplicate"],true);
+  let queued=rpc(&cx,"_modular-agent/input",json!({"sessionId":id,"content":"withdraw me","when":"propose","key":"queued"})).await?;
+  rpc(&cx,"_modular-agent/withdraw",json!({"sessionId":id,"inputId":queued["inputId"]})).await?;
+  let h=rpc(&cx,"_modular-agent/history",json!({"sessionId":id})).await?;
+  let rows=h["entries"].as_array().unwrap();
+  assert!(rows.iter().any(|e| e["kind"] == "inputHandedBack" && e["inputId"] == queued["inputId"]));
+  assert_eq!(rows.iter().filter(|e|e["kind"] == "response").count(),1);
+  let position=&rows.iter().find(|e|e["kind"] == "turnEnd").unwrap()["id"];
+  let other=cx.send_request(NewSessionRequest::new(cwd.clone())).block_task().await?.session_id;
+  assert!(rpc(&cx,"_modular-agent/move",json!({"sessionId":id,"entryId":position,"rewind":true})).await.is_err());
+  cx.send_request(CloseSessionRequest::new(other)).block_task().await?;
+  let still=rpc(&cx,"_modular-agent/history",json!({"sessionId":id})).await?;
+  assert_eq!(still,h);
+  rpc(&cx,"_modular-agent/move",json!({"sessionId":id,"entryId":position})).await?;
+  let fork=rpc(&cx,"_modular-agent/fork",json!({"sessionId":id,"entryId":position})).await?;
+  let fork_id:SessionId=fork["sessionId"].as_str().unwrap().to_string().into();
   cx.send_request(ResumeSessionRequest::new(fork_id.clone(),cwd)).block_task().await?;
-  rpc(&cx,"_modular/move",json!({"sessionId":fork_id,"position":null})).await?;
   cx.send_request(CloseSessionRequest::new(fork_id)).block_task().await?;
   cx.send_request(CloseSessionRequest::new(id)).block_task().await?; Ok(())
  }).await;
@@ -343,13 +412,13 @@ async fn acp_never_requests_secrets_in_form_elicitation() {
         cx.send_request(PromptRequest::new(id.clone(), vec!["work".into()]))
             .block_task()
             .await?;
-        let h = rpc(&cx, "_modular/history", json!({"sessionId":id})).await?;
+        let h = rpc(&cx, "_modular-agent/history", json!({"sessionId":id})).await?;
         assert!(
             h["entries"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|e| e["kind"] == "request.answer" && e["content"]["declined"] == true)
+                .any(|e| e["kind"] == "inputAnswer" && e["data"]["declined"] == true)
         );
         cx.send_request(CloseSessionRequest::new(id))
             .block_task()

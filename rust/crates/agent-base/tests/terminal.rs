@@ -217,4 +217,20 @@ async fn credentials_are_read_on_demand_from_the_credential_store() {
         "CHANGED-TEST-VALUE"
     );
     assert!(store.get("openai").is_err());
+    let answers = root.path().join("answers");
+    std::fs::create_dir(&answers).unwrap();
+    std::fs::write(answers.join("example"), "unused-fixture").unwrap();
+    assert!(store.get("example").is_err());
+    store.put("example", "answer-from-journal").unwrap();
+    assert_eq!(store.get("example").unwrap(), "answer-from-journal");
+    let journal = answers.join("credentials.json");
+    let invalid = br#"{"example":"not-a-journal"}"#;
+    std::fs::write(&journal, invalid).unwrap();
+    assert!(store.get("example").is_err());
+    assert!(
+        store
+            .put("example", "cannot-replace-an-unrecognized-journal")
+            .is_err()
+    );
+    assert_eq!(std::fs::read(journal).unwrap(), invalid);
 }

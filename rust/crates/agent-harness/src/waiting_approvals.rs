@@ -532,6 +532,16 @@ impl Harness {
             .ok_or_else(|| anyhow!("session is closed"))?;
         self.reconcile_open_approvals(open, reopen)
     }
+    pub(super) fn wake_settled_approval(&self, session: &str) {
+        let h = self.me.clone();
+        let id = session.to_owned();
+        tokio::spawn(async move {
+            if let Some(h) = h.upgrade() {
+                let _ = h.interface_work_ready(&id).await;
+            }
+        });
+    }
+
     pub(super) fn reconcile_open_approvals(
         &self,
         open: &mut OpenSession,
@@ -618,13 +628,7 @@ impl Harness {
             self.commit_approval(open, next)?;
             // A settings change or a poll can observe expiry before its timer.
             // In all cases wake the driver from the committed settlement.
-            let h = self.me.clone();
-            let id = open.data.id.clone();
-            tokio::spawn(async move {
-                if let Some(h) = h.upgrade() {
-                    let _ = h.interface_work_ready(&id).await;
-                }
-            });
+            self.wake_settled_approval(&open.data.id);
             return Ok(true);
         }
         Ok(false)

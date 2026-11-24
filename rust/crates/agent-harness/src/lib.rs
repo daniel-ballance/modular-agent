@@ -100,7 +100,6 @@ pub struct Harness {
     approval_maximum: std::sync::OnceLock<u64>,
     live_covers: covered_approvals::Dispatches,
     approval_audiences: RwLock<waiting_approvals::Audiences>,
-    model_provider_aliases: std::sync::OnceLock<&'static [(&'static str, &'static str)]>,
     tenants: RwLock<tenants::Tenants>,
     registry: RwLock<Registry>,
     points: BTreeMap<String, HookPoint>,
@@ -132,7 +131,6 @@ impl Harness {
             approval_maximum: Default::default(),
             live_covers: Default::default(),
             approval_audiences: Default::default(),
-            model_provider_aliases: Default::default(),
             tenants: RwLock::default(),
             registry: RwLock::new(registry),
             points,
@@ -172,29 +170,6 @@ impl Harness {
         }
         Operation::start(name, SpanKind::Internal, Some(scope), attrs, parent, links)
             .interrupted("modular_agent.turn.outcome")
-    }
-
-    /// Normalize old Provider ids supplied by a reference implementation
-    /// before session preparation or recovery, without rewriting history.
-    pub fn configure_model_provider_aliases(
-        &self,
-        aliases: &'static [(&'static str, &'static str)],
-    ) {
-        assert!(self.model_provider_aliases.set(aliases).is_ok());
-    }
-
-    fn normalize_model(&self, settings: &mut Value) {
-        let Some(aliases) = self.model_provider_aliases.get() else {
-            return;
-        };
-        let Some(model) = settings.get_mut("model") else {
-            return;
-        };
-        if let Some((provider, id)) = model.as_str().and_then(|model| model.split_once('/'))
-            && let Some((_, canonical)) = aliases.iter().find(|(alias, _)| *alias == provider)
-        {
-            *model = json!(format!("{canonical}/{id}"));
-        }
     }
 
     pub fn configure_reservations(&self, pool: Arc<ReservationPool>) -> Result<()> {
@@ -401,7 +376,6 @@ impl Harness {
             if self.max_approval_wait_ms().is_some() && defaults.get("approvalWait").is_none() {
                 defaults["approvalWait"] = json!("live");
             }
-            self.normalize_model(&mut defaults);
             let id = id();
             op.attr("gen_ai.conversation.id", id.clone());
             let lease = if provisional {
@@ -584,7 +558,6 @@ impl Harness {
                 json!("ask_always")
             };
         }
-        self.normalize_model(&mut data.settings);
         data.project = data.project.canonicalize()?;
         let previous_plugins = data.plugins.clone();
         data.plugins = self.registry.read().unwrap().names();
@@ -2760,10 +2733,17 @@ impl AgentApi for Harness {
         next.entries.push(entry.clone());
         let revoked = matches!(entry.kind.as_str(), "actor.grant" | "actor.left")
             && self.close_revoked_questions(&open.data, &mut next)?;
+        let settled_wait = revoked
+            && next.entries[open.data.entries.len()..]
+                .iter()
+                .any(|e| e.kind == "tool.result");
         self.commit(open, &next)?;
         open.data = next;
         if revoked {
             requests(self)?.decisions_changed();
+            if settled_wait {
+                self.wake_settled_approval(&open.data.id);
+            }
         }
         if let Some(content) = &entry.content {
             match entry.kind.as_str() {
@@ -2830,10 +2810,9 @@ impl AgentApi for Harness {
             .get(session)
             .is_some_and(|s| s.active.is_some())
     }
-    fn settings(&self, scope: &Scope, mut patch: Value) -> Result<Value> {
+    fn settings(&self, scope: &Scope, patch: Value) -> Result<Value> {
         require(self, scope, "settings")?;
         self.validate_approval_wait(&patch)?;
-        self.normalize_model(&mut patch);
         ensure!(
             patch
                 .as_object()
@@ -3748,6 +3727,55 @@ fn saved_turn_trace(data: &SessionData, turn: Option<&str>) -> Option<Context> {
         .find_map(telemetry::extract)
 }
 
+/// A question alone does not show that its invocation stopped. Use only the
+/// pending record for this call, its cited questions, and its start (if any).
+fn pending_questions(branch: &[Entry], call: &Entry) -> bool {
+    let Some((index, pending)) = branch
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, p)| p.kind == "tool.pending" && p.scope.call == call.scope.call)
+    else {
+        return false;
+    };
+    let Some(proof) = &pending.content else {
+        return false;
+    };
+    if pending.scope.turn != call.scope.turn
+        || pending.scope.step != call.scope.step
+        || pending.scope.session != call.scope.session
+    {
+        return false;
+    }
+    let same_call = |e: &Entry| {
+        e.scope.turn == pending.scope.turn
+            && e.scope.step == pending.scope.step
+            && e.scope.call == pending.scope.call
+            && e.scope.session == pending.scope.session
+    };
+    let before = &branch[..index];
+    let start = before
+        .iter()
+        .rev()
+        .find(|e| e.kind == "tool.started" && same_call(e));
+    if start.is_some_and(|e| e.content.is_none())
+        || proof.get("toolStartedId") != start.map(|e| &e.id).map(|id| json!(id)).as_ref()
+    {
+        return false;
+    }
+    proof["requestIds"].as_array().is_some_and(|ids| {
+        !ids.is_empty()
+            && ids.iter().all(|id| {
+                id.is_string()
+                    && before.iter().any(|e| {
+                        e.kind == "request.open"
+                            && same_call(e)
+                            && e.content.as_ref().is_some_and(|q| q["id"] == *id)
+                    })
+            })
+    })
+}
+
 fn next_continuation(data: &SessionData) -> Result<Option<(Input, Vec<ToolCall>)>> {
     let branch = data.branch();
     let qs = questions(data)?;
@@ -3775,6 +3803,7 @@ fn next_continuation(data: &SessionData) -> Result<Option<(Input, Vec<ToolCall>)
             });
         let related: Vec<_> = qs.iter().filter(|q| q.scope.call == e.scope.call).collect();
         if ended
+            && pending_questions(&branch, e)
             && !related.is_empty()
             && related.iter().all(|q| !q.answerable)
             && related.iter().any(|q| q.answer.is_some())

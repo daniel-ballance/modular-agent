@@ -181,7 +181,20 @@ async fn keyed_answer_reuses_only_on_its_branch_and_while_authorized() {
     svc.ask(rig.h.clone(), q.clone(), CancellationToken::new())
         .await
         .unwrap();
-    answer(&rig, &open(&rig), json!("allow")).await;
+    let open = open(&rig);
+    assert!(
+        svc.answer(
+            rig.h.clone(),
+            &rig.id,
+            "user",
+            &open.id,
+            json!("refuse"),
+            false
+        )
+        .await
+        .is_err()
+    );
+    answer(&rig, &open, json!("allow")).await;
     assert!(matches!(
         svc.ask(rig.h.clone(), q.clone(), CancellationToken::new())
             .await
@@ -266,16 +279,27 @@ async fn approval_policies_read_only_always_never_off_and_no_answerer() {
         let task = start(&rig).await;
         if asked {
             rig.events.wait("request.opened").await;
-            answer(
-                &rig,
-                &open(&rig),
-                json!(if status == ToolStatus::Refused {
-                    "refuse"
-                } else {
-                    "allow"
-                }),
-            )
-            .await;
+            let q = open(&rig);
+            if status == ToolStatus::Refused {
+                let svc = requests(rig.h.as_ref()).unwrap();
+                assert!(
+                    svc.answer(
+                        rig.h.clone(),
+                        &rig.id,
+                        "user",
+                        &q.id,
+                        json!("refuse"),
+                        false
+                    )
+                    .await
+                    .is_err()
+                );
+                svc.decline(rig.h.clone(), &rig.id, "user", &q.id, None)
+                    .await
+                    .unwrap();
+            } else {
+                answer(&rig, &q, json!("allow")).await;
+            }
         }
         assert_eq!(
             task.await.unwrap().unwrap().unwrap().outcome,
@@ -328,6 +352,31 @@ async fn deadline_leaves_no_result_and_late_answer_starts_a_new_turn() {
         2
     );
 }
+#[tokio::test]
+async fn answered_question_without_its_pending_invocation_cannot_start_work() {
+    let rig = Rig::new(vec![calls(vec![ToolCall::new(
+        "ask_user",
+        json!({"question":"Which?","timeout_ms":0}),
+    )])])
+    .await;
+    assert_eq!(rig.run("start").await.open_calls.len(), 1);
+    let q = open(&rig);
+    rig.h.close(&rig.id).await.unwrap();
+    let store = history_fs::FileHistory::new(&rig.root.path().join("sessions")).unwrap();
+    let mut data = store.load(&rig.id).unwrap();
+    let pending = data
+        .entries
+        .iter_mut()
+        .find(|e| e.kind == "tool.pending")
+        .unwrap();
+    pending.content = None;
+    store.save(&data).unwrap();
+    rig.h.open(&rig.id).await.unwrap();
+    answer(&rig, &q, json!("ok")).await;
+    assert!(rig.h.run_next(&rig.id).await.unwrap().is_none());
+    assert!(rig.results().is_empty());
+}
+
 #[tokio::test]
 async fn expired_approval_leaves_no_open_call_and_cannot_be_answered() {
     let rig = Rig::with(

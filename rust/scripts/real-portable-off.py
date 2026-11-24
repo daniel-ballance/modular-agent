@@ -51,7 +51,7 @@ def seed(history, session, project):
         'startedBy': {'kind': 'actor', 'id': ACTOR}}, **turn)
     add('input', 'input', {'inputId': 'receipt'}, {'role': 'user', 'content': content}, **turn)
     add('modelRequest', 'request', {'model': MODEL, 'tools': ['bash'], 'safeToRepeat': False,
-        'tracksStepAfter': True}, **step)
+        }, **step)
     add('response', 'response', message={'role': 'assistant', 'stop': 'toolUse', 'content': [
         {'type': 'toolCall', 'id': 'call', 'name': 'bash', 'arguments': {'command': command}}
     ]}, **step)

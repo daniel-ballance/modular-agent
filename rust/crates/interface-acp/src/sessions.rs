@@ -361,31 +361,18 @@ impl Session {
             }
         }
     }
-    pub async fn drain(&self) -> Result<Value> {
-        let _guard = self.gate.try_lock().map_err(|_| anyhow!("session busy"))?;
-        let result = self.drain_inner().await?;
-        self.flush().await?;
-        Ok(result)
-    }
-    async fn drain_inner(&self) -> Result<Value> {
-        let mut last = None;
+    async fn drain_inner(&self) -> Result<()> {
         while !self.closing.load(std::sync::atomic::Ordering::SeqCst) {
             let Some(result) = self.api.next_turn(&self.id).await? else {
                 break;
             };
             self.completed.notify_waiters();
             let stop = result.outcome != Outcome::Completed || !result.open_calls.is_empty();
-            last = Some(result);
             if stop {
                 break;
             }
         }
-        let reason = match last.as_ref().map(|r| &r.outcome) {
-            Some(Outcome::Cancelled) => "cancelled",
-            Some(Outcome::Limit) => "max_turn_requests",
-            _ => "end_turn",
-        };
-        Ok(json!({"stopReason":reason,"_meta":{"result":last}}))
+        Ok(())
     }
 }
 fn recorded_rights(data: &SessionData, id: &str) -> Option<Option<Authority>> {

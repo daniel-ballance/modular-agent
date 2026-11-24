@@ -165,18 +165,25 @@ pub fn scenarios() -> Vec<PathBuf> {
         .map(|e| e.unwrap().path())
         .filter(|p| p.extension().is_some_and(|e| e == "json"))
         .collect();
-    let waiting = std::env::var_os("MA_SDK_WAITING_FIXTURES")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| dir.join("../fixtures/waiting-approval"));
-    if waiting.is_dir() {
-        files.extend(
-            std::fs::read_dir(waiting)
-                .unwrap()
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|s| s == "json")),
-        );
-    }
+    assert!(!files.is_empty(), "scenario folder is empty");
+    let sdk = dir.parent().unwrap();
+    let waiting = sdk.join("fixtures/waiting-approval");
+    let mut actual: Vec<_> = std::fs::read_dir(&waiting)
+        .expect("waiting fixtures")
+        .map(|entry| entry.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .collect();
+    let manifest: Vec<String> =
+        serde_json::from_value(load(&sdk.join("waiting-scenarios.json"))).unwrap();
+    assert!(!manifest.is_empty(), "waiting fixture manifest is empty");
+    let mut expected: Vec<_> = manifest
+        .iter()
+        .map(|name| waiting.join(format!("{name}.json")))
+        .collect();
+    actual.sort();
+    expected.sort();
+    assert_eq!(actual, expected, "waiting fixtures differ from manifest");
+    files.extend(actual);
     files.sort();
     files
 }
@@ -461,7 +468,7 @@ async fn run_at(
     let mut fail =
         |step: usize, what: String| failures.push(format!("{name} ({label}) step {step}: {what}"));
 
-    if scenario["requires"]["approvalsOutlastTurns"] == true {
+    if name.starts_with("waiting-approval") {
         let result = Command::new("node")
             .arg(repo().join("rust/scripts/waiting-runner.mjs"))
             .arg(path)
@@ -732,29 +739,7 @@ async fn run_at(
     let report = if failures.is_empty()
         && let (Some(request), Some((a, session, _))) = (request, &current)
     {
-        let mut report = evidence.report(request, run, a, session, before_crash);
-        if request.scenario == "first-turn"
-            && let Ok(r) = &mut report
-        {
-            let probe = test_agent()
-                .project(run.project())
-                .data_dir(run.dir.join("waiting-probe"))
-                .several_actors(true)
-                .durability(Durability::Kept)
-                .approval(Approval::All)
-                .max_approval_wait_ms(100)
-                .build()
-                .await
-                .expect("waiting support probe");
-            r["declarations"]["waitingSession"] = probe
-                .session()
-                .await
-                .expect("kept probe")
-                .declaration()
-                .expect("probe declaration");
-            probe.close().await.expect("release probe");
-        }
-        Some(report)
+        Some(evidence.report(request, run, a, session, before_crash))
     } else {
         None
     };

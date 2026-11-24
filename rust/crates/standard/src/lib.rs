@@ -28,23 +28,6 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 pub const PROVIDERS: [&str; 3] = ["chatgpt", "grok", "claude"];
-const ALIASES: &[(&str, &str)] = &[("openai-codex", "chatgpt"), ("xai", "grok")];
-
-pub fn canonical_provider(id: &str) -> &str {
-    ALIASES
-        .iter()
-        .find_map(|(old, new)| (*old == id).then_some(*new))
-        .unwrap_or(id)
-}
-
-pub fn canonical_model(model: &str) -> String {
-    if let Some((provider, model)) = model.split_once('/') {
-        format!("{}/{model}", canonical_provider(provider))
-    } else {
-        model.to_string()
-    }
-}
-
 #[derive(Clone)]
 pub struct Standard {
     pub approval: Option<Approval>,
@@ -130,7 +113,6 @@ impl Standard {
     }
     pub fn auth(&self) -> credentials_auth::AuthFile {
         credentials_auth::AuthFile::new(self.config.join("auth.json"), &PROVIDERS)
-            .with_aliases(ALIASES)
     }
     pub fn configuration(&self) -> FilesConfiguration {
         FilesConfiguration {
@@ -150,27 +132,7 @@ impl Standard {
         let path = self.config.join("models.json");
         match std::fs::read(&path) {
             Ok(bytes) => {
-                let mut catalog: Value = serde_json::from_slice(&bytes)
-                    .map_err(|e| anyhow!("{}: {e}", path.display()))?;
-                if let Some(providers) = catalog.as_object_mut() {
-                    for &(old, canonical) in ALIASES {
-                        if let Some(old) = providers.remove(old) {
-                            // Canonical entries win if the same model appears twice.
-                            if let Some(new) = providers.get_mut(canonical) {
-                                let old = old.as_array().ok_or_else(|| {
-                                    anyhow!("models for {canonical} must be an array")
-                                })?;
-                                let new = new.as_array_mut().ok_or_else(|| {
-                                    anyhow!("models for {canonical} must be an array")
-                                })?;
-                                new.splice(..0, old.iter().cloned());
-                            } else {
-                                providers.insert(canonical.into(), old);
-                            }
-                        }
-                    }
-                }
-                Ok(catalog)
+                serde_json::from_slice(&bytes).map_err(|e| anyhow!("{}: {e}", path.display()))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::Null),
             Err(e) => Err(e.into()),
@@ -230,7 +192,6 @@ pub fn builder(
     let mut b = Agent::builder()
         .agent_name("ma")
         .project(&project)
-        .model_provider_aliases(ALIASES)
         .data_dir(&standard.state)
         .durability(if standard.durable {
             Durability::Durable
@@ -343,7 +304,7 @@ fn catalog_overrides(catalog: &Value, provider: &str) -> Result<Vec<ResponsesMod
 /// The model to start with when settings name none: the first Provider that
 /// is signed in.
 pub async fn default_model(standard: &Standard) -> Option<&'static str> {
-    let auth = standard.auth();
+    let auth = standard.auth().subscription_logins();
     let signed_in = |provider: &str| auth.login(provider).ok().flatten().is_some();
     if signed_in("chatgpt") {
         Some("chatgpt/gpt-6.1-sol")

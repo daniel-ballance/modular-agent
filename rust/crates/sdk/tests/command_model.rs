@@ -73,7 +73,10 @@ async fn a_served_command_knows_its_session_project() -> Result<()> {
         let plugin = Plugin::new("where").command(Command::new(
             "where",
             "Name the project",
-            |_, cx| async move { Ok(Some(cx.project().display().to_string())) },
+            |args, cx| async move {
+                assert_eq!(args, "  \"two words\"  tail ");
+                Ok(Some(cx.project().display().to_string()))
+            },
         ));
         let builder = test_agent().project(project.path());
         let agent = if over_wire {
@@ -84,7 +87,10 @@ async fn a_served_command_knows_its_session_project() -> Result<()> {
         .build()
         .await?;
         let session = agent.session().await?;
-        let named = session.run_command("/where").await?.unwrap_or_default();
+        let named = session
+            .run_command("/where   \"two words\"  tail ")
+            .await?
+            .unwrap_or_default();
         assert_eq!(
             std::fs::canonicalize(&named).ok(),
             std::fs::canonicalize(project.path()).ok(),

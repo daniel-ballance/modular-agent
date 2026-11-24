@@ -26,6 +26,19 @@ pub fn optional<'a>(v: &'a Value, field: &str) -> Option<&'a Value> {
     v.get(field).filter(|value| !value.is_null())
 }
 
+/// A plugin exec with no requested deadline omits timeoutMs.
+pub fn exec_timeout(params: &Value) -> Result<Option<std::time::Duration>> {
+    params
+        .get("timeoutMs")
+        .map(|v| {
+            v.as_u64()
+                .filter(|ms| (1..=9_007_199_254_740_991).contains(ms))
+                .map(std::time::Duration::from_millis)
+                .ok_or_else(|| anyhow!("timeoutMs must be a positive safe integer"))
+        })
+        .transpose()
+}
+
 pub fn string<'a>(v: &'a Value, field: &str) -> Result<&'a str> {
     v[field]
         .as_str()

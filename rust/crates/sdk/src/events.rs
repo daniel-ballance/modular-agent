@@ -50,7 +50,18 @@ fn typed<T: serde::de::DeserializeOwned>(
     info: EventData,
     event: impl FnOnce(EventPayload<T>) -> Event,
 ) -> Event {
-    match serde_json::from_value(info.data.clone()) {
+    let mut data = info.data.clone();
+    if info.event_type == "toolResult" {
+        // The event identifies the toolCallId. The SDK settlement has the RPC shape.
+        let Some(fields) = data.as_object_mut() else {
+            return Event::Custom(info);
+        };
+        let Some(id) = fields.remove("toolCallId") else {
+            return Event::Custom(info);
+        };
+        fields.insert("callId".into(), id);
+    }
+    match serde_json::from_value(data) {
         Ok(data) => event(EventPayload { data, info }),
         Err(_) => Event::Custom(info),
     }

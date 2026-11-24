@@ -368,6 +368,12 @@ async fn history_tool_call_blocks_use_arguments() {
         assert_eq!(block["id"], call_id);
         assert_eq!(block["name"], "read");
         assert_eq!(block["arguments"], json!({"path":"proof.txt"}));
+        assert!(block.get("input").is_none());
+        assert!(
+            rpc(&cx, "_modular/history", json!({"sessionId":id}))
+                .await
+                .is_err()
+        );
         rpc(&cx, "session/close", json!({"sessionId":id})).await?;
         Ok(())
     })

@@ -4,7 +4,7 @@ use crate::{Code, Error, ProcessPlugin, Result};
 use plugin_stdio::ProviderReadiness;
 use std::{path::PathBuf, time::Duration};
 
-const INSTALLED: &str = ".local/share/modular-agent/sidecars/claude/dist/main.js";
+const INSTALLED: &str = ".local/share/modular-agent/sidecars/claude/dist/src/main.js";
 const PROGRAM_ENV: &str = "MODULAR_AGENT_CLAUDE_SIDECAR";
 const READINESS: ProviderReadiness = ProviderReadiness {
     id: "claude",

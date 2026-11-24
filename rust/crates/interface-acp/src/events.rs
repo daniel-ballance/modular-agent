@@ -192,7 +192,7 @@ async fn question(
                             return std::future::pending().await;
                         }
                     }
-                    return Ok((json!("refuse"), false));
+                    return Ok((Value::Null, true));
                 }
                 session.check_view()?;
                 if !binding::answerable(&session, service.as_ref(), &q) {
@@ -205,8 +205,11 @@ async fn question(
                 let selected = if response["outcome"]["outcome"] == "selected" {
                     response["outcome"]["optionId"].as_str().unwrap_or_default()
                 } else { "refuse" };
-                if !matches!(selected, "allow" | "refuse") { return std::future::pending().await; }
-                Ok((json!(selected),false))
+                match selected {
+                    "allow" => Ok((json!("allow"), false)),
+                    "refuse" => Ok((Value::Null, true)),
+                    _ => std::future::pending().await,
+                }
             } else if q.kind != RequestKind::Secret && capabilities["elicitation"]["form"].is_object() {
                 let mut field = json!({"type":"string"});
                 if q.kind == RequestKind::Choice { field["enum"] = json!(q.options); }

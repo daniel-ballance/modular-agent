@@ -911,9 +911,8 @@ impl base::Plugin for InProcess {
 }
 
 pub(crate) fn command_line(line: &str) -> (&str, &str) {
-    let line = line.trim().trim_start_matches('/');
-    let (name, args) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
-    (name, args.trim())
+    let line = line.trim_start().trim_start_matches('/');
+    line.split_once(char::is_whitespace).unwrap_or((line, ""))
 }
 
 async fn request_from_command(

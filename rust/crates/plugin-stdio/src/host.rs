@@ -78,7 +78,6 @@ pub enum ExternalLaunch {
 #[derive(Default)]
 pub struct LoadOptions {
     pub readiness: Option<ProviderReadiness>,
-    pub omit_trace_offer: bool,
 }
 
 impl ExternalLaunch {
@@ -171,8 +170,7 @@ impl ProviderReadiness {
         );
         let _close_on_drop = peer.closed.clone().drop_guard();
         let result = async {
-            let registration =
-                initialize(&peer, &state, &state, launch.config.clone(), true).await?;
+            let registration = initialize(&peer, &state, &state, launch.config.clone()).await?;
             validate_binding(&registration)?;
             wire::string(&registration, "name")?;
             self.validate(&registration)?;
@@ -366,15 +364,14 @@ async fn load_transport(
             peer
         }
     };
-    let registration =
-        match initialize(&peer, &project, &home, config, !options.omit_trace_offer).await {
-            Ok(r) => r,
-            Err(e) => {
-                peer.close();
-                reaped.cancelled().await;
-                return Err(e.into());
-            }
-        };
+    let registration = match initialize(&peer, &project, &home, config).await {
+        Ok(r) => r,
+        Err(e) => {
+            peer.close();
+            reaped.cancelled().await;
+            return Err(e.into());
+        }
+    };
     let result: Result<Arc<Remote>> = async {
         validate_binding(&registration)?;
         let name = format!("external.{index}.{}", wire::string(&registration, "name")?);
@@ -530,19 +527,16 @@ async fn load_transport(
 }
 const CONTROL: Duration = Duration::from_secs(5);
 
-async fn initialize(peer: &Peer, project: &Path, home: &Path, config: Value, offer: bool) -> Reply {
+async fn initialize(peer: &Peer, project: &Path, home: &Path, config: Value) -> Reply {
     let config = if config.is_null() { json!({}) } else { config };
-    let mut params = json!({
-        "binding":"modular-agent-plugin/1","data":"modular-agent-data/1",
+    let params = json!({
+        "binding":"modular-agent-plugin/1",
         "host":{"name":"modular-agent-rs","version":env!("CARGO_PKG_VERSION")},
         "project":project,"home":home,"config":config
     });
-    if offer {
-        params["traceContext"] = json!(1);
-    }
     let registration = control(peer, "plugin/initialize", params).await?;
     if let Some(name) = registration["name"].as_str() {
-        peer.configure_trace(name, offer && registration["traceContext"] == 1, false);
+        peer.configure_trace(name, false);
     }
     Ok(registration)
 }
@@ -1997,8 +1991,7 @@ impl Callbacks {
                             },
                             "env/exec"=>{
                                 let relay:Api=Arc::new(crate::relay::Relay{inner:api.clone(),peer:peer.clone(),id,route:crate::relay::Route::Environment});
-                                // Zero is no limit, including when routing to a local environment.
-                                let limit=p["timeoutMs"].as_u64().filter(|ms| *ms > 0).map(Duration::from_millis);
+                                let limit=wire::exec_timeout(&p)?;
                                 let r=env.exec(relay,scope.clone(),cwd.to_path_buf(),wire::string(&p,"command")?,limit,token.clone()).await?;
                                 let timed_out=r.value.as_ref().is_some_and(|v|v["timed_out"]==true);
                                 if token.is_cancelled(){bail!("cancelled");}

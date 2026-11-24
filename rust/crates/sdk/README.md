@@ -49,7 +49,7 @@ not on model requests.
 Claude needs Node.js 22 or newer and Claude Code. Set
 `ClaudeOptions::program` to the TypeScript program, or set
 `MODULAR_AGENT_CLAUDE_SIDECAR`. The install location is
-`~/.local/share/modular-agent/sidecars/claude/dist/main.js`.
+`~/.local/share/modular-agent/sidecars/claude/dist/src/main.js`.
 `ClaudeProvider::available().await` checks for a Claude plan sign-in;
 `unavailable_reason().await` explains a refusal. The Rust SDK does not read
 Claude credentials, pass them to the program, or sign in.
@@ -189,7 +189,7 @@ Use `Ask::link(question, uri)` for a link question. Pass an absolute URI separat
 
 The `ma --agui` options are in the [standard configuration](../../../docs/reference/standard-configuration.md#the-program).
 
-The Harness declares `telemetry: 1`, whether export is installed or not. Set `Agent::builder().agent_name("my-agent")` to supply a stable, non-sensitive GenAI agent name. Register the application's tracer and meter providers with `opentelemetry::global` before building the agent. The SDK uses the OpenTelemetry API only; the application owns sampling, export and shutdown. Durable turns save their span context and use it as the parent and a link when they resume. Forks and public history do not carry that context. The SDK sends no baggage or vendor state. ACP trusts the stdio launcher unless `AcpOptions::trust_trace_context` is `Some(false)`. A network peer is outside that scope unless its `AcpActor::trust_trace_context` is true. Configured plugin peers negotiate trace context separately on every connection.
+The Harness declares `telemetry: 1`, whether export is installed or not. Set `Agent::builder().agent_name("my-agent")` to supply a stable, non-sensitive GenAI agent name. Register the application's tracer and meter providers with `opentelemetry::global` before building the agent. The SDK uses the OpenTelemetry API only; the application owns sampling, export and shutdown. Durable turns save their span context and use it as the parent and a link when they resume. Forks and public history do not carry that context. The SDK sends no baggage or vendor state. ACP trusts the stdio launcher unless `AcpOptions::trust_trace_context` is `Some(false)`. A network peer is outside that scope unless its `AcpActor::trust_trace_context` is true. Work on a configured plugin connection can carry the trusted operation context. A callback stays in the trace of its parent work.
 
 | Milestone | State |
 |---|---|

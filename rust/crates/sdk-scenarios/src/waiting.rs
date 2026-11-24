@@ -177,7 +177,7 @@ impl ToolSource for Catalog {
         ]
     }
 }
-async fn build(s: &Value, run: &Run, controls: &Arc<Controls>, probe: bool) -> R<Agent> {
+async fn build(s: &Value, run: &Run, controls: &Arc<Controls>) -> R<Agent> {
     let spec = &s["agent"];
     let mut b = test_agent()
         .project(run.project())
@@ -185,14 +185,10 @@ async fn build(s: &Value, run: &Run, controls: &Arc<Controls>, probe: bool) -> R
         .script(s["model"].clone())
         .several_actors(spec["severalActors"] == true)
         .plugin(controls.plugin());
-    let d = if probe {
-        Durability::Kept
-    } else {
-        match spec["durability"].as_str() {
-            Some("kept") => Durability::Kept,
-            Some("durable") => Durability::Durable,
-            _ => Durability::Ephemeral,
-        }
+    let d = match spec["durability"].as_str() {
+        Some("kept") => Durability::Kept,
+        Some("durable") => Durability::Durable,
+        _ => Durability::Ephemeral,
     };
     b = b.durability(d);
     if d != Durability::Ephemeral {
@@ -204,12 +200,8 @@ async fn build(s: &Value, run: &Run, controls: &Arc<Controls>, probe: bool) -> R
             true,
         ));
     }
-    if probe || spec["maxApprovalWaitMs"].is_number() {
-        b = b.max_approval_wait_ms(if probe {
-            100
-        } else {
-            spec["maxApprovalWaitMs"].as_u64().unwrap_or(0)
-        });
+    if let Some(ms) = spec["maxApprovalWaitMs"].as_u64() {
+        b = b.max_approval_wait_ms(ms);
     }
     if let Some(policy) = spec["approval"].as_str() {
         b = b.approval(match policy {
@@ -218,18 +210,15 @@ async fn build(s: &Value, run: &Run, controls: &Arc<Controls>, probe: bool) -> R
             "never" => Approval::Never,
             _ => Approval::All,
         });
-    } else if probe {
-        b = b.approval(Approval::All);
     }
     if let Some(ms) = s.pointer("/fixture/requestedApprovalMs") {
         b = b.setting("approval_timeout_ms", ms.clone());
     }
-    if !probe
-        && s["steps"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|v| v.pointer("/change/registration").is_some())
+    if s["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|v| v.pointer("/change/registration").is_some())
     {
         let peer = place(test_agent().project(run.project()), spec, run)?
             .build()
@@ -254,7 +243,7 @@ async fn build(s: &Value, run: &Run, controls: &Arc<Controls>, probe: bool) -> R
     } else {
         b = place(b, spec, run)?;
     }
-    if !probe && let Some(request) = telemetry::Request::from_env() {
+    if let Some(request) = telemetry::Request::from_env() {
         b = request.configure(b);
     }
     Ok(b.build().await?)
@@ -278,16 +267,11 @@ pub async fn worker(args: &[String]) -> R<()> {
         let p: Value = serde_json::from_str(&line)?;
         let op = p["op"].as_str().unwrap();
         let response: R<Value> = async {
-            if op == "init" || op == "probe" {
+            if op == "init" {
                 agent_api::set_clock_for_test(p["clock"].as_u64().unwrap());
-                if op == "init" {
-                    export =
-                        telemetry::install(telemetry::Request::from_env().is_some_and(|r| r.sdk));
-                }
-                let a = build(&s, &run, &controls, op == "probe").await?;
-                let session = if op == "probe" {
-                    a.session().await?
-                } else if let Some(id) = p["open"].as_str() {
+                export = telemetry::install(telemetry::Request::from_env().is_some_and(|r| r.sdk));
+                let a = build(&s, &run, &controls).await?;
+                let session = if let Some(id) = p["open"].as_str() {
                     a.open_session(id).await?
                 } else {
                     a.session_with(SessionOptions {

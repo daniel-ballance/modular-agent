@@ -39,36 +39,8 @@ impl AuthFile {
         }
     }
 
-    pub fn with_aliases(mut self, aliases: &[(&'static str, &'static str)]) -> Self {
-        self.providers
-            .extend(aliases.iter().map(|(old, _)| old.to_string()));
-        self.logins = self.logins.with_aliases(aliases);
-        self
-    }
-
     pub fn subscription_logins(&self) -> SubscriptionLogins {
         self.logins.clone()
-    }
-
-    pub fn login(&self, provider: &str) -> Result<Option<Login>> {
-        self.logins.login(provider)
-    }
-
-    pub fn set_login(&self, provider: &str, login: Option<Login>) -> Result<()> {
-        self.logins.set_login(provider, login)
-    }
-
-    pub async fn current<F, Fut>(
-        &self,
-        provider: &str,
-        rejected: Option<&str>,
-        refresh: F,
-    ) -> Result<Login>
-    where
-        F: FnOnce(Login) -> Fut,
-        Fut: std::future::Future<Output = Result<Login>>,
-    {
-        self.logins.current(provider, rejected, refresh).await
     }
 
     fn change<T>(
@@ -131,7 +103,8 @@ impl modular_agent::CredentialStore for AuthFile {
         Ok(self.answer(name)?)
     }
     fn read_provider(&self, provider: &str) -> modular_agent::Result<String> {
-        self.login(provider)?
+        self.logins
+            .login(provider)?
             .map(|login| login.secret().to_owned())
             .ok_or_else(|| {
                 modular_agent::Error::new(
@@ -189,13 +162,14 @@ mod tests {
     #[test]
     fn rust_auth_fixture_round_trips_byte_for_byte() {
         let dir = tempfile::tempdir().unwrap();
-        let auth = AuthFile::new(dir.path().join("auth.json"), &["openai-codex", "xai"]);
+        let auth = AuthFile::new(dir.path().join("auth.json"), &["chatgpt", "grok"]);
         let fixture = include_bytes!("../tests/fixtures/auth.json");
         std::fs::write(&auth.path, fixture).unwrap();
         std::fs::set_permissions(&auth.path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(auth.answer("named-answer").unwrap(), "fixture");
-        assert!(auth.put_answer("xai", "refused").is_err());
-        auth.set_login("openai-codex", auth.login("openai-codex").unwrap())
+        assert!(auth.put_answer("grok", "refused").is_err());
+        auth.logins
+            .set_login("chatgpt", auth.logins.login("chatgpt").unwrap())
             .unwrap();
         assert_eq!(std::fs::read(&auth.path).unwrap(), fixture);
         assert_eq!(
@@ -207,17 +181,18 @@ mod tests {
     #[tokio::test]
     async fn refresh_competes_under_the_file_lock_and_only_spends_once() {
         let dir = tempfile::tempdir().unwrap();
-        let auth = AuthFile::new(dir.path().join("auth.json"), &["xai"]);
-        auth.set_login(
-            "xai",
-            Some(Login::Oauth {
-                access: "before".into(),
-                refresh: "fixture".into(),
-                expires: 0,
-                account: None,
-            }),
-        )
-        .unwrap();
+        let auth = AuthFile::new(dir.path().join("auth.json"), &["grok"]);
+        auth.logins
+            .set_login(
+                "grok",
+                Some(Login::Oauth {
+                    access: "before".into(),
+                    refresh: "fixture".into(),
+                    expires: 0,
+                    account: None,
+                }),
+            )
+            .unwrap();
         let count = Arc::new(AtomicUsize::new(0));
         let observed = count.clone();
         let refresh = move |_| {
@@ -233,9 +208,9 @@ mod tests {
                 })
             }
         };
-        let a = auth.current("xai", None, refresh.clone());
-        let other = AuthFile::new(auth.path.clone(), &["xai"]);
-        let b = other.current("xai", Some("before"), refresh);
+        let a = auth.logins.current("grok", None, refresh.clone());
+        let other = AuthFile::new(auth.path.clone(), &["grok"]);
+        let b = other.logins.current("grok", Some("before"), refresh);
         let (a, b) = tokio::join!(a, b);
         assert_eq!(a.unwrap(), b.unwrap());
         assert_eq!(observed.load(Ordering::SeqCst), 1);
