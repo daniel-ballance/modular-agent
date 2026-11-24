@@ -205,7 +205,7 @@ An event is `{ type: Id, data: object }` with the following payload. The [plugin
 | `text` | `{ delta: string, stepId?: Id }` |
 | `reasoning` | `{ delta: string, stepId?: Id }` (readable only) |
 | `toolCall` | `{ call: ToolCall }` |
-| `toolOutput` | `{ toolCallId: Id, chunk: string, content?: Content }`: `chunk` is the text of the progress; `content`, when present, is the progress as reported, which may include images |
+| `toolOutput` | `{ toolCallId: Id, content: Content }`: progress as reported, including text or images. A recipient adapter derives its presentation only from the content allowed by the output gate |
 | `toolResult` | `{ toolCallId: Id, status: ToolStatus, content: Content }` |
 | `entry` | `{ entry: object }` (the recipient's history view) |
 | `turnEnded` | `{ turnId: Id, outcome: Outcome, result: TurnResult }` |
