@@ -1,3 +1,5 @@
+#[path = "agui/approval_call.rs"]
+mod approval_call;
 #[path = "agui/crash.rs"]
 mod crash;
 #[path = "agui/listing.rs"]
@@ -282,6 +284,10 @@ async fn presence_first_opened_on_return_can_resume_a_parked_approval() -> anyho
     let q = &snapshot["waiting"]["questions"][0];
     assert!(q["expiresAt"].is_string());
     assert!(q["message"].as_str().unwrap().contains("bump"));
+    assert_eq!(
+        q["metadata"]["modular-agent.approvalCall"],
+        json!({"name":"bump","input":{}})
+    );
     assert_eq!(q["metadata"]["modular-agent.coversNested"], true);
     assert_eq!(snapshot["declaration"]["approvalCoversNested"], true);
     let end=exchange(&server,json!({"protocolVersion":"1.0","threadId":id,"runId":"answer","messages":snapshot["messages"],"resume":[{"interruptId":q["id"],"status":"resolved","payload":{"allow":true}}]})).await?;

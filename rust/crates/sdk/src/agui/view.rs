@@ -45,8 +45,11 @@ pub(super) fn interrupt(q: &base::Question, v: &Value, at: u64) -> Option<Value>
     interrupt["responseSchema"] = match q.kind {
         base::RequestKind::Approval => {
             interrupt["toolCallId"] = json!(q.scope.call);
+            if let Some(call) = v.get("call") {
+                interrupt["metadata"]["modular-agent.approvalCall"] = call.clone();
+            }
             if q.covers_nested() {
-                interrupt["metadata"] = json!({"modular-agent.coversNested":true});
+                interrupt["metadata"]["modular-agent.coversNested"] = json!(true);
             }
             json!({"type":"object","properties":{"allow":{"type":"boolean"}},"required":["allow"],"additionalProperties":false})
         }
