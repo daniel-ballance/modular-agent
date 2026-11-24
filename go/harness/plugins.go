@@ -38,7 +38,7 @@ type Harness struct {
 	interfaceTools       map[string]*interfaceSource
 	agentName            string
 	localActor           string
-	deferHistory         bool
+	volatileHistory      bool
 	handBackOnOpen       bool
 	parkJobReports       bool
 	refuseSettings       bool
@@ -85,9 +85,8 @@ func NewWithLocalActor(actor string) *Harness {
 func (h *Harness) SetAgentName(name string) { h.agentName = name }
 func (c *client) TelemetryProfile() int     { return 1 }
 
-// DeferPersistentHistory keeps new public sessions provisional until admission.
-// Call before loading plugins.
-func (h *Harness) DeferPersistentHistory() { h.deferHistory = true }
+// UseVolatileHistory selects an in-memory store that cannot survive restart.
+func (h *Harness) UseVolatileHistory() { h.volatileHistory = true }
 
 // HandBackQueuedOnOpen selects the embedded SDK's recovery policy before loading plugins.
 func (h *Harness) HandBackQueuedOnOpen() { h.handBackOnOpen = true }

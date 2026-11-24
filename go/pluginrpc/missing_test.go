@@ -58,6 +58,7 @@ func TestMissingProjectInstructionsAcrossEnvironments(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				runtimetest.Publish(t, a, id)
 				// The external fixture claims exists=true, then answers the read
 				// with not_found: only the read's code is authoritative.
 				ctx := api.WithExecution(context.Background(), api.Execution{Session: id})

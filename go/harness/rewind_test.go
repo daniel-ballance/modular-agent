@@ -6,6 +6,7 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/harness"
 	"github.com/daniel-ballance/modular-agent/go/history"
+	"github.com/daniel-ballance/modular-agent/go/internal/runtimetest"
 	"github.com/daniel-ballance/modular-agent/go/local"
 	"io/fs"
 	"os"
@@ -105,6 +106,7 @@ func newRewindFixture(t *testing.T) *rewindFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtimetest.Publish(t, f.a, f.id)
 	f.target = f.record(api.Entry{Kind: "test.mark"})
 	f.write("before")
 	f.first = f.turnPoint("first")
@@ -216,6 +218,7 @@ func TestRewindChecksLaterPointsBeforeSaveAndUsesCanonicalProject(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtimetest.Publish(t, f.a, other)
 	if err := f.a.Move(f.ctx, f.id, f.target, true); err == nil || len(f.env.checks) != 0 {
 		t.Fatalf("rewind with another hosted session: %v, checks %v", err, f.env.checks)
 	}

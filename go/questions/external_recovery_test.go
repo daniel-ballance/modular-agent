@@ -20,6 +20,7 @@ func TestExternalSIGKILLQuestion(t *testing.T) {
 			t.Fatal(err)
 		}
 		id, _ := h.API().New(context.Background(), root)
+		runtimetest.Publish(t, h.API(), id)
 		_ = os.WriteFile(filepath.Join(root, "session"), []byte(id), 0600)
 		h.API().Subscribe(func(e api.Event) {
 			if e.Kind == "question.open" {

@@ -417,6 +417,7 @@ func TestExternalItemsReplaceRatherThanShadowLocalCopies(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		runtimetest.Publish(t, a, id)
 		if err = os.WriteFile(filepath.Join(opt.Project, "note.txt"), []byte("external-marker"), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -447,6 +448,7 @@ func TestToolsUseTheSelectedEnvironmentInAnotherProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtimetest.Publish(t, h.API(), id)
 	r, err := h.API().CallTool(context.Background(), id, api.Call{Name: "read", Input: api.JSON(map[string]string{"path": "not-on-local-disk"})})
 	if err != nil || r.Status != "completed" || r.Content.Text() != "virtual-file-from-other-environment" {
 		t.Fatal(r, err)
@@ -474,6 +476,7 @@ func testHostCallbacks(t *testing.T, mode string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtimetest.Publish(t, a, id)
 	notifications := make(chan string, 2)
 	a.Subscribe(func(e api.Event) {
 		if e.Kind == "plugin.wire-fixture.probe.notice" || e.Kind == "plugin.problem" &&

@@ -26,6 +26,7 @@ func TestQuestionSIGKILLReplay(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		runtimetest.Publish(t, h.API(), id)
 		_ = os.WriteFile(filepath.Join(root, "session"), []byte(id), 0600)
 		v, _ := h.API().Get("questions")
 		q := v.(api.Questions)
@@ -175,6 +176,7 @@ func TestReplayedAllowFromRevokedActorIsNotUsed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		runtimetest.Publish(t, a, id)
 		v, _ := a.Get("questions")
 		q := v.(api.Questions)
 		disconnect := q.Connect(id, "local-user")

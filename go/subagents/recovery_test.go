@@ -62,6 +62,7 @@ func TestSubagentSIGKILLRecovery(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		runtimetest.Publish(t, h.API(), id)
 		ready := func() {
 			if _, err := fmt.Fprintln(os.Stdout, "crash-ready:"+id); err != nil {
 				t.Error(err)

@@ -5,6 +5,7 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/harness"
 	"github.com/daniel-ballance/modular-agent/go/history"
+	"github.com/daniel-ballance/modular-agent/go/internal/runtimetest"
 	"path/filepath"
 	"testing"
 )
@@ -26,6 +27,9 @@ func TestHistoryBranchesMoveForkAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtimetest.Publish(t, a, id)
+	setup, _ := a.Snapshot(id)
+	prefix := len(setup.Entries)
 	first, err := a.Record(ctx, id, api.Entry{Kind: "test.note", Visible: true, Content: api.Text("first")})
 	if err != nil {
 		t.Fatal(err)
@@ -41,7 +45,7 @@ func TestHistoryBranchesMoveForkAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap, _ := a.Snapshot(id)
-	if snap.Position != first.ID || len(snap.Entries) != 4 || len(snap.Branch()) != 2 || snap.Branch()[0].Kind != "plugins.set" {
+	if snap.Position != first.ID || len(snap.Entries) != prefix+3 || len(snap.Branch()) != prefix+1 || snap.Branch()[0].Kind != "plugins.set" {
 		t.Fatal(snap)
 	}
 	fork, err := a.Fork(ctx, id, first.ID)
@@ -49,7 +53,7 @@ func TestHistoryBranchesMoveForkAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	branch, _ := a.Snapshot(fork)
-	if len(branch.Entries) < 3 || branch.Entries[1].Copies[0] != first.ID || branch.Entries[len(branch.Entries)-1].Kind != "plugins.set" {
+	if len(branch.Entries) < prefix+2 || branch.Entries[prefix].Copies[0] != first.ID || branch.Entries[len(branch.Entries)-1].Kind != "plugins.set" {
 		t.Fatal(branch)
 	}
 	third, _ := a.Record(ctx, id, api.Entry{Kind: "test.note", Visible: true, Content: api.Text("third")})
@@ -66,7 +70,7 @@ func TestHistoryBranchesMoveForkAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap, _ = a.Snapshot(id)
-	if snap.Position != third.ID || len(snap.Entries) != 5 {
+	if snap.Position != third.ID || len(snap.Entries) != prefix+4 {
 		t.Fatal(snap)
 	}
 	list, err := a.List(filepath.Clean(project))
@@ -81,6 +85,7 @@ func TestErasureReloadsOpenSessionsAndForks(t *testing.T) {
 	a := h.API()
 	ctx := context.Background()
 	id, _ := a.New(ctx, t.TempDir())
+	runtimetest.Publish(t, a, id)
 	source, _ := a.Record(ctx, id, api.Entry{Kind: "input", Visible: true, Content: api.Text("private")})
 	summary, _ := a.Record(ctx, id, api.Entry{Kind: "summary", Visible: true, Copies: []string{source.ID}, Content: api.Text("private paraphrase")})
 	fork, err := a.Fork(ctx, id, summary.ID)

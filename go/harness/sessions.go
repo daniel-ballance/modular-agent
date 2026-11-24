@@ -197,7 +197,7 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 	if v, err := c.Get("history"); err == nil {
 		store := v.(api.Store)
 		s.provisional.Store(true)
-		if c.h.deferHistory {
+		if !c.h.volatileHistory {
 			s.pendingStore = store
 		} else {
 			s.lease, err = acquireNew(store, id)
@@ -598,8 +598,6 @@ func isSetup(e api.Entry) bool {
 	}
 }
 
-func startsLegacyHistory(e api.Entry) bool { return !isSetup(e) || e.Kind == "subagent.bound" }
-
 // Only admission and fork publication can start a persistent writer. Save the
 // already staged setup with the new entries before making the state visible.
 func (s *session) publishInitialLocked(next api.Session, contexts ...context.Context) error {
@@ -638,13 +636,9 @@ func (s *session) publishReservedInitialLocked(next api.Session, ctx context.Con
 func (s *session) commitSnapshotLocked(next api.Session, contexts ...context.Context) error {
 	return s.withErasureCheck(next, func() error {
 		return s.commitCapacity(next, func() error {
-			return s.traceCommit(next, s.savesSnapshot(next), contexts, func(ctx context.Context) error { return s.commitReservedSnapshotLocked(next, ctx) })
+			return s.traceCommit(next, s.lease != nil, contexts, func(ctx context.Context) error { return s.commitReservedSnapshotLocked(next, ctx) })
 		})
 	})
-}
-
-func (s *session) savesSnapshot(next api.Session) bool {
-	return s.pendingStore == nil && s.lease != nil && (s.h.deferHistory || next.ForkedFrom != "" || slices.ContainsFunc(next.Entries, startsLegacyHistory))
 }
 
 func (s *session) commitReservedSnapshotLocked(next api.Session, contexts ...context.Context) error {
@@ -659,9 +653,7 @@ func (s *session) commitReservedSnapshotLocked(next api.Session, contexts ...con
 		s.publishLocked(next)
 		return nil
 	}
-	// Outside the public persistent lifecycle, keep the original lazy
-	// save rule. An attached public persistent lease saves all changes.
-	if s.savesSnapshot(next) {
+	if s.lease != nil {
 		if err := saveHistory(ctx, s.lease, next); err != nil {
 			if s.rewindBlocked && !errors.Is(err, api.ErrWriterLost) && s.reconcileRewindCommit(next) {
 				return nil

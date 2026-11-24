@@ -155,6 +155,7 @@ func TestUnsupportedReasoningIsLoweredOnReopen(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		runtimetest.Publish(t, a, string(session.SessionId))
 		snap, err := a.Snapshot(string(session.SessionId))
 		if err != nil {
 			t.Fatal(err)

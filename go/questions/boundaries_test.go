@@ -88,6 +88,7 @@ func TestLaterGateCannotChangeApprovedArgumentsOrUseRevokedAllow(t *testing.T) {
 				}
 				a := h.API()
 				id, _ := a.New(context.Background(), t.TempDir())
+				runtimetest.Publish(t, a, id)
 				s, _ := a.Snapshot(id)
 				s.Settings.Approval = "ask-always"
 				_ = a.SetSettings(context.Background(), id, s.Settings)
@@ -152,6 +153,7 @@ func TestSecretDestinationRefusedBeforeAskAndWriteErrorsDoNotLeak(t *testing.T) 
 				}
 				a := h.API()
 				id, _ := a.New(context.Background(), t.TempDir())
+				runtimetest.Publish(t, a, id)
 				v, _ := a.Get("questions")
 				q := v.(api.Questions)
 				events := ""

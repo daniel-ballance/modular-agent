@@ -27,6 +27,7 @@ func setup(t *testing.T, limit int, scripts ...fake.Script) (api.API, *fake.Prov
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtimetest.Publish(t, h.API(), id)
 	t.Cleanup(func() {
 		if err := h.Close(); err != nil {
 			t.Error(err)

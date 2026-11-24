@@ -31,6 +31,7 @@ func newAgent(t *testing.T, p *fake.Provider, depth int) (*harness.Harness, stri
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtimetest.Publish(t, h.API(), id)
 	v, _ := h.API().Get("jobs")
 	return h, id, v.(api.Jobs)
 }

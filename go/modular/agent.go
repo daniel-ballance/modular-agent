@@ -353,8 +353,8 @@ func New(ctx context.Context, opts ...Option) (*Agent, error) {
 	}
 	h := harness.NewWithLocalActor(localActor)
 	h.SetAgentName(o.agentName)
-	if o.durability != Ephemeral {
-		h.DeferPersistentHistory()
+	if o.durability == Ephemeral {
+		h.UseVolatileHistory()
 	}
 	h.ConfigureTenants(o.tenants)
 	if capacity, _ := ctx.Value(servingCapacityKey{}).(*harness.Capacity); capacity != nil {

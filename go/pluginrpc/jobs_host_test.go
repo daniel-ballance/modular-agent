@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/conformancemodel"
+	"github.com/daniel-ballance/modular-agent/go/internal/runtimetest"
 	"github.com/daniel-ballance/modular-agent/go/pluginrpc"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 	"github.com/daniel-ballance/modular-agent/go/vanilla"
@@ -157,6 +158,7 @@ func TestRemoteJobOwnershipCancellationAndResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtimetest.Publish(t, a, session)
 	v, _ := a.Get("jobs")
 	jobs := v.(api.Jobs)
 	progress := make(chan struct{}, 8)

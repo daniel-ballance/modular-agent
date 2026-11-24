@@ -25,6 +25,7 @@ func TestJobStartRequiresJobsRightNotTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtimetest.Publish(t, a, id)
 	v, _ := a.Get("jobs")
 	jobs := v.(api.Jobs)
 	for _, right := range []string{"tools", "jobs"} {
@@ -66,6 +67,7 @@ func TestJobReportUsesOnlyTheRecordedResult(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			runtimetest.Publish(t, a, id)
 			capability, err := a.Get("jobs")
 			if err != nil {
 				t.Fatal(err)
@@ -118,6 +120,7 @@ func TestProcessStopLeavesJobForItsOwnerAndKeyedStartIsOnce(t *testing.T) {
 		}
 		a := h.API()
 		id, _ := a.New(context.Background(), root)
+		runtimetest.Publish(t, a, id)
 		v, _ := a.Get("jobs")
 		jobs := v.(api.Jobs)
 		started := make(chan struct{})
