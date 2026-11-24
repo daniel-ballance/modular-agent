@@ -179,7 +179,7 @@ func (a *Agent) serveAGUI(ctx context.Context, opt ServeAGUIOptions, wrap func(h
 				if err != nil || !q.scope(snap.Project, snap.Tenant) {
 					return false
 				}
-				_, err = q.encode("agui.interrupt", agInterrupt(v))
+				_, err = q.recordedInterrupt(v)
 				return err == nil
 			})
 		}

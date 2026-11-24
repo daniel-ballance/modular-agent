@@ -282,8 +282,8 @@ func (q *agRequest) questionViews(offer bool) (map[string]agQuestion, error) {
 		if !ok {
 			continue
 		}
-		view := agInterrupt(v)
-		if _, err := q.encode("agui.interrupt", view); err != nil {
+		view, err := q.recordedInterrupt(v)
+		if err != nil {
 			continue
 		}
 		out[v.ID] = agQuestion{q: v, presence: d.presence, view: view}
@@ -300,16 +300,45 @@ func (q *agRequest) eligible(v api.Question) bool {
 	}
 	return v.Answerable && v.Kind != "secret" && (len(v.Allowed) == 0 || slices.Contains(v.Allowed, q.Actor.ID)) && q.allowed(right)
 }
+
+// A recorded approval must still pass the question gate, even if this client
+// was absent when it opened. The interrupt gate then checks the wire view.
+func (q *agRequest) recordedInterrupt(v api.Question) (agObject, error) {
+	if v.Kind == "approval" {
+		opened := api.Event{Kind: "question.open", Turn: v.Turn, Call: v.Call}
+		if v.ApprovalWait == api.UntilDeadline {
+			v.Answerable = false // The opening event precedes the origin's turn end.
+			opened.Step = v.Step
+		}
+		opened.Data = api.JSON(v)
+		if _, err := q.exact(opened); err != nil {
+			return nil, err
+		}
+	}
+	view := agInterrupt(v)
+	if _, err := q.encode("agui.interrupt", view); err != nil {
+		return nil, err
+	}
+	return view, nil
+}
+
 func agInterrupt(v api.Question) agObject {
 	m := agObject{"id": v.ID, "reason": v.Kind, "message": v.Prompt}
 	switch v.Kind {
 	case "approval":
 		m["toolCallId"] = v.Call
+		metadata := agObject{}
 		if v.CoversNested {
-			m["metadata"] = agObject{"modular-agent.coversNested": true}
+			metadata["modular-agent.coversNested"] = true
 		}
-		if c := v.ApprovalCall; c != nil && (!strings.Contains(v.Prompt, c.Name) || !strings.Contains(v.Prompt, string(c.Input))) {
-			m["message"] = v.Prompt + " " + c.Name + " " + string(c.Input)
+		if c := v.ApprovalCall; c != nil {
+			metadata["modular-agent.approvalCall"] = agObject{"name": c.Name, "input": c.Input}
+			if !strings.Contains(v.Prompt, c.Name) || !strings.Contains(v.Prompt, string(c.Input)) {
+				m["message"] = v.Prompt + " " + c.Name + " " + string(c.Input)
+			}
+		}
+		if len(metadata) != 0 {
+			m["metadata"] = metadata
 		}
 		m["responseSchema"] = agObject{"type": "object", "properties": agObject{"allow": agObject{"type": "boolean"}}, "required": []string{"allow"}}
 	case "choice":
