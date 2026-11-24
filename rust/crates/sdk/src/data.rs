@@ -65,7 +65,6 @@ impl Default for ToolHints {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolSettlement {
-    #[serde(alias = "toolCallId")]
     pub call_id: String,
     pub status: ToolStatus,
     pub content: Content,

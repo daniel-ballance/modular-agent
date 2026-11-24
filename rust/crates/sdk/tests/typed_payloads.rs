@@ -81,6 +81,22 @@ async fn typed_hooks_and_events_project_the_checked_shared_shapes() -> Result<()
 }
 
 #[test]
+fn tool_result_uses_the_id_of_its_wire_shape() -> Result<()> {
+    let data = json!({"toolCallId":"event-call","content":[],"status":"completed"});
+    assert!(serde_json::from_value::<modular_agent::ToolSettlement>(data.clone()).is_err());
+    let mut raw = json!({"type":"toolResult","time":0,"sessionId":"s","data":data});
+    let event: Event = serde_json::from_value(raw.clone())?;
+    assert!(matches!(&event, Event::ToolResult(v) if v.data.call_id == "event-call"));
+    assert_eq!(serde_json::to_value(event)?, raw);
+    raw["data"] = json!({"callId":"rpc-call","content":[],"status":"completed"});
+    assert!(matches!(
+        serde_json::from_value::<Event>(raw)?,
+        Event::Custom(_)
+    ));
+    Ok(())
+}
+
+#[test]
 fn event_keeps_unknown_wire_data() -> Result<()> {
     let raw = json!({"type":"sessionInterrupted","time":10,"sessionId":"s","data":{"reason":"writerLost","future":17}});
     let event: Event = serde_json::from_value(raw.clone())?;

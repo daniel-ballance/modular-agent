@@ -443,9 +443,6 @@ impl Questions {
                     "approval answerer is not present"
                 );
             }
-            // The portable answer for an approval refusal is an actor decline,
-            // even when the permission route sends the option as a string.
-            let declined = declined || (q.kind == RequestKind::Approval && value == "refuse");
             if let Some(route) = route {
                 ensure!(
                     self.present
@@ -516,16 +513,8 @@ impl Questions {
                     Value::Null
                 } else {
                     match q.kind {
-                        // data.md: an approval's answer is "allow" and a refusal is a
-                        // decline, so a draft need not list options. An older draft
-                        // that lists "refuse" as an option keeps accepting it.
                         RequestKind::Approval => {
-                            ensure!(
-                                value.as_str().is_some_and(|s| {
-                                    s == "allow" || q.options.iter().any(|o| o == s)
-                                }),
-                                "approval answer must be allow"
-                            );
+                            ensure!(value == "allow", "approval answer must be allow");
                             value
                         }
                         RequestKind::Choice => {

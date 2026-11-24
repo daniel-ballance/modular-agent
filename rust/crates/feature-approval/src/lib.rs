@@ -61,7 +61,6 @@ impl Plugin for ApprovalPlugin {
                             " An allow covers the nested calls it makes in this dispatch.",
                         );
                     }
-                    q.options = vec!["allow".into(), "refuse".into()];
                     q.extra["approvalCall"] = wire::call(&call, &scope);
                     if let Some((source, definition)) =
                         api.capability_names("tools.").into_iter().find_map(|key| {

@@ -157,7 +157,6 @@ async fn forked_recorded_answers_use_the_forks_current_authority() {
     let svc = requests(rig.h.as_ref()).unwrap();
     svc.presence(&rig.id, "user", true);
     let mut q = Question::new(Scope::session(&rig.id), RequestKind::Approval, "Allow?");
-    q.options = vec!["allow".into(), "refuse".into()];
     q.key = Some("key".into());
     q.timeout_ms = Some(1);
     svc.ask(rig.h.clone(), q, CancellationToken::new())
@@ -176,7 +175,6 @@ async fn forked_recorded_answers_use_the_forks_current_authority() {
     cap.0.remove("approve");
     rig.h.grant(&Scope::session(&fork), "user", cap).unwrap();
     let mut question = Question::new(Scope::session(&fork), RequestKind::Approval, "Allow?");
-    question.options = vec!["allow".into(), "refuse".into()];
     question.key = Some("key".into());
     question.timeout_ms = Some(1);
     assert!(matches!(

@@ -647,7 +647,7 @@ pub(crate) async fn extension(
             if q.waits_for_approval() {
                 let route = session.waiting_route()?;
                 let allow = p["value"] == "allow" && p["declined"] != true;
-                let decline = p["declined"] == true || p["value"] == "refuse";
+                let decline = p["declined"] == true;
                 if route.actor != actor || (!allow && !decline) {
                     return Ok(json!({"accepted":false,"reason":"not_open"}));
                 }
@@ -676,7 +676,7 @@ pub(crate) async fn extension(
                     actor,
                     id,
                     p["value"].clone(),
-                    p["declined"] == true || p["value"].is_null(),
+                    p["declined"] == true,
                 )
                 .await
             {

@@ -181,7 +181,20 @@ async fn keyed_answer_reuses_only_on_its_branch_and_while_authorized() {
     svc.ask(rig.h.clone(), q.clone(), CancellationToken::new())
         .await
         .unwrap();
-    answer(&rig, &open(&rig), json!("allow")).await;
+    let open = open(&rig);
+    assert!(
+        svc.answer(
+            rig.h.clone(),
+            &rig.id,
+            "user",
+            &open.id,
+            json!("refuse"),
+            false
+        )
+        .await
+        .is_err()
+    );
+    answer(&rig, &open, json!("allow")).await;
     assert!(matches!(
         svc.ask(rig.h.clone(), q.clone(), CancellationToken::new())
             .await
@@ -266,16 +279,27 @@ async fn approval_policies_read_only_always_never_off_and_no_answerer() {
         let task = start(&rig).await;
         if asked {
             rig.events.wait("request.opened").await;
-            answer(
-                &rig,
-                &open(&rig),
-                json!(if status == ToolStatus::Refused {
-                    "refuse"
-                } else {
-                    "allow"
-                }),
-            )
-            .await;
+            let q = open(&rig);
+            if status == ToolStatus::Refused {
+                let svc = requests(rig.h.as_ref()).unwrap();
+                assert!(
+                    svc.answer(
+                        rig.h.clone(),
+                        &rig.id,
+                        "user",
+                        &q.id,
+                        json!("refuse"),
+                        false
+                    )
+                    .await
+                    .is_err()
+                );
+                svc.decline(rig.h.clone(), &rig.id, "user", &q.id, None)
+                    .await
+                    .unwrap();
+            } else {
+                answer(&rig, &q, json!("allow")).await;
+            }
         }
         assert_eq!(
             task.await.unwrap().unwrap().unwrap().outcome,

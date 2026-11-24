@@ -731,6 +731,7 @@ impl Endpoint for Served {
                     .iter()
                     .find(|c| p["name"] == c.name)
                     .ok_or_else(|| Fault::new("not_found", "unknown command"))?;
+                let args = base::wire::string(&p, "args")?;
                 // command/run carries only the session and actor ids; the session's project,
                 // which the command's environment calls use, comes from host/session
                 // (docs/sdk/api.md, Commands).
@@ -769,9 +770,7 @@ impl Endpoint for Served {
                     work,
                     can_ask: false,
                 };
-                let text = (command.run)(p["args"].as_str().unwrap_or_default().into(), cx)
-                    .await
-                    .map_err(to_fault)?;
+                let text = (command.run)(args.into(), cx).await.map_err(to_fault)?;
                 Ok(command_reply(text))
             }
             "jobs/cancel" => {
