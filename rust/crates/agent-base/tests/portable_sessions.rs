@@ -96,7 +96,7 @@ async fn reopen(served: bool) {
             "intent",
             Some("input"),
             "modelRequest",
-            json!({"turnId":"interrupted","stepId":"step","data":{"model":{"provider":"fake","id":"fake"},"tools":["read"],"safeToRepeat":false,"tracksStepAfter":true}}),
+            json!({"turnId":"interrupted","stepId":"step","data":{"model":{"provider":"fake","id":"fake"},"tools":["read"],"safeToRepeat":false}}),
         ),
         row(
             "response",

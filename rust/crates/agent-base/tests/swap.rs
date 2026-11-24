@@ -85,7 +85,6 @@ async fn checkpoint(h: &Arc<agent_harness::Harness>, session: &str, calls: Vec<T
             .map(|d| d["name"].clone())
             .collect::<Vec<_>>()
     );
-    intent["tracksStepAfter"] = json!(true);
     h.append(&scope, "test", Draft::new("model.request", false, intent))
         .unwrap();
     h.append(

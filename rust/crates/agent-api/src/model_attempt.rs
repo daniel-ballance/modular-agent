@@ -194,8 +194,6 @@ impl ModelAttempt {
         }
         if self.auxiliary {
             intent["auxiliary"] = json!(true);
-        } else {
-            intent["tracksStepAfter"] = json!(true);
         }
         let draft = Draft::new("model.request", false, intent).copying(self.sources.clone());
         ensure!(

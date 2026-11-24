@@ -338,7 +338,7 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
             let mut intent = json!({"model":model,"safeToRepeat":c["safeToRepeat"].as_bool()
                 .unwrap_or(c["keeps_state"] == false && c["runs_tools"] == false),
                 "tools":c.get("tools").cloned().unwrap_or_else(||json!([]))});
-            for field in ["auxiliary", "request", "tracksStepAfter"] {
+            for field in ["auxiliary", "request"] {
                 if let Some(value) = optional(c, field) {
                     intent[field] = value.clone();
                 }

@@ -34,6 +34,16 @@ pub fn last_answered_step(history: &[Value]) -> Result<Option<(&Value, Value)>> 
 
 /// None means a complete checkpoint proves that the gate is due.
 pub fn checkpoint_decision(history: &[Value], step: &str) -> Result<Option<Value>> {
+    ensure!(
+        history.iter().any(|e| e["kind"] == "modelRequest"
+            && e["stepId"] == step
+            && e["erased"] != true
+            && e["data"]["auxiliary"] != true
+            && e["data"]["tools"]
+                .as_array()
+                .is_some_and(|tools| tools.iter().all(Value::is_string))),
+        "missing step intent or model offer"
+    );
     let mut decisions = history
         .iter()
         .filter(|e| e["kind"] == STEP_AFTER && e["stepId"] == step);
@@ -52,13 +62,6 @@ pub fn checkpoint_decision(history: &[Value], step: &str) -> Result<Option<Value
         );
         return Ok(Some(decision.clone()));
     }
-    ensure!(
-        history.iter().any(|e| e["kind"] == "modelRequest"
-            && e["stepId"] == step
-            && e["erased"] != true
-            && e["data"]["tracksStepAfter"] == true),
-        "cannot establish step.after state"
-    );
     Ok(None)
 }
 
@@ -69,7 +72,7 @@ mod tests {
     #[test]
     fn gate_state_distinguishes_due_allowed_refused_and_unknown() {
         let mut log = vec![
-            json!({"kind":"modelRequest","stepId":"s","data":{"tracksStepAfter":true}}),
+            json!({"kind":"modelRequest","stepId":"s","data":{"tools":[]}}),
             json!({"kind":"response","stepId":"s","message":{"role":"assistant"}}),
             json!({"kind":"response","stepId":"abort","data":{"recovery":true}}),
         ];

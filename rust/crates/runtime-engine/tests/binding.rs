@@ -37,7 +37,7 @@ impl Host for HistoryHost {
 async fn served_runtime_treats_null_next_as_the_last_history_page() {
     for explicit_null in [false, true] {
         let mut page = json!({"entries":[
-            {"kind":"modelRequest","turnId":"turn","stepId":"step","data":{"tracksStepAfter":true}},
+            {"kind":"modelRequest","turnId":"turn","stepId":"step","data":{"tools":[]}},
             {"kind":"response","turnId":"turn","stepId":"step",
                 "message":{"role":"assistant","content":[{"type":"text","text":"kept"}],"stop":"finished","usage":null}},
             {"kind":"modular-agent.stepAfter","turnId":"turn","stepId":"step","data":{"decision":null}}

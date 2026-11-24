@@ -674,7 +674,7 @@ mod tests {
     fn resume_rejects_missing_or_conflicting_gate_state_and_unsettled_unsafe_call() {
         let call = json!({"id":"c","name":"bash","input":{},"stepId":"s","started":true,"safeToRepeat":false});
         let mut history = vec![
-            json!({"kind":"modelRequest","stepId":"s","data":{"tracksStepAfter":true}}),
+            json!({"kind":"modelRequest","stepId":"s","data":{"tools":[]}}),
             json!({"kind":"response","stepId":"s","message":{"role":"assistant","stop":"toolUse",
                 "content":[{"type":"toolCall","id":"c","name":"bash","arguments":{}}]}}),
             json!({"kind":"toolStarted","toolCallId":"c","data":{"safeToRepeat":false}}),
