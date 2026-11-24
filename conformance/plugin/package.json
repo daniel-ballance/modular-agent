@@ -1,0 +1,7 @@
+{
+  "name": "modular-agent-plugin-conformance",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test named-callers.test.mjs" },
+  "devDependencies": { "ws": "8.23.0" }
+}
