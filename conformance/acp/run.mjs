@@ -1629,7 +1629,7 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 			if (mode === "approval") rows.push({ kind: "setting", data: { key: "approval", value: "kit-unrecognized-policy" } });
 			if (mode === "rights") rows.push({ kind: "actorJoined", actorId: "kit-granter", data: { actor: { ...actor, rights: ["watch", "input"] } } });
 			if (mode === "revoked") rows.push({ kind: "actorLeft", actorId: "kit-granter", data: { actorId: actor.id } });
-			if (mode === "cleanup") {
+			if (mode === "cleanup" || mode === "incomplete-report") {
 				const jobId = randomUUID(), reported = randomUUID(), report = [{ type: "text", text: "parked fixture report" }];
 				const start = (jobId) => ({ kind: "jobStarted", jobId, actorId: actor.id, writer: "kit-absent-job-owner", data: { kind: "fixture", detail: null, rights: ["watch", "input"], authorizers: [{ sessionId, actorId: actor.id }] } });
 				rows.push(
@@ -1641,7 +1641,14 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 			if (mode === "queue") rows.push({ kind: "inputAccepted", inputId: "older-ready", actorId: actor.id, data: {
 				when: "after", taken: "after", key: "fixture-ready", content: [{ type: "text", text: "older ready input" }], authorizers: [{ sessionId, actorId: actor.id }], rights: actor.rights,
 			} });
-			rows.push({ kind: "position", data: { to: `${sessionId}-e3` } });
+			if (mode === "incomplete-report") rows.pop(); // A reported end with no admission.
+			if (mode === "nested-id") {
+				rows[4].data.inputId = rows[4].inputId;
+				delete rows[4].inputId;
+			}
+			if (mode === "missing-ceiling") delete rows[3].data.rights;
+			if (mode === "missing-disposition") delete rows[3].data.taken;
+			rows.push({ kind: "position", data: { to: `${sessionId}-e3`, ...(mode === "failed-position" && { failed: true }) } });
 			const entries = rows.map((e, i) => ({ ...e, id: `${sessionId}-e${i}`, parentId: i ? `${sessionId}-e${i - 1}` : null, sessionId, time: Date.now(), writer: e.writer ?? "kit-history-fixture", modelVisible: false }));
 			const base = store.path(sessionId);
 			await store.json(base, "PUT", { project, created: Date.now() });
@@ -1653,6 +1660,13 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 		};
 		const load = async (sessionId) => within(await reopenWatchdog(), s.ctx.request(methods.agent.session.load, { sessionId, cwd: project, mcpServers: [] }), "seeded portable load").catch((e) => e);
 		const forbidden = (r) => r?.code === -32602 && r?.data?.code === "forbidden";
+		for (const mode of ["incomplete-report", "nested-id", "missing-ceiling", "missing-disposition", "failed-position"]) {
+			const sid = await seed(mode), before = await store.pages(sid);
+			const reply = await load(sid);
+			check(`portable: refuse ${mode} without scheduling work or rewriting history`,
+				Number.isInteger(reply?.code) && equal(await store.pages(sid), before));
+			if (!reply?.code && !(reply instanceof Error)) await closeSession(s, sid);
+		}
 		const revoked = await seed("revoked");
 		const denied = await load(revoked);
 		check("portable: a revoked configured actor cannot reopen on another branch", forbidden(denied));
