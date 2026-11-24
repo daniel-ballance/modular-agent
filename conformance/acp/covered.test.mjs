@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { coveredApproval } from "./covered.mjs";
 
-const declaration = { approvalCoversNested: true, nestedToolCalls: true };
+const declaration = { approvalCoversNested: true, nestedToolCalls: true, approvalsOutlastTurns: true };
 function server(fault) {
   let permission, entries, question, waiting = false;
   return {
@@ -25,14 +25,14 @@ function server(fault) {
       question = { id: "q", answerable: true, toolCallId: "p", coversNested: true, call: { name: "nest", input } };
       if (waiting) {
         question = { ...question, id: "q2", toolCallId: "p2", approvalWait: "untilDeadline" };
-        entries.push({ kind: "inputRequest", turnId: "t", data: { request: question } });
+        entries.push({ kind: "inputRequest", requestId: question.id, turnId: "t", data: { request: question } });
         return { stopReason: "end_turn", _meta: { "modular-agent": { openToolCalls: ["p2"] } } };
       }
       const req = { toolCall: { toolCallId: "p", title: "nest", rawInput: input }, _meta: { "modular-agent": { requestId: "q", coversNested: fault !== "permission" } } };
       const decision = await permission(req);
       assert.equal(decision.outcome.optionId, "allow");
       if (fault === "twice") await permission(req);
-      entries = [{ kind: "inputRequest", data: { request: question } },
+      entries = [{ kind: "inputRequest", requestId: question.id, data: { request: question } },
         { kind: "toolStarted", toolCallId: "c", data: { call: { name: "bash", parentCallId: "p" }, approvalCoveredBy: { toolCallId: "p", requestId: fault === "audit" ? "other" : "q" } } },
         { kind: "toolResult", toolCallId: "c", data: { status: "completed" } }];
       return { stopReason: "end_turn" };
@@ -42,12 +42,12 @@ function server(fault) {
 
 test("covered approval reads the poll and the actual start", () => coveredApproval(declaration, server()));
 test("a declared waiting approval binds the continued child to the new question", async () => {
-  const support = { ...declaration, approvalsOutlastTurns: true };
-  await coveredApproval(support, server());
-  await assert.rejects(coveredApproval(support, server("continued audit")), /child start names/);
+  await coveredApproval(declaration, server());
+  await assert.rejects(coveredApproval(declaration, server("continued audit")), /child start names/);
 });
-test("undeclared coverage skips before sending a request", async () => {
-  assert.match(await coveredApproval({}, {}), /does not declare approvalCoversNested/);
+test("the covered approval fixture requires all three capabilities", async () => {
+  for (const key of Object.keys(declaration))
+    await assert.rejects(coveredApproval({ ...declaration, [key]: false }, {}), new RegExp("must declare " + key));
 });
 for (const [fault, why] of [["poll", /poll declares/], ["permission", /permission declares/], ["twice", /only the top-level/], ["audit", /child start names/]]) {
   test("covered approval rejects a fake server with wrong " + fault, () => assert.rejects(coveredApproval(declaration, server(fault)), why));

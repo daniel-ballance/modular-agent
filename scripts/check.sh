@@ -68,17 +68,6 @@ step() { # lane, name, command...
   fi
 }
 
-acp_kit() {
-  local language="$1"
-  local -a command
-  mapfile -t command < <(node -e '
-    const [repo, language] = process.argv.slice(1);
-    for (const arg of require(`${repo}/conformance/reference/agents/${language}.json`).command)
-      console.log(arg.replaceAll("{repo}", repo));
-  ' "$repo" "$language")
-  (cd conformance/acp && MODULAR_AGENT_CONFORMANCE=1 node run.mjs --crash-checks --probe-checks --job-checks -- "${command[@]}" --acp)
-}
-
 telemetry_kit() { # language, scope (empty for every placement)
   local language="$1" scope="$2"
   local -a adapter filters=()
@@ -113,7 +102,7 @@ only_lane_fixtures() {
 
 # The plan keeps the serial order. Each parallel worker follows only its own entries.
 plan() {
-  local selection="$1" runtime binding language label scope=--in-process telemetry_label=in-process
+  local selection="$1" runtime binding language label group scope=--in-process telemetry_label=in-process
   local -a matrix_options=()
   if $serial; then
     matrix_options+=(--serial)
@@ -172,7 +161,9 @@ plan() {
     step rust "rust: build history service example" bash -c "cd rust && mise exec -- cargo build -q -p modular-agent --example history_service"
     step go "go: build history service" bash -c "cd go && mise exec -- go build -o .bin/modular-service ./cmd/modular-service"
     for language in rust typescript go python; do
-      step "$language" "ACP kit: $language ma (crash, probe, job checks)" acp_kit "$language"
+      for group in core covered waiting; do
+        step "$language" "ACP kit: $language $group" scripts/acp-kit.sh "$language" "$group"
+      done
       step "$language" "kits over WebSocket: $language plugin and ma" scripts/websocket-kits.sh "$language"
       step "$language" "ADR 0030 kits: $language ACP and history" scripts/production-kits.sh "$language"
     done

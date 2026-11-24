@@ -81,6 +81,6 @@ service "" b "$work/second-token" "$work/project-b" "$work/state-b"; second=$ser
 (cd "$repo/conformance/plugin" && node run.mjs --named-callers -- "${named[@]}")
 
 port=$(node -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')
-(cd "$repo/conformance/acp" && MODULAR_AGENT_CONFORMANCE=1 node run.mjs --crash-checks --probe-checks --job-checks \
+(cd "$repo/conformance/acp" && MODULAR_AGENT_CONFORMANCE=1 node run.mjs --group core --crash-checks --probe-checks --job-checks \
   --connect "ws://127.0.0.1:$port/" --token-file "$work/token" \
-  --service-command "$ma --acp --listen \"\$MODULAR_AGENT_CONFORMANCE_URL\" --token-file \"\$MODULAR_AGENT_CONFORMANCE_TOKEN_FILE\"")
+  --service-command "$ma --acp --approval off --listen \"\$MODULAR_AGENT_CONFORMANCE_URL\" --token-file \"\$MODULAR_AGENT_CONFORMANCE_TOKEN_FILE\"")
