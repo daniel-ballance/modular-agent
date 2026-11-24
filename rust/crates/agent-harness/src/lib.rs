@@ -6,6 +6,7 @@ use agent_api::{
 mod bytes;
 pub use bytes::{ByteCapacity, ByteLimits};
 mod capacity;
+mod waiting_approvals;
 pub use capacity::{Capacity, Pool as ReservationPool, ResourceLimits};
 mod interface_tools;
 mod output;
@@ -29,6 +30,7 @@ struct OpenSession {
     queue: VecDeque<Input>,
     input_contexts: BTreeMap<String, Context>,
     question_contexts: BTreeMap<String, String>,
+    approval_views: waiting_approvals::Views,
     interrupted: Vec<(Arc<dyn Runtime>, Scope)>,
     active: Option<ActiveTurn>,
     rewinding: bool,
@@ -91,6 +93,8 @@ pub struct Harness {
     me: Weak<Harness>,
     agent_name: std::sync::OnceLock<String>,
     project: Option<PathBuf>,
+    approval_maximum: std::sync::OnceLock<u64>,
+    approval_audiences: RwLock<waiting_approvals::Audiences>,
     model_provider_aliases: std::sync::OnceLock<&'static [(&'static str, &'static str)]>,
     tenants: RwLock<tenants::Tenants>,
     registry: RwLock<Registry>,
@@ -118,6 +122,8 @@ impl Harness {
             me: me.clone(),
             agent_name: Default::default(),
             project,
+            approval_maximum: Default::default(),
+            approval_audiences: Default::default(),
             model_provider_aliases: Default::default(),
             tenants: RwLock::default(),
             registry: RwLock::new(registry),
@@ -377,6 +383,10 @@ impl Harness {
                 Err(_) => json!({}),
             };
             merge(&mut defaults, settings);
+            self.validate_approval_wait(&defaults)?;
+            if self.max_approval_wait_ms().is_some() && defaults.get("approvalWait").is_none() {
+                defaults["approvalWait"] = json!("live");
+            }
             self.normalize_model(&mut defaults);
             let id = id();
             op.attr("gen_ai.conversation.id", id.clone());
@@ -421,6 +431,7 @@ impl Harness {
                         queue: VecDeque::new(),
                         input_contexts: BTreeMap::new(),
                         question_contexts: BTreeMap::new(),
+                        approval_views: Default::default(),
                         interrupted: Vec::new(),
                         active: None,
                         rewinding: false,
@@ -547,7 +558,13 @@ impl Harness {
             data.settings["approval"].as_str(),
             Some("off" | "ask_unless_read_only" | "ask_always" | "never_ask")
         ) {
-            data.settings["approval"] = json!("ask_always");
+            data.settings["approval"] = if data.settings["approval"].is_string()
+                && (self.max_approval_wait_ms().is_some() || waiting_approvals::outstanding(&data))
+            {
+                json!("never_ask")
+            } else {
+                json!("ask_always")
+            };
         }
         self.normalize_model(&mut data.settings);
         data.project = data.project.canonicalize()?;
@@ -583,6 +600,7 @@ impl Harness {
                     queue: VecDeque::new(),
                     input_contexts: BTreeMap::new(),
                     question_contexts: BTreeMap::new(),
+                    approval_views: Default::default(),
                     interrupted: Vec::new(),
                     active: None,
                     rewinding: recovery,
@@ -635,6 +653,7 @@ impl Harness {
         }
         let snapshot = self.snapshot(id)?;
         let branch = snapshot.branch();
+        self.reconcile_approvals(id, true)?;
         self.recover_interface_tools(id, &snapshot)?;
         let mut interrupted = Vec::new();
         for scope in unfinished_turns(&branch) {
@@ -1000,6 +1019,9 @@ impl Harness {
             }
         }
         Ok(accepted)
+    }
+    pub fn gates_output(&self) -> bool {
+        self.registry.read().unwrap().gates_output()
     }
     fn holds_remote_output(&self) -> bool {
         self.registry.read().unwrap().declaration()["remote_output"] == true
@@ -1475,6 +1497,12 @@ impl Harness {
         })
     }
     pub async fn cancel(&self, session: &str) -> Result<Vec<Input>> {
+        self.cancel_inner(session, false).await
+    }
+    pub async fn cancel_for_close(&self, session: &str) -> Result<Vec<Input>> {
+        self.cancel_inner(session, true).await
+    }
+    async fn cancel_inner(&self, session: &str, preserve_waits: bool) -> Result<Vec<Input>> {
         {
             let sessions = self.sessions.lock().unwrap();
             if sessions.get(session).is_some_and(|open| {
@@ -1500,11 +1528,22 @@ impl Harness {
         if !self.is_running(session) {
             let data = self.snapshot(session)?;
             if let Ok(service) = requests(self) {
-                for q in questions(&data)?.iter().filter(|q| q.answerable) {
+                for q in questions(&data)?
+                    .iter()
+                    .filter(|q| q.answerable && !(preserve_waits && q.waits_for_approval()))
+                {
                     service.close_turn(self, &q.scope)?;
                 }
             }
             for e in data.branch().iter().filter(|e| e.kind == "tool.call") {
+                if preserve_waits
+                    && data
+                        .entries
+                        .iter()
+                        .any(|r| waiting_approvals::marked(r) && r.scope.call == e.scope.call)
+                {
+                    continue;
+                }
                 if data
                     .entries
                     .iter()
@@ -1603,7 +1642,10 @@ impl Harness {
             );
             self.check_open_writer(open)?;
             self.refresh_open_erasure(open)?;
-            let interface = if self.has_interface_tools() {
+            self.reconcile_open_approvals(open, false)?;
+            let interface = if self.has_interface_tools()
+                || open.data.entries.iter().any(waiting_approvals::marked)
+            {
                 interface_tools::next_interface_continuation(&open.data)?
             } else {
                 None
@@ -2018,6 +2060,9 @@ impl Harness {
             self.registry.read().unwrap().declaration(),
         );
         declaration["telemetry"] = json!(1);
+        if self.max_approval_wait_ms().is_some() {
+            declaration["approvals_outlast_turns"] = json!(true);
+        }
         if self.has_interface_tools() {
             declaration["interface_tools"] = json!(true);
         }
@@ -2412,6 +2457,36 @@ impl AgentApi for Harness {
     fn tool_registration(&self, key: &str) -> Value {
         self.registry.read().unwrap().tool_registration(key)
     }
+    fn park_approval(&self, question: &Question) -> Result<Option<bool>> {
+        self.park(question)
+    }
+    async fn waiting_dispatch(
+        &self,
+        scope: &Scope,
+        call: &ToolCall,
+        after_start: bool,
+    ) -> Result<Option<ToolStatus>> {
+        self.check_approval(scope, call, after_start).await
+    }
+    async fn deliver_approval(
+        &self,
+        session: &str,
+        id: &str,
+        route: &ApprovalRoute,
+    ) -> Result<bool> {
+        self.approval_view(session, id, route, None).await
+    }
+    async fn decide_approval(
+        &self,
+        session: &str,
+        id: &str,
+        route: &ApprovalRoute,
+        allow: bool,
+        reason: Option<String>,
+    ) -> Result<bool> {
+        self.approval_view(session, id, route, Some((allow, reason)))
+            .await
+    }
     fn question_trace(&self, session: &str, question: &str) -> Option<String> {
         self.sessions
             .lock()
@@ -2587,7 +2662,9 @@ impl AgentApi for Harness {
             .get_mut(&scope.session)
             .ok_or_else(|| anyhow!("session not open"))?;
         open.check_rewind()?;
-        if draft.kind == "turn.end" && self.has_interface_tools() {
+        if draft.kind == "turn.end"
+            && (self.has_interface_tools() || waiting_approvals::outstanding(&open.data))
+        {
             let mut result = serde_json::from_value(draft.content.clone())?;
             self.finish_open_interface_turn(open, scope, &mut result)?;
             draft.content["open_calls"] = json!(result.open_calls);
@@ -2601,6 +2678,9 @@ impl AgentApi for Harness {
                     .any(|e| e.kind == "tool.result" && e.scope.call == scope.call),
                 "tool call already has a result"
             );
+        }
+        if matches!(draft.kind.as_str(), "tool.started" | "tool.result") {
+            waiting_approvals::add_sources(&open.data, scope, &mut draft);
         }
         let entry = make_entry(&open.data, scope, writer, draft);
         let mut next = open.data.clone();
@@ -2624,6 +2704,12 @@ impl AgentApi for Harness {
                 }
                 _ => {}
             }
+        }
+        if authority_record(&entry) {
+            self.invalidate_ineligible_approval_views(open)?;
+        }
+        if entry.kind == "turn.end" || authority_record(&entry) {
+            self.reconcile_open_approvals(open, false)?;
         }
         observe_question(&open.data, &entry);
         self.pending_events
@@ -2669,6 +2755,7 @@ impl AgentApi for Harness {
     }
     fn settings(&self, scope: &Scope, mut patch: Value) -> Result<Value> {
         require(self, scope, "settings")?;
+        self.validate_approval_wait(&patch)?;
         self.normalize_model(&mut patch);
         ensure!(
             patch
@@ -2714,6 +2801,7 @@ impl AgentApi for Harness {
             "setting.changed",
             json!(entry),
         ));
+        self.reconcile_open_approvals(open, false)?;
         Ok(next.settings)
     }
     async fn rewind(&self, scope: &Scope, position: String) -> Result<Vec<String>> {
@@ -2767,6 +2855,10 @@ impl AgentApi for Harness {
             "unknown position"
         );
         let mut next = open.data.clone();
+        ensure!(
+            !waiting_approvals::outstanding(&next),
+            OperationError::Busy("settle waiting approvals before moving".into())
+        );
         let original = next.branch();
         ensure!(
             !original
@@ -2852,6 +2944,10 @@ impl AgentApi for Harness {
             OperationError::Busy("cannot fork during a turn".into())
         );
         let mut source = self.snapshot(&scope.session)?;
+        ensure!(
+            !waiting_approvals::outstanding(&source),
+            OperationError::Busy("settle waiting approvals before forking".into())
+        );
         if let Some(p) = position {
             ensure!(
                 source.entries.iter().any(|e| e.id == p),
@@ -3010,6 +3106,7 @@ impl AgentApi for Harness {
                 queue: VecDeque::new(),
                 input_contexts: BTreeMap::new(),
                 question_contexts: BTreeMap::new(),
+                approval_views: Default::default(),
                 interrupted: Vec::new(),
                 active: None,
                 rewinding: false,
@@ -3341,6 +3438,14 @@ impl AgentApi for Harness {
         call: ToolCall,
         cancel: CancellationToken,
     ) -> ToolResult {
+        if let Some(status) = self
+            .waiting_dispatch(scope, &call, true)
+            .await
+            .unwrap_or(Some(ToolStatus::Refused))
+        {
+            telemetry::disposition(scope, &call, &status);
+            return ToolResult::new(&call, status, "waiting approval no longer permits dispatch");
+        }
         let data = match self.snapshot(&scope.session) {
             Ok(s) => s,
             Err(e) => return ToolResult::new(&call, ToolStatus::Failed, e.to_string()),
@@ -3538,12 +3643,11 @@ fn next_continuation(data: &SessionData) -> Result<Option<(Input, Vec<ToolCall>)
     let qs = questions(data)?;
     let mut resume = vec![];
     for e in branch.iter().filter(|e| e.kind == "tool.call") {
-        if branch
+        if branch.iter().any(|r| {
+            (interface_handoff(r) || waiting_approvals::marked(r)) && r.scope.turn == e.scope.turn
+        }) || branch
             .iter()
-            .any(|r| interface_handoff(r) && r.scope.turn == e.scope.turn)
-            || branch
-                .iter()
-                .any(|r| r.kind == "tool.result" && r.scope.call == e.scope.call)
+            .any(|r| r.kind == "tool.result" && r.scope.call == e.scope.call)
         {
             continue;
         }

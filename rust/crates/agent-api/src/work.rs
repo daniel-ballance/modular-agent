@@ -206,6 +206,14 @@ pub struct Question {
     pub extra: Value,
 }
 impl Question {
+    pub fn waits_for_approval(&self) -> bool {
+        self.kind == RequestKind::Approval && self.extra["approvalWait"] == "untilDeadline"
+    }
+    pub fn approval_projection(&self) -> Value {
+        let call = &self.extra["approvalCall"];
+        json!({"id":self.id,"kind":"approval","question":self.text,"toolCallId":self.scope.call,
+              "call":{"name":call["name"],"input":call["input"]},"deadlineAt":self.extra["deadlineAt"],"approvalWait":"untilDeadline"})
+    }
     pub fn new(scope: Scope, kind: RequestKind, text: &str) -> Self {
         Self {
             id: id(),
@@ -234,6 +242,16 @@ pub struct Answer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
+/// The binding identifies the operator route. The instance identifies this live delivery only.
+#[derive(Clone, Debug)]
+pub struct ApprovalRoute {
+    pub instance: String,
+    pub binding: String,
+    pub actor: String,
+    pub principal: String,
+    pub ceiling: Authority,
+    pub live: CancellationToken,
+}
 #[derive(Clone, Debug)]
 pub enum RequestReply {
     Answer(Answer),
@@ -249,6 +267,18 @@ pub(crate) fn questions_in(branch: &[Entry]) -> Result<Vec<Question>> {
         let Some(v) = &e.content else { continue };
         match e.kind.as_str() {
             "request.open" => result.push(serde_json::from_value(v.clone())?),
+            "turn.end" => {
+                for q in result.iter_mut().filter(|q| {
+                    q.waits_for_approval() && q.scope.turn == e.scope.turn && q.answer.is_none()
+                }) {
+                    q.answerable = v["outcome"] == "completed"
+                        && v["open_calls"].as_array().is_some_and(|calls| {
+                            calls
+                                .iter()
+                                .any(|c| c["id"].as_str() == q.scope.call.as_deref())
+                        });
+                }
+            }
             "request.answer" => {
                 let a: Answer = serde_json::from_value(v.clone())?;
                 if let Some(q) = result.iter_mut().find(|q| q.id == a.request) {

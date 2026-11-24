@@ -110,6 +110,12 @@ pub fn install(b: sdk::AgentBuilder, k: &Arc<Kit>) -> sdk::AgentBuilder {
             {
                 return Ok(OutputDecision::Block);
             }
+            if k.name.starts_with("waiting-")
+                && out.recipient == *k.redacted_client.lock().unwrap()
+                && v["question"]["kind"] == "approval"
+            {
+                return Ok(OutputDecision::Block);
+            }
             if k.name == "approval-redacted"
                 && v["question"]["kind"] == "approval"
                 && replace(&mut v, "dispatch-blue", "[redacted]")

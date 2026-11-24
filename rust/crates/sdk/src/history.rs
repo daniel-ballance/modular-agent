@@ -175,6 +175,15 @@ impl crate::Agent {
                     (viewer.in_turn)(&q.id, approval)
                 } else {
                     !approval
+                        || q.waits_for_approval()
+                            && self.inner.harness.max_approval_wait_ms().is_some()
+                            && data.settings["approvalWait"] == "untilDeadline"
+                            && q.extra["deadlineAt"]
+                                .as_u64()
+                                .is_some_and(|end| base::now() < end)
+                            && q.extra["answerers"]
+                                .as_array()
+                                .is_none_or(|set| set.iter().any(|a| a == viewer.actor))
                 }
             },
         )?;

@@ -36,6 +36,12 @@ pub fn id() -> String {
 static TEST_CLOCK: std::sync::OnceLock<tokio::sync::watch::Sender<u64>> =
     std::sync::OnceLock::new();
 #[doc(hidden)]
+pub fn set_clock_for_test(at: u64) {
+    TEST_CLOCK
+        .get_or_init(|| tokio::sync::watch::channel(at).0)
+        .send_replace(at);
+}
+#[doc(hidden)]
 pub fn advance_clock_for_test(ms: u64) {
     TEST_CLOCK
         .get_or_init(|| tokio::sync::watch::channel(wall_time()).0)

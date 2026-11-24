@@ -41,7 +41,12 @@ impl Plugin for ApprovalPlugin {
                             cap.tools(&data)
                                 .into_iter()
                                 .find(|tool| tool.name == call.name)
-                                .map(|def| (api.tool_registration(&key), wire::definition(&def)))
+                                .map(|def| {
+                                    (
+                                        api.tool_registration(&key),
+                                        wire::registered_definition(&def),
+                                    )
+                                })
                         })
                     {
                         q.extra["source"] = source;
@@ -50,6 +55,32 @@ impl Plugin for ApprovalPlugin {
                     q.key = Some(format!("approval:{}:{}", call.id, call.input));
                     q.timeout_ms = settings["approval_timeout_ms"].as_u64();
                     q.extra["whenTimeLimit"] = json!("decline");
+                    if let Some(parked) = api.park_approval(&q)? {
+                        return Ok(if parked {
+                            HookResult {
+                                suspended: true,
+                                ..answer(value)
+                            }
+                        } else {
+                            refuse("approval has no eligible answerer")
+                        });
+                    }
+                    // Never ask a replacement question on a continuation's bound call.
+                    if let Some(old) = questions(&api.snapshot(&scope.session)?)?
+                        .iter()
+                        .find(|old| old.scope.call == scope.call && old.waits_for_approval())
+                    {
+                        return Ok(
+                            if ["approvalCall", "source", "definition"]
+                                .iter()
+                                .all(|key| wire::json_eq(&old.extra[key], &q.extra[key]))
+                            {
+                                answer(value)
+                            } else {
+                                refuse("the call changed at its approval gate")
+                            },
+                        );
+                    }
                     match requests(api.as_ref())?
                         .ask(api.clone(), q, api.cancellation(&scope.session)?)
                         .await?

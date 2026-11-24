@@ -145,7 +145,7 @@ async fn question(
     cx: ConnectionTo<acp::Client>,
     capabilities: Value,
 ) {
-    if session.check_view().is_err() {
+    if session.check_view().is_err() || q.waits_for_approval() {
         return;
     }
     // Unsupported forms and questions past their turn use requests/answer.
@@ -183,7 +183,7 @@ async fn question(
                     if let Some(mut view) = gate(poll.clone()).await?
                         && let Some(after) = view["result"]["requests"].as_array_mut()
                     {
-                        binding::mark_poll_view(&session, &poll["result"]["requests"], after)?;
+                        binding::mark_poll_view(&session, &poll["result"]["requests"], after).await?;
                         if after.iter().any(|v| v["id"] == q.id && v["answerable"] == true) {
                             return std::future::pending().await;
                         }

@@ -183,7 +183,9 @@ fn settlement(data: &SessionData, counts: Capacity) -> u64 {
                 turns.remove(&entry.scope.turn);
             }
             "request.open" => {
-                questions.insert(entry.id.as_str());
+                if let Some(id) = entry.content.as_ref().and_then(|v| v["id"].as_str()) {
+                    questions.insert(id);
+                }
             }
             "request.answer" | "request.closed" | "request.invalidated" => {
                 if let Some(id) = entry.content.as_ref().and_then(|v| v["request"].as_str()) {

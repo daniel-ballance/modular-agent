@@ -3,6 +3,7 @@ use crate::events::Message;
 use crate::routes::Fanout;
 use tokio::sync::{mpsc, oneshot};
 pub(crate) struct SharedSession {
+    borrowed_writer: bool,
     pub id: String,
     pub project: PathBuf,
     pub api: Api,
@@ -77,6 +78,20 @@ impl Session {
         ));
         *self.worker.lock().unwrap() = Some(worker);
         Ok(())
+    }
+    pub fn waiting_route(&self) -> Result<ApprovalRoute> {
+        self.check_view()?;
+        let actor = connection_actor();
+        Ok(ApprovalRoute {
+            instance: self.route.clone(),
+            binding: PRINCIPAL
+                .try_with(|p| p.approval_route())
+                .map_err(|_| anyhow!("no ACP principal"))?,
+            actor: actor.clone(),
+            principal: actor.clone(),
+            ceiling: self.api.authority(&self.id, &actor)?,
+            live: self.stop.clone(),
+        })
     }
     pub async fn detach_route(&self) -> bool {
         let last = self.fanout.remove(&self.route);
@@ -182,7 +197,7 @@ impl Session {
         }
         self.detach_route().await;
         let open = self.api.snapshot(&self.id).is_ok();
-        if open && self.api.is_running(&self.id) {
+        if open && !self.borrowed_writer && self.api.is_running(&self.id) {
             self.cancel().await?;
         }
         let driver = self.driver.lock().unwrap().take();
@@ -190,7 +205,7 @@ impl Session {
             let _ = driver.await;
         }
         let _guard = self.gate.lock().await;
-        let result = if open {
+        let result = if open && !self.borrowed_writer {
             self.api.close(&self.id).await
         } else {
             Ok(())
@@ -477,11 +492,15 @@ pub(crate) fn config(api: &dyn AgentApi, id: &str) -> Result<Value> {
     }
     let effective_thinking =
         wire::lower_reasoning(settings["thinking"].as_str().unwrap_or("low"), &thinking);
-    Ok(json!([
+    let mut options = json!([
         {"id":"model","name":"Model","category":"model","type":"select","currentValue":current_model,"options":models},
         {"id":"thinking","name":"Thinking","category":"thought_level","type":"select","currentValue":effective_thinking,"options":thinking.into_iter().map(|v|json!({"value":v,"name":v})).collect::<Vec<_>>()},
         {"id":"approval","name":"Approval","type":"select","currentValue":match settings["approval"].as_str().unwrap_or("off") {"ask_always"=>"all","ask_unless_read_only"=>"ask","never_ask"=>"never",_=>"off"},"options":[{"value":"off","name":"Off"},{"value":"ask","name":"Ask unless read-only"},{"value":"all","name":"Ask always"},{"value":"never","name":"Refuse without asking"}]}
-    ]))
+    ]);
+    if api.declaration()?["approvals_outlast_turns"] == true {
+        options.as_array_mut().unwrap().push(json!({"id":"approvalWait","name":"Approval wait","type":"select","currentValue":settings["approvalWait"].as_str().unwrap_or("live"),"options":[{"value":"live","name":"Live only"},{"value":"untilDeadline","name":"Until deadline"}]}));
+    }
+    Ok(options)
 }
 struct Opening<'a>(&'a Mutex<std::collections::BTreeSet<String>>, String);
 impl Drop for Opening<'_> {
@@ -716,7 +735,12 @@ impl State {
                 }
             }
         };
+        // The embedded SDK can already own this writer for an AG-UI thread.
+        // Attach only a route. Do not recover, cancel or release its writer.
+        let borrowed_writer =
+            reopening && !self.factory.owns_session_agent() && api.snapshot(&id).is_ok();
         let (session, rx) = Session::new(Arc::new(SharedSession {
+            borrowed_writer,
             id: id.clone(),
             project: project.clone(),
             api: api.clone(),
@@ -743,7 +767,10 @@ impl State {
                         .unwrap_or(json!([])),
                 )
                 .await?;
-            let handed_back = if reopening {
+            let handed_back = if borrowed_writer {
+                join_host(api.as_ref(), &id)?;
+                vec![]
+            } else if reopening {
                 let inputs = api.install_recovery(&id).await?;
                 self.routes.rewind_blocks.lock().unwrap().remove(&project);
                 inputs
@@ -762,7 +789,7 @@ impl State {
             *session.driver.lock().unwrap() = Some(tokio::spawn(with_principal(
                 self.principal.clone(),
                 self.ceiling.clone(),
-                session.clone().drive(reopening),
+                session.clone().drive(reopening && !borrowed_writer),
             )));
             self.routes
                 .sessions
@@ -773,7 +800,7 @@ impl State {
         } else {
             // Release the writer even if an error after installation stranded an
             // interrupted turn. No turn driver was started in this case.
-            if api.is_running(&id) {
+            if !borrowed_writer && api.is_running(&id) {
                 let _ = api.cancel(&id).await;
                 let _ = api.run_recovery(&id).await;
             }

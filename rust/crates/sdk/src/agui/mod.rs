@@ -165,6 +165,7 @@ struct Client {
     run: Arc<tokio::sync::Mutex<()>>,
     cursor: Mutex<Option<Cursor>>,
     presence: Mutex<Option<String>>,
+    presence_token: Mutex<base::CancellationToken>,
     questions: Mutex<BTreeMap<String, Option<String>>>,
     paused: Mutex<Option<(String, InterfaceConnection)>>,
     runs: Mutex<std::collections::VecDeque<String>>,
@@ -222,6 +223,28 @@ impl Agent {
                 return Err(invalid("AG-UI route has a different registered executor"));
             }
         }
+        for (_, actor) in &entries {
+            let acl = actor.clone();
+            let tenant = options.tenant.clone();
+            let guard = Arc::new(move |d: &SessionData, id: &str| {
+                (acl.id() == id
+                    && acl.allows(&d.project, d.tenant_id())
+                    && tenant.as_deref() == d.tenant_id())
+                .then(|| acl.principal.actor.rights.clone())
+            });
+            self.inner.harness.register_approval_audience(
+                format!("agui:{}", actor.client_id),
+                actor.id().into(),
+                guard.clone(),
+            );
+            if options.acp {
+                self.inner.harness.register_approval_audience(
+                    actor.acp_identity().approval_route(),
+                    actor.id().into(),
+                    guard,
+                );
+            }
+        }
         let routes = self.acp_routes();
         if options.acp {
             self.acp_factory(options.acp_composition.clone(), routes.clone())
@@ -249,8 +272,7 @@ impl Agent {
                 if !allowed {return Fail::Refused.response()}
                 let mut response=if req.method()==Method::OPTIONS && origin.is_some() {reply(204,"text/plain",Body::empty())} else if let Some(actor)=actor {
                     if req.uri().path()=="/" && let Some((compose,routes,open))=acp {
-                        let p=&actor.principal;
-                        let identity=interface_acp::Identity{id:p.actor.id.clone(),kind:p.actor.kind.clone(),rights:p.actor.rights.clone(),tenants:p.tenants.clone(),projects:p.projects.clone(),represents:p.represents.clone(),explicit_rights:true,join_on_open:actor.join_on_open,network:true,trust_trace_context:Some(actor.trust_trace_context)};
+                        let identity=actor.acp_identity();
                         let factory=service.agent.connection_factory(compose,routes);
                         return upgrade.acp(req,move |conn| async move { let _=interface_acp::run_websocket(factory,identity,conn,open).await; }).unwrap_or_else(||Fail::Invalid.response());
                     }
@@ -263,6 +285,21 @@ impl Agent {
     }
 }
 impl AguiActor {
+    fn acp_identity(&self) -> interface_acp::Identity {
+        let p = &self.principal;
+        interface_acp::Identity {
+            id: p.actor.id.clone(),
+            kind: p.actor.kind.clone(),
+            rights: p.actor.rights.clone(),
+            tenants: p.tenants.clone(),
+            projects: p.projects.clone(),
+            represents: p.represents.clone(),
+            explicit_rights: true,
+            join_on_open: self.join_on_open,
+            network: true,
+            trust_trace_context: Some(self.trust_trace_context),
+        }
+    }
     fn id(&self) -> &str {
         &self.principal.actor.id
     }
@@ -483,6 +520,20 @@ impl Service {
         let v = self.gate(a, id, v).await?;
         Ok(reply(status, "application/json", Body::from(encode(&v)?)))
     }
+    fn waiting_route(&self, a: &AguiActor, c: &Client, expected: &str) -> R<base::ApprovalRoute> {
+        let slot = c.presence.lock().unwrap();
+        if slot.as_deref() != Some(expected) {
+            return Err(Fail::Conflict);
+        }
+        Ok(base::ApprovalRoute {
+            instance: expected.into(),
+            binding: format!("agui:{}", a.client_id),
+            actor: a.id().into(),
+            principal: a.id().into(),
+            ceiling: a.principal.actor.rights.clone(),
+            live: c.presence_token.lock().unwrap().clone(),
+        })
+    }
     fn presence(self: Arc<Self>, a: Arc<AguiActor>, id: String, c: Arc<Client>) -> R<Response> {
         let route = base::id();
         let questions = base::requests(self.h())?;
@@ -492,16 +543,19 @@ impl Service {
         }
         let approvals = self.right(&a, &id, "approve")?;
         questions.connect_answer_route(&id, a.id(), &route, approvals);
+        *c.presence_token.lock().unwrap() = base::CancellationToken::new();
         *slot = Some(route.clone());
         drop(slot);
         struct Guard(Arc<Client>, Arc<dyn base::InputRequests>, String, String);
         impl Drop for Guard {
             fn drop(&mut self) {
                 let mut slot = self.0.presence.lock().unwrap();
+                self.0.presence_token.lock().unwrap().cancel();
                 self.1.detach_presence(&self.2, &self.3);
                 *slot = None;
                 self.0.questions.lock().unwrap().retain(|_, r| r.is_none());
                 self.0.paused.lock().unwrap().take();
+                log::debug!(target:"modular_agent::agui::presence_lost","{}",self.2);
             }
         }
         let guard = Guard(c, questions, id.clone(), route);

@@ -35,6 +35,30 @@ impl HistoryStore for Journal {
                 json!(entries.iter().map(|e| &e.id).collect::<Vec<_>>()),
             )?;
         }
+        for entry in entries {
+            match entry.kind.as_str() {
+                "request.answer" => self.state.latch(&d.id, "answerCommitted"),
+                "tool.result"
+                    if d.entries.iter().any(|e| {
+                        base::interface_handoff(e) && e.scope.call == entry.scope.call
+                    }) =>
+                {
+                    self.state.latch(&d.id, "reportCommitted")
+                }
+                "turn.end"
+                    if d.entries.iter().any(|s| {
+                        s.kind == "turn.start"
+                            && s.scope.turn == entry.scope.turn
+                            && s.content
+                                .as_ref()
+                                .is_some_and(|v| v["continuesTurnId"].is_string())
+                    }) =>
+                {
+                    self.state.latch(&d.id, "continuationEnded")
+                }
+                _ => (),
+            }
+        }
         self.state.changed.notify_waiters();
         if self.state.name == "crash-after-result"
             && !self.state.restarted

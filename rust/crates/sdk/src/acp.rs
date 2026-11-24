@@ -231,6 +231,7 @@ impl interface_acp::Factory for ProjectFactory {
         }
         let harness = agent.inner.harness.clone();
         harness.configure_reservations(self.1.inner.harness.reservations())?;
+        harness.inherit_approval_audiences(&self.1.inner.harness);
         if let Err(error) = harness
             .load(Arc::new(interface_acp::AcpPlugin { sink }))
             .await
@@ -317,6 +318,16 @@ impl base::EventSink for Routes {
 }
 
 impl Agent {
+    pub(crate) fn register_acp_audience(&self, p: interface_acp::Identity) {
+        self.inner.harness.register_approval_audience(
+            p.approval_route(),
+            p.id.clone(),
+            Arc::new(move |data, actor| {
+                (p.may_discover(data) && (p.id == actor || p.represents.iter().any(|s| s == actor)))
+                    .then(|| p.rights.clone())
+            }),
+        );
+    }
     /// Serve this agent's project on stdio. Build with `plugin_host(true)` before serving.
     /// Start the Interface before opening embedded sessions; stdout belongs to ACP.
     pub async fn serve_acp(&self, options: AcpOptions) -> Result<()> {
@@ -328,6 +339,7 @@ impl Agent {
             .try_lock()
             .map_err(|_| Error::new(Code::Busy, "ACP is already serving"))?;
         let factory = self.acp_factory(options.compose, routes.clone()).await?;
+        self.register_acp_audience(identity.clone());
         Ok(interface_acp::run_stdio(factory, identity).await?)
     }
 
@@ -368,6 +380,9 @@ impl Agent {
             let _serving = routes.serving.lock().await;
             self.acp_factory(options.compose.clone(), routes.clone())
                 .await?;
+        }
+        for (_, identity) in &entries {
+            self.register_acp_audience(identity.clone());
         }
         let agent = self.clone();
         let open_routes = Arc::new(interface_acp::OpenRoutes::default());
@@ -552,7 +567,8 @@ impl interface_acp::Factory for Factory {
             let mut routes = self.1.attached.lock().unwrap();
             base::ensure!(
                 !routes.contains_key(id)
-                    && base::AgentApi::snapshot(self.0.inner.harness.as_ref(), id).is_err(),
+                    && (self.0.inner.harness.max_approval_wait_ms().is_some()
+                        || base::AgentApi::snapshot(self.0.inner.harness.as_ref(), id).is_err()),
                 interface_acp::request_error("busy", "session is already open by another writer")
             );
             routes.insert(id.into(), sink.clone());

@@ -66,7 +66,35 @@ pub struct Session {
     inner: Arc<Inner>,
     id: String,
     driver: Arc<Driver>,
+    approval_route: Arc<PollHandle>,
     actor: String,
+}
+
+struct PollHandle {
+    instance: String,
+    live: base::CancellationToken,
+}
+impl PollHandle {
+    fn new(inner: &Inner, id: &str) -> Arc<Self> {
+        let live = inner
+            .harness
+            .session_generation(id)
+            .map(|t| t.child_token())
+            .unwrap_or_else(|_| {
+                let t = base::CancellationToken::new();
+                t.cancel();
+                t
+            });
+        Arc::new(Self {
+            instance: base::id(),
+            live,
+        })
+    }
+}
+impl Drop for PollHandle {
+    fn drop(&mut self) {
+        self.live.cancel();
+    }
 }
 
 /// Membership and a grant for an embedded actor.
@@ -268,6 +296,7 @@ impl Session {
                 })
         };
         Session {
+            approval_route: PollHandle::new(&inner, &id),
             inner,
             id,
             driver,
@@ -344,6 +373,7 @@ impl Session {
         }
         Ok(Self {
             actor: actor_id.into(),
+            approval_route: PollHandle::new(&self.inner, &self.id),
             ..self.clone()
         })
     }
@@ -459,8 +489,89 @@ impl Session {
             .visible(h, &self.id, &self.actor)?
             .into_iter()
             .filter(|q| q.answerable && q.answer.is_none())
-            .map(|q| crate::Question::from_base(&q))
+            .map(|q| {
+                let mut view = crate::Question::from_base(&q);
+                // A synchronous listing cannot await a filter. Return only
+                // the waiting identity; the async polling route gates the card.
+                if q.waits_for_approval() && h.gates_output() {
+                    view.question.clear();
+                    view.call = None;
+                    view.deadline = None;
+                    view.options.clear();
+                }
+                view
+            })
             .collect())
+    }
+
+    fn approval_route(&self) -> base::ApprovalRoute {
+        base::ApprovalRoute {
+            instance: self.approval_route.instance.clone(),
+            binding: "sdk".into(),
+            actor: self.actor.clone(),
+            principal: LOCAL.into(),
+            ceiling: Rights::full(),
+            live: self.approval_route.live.clone(),
+        }
+    }
+
+    /// Poll on this actor handle. A plain listing does not deliver consent.
+    pub async fn questions_present(&self) -> Result<Vec<crate::Question>> {
+        self.require("watch")?;
+        let h = self.inner.harness.as_ref();
+        if h.max_approval_wait_ms().is_none() {
+            return Err(Error::new(
+                Code::NotSupported,
+                "agent does not support waiting approvals",
+            ));
+        }
+        let mut result = Vec::new();
+        for q in base::requests(h)?.visible(h, &self.id, &self.actor)? {
+            if q.answerable
+                && q.answer.is_none()
+                && (!q.waits_for_approval()
+                    || h.deliver_approval(&self.id, &q.id, &self.approval_route())
+                        .await?)
+            {
+                result.push(crate::Question::from_base(&q));
+            }
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn offer_waiting_handler(&self) {
+        if self.inner.harness.max_approval_wait_ms().is_none() {
+            return;
+        }
+        let handler = self
+            .inner
+            .hub
+            .session_handlers
+            .lock()
+            .unwrap()
+            .get(&self.id)
+            .or(self.inner.hub.on_question.as_ref())
+            .cloned();
+        let Some(handler) = handler else { return };
+        let session = self.clone();
+        self.inner.workers.spawn(async move {
+            let Ok(list)=session.questions_present().await else{return};
+            for q in list.into_iter().filter(|q|q.approval_wait.is_some()) {
+                let handler=handler.clone();let s=session.clone(); let key=(s.id.clone(),q.id.clone());
+                if !session.inner.hub.waiting_handlers.lock().unwrap().insert(key.clone()){continue}
+                session.inner.workers.spawn(async move {
+                    let h=&s.inner.harness;
+                    let Ok(generation)=h.session_generation(&s.id) else{return};
+                    let mut changes=s.inner.hub.events.subscribe();
+                    let closed=async {loop{
+                        if !h.snapshot(&s.id).and_then(|d|base::questions(&d)).is_ok_and(|qs|qs.iter().any(|v|v.id==q.id && v.answerable)) {break}
+                        if matches!(changes.recv().await,Err(tokio::sync::broadcast::error::RecvError::Closed)){break}
+                    }};
+                    tokio::select!{biased; _=generation.cancelled()=>(),_=s.inner.crash.cancelled()=>(),_=closed=>(),answer=handler(q.clone())=>{let _=s.answer(&q.id,answer).await;}}
+                    s.inner.hub.waiting_handlers.lock().unwrap().remove(&key);
+                });
+            }
+        });
     }
 
     /// Answer an open question by id.
@@ -482,7 +593,24 @@ impl Session {
         } else {
             "answer"
         })?;
-        crate::events::answer(api, &self.id, &self.actor, &q, answer).await?;
+        if q.waits_for_approval() {
+            let (allow, reason) = match answer {
+                crate::Answer::Allow => (true, None),
+                crate::Answer::Declined { reason } => (false, reason),
+                _ => return Err(Error::new(Code::InvalidParams, "expected allow or decline")),
+            };
+            if !api
+                .decide_approval(&self.id, id, &self.approval_route(), allow, reason)
+                .await?
+            {
+                return Err(Error::new(
+                    Code::Conflict,
+                    "no current delivery on this handle",
+                ));
+            }
+        } else {
+            crate::events::answer(api, &self.id, &self.actor, &q, answer).await?;
+        }
         if q.scope.session == self.id && q.scope.call.is_some() {
             self.drive();
         }
@@ -512,6 +640,7 @@ impl Session {
             }),
         );
         base::requests(self.inner.harness.as_ref())?.presence(&self.id, LOCAL, true);
+        self.offer_waiting_handler();
         Ok(())
     }
 
@@ -1086,6 +1215,11 @@ impl Session {
     /// the session. Proposed or parked input does not keep it busy.
     pub async fn wait_idle(&self) -> Result<()> {
         self.require("watch")?;
+        if self.inner.harness.max_approval_wait_ms().is_some() {
+            // Reconcile an elapsed deadline even if its clock notification has
+            // not yet been delivered. The driver returns at once for open waits.
+            self.drive();
+        }
         let mut events = self.inner.hub.events.subscribe();
         loop {
             {
@@ -1254,7 +1388,7 @@ impl Session {
     }
 
     pub(crate) async fn close_owned(&self) -> Result<()> {
-        self.inner.harness.cancel(&self.id).await?;
+        self.inner.harness.cancel_for_close(&self.id).await?;
         let _run = self.driver.run.lock().await;
         self.inner.harness.close(&self.id).await?;
         self.inner

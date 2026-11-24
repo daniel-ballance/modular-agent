@@ -183,6 +183,35 @@ pub trait AgentApi: Send + Sync {
         json!({"plugin":capability,"toolSource":capability.strip_prefix("tools.").unwrap_or(capability)})
     }
     fn snapshot(&self, session: &str) -> Result<SessionData>;
+    fn park_approval(&self, _question: &Question) -> Result<Option<bool>> {
+        Ok(None)
+    }
+    async fn waiting_dispatch(
+        &self,
+        _scope: &Scope,
+        _call: &ToolCall,
+        _after_start: bool,
+    ) -> Result<Option<ToolStatus>> {
+        Ok(None)
+    }
+    async fn deliver_approval(
+        &self,
+        _session: &str,
+        _id: &str,
+        _route: &ApprovalRoute,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+    async fn decide_approval(
+        &self,
+        _session: &str,
+        _id: &str,
+        _route: &ApprovalRoute,
+        _allow: bool,
+        _reason: Option<String>,
+    ) -> Result<bool> {
+        Ok(false)
+    }
     fn question_trace(&self, _session: &str, _question: &str) -> Option<String> {
         None
     }

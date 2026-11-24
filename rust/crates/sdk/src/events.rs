@@ -271,6 +271,8 @@ pub struct Question {
     pub options: Vec<String>,
     pub details: Option<Value>,
     pub deadline: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_wait: Option<String>,
     pub credential: Option<String>,
     /// For an approval: the exact call, as shared data's ToolCall.
     pub call: Option<Value>,
@@ -291,7 +293,10 @@ impl Question {
             question: q.text.clone(),
             options: q.options.clone(),
             details: q.extra.get("details").cloned(),
-            deadline: q.extra["deadline"].as_u64(),
+            deadline: q.extra["deadlineAt"]
+                .as_u64()
+                .or_else(|| q.extra["deadline"].as_u64()),
+            approval_wait: q.extra["approvalWait"].as_str().map(str::to_string),
             credential: q.credential.clone(),
             call: q.extra.get("approvalCall").cloned(),
         }
@@ -325,6 +330,7 @@ pub(crate) type QuestionHandler = Arc<dyn Fn(Question) -> BoxFuture<'static, Ans
 pub(crate) struct Hub {
     pub events: broadcast::Sender<Event>,
     pub on_question: Option<QuestionHandler>,
+    pub waiting_handlers: std::sync::Mutex<std::collections::BTreeSet<(String, String)>>,
     pub session_handlers: std::sync::Mutex<std::collections::HashMap<String, QuestionHandler>>,
     pub harness: OnceLock<Weak<Harness>>,
     pub inner: OnceLock<Weak<crate::agent::Inner>>,
@@ -342,6 +348,7 @@ impl Hub {
             events: broadcast::channel(4096).0,
             on_question,
             session_handlers: Default::default(),
+            waiting_handlers: Default::default(),
             harness: OnceLock::new(),
             inner: OnceLock::new(),
             crash,
@@ -355,6 +362,11 @@ impl base::EventSink for Hub {
         let Some(h) = self.harness.get().and_then(Weak::upgrade) else {
             return;
         };
+        if event.kind == "turn.result"
+            && let Some(inner) = self.inner.get().and_then(Weak::upgrade)
+        {
+            crate::Session::new(inner, event.scope.session.clone()).offer_waiting_handler();
+        }
         let question = (event.kind == "request.opened")
             .then(|| serde_json::from_value::<base::Question>(event.content.clone()).ok())
             .flatten();

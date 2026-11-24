@@ -61,6 +61,13 @@ fn route(api: &dyn AgentApi, session: &str) -> Result<Vec<String>> {
 impl Questions {
     fn open(&self, api: &dyn AgentApi, mut q: Question) -> Result<Question> {
         let _guard = self.lock.lock().unwrap();
+        // Only the writer's pre-dispatch checkpoint can mark a waiting
+        // approval. A draft from a running tool is never that checkpoint.
+        if let Some(extra) = q.extra.as_object_mut() {
+            extra.remove("approvalWait");
+            extra.remove("approvalView");
+            extra.remove("deadlineAt");
+        }
         q.route = route(api, &q.scope.session)?;
         if let Some(key) = &q.key
             && let Some(old) = questions(&api.snapshot(&q.scope.session)?)?
@@ -423,6 +430,10 @@ impl Questions {
                 .into_iter()
                 .find(|q| q.id == request)
                 .ok_or_else(|| anyhow!("unknown request"))?;
+            ensure!(
+                !q.waits_for_approval(),
+                "waiting approval needs a delivered view"
+            );
             ensure!(q.answerable && q.answer.is_none(), "request is closed");
             ensure!(
                 may_answer(api.as_ref(), &q, session, actor),

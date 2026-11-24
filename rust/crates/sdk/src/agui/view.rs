@@ -209,6 +209,7 @@ impl Service {
         d: &SessionData,
         c: &Client,
         offer: bool,
+        snapshot: bool,
     ) -> R<Vec<(base::Question, Value)>> {
         let service = base::requests(self.h())?;
         let presence = c.presence.lock().unwrap().clone();
@@ -225,7 +226,9 @@ impl Service {
             if !self.right(a, &d.id, if approval { "approve" } else { "answer" })?
                 || !service.eligible(self.h(), &q, &d.id, a.id())
                 || ((live || approval)
-                    && (presence.is_none() || (!offer && delivered.get(&q.id) != Some(&presence))))
+                    && (presence.is_none()
+                        || (!(offer || snapshot && q.waits_for_approval())
+                            && delivered.get(&q.id) != Some(&presence))))
             {
                 continue;
             }
@@ -233,7 +236,9 @@ impl Service {
             let view = self.gate(a, &d.id, json!({"question":shared})).await;
             let exact = view.as_ref().is_ok_and(|v| v["question"] == shared);
             if approval && !exact {
-                if offer && let Some(route) = &presence {
+                if q.waits_for_approval() {
+                    c.questions.lock().unwrap().remove(&q.id);
+                } else if offer && let Some(route) = &presence {
                     service.detach_presence(&d.id, route);
                 }
                 continue;
@@ -263,7 +268,9 @@ impl Service {
                 && let Some(open) = d.entries.iter().find(|e| {
                     e.kind == "request.open" && e.content.as_ref().is_some_and(|v| v["id"] == q.id)
                 })
-                && let Some(date) = iso(open.at.saturating_add(ms))
+                && let Some(date) = iso(q.extra["deadlineAt"]
+                    .as_u64()
+                    .unwrap_or(open.at.saturating_add(ms)))
             {
                 interrupt["expiresAt"] = json!(date);
             }
@@ -284,7 +291,7 @@ impl Service {
         let last = messages.as_array().and_then(|l| l.last()).map(|m| &m["id"]);
         let v = if http {
             let questions = self
-                .questions(a, d, c, false)
+                .questions(a, d, c, false, true)
                 .await?
                 .into_iter()
                 .map(|(_, v)| v)
@@ -365,10 +372,36 @@ impl Service {
     }
     pub(super) async fn http_snapshot(&self, a: &AguiActor, id: &str, c: &Client) -> R<Response> {
         let d = self.watch(a, id)?;
+        let presence = c.presence.lock().unwrap().clone();
+        let waiting: Vec<_> = base::questions(&d)?
+            .into_iter()
+            .filter(base::Question::waits_for_approval)
+            .map(|q| q.id)
+            .collect();
+        c.questions
+            .lock()
+            .unwrap()
+            .retain(|id, _| !waiting.contains(id));
         let (v, cursor) = self.snapshot_value(a, id, c, &d, &base::id(), true).await?;
         let bytes = self.buffer(id, encode(&v)?)?;
         if d.position != self.watch(a, id)?.position {
             return Err(Fail::Conflict);
+        }
+        for q in v["waiting"]["questions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|q| waiting.iter().any(|id| q["id"] == *id))
+        {
+            let qid = q["id"].as_str().ok_or(Fail::Withheld)?;
+            let route = self.waiting_route(a, c, presence.as_deref().ok_or(Fail::Conflict)?)?;
+            if !self.h().deliver_approval(id, qid, &route).await? {
+                return Err(Fail::Conflict);
+            }
+            c.questions
+                .lock()
+                .unwrap()
+                .insert(qid.into(), presence.clone());
         }
         *c.cursor.lock().unwrap() = Some(cursor);
         Ok(reply(200, "application/json", Body::from(bytes)))

@@ -120,7 +120,7 @@ impl Service {
                 _ => return Err(Fail::Invalid),
             }
         }
-        let questions = self.questions(&a, &d, &c, false).await?;
+        let questions = self.questions(&a, &d, &c, false, false).await?;
         let mut answers = BTreeMap::new();
         let mut live = None;
         for decision in &req.resume {
@@ -253,7 +253,26 @@ impl Service {
             for (qid, value) in answers {
                 let service = base::requests(self.h())?;
                 let declined = value.is_none();
-                if live.is_some() {
+                if questions
+                    .iter()
+                    .any(|(q, _)| q.id == qid && q.waits_for_approval())
+                {
+                    let seen = c
+                        .questions
+                        .lock()
+                        .unwrap()
+                        .get(&qid)
+                        .and_then(Clone::clone)
+                        .ok_or(Fail::Conflict)?;
+                    let route = self.waiting_route(&a, &c, &seen)?;
+                    if !self
+                        .h()
+                        .decide_approval(id, &qid, &route, !declined, None)
+                        .await?
+                    {
+                        return Err(Fail::Conflict);
+                    }
+                } else if live.is_some() {
                     let route = c
                         .questions
                         .lock()
@@ -597,7 +616,10 @@ impl Exchange {
                     return Ok((vec![], false));
                 }
                 let data = self.server.watch(&self.a, &self.id)?;
-                let questions = self.server.questions(&self.a, &data, &self.c, true).await?;
+                let questions = self
+                    .server
+                    .questions(&self.a, &data, &self.c, true, false)
+                    .await?;
                 let selected = questions
                     .into_iter()
                     .filter(|(q, _)| q.scope.turn.as_ref() == Some(&turn))
@@ -617,7 +639,7 @@ impl Exchange {
                     let data = self.server.watch(&self.a, &self.id)?;
                     let questions = self
                         .server
-                        .questions(&self.a, &data, &self.c, true)
+                        .questions(&self.a, &data, &self.c, true, false)
                         .await?
                         .into_iter()
                         .filter(|(q, _)| q.scope.turn.as_ref() == Some(&turn))
@@ -879,7 +901,35 @@ impl Exchange {
             return Err(Fail::Withheld);
         }
         if outcome == "interrupt" {
+            let waiting: Vec<_> = base::questions(&current)?
+                .into_iter()
+                .filter(base::Question::waits_for_approval)
+                .map(|q| q.id)
+                .collect();
+            let expected = self.c.presence.lock().unwrap().clone();
+            for q in &questions {
+                if let Some(id) = q["id"].as_str()
+                    && waiting.iter().any(|v| v == id)
+                {
+                    let route = self.server.waiting_route(
+                        &self.a,
+                        &self.c,
+                        expected.as_deref().ok_or(Fail::Refused)?,
+                    )?;
+                    if !self
+                        .server
+                        .h()
+                        .deliver_approval(&self.id, id, &route)
+                        .await?
+                    {
+                        return Err(Fail::Conflict);
+                    }
+                }
+            }
             let presence = self.c.presence.lock().unwrap();
+            if *presence != expected {
+                return Err(Fail::Conflict);
+            }
             if in_turn && (presence.is_none() || *presence != self.presence_at_start) {
                 return Err(Fail::Refused);
             }
@@ -888,7 +938,11 @@ impl Exchange {
             for q in questions {
                 delivered.insert(
                     q["id"].as_str().ok_or(Fail::Lost)?.into(),
-                    if in_turn { presence.clone() } else { None },
+                    if in_turn || waiting.iter().any(|v| q["id"] == *v) {
+                        presence.clone()
+                    } else {
+                        None
+                    },
                 );
             }
             if in_turn && let Some(conn) = self.executor.take() {
