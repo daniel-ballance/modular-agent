@@ -239,11 +239,11 @@ type Input struct {
 	TraceContext         *telemetry.Wire `json:"-"`
 	ResultSchema         json.RawMessage `json:"resultSchema,omitempty"`
 	ID, Key, Actor, When string
-	Answer               string    `json:",omitempty"`
-	ReleasedBy           string    `json:",omitempty"`
-	Taken                string    `json:",omitempty"`
-	Parked               *bool     `json:",omitempty"`
-	JobRights            []string  `json:",omitempty"`
+	Answer               string `json:",omitempty"`
+	ReleasedBy           string `json:",omitempty"`
+	Taken                string `json:",omitempty"`
+	Parked               *bool  `json:",omitempty"`
+	JobRights            []string
 	ConnectionRights     *[]string `json:",omitempty"`
 	ViaActor             string    `json:",omitempty"`
 	Content              Content

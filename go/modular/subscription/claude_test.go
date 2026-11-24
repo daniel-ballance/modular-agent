@@ -171,6 +171,23 @@ func TestClaudeRefusesAPIKeyAccount(t *testing.T) {
 	}
 }
 
+func TestClaudeInstalledPackage(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("MODULAR_AGENT_CLAUDE_SIDECAR", "")
+	path := filepath.Join(home, ".local/share/modular-agent/sidecars/claude/dist/src/main.js")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("// fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := subscription.FindClaudeProgram(subscription.ClaudeOptions{})
+	if err != nil || got != path {
+		t.Fatalf("installed Claude package: %q, %v", got, err)
+	}
+}
+
 func TestClaudeMissingProgramNamesBothOptions(t *testing.T) {
 	_, err := subscription.Claude(t.Context(), subscription.ClaudeOptions{Program: filepath.Join(t.TempDir(), "missing.js")})
 	var e *modular.Error

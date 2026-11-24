@@ -1305,7 +1305,9 @@ func (h *Harness) runOne(ctx context.Context, s *session, in api.Input) (out api
 		recorded := api.Decode[api.TurnStart](resume.Data)
 		// Do not add newly registered tools to a saved offer.
 		tools = slices.DeleteFunc(tools, func(t api.Tool) bool {
-			return !slices.ContainsFunc(recorded.Tools, func(saved api.Tool) bool { return saved.Name == t.Name })
+			return !slices.ContainsFunc(recorded.Tools, func(saved api.Tool) bool {
+				return saved.Name == t.Name && portable.EqualJSON(api.JSON(portable.Tool(saved)), api.JSON(portable.Tool(t)))
+			})
 		})
 	}
 	if err != nil {

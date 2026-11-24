@@ -39,7 +39,7 @@ func HasQuestionCheckpoint(s Session, q Question) bool {
 	s.Entries = s.LiveEntries()
 	opened := false
 	for _, e := range s.Branch() {
-		if e.Call != q.Call || e.Turn != q.Turn {
+		if e.Session != s.ID || e.Call != q.Call || e.Turn != q.Turn || e.Step != q.Step {
 			continue
 		}
 		switch e.Kind {
