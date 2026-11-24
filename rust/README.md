@@ -87,11 +87,19 @@ By default a restart leaves an interrupted turn alone. Add `--resume-open` to `-
 
 `ma --help` lists the rest. With no `--model` and none in settings, `ma` uses the first Provider that is signed in.
 
+### Approval
+
+Use `ma --approval ask` to review each `codemode` script. The terminal shows the whole script on stderr and asks `Allow? (y/n)`. Enter `y` to allow that run, including the nested calls it makes, or `n` to refuse it before it starts. Each nested call still needs its own rights and must pass its other gates. Print mode (`-p`) has no approver and refuses calls that need approval.
+
+The flag overrides `approval` in global `settings.json`. Both accept `off`, `ask`, `all` or `never`. Without either, no approval feature loads. Explicit `off` loads the feature without asking. With approval configured, the declaration includes `approvalCoversNested: true`. An ACP client can select the session's `approval` option. An AG-UI client can POST, for example, `{"approval":"never"}` to `/agui/v1/threads/{threadId}/settings`. Both need the session's `settings` right.
+
+For approvals that wait, set a positive integer `approvalWaitMaxMs` in operator `policy.json`, for example `60000`. With approval configured, this adds `approvalsOutlastTurns: true`. New sessions use live approvals unless global `settings.json` also sets `"approval_wait": "untilDeadline"`. A waiting script has not started. On return, poll the request over ACP or open AG-UI presence and read the thread snapshot before answering. Project settings cannot load approval, change the policy or opt into waiting.
+
 ### Files
 
 | File | Purpose |
 |---|---|
-| `~/.config/modular-agent/settings.json` | Session defaults: `model`, `thinking`, `step_limit`, `output_limit`, `model_tools`. `resume_open` is a global boolean, not a session default; the project cannot set it. |
+| `~/.config/modular-agent/settings.json` | Session defaults: `model`, `thinking`, `step_limit`, `output_limit`, `model_tools`. `approval`, `approval_wait` and the boolean `resume_open` come only from this global file. |
 | `~/.config/modular-agent/auth.json` | Sign-ins. Written by `ma login`. Mode 0600. |
 | `~/.config/modular-agent/mcp.json` | `{"mcpServers": {...}}` in the form Pi and other clients use. `${NAME}` takes a value from the environment. |
 | `~/.config/modular-agent/models.json` | Catalog additions or replacements: `{"chatgpt": [{"id", "name", "contextWindow", "maxTokens", "effort"}], "grok": [...]}` |
@@ -150,11 +158,11 @@ node ../conformance/telemetry/run.mjs rust -- "$PWD/target/debug/scenario-agent"
 
 Build the other three fixture programs before running the full Rust telemetry matrix. Their build commands are in the [fixture registry](../conformance/sdk/fixtures/).
 
-- **Standard reference checks:** 27/27, including `trace-trust`, `resume-open` and `telemetry-export`. The startup check kills `ma` mid-call and observes recovery without connecting to the restarted writer.
-- **ACP with `--crash-checks --probe-checks --job-checks`:** `ma` passed 188/188 on stdio and 193/193 on its built-in loopback WebSocket listener. The base build passes 214/214 on stdio. The expanded run covers late answers and job report turns, including after a crash.
+- **Standard reference checks:** 28/28, including `approval-covers-script`, `trace-trust`, `resume-open` and `telemetry-export`. The startup check kills `ma` mid-call and observes recovery without connecting to the restarted writer.
+- **ACP with `--crash-checks --probe-checks --job-checks`:** `ma` passed 190/190 on stdio and 195/195 on its built-in loopback WebSocket listener. With approval configured, the updated ACP kit passed 193/193. With a wait maximum the public, crash and job checks passed 118/118, including a covered call on continuation. The base build passes 214/214 on stdio. The expanded run covers late answers and job report turns, including after a crash.
 - **Plugin binding:** The Rust conformance plugin passed 146/146 on stdio and 153/153 on WebSocket, including the transient and durable Runtime services. The separate-listener WebSocket isolation run passed 14/14. Neither WebSocket run used a bridge.
 - **Standard and codemode:** `ma` includes the five alias checks. The six `tools-code` tests are separate. These cover startup validation, tool results, sandbox limits, OS policy, worker death and cancellation, crash recovery, and the dependency boundary.
-- **Workspace:** 467 Rust tests passed, with no failures. The ops-desk demo passed all five cases. Project-notes passed its scripted and crash-and-reopen runs. Formatting and Clippy with `-D warnings` passed. See the [SDK verification matrix](crates/sdk/README.md#what-is-checked) for shared scenarios.
+- **Workspace:** 484 Rust tests passed, with no failures. The ops-desk demo passed all six scripted cases. Project-notes passed its scripted and crash-and-reopen runs. Formatting and Clippy with `-D warnings` passed. See the [SDK verification matrix](crates/sdk/README.md#what-is-checked) for shared scenarios.
 - **Subscriptions:** Offline checks use loopback OAuth and Responses fixtures and a fake Claude process plugin. The Grok SDK checks cover device sign-in, locked refresh, request shape and encrypted reasoning replay. The alias checks cover sign-in routing, sign-out, both model configuration files, `--model`, and reopening an old session. Live checks compile and skip without opt-in.
 
 To try the terminal without a login:
