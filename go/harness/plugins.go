@@ -336,6 +336,12 @@ func (c *client) Invoke(ctx context.Context, name string, v any) (any, error) {
 	var collected []any
 	for _, h := range handlers {
 		d, err := safeHandle(ctx, h.fn, v)
+		if before, ok := v.(api.Output); ok {
+			if after, ok := d.Value.(api.Output); ok {
+				after.Event.OutputChanged = before.Event.OutputChanged || !portable.EqualJSON(before.Event.Data, after.Event.Data)
+				d.Value = after
+			}
+		}
 		if rule == api.Observe {
 			if err != nil {
 				c.h.API().Emit(ctx, api.Event{Kind: "plugin.problem", Data: api.JSON(map[string]string{"where": name, "plugin": h.owner, "message": err.Error()})})

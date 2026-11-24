@@ -343,6 +343,9 @@ func (s *server) cancelQuestion(st *attachment, id string) {
 	}
 }
 func (s *server) ask(st *attachment, q api.Question) {
+	if q.ApprovalWait != "" {
+		return
+	}
 	s.mu.Lock()
 	present := []string{st.actor}
 	for who := range st.joined {

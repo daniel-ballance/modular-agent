@@ -67,7 +67,7 @@ func (c *client) SessionSummary(ctx context.Context, row api.Session, viewer api
 			if !q.Answerable || q.Kind == "secret" || len(q.Allowed) != 0 && !slices.Contains(q.Allowed, host.ID) {
 				continue
 			}
-			late := q.Defer && q.Kind != "approval" && ended[q.Turn]
+			late := (q.Defer && q.Kind != "approval" || q.ApprovalWait == api.UntilDeadline && c.SupportsWaitingApprovals()) && ended[q.Turn]
 			if !late && (viewer.InTurn == nil || !viewer.InTurn(row.ID, q.ID)) {
 				continue
 			}

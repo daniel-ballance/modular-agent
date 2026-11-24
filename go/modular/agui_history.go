@@ -245,7 +245,11 @@ func (s *agClient) questionDelivery(v api.Question, ended bool) (agDelivery, boo
 	return d, delivered && d.presence != nil && !(v.Defer && v.Kind == "approval")
 }
 
-func (q *agRequest) waitingQuestions() (map[string]agQuestion, error) {
+func (q *agRequest) waitingQuestions() (map[string]agQuestion, error) { return q.questionViews(false) }
+
+// Only a snapshot or a terminal delivery may offer a new approval. A resume
+// POST can use an earlier delivery, but cannot create one for itself.
+func (q *agRequest) questionViews(offer bool) (map[string]agQuestion, error) {
 	snap, err := q.a.a.Snapshot(q.id)
 	if err != nil {
 		return nil, err
@@ -257,6 +261,14 @@ func (q *agRequest) waitingQuestions() (map[string]agQuestion, error) {
 			continue
 		}
 		d, ok := q.state.questionDelivery(v, ended[v.Turn])
+		if offer && v.ApprovalWait == api.UntilDeadline && ended[v.Turn] {
+			q.state.mu.Lock()
+			p := q.state.presence
+			if p != nil && p.ctx.Err() == nil {
+				d.presence, ok = p, true
+			}
+			q.state.mu.Unlock()
+		}
 		if !ok {
 			continue
 		}
@@ -312,7 +324,7 @@ func (q *agRequest) snapshotHTTP() error {
 		return err
 	}
 	cursor := api.ID()
-	questions, err := q.waitingQuestions()
+	questions, err := q.questionViews(true)
 	if err != nil {
 		return err
 	}
@@ -355,8 +367,32 @@ func (q *agRequest) snapshotHTTP() error {
 	q.w.Header().Set("Content-Type", "application/json")
 	if n, err := q.w.Write(b); err == nil && n == len(b) {
 		s.cursor, s.digest = cursor, h.digest
+		for _, d := range questions {
+			q.rememberWaiting(d)
+		}
 	}
 	return nil
+}
+
+func (q *agRequest) rememberWaiting(d agQuestion) {
+	if d.q.ApprovalWait != api.UntilDeadline || d.presence == nil {
+		return
+	}
+	host := q.a.a.(api.WaitingApprovalHost)
+	if !host.PresentApproval(q.ctx, d.q, q.approvalRoute, d.presence.instance) {
+		return
+	}
+	s := q.state
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.presence != d.presence || d.presence.ctx.Err() != nil {
+		host.ForgetApprovalRoute(q.id, d.presence.instance)
+		return
+	}
+	if s.delivered == nil {
+		s.delivered = map[string]agDelivery{}
+	}
+	s.delivered[d.q.ID] = agDelivery{d.presence, sha256.Sum256(api.JSON(d.view))}
 }
 func (q *agRequest) snapshotFrames(h agHistory) ([][]byte, string, error) {
 	cursor := api.ID()

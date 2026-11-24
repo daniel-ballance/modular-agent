@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/daniel-ballance/modular-agent/go/api"
@@ -22,14 +21,20 @@ func (c *client) SupportsWaitingApprovals() bool      { return c.h.SupportsWaiti
 
 // RegisterApprovalRoute installs a stateless route projection, not a connection.
 func (h *Harness) RegisterApprovalRoute(binding string, check api.ApprovalRouteCheck) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if h.approvalRoutes == nil {
 		h.approvalRoutes = map[string]api.ApprovalRouteCheck{}
 	}
 	h.approvalRoutes[binding] = check
 }
+func (c *client) RegisterApprovalRoute(route string, check api.ApprovalRouteCheck) {
+	c.h.RegisterApprovalRoute(route, check)
+}
 func (h *Harness) unchanged(ctx context.Context, q api.Question, route string) bool {
-	binding, _, _ := strings.Cut(route, ":")
-	check := h.approvalRoutes[binding]
+	h.mu.RLock()
+	check := h.approvalRoutes[route]
+	h.mu.RUnlock()
 	q.Answerable = false
 	return check != nil && check(ctx, q, route)
 }

@@ -34,7 +34,15 @@ func (s *server) config(id string) ([]acp.SessionConfigOption, error) {
 		}
 	}
 	approval := snap.Settings.Approval
-	return []acp.SessionConfigOption{selectOption("model", "Model", "model", currentModel, models), selectOption("thinking", "Thinking", "thought_level", api.LowerReasoning(snap.Settings.Thinking, thinking), thinking), selectOption("approval", "Approval", "_approval", approvalValue(approval), []string{"off", "ask", "all", "never"})}, nil
+	opts := []acp.SessionConfigOption{selectOption("model", "Model", "model", currentModel, models), selectOption("thinking", "Thinking", "thought_level", api.LowerReasoning(snap.Settings.Thinking, thinking), thinking), selectOption("approval", "Approval", "_approval", approvalValue(approval), []string{"off", "ask", "all", "never"})}
+	if h, ok := s.a.(interface{ SupportsWaitingApprovals() bool }); ok && h.SupportsWaitingApprovals() {
+		v := snap.Settings.ApprovalWait
+		if v == "" {
+			v = "live"
+		}
+		opts = append(opts, selectOption("approvalWait", "Approval wait", "_approval", v, []string{"live", api.UntilDeadline}))
+	}
+	return opts, nil
 }
 func (s *server) SetSessionConfigOption(ctx context.Context, p acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
 	if p.ValueId == nil {
@@ -85,6 +93,8 @@ func (s *server) SetSessionConfigOption(ctx context.Context, p acp.SetSessionCon
 		}
 	case "thinking":
 		snap.Settings.Thinking = string(v.Value)
+	case "approvalWait":
+		snap.Settings.ApprovalWait = string(v.Value)
 	case "approval":
 		snap.Settings.Approval = api.ApprovalInternal(string(v.Value))
 	}

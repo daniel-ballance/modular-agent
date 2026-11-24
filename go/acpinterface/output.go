@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/portable"
 	"github.com/daniel-ballance/modular-agent/go/servicehttp"
 	"math"
 	"net/http"
@@ -73,6 +74,9 @@ func (s *server) gateAnswer(ctx context.Context, session, method string, result 
 	}
 	if !s.canDeliver(st, session, api.Acting(ctx)) {
 		return nil, acpError("forbidden")
+	}
+	if method == "_modular-agent/requests" && event.OutputChanged && portable.EqualJSON(api.JSON(result), event.Data) {
+		return nil, api.ErrOutputWithheld
 	}
 	if !json.Valid(event.Data) {
 		return nil, api.ErrOutputWithheld

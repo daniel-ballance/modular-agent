@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/daniel-ballance/modular-agent/go/api"
+	"github.com/daniel-ballance/modular-agent/go/portable"
 	"os"
 	"slices"
 	"strings"
@@ -240,11 +241,16 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 		if who == "" {
 			who = st.actor
 		}
+		var waiting *api.Question
 		for _, q := range s.openQuestions(p.SessionID) {
 			if q.ID == p.RequestID && q.Kind == "approval" {
 				s.mu.Lock()
 				exact := st.polled[questionRecipient{q.ID, who}] || st.requests[questionRecipient{q.ID, who}] != nil
 				s.mu.Unlock()
+				if q.ApprovalWait == api.UntilDeadline {
+					waiting = &q
+					exact = exact && s.eligible(st, q, who)
+				}
 				if !exact {
 					return map[string]any{"accepted": false, "reason": "not_open"}, nil
 				}
@@ -256,7 +262,25 @@ func (s *server) handleExtensionMethod(ctx context.Context, method string, b jso
 				return map[string]any{"accepted": false, "reason": "answer must be a string"}, nil
 			}
 		}
-		err = s.answerFor(ctx, p.SessionID, p.ActorID, api.Answer{Request: p.RequestID, Value: value, Declined: p.Declined || len(p.Value) == 0 || string(p.Value) == "null"})
+		answer := api.Answer{Request: p.RequestID, Value: value, Declined: p.Declined || len(p.Value) == 0 || string(p.Value) == "null"}
+		if waiting != nil {
+			projected, e := s.projectRequests(ctx, st, p.SessionID, who, false)
+			exact := false
+			for _, v := range api.Decode[struct{ Requests []portable.Object }](api.JSON(projected)).Requests {
+				if v["id"] == waiting.ID && v["answerable"] == true {
+					exact = true
+				}
+			}
+			if e != nil || !exact {
+				s.mu.Lock()
+				delete(st.polled, questionRecipient{waiting.ID, who})
+				s.mu.Unlock()
+				return map[string]any{"accepted": false, "reason": "not_open"}, nil
+			}
+			err = s.a.(api.WaitingApprovalHost).AnswerWaiting(s.approvalContext(ctx, st, p.SessionID, who), p.SessionID, st.approvalInstance, answer)
+		} else {
+			err = s.answerFor(ctx, p.SessionID, p.ActorID, answer)
+		}
 		if errors.Is(err, api.ErrInvalidAnswer) {
 			return nil, acpError("invalid_params")
 		}
