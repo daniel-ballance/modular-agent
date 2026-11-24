@@ -71,7 +71,7 @@ step 'Python: install ma and Monty' bash -c 'cd python && uv sync --locked --pyt
 step 'Rust: workspace tests' bash -c 'cd rust && mise exec -- cargo test --locked --workspace --no-fail-fast -- --test-threads=1'
 step 'TypeScript: tests' bash -c 'cd typescript && npm test'
 step 'TypeScript: tests with remote parts' bash -c 'cd typescript && MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test'
-step 'TypeScript: Claude sidecar tests' bash -c 'cd typescript/sidecars/claude && npm ci --silent && npm test'
+step 'TypeScript: Claude sidecar tests' bash -c 'cd typescript && npm test --workspace @modular-agent/claude'
 step 'Go: tests' bash -c 'cd go && mise exec -- go test -count=1 ./...'
 step 'Go: race detector' bash -c 'cd go && mise exec -- go test -race -count=1 ./modular/... ./cmd/ma/...'
 for runtime in transient durable; do
@@ -79,20 +79,15 @@ for runtime in transient durable; do
     step "Python: tests ($runtime, $binding)" bash -c 'cd python && uv run --offline pytest -q --runtime "$1" --binding "$2"' bash "$runtime" "$binding"
   done
 done
+step 'Rust: build history service' bash -c 'cd rust && mise exec -- cargo build --locked -p modular-agent --example history_service'
+step 'Go: build history service' bash -c 'cd go && mise exec -- go build -o .bin/modular-service ./cmd/modular-service'
 step 'Reference checks: all four ma' env MODULAR_AGENT_REF_REQUIRE=all node conformance/reference/run.mjs --all
 
-acp() (
-  local language=$1 arg
-  local command=()
-  while IFS= read -r arg; do command+=("$arg"); done < <(
-    node -e 'for (const arg of require(`./conformance/reference/agents/${process.argv[1]}.json`).command) console.log(arg.replaceAll("{repo}", process.argv[2]))' "$language" "$repo"
-  )
-  [[ ${#command[@]} -gt 0 ]] || return 1
-  cd conformance/acp
-  MODULAR_AGENT_CONFORMANCE=1 node run.mjs --crash-checks --probe-checks --job-checks -- "${command[@]}" --acp
-)
 for language in rust typescript go python; do
-  step "ACP kit: $language (crash, probe, job checks)" acp "$language"
+  for group in core covered waiting; do
+    step "ACP kit: $language $group" scripts/acp-kit.sh "$language" "$group"
+  done
+  step "ADR 0030 kits: $language ACP and history" scripts/production-kits.sh "$language"
 done
 
 printf '\n%-52s %-5s %s\n' Check Result Log

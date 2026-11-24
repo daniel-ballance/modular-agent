@@ -9,8 +9,7 @@ Two drafts waited on the same evidence. The [edition 4 draft](0023-edition-4-dra
 
 ## Decision
 
-- **Edition 4 is the edition to pin.** It replaces [production edition 3](0021-production-edition.md) as the specification for handoff. Its rules are the ones [ADR 0023](0023-edition-4-draft.md) records: nested calls, `modelTools` as a setting, directory listing, a nested call's parent on ACP, and three Provider clarifications. The bindings keep their major versions; every addition is optional on the wire, so an edition 3 build still passes the kits for what it declares.
-- **SDK specification 0.1 is accepted.** It binds the four SDKs from this revision on. Breaking changes are allowed before 1.0, as [versioning](../sdk/README.md#versioning) says, but each one changes the SDK specification first.
+Edition 4 and SDK specification 0.1 were accepted on the evidence below. **Current rule:** implement the [normative documents](../conformance.md#versioning) and [SDK scenarios](../sdk/testing.md) at the same revision. Change the SDK specification before changing its API.
 
 ## Evidence
 
@@ -26,6 +25,4 @@ Two drafts waited on the same evidence. The [edition 4 draft](0023-edition-4-dra
 
 ## Consequences
 
-- The README, the implementer's guide and the bindings' change logs name edition 4. The edition 3 records stay as history.
-- A team that pinned edition 3 can move to edition 4 by adopting the optional additions it wants; nothing it relied on changed.
 - Production gaps from [ADR 0021](0021-production-edition.md) still stand.

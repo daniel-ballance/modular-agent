@@ -25,11 +25,8 @@ test('runner launches a scripted agent command', async () => {
   assert.match(stdout, /1\/1 AG-UI cases passed/);
 });
 
-test('managed legacy listener needs no control URL for optional host reads', async () => {
-  const { stdout } = await exec(process.execPath, [here('run.mjs'), '--only', 'closure-order,receipt-durable', '--', process.execPath, here('fake-agent.mjs')], { signal: deadline() });
-  assert.match(stdout, /SKIP  closure-order \(thread snapshot does not offer waitCursor\)/);
-  assert.match(stdout, /SKIP  receipt-durable \(thread snapshot does not offer runReceipts\)/);
-  assert.match(stdout, /0\/0 AG-UI cases passed; 2 skipped/);
+test('managed host reads fail without fixture controls', async () => {
+  await assert.rejects(exec(process.execPath, [here('run.mjs'), '--only', 'closure-order,receipt-durable', '--', process.execPath, here('fake-agent.mjs')], { signal: deadline() }), e => e.code === 1 && /managed fixture must report its control URL/.test(e.stderr) && /0\/2 AG-UI cases passed/.test(e.stdout));
 });
 
 test('runner connects to an existing scripted agent with a token file', async () => {
@@ -46,24 +43,28 @@ test('runner connects to an existing scripted agent with a token file', async ()
   }
 });
 
-test('undeclared session skips the waiting case before requiring controls or restart', async () => {
+test('a restart case refuses an unmanaged listener', async () => {
   const server = await fake();
   const folder = await mkdtemp(join(tmpdir(), 'agui-no-wait-'));
   try {
     const path = join(folder, 'owner.token');
     await writeFile(path, server.tokens.owner, { mode: 0o600 });
-    const { stdout } = await exec(process.execPath, [here('run.mjs'), '--only', 'waiting-restart', '--url', server.origin, '--token-file', path], { signal: deadline() });
-    assert.match(stdout, /SKIP  waiting-restart \(session does not declare approvalsOutlastTurns\)/);
-    assert.match(stdout, /0\/0 AG-UI cases passed; 1 skipped/);
+    await assert.rejects(exec(process.execPath, [here('run.mjs'), '--only', 'waiting-restart', '--url', server.origin, '--token-file', path], { signal: deadline() }), e => e.code === 1 && /require a managed fixture command/.test(e.stderr));
   } finally { await server.close(); await rm(folder, { recursive: true, force: true }); }
 });
 
-test('host reads absent: skip before looking for controls, restart or other credentials', async () => {
+test('waiting cases require declarations on their own session', async () => {
+  const api = { create: async () => ({ threadId: 'fixture', declaration: {} }) };
+  await assert.rejects(waiting['waiting-live'].run({ api }), /fixture must declare approvalsOutlastTurns/);
+  await assert.rejects(run('approval', 'no-covered-approvals'), /fixture must declare approvalCoversNested/);
+});
+
+test('required host reads fail on a snapshot without the field', async () => {
   const server = await fake();
   try {
     const peer = { api: at(server.origin, server.tokens.owner) };
-    for (const c of Object.values(receipts)) assert.deepEqual(await c.run(peer), { skipped: 'thread snapshot does not offer runReceipts' });
-    for (const c of Object.values(closures)) assert.deepEqual(await c.run(peer), { skipped: 'thread snapshot does not offer waitCursor' });
+    for (const c of Object.values(receipts)) await assert.rejects(c.run(peer), /thread snapshot does not offer runReceipts/);
+    for (const c of Object.values(closures)) await assert.rejects(c.run(peer), /thread snapshot does not offer waitCursor/);
   } finally { await server.close(); }
 });
 
@@ -78,7 +79,7 @@ async function run(name, fault) {
 
 test('watch loss may reset a feed between complete frames', () => run('closure-buffered', 'reset-on-watch-loss'));
 for (const name of Object.keys(cases)) test(`fake passes ${name}`, async () => {
-  assert.equal((await run(name))?.skipped, undefined, 'fake must exercise this case');
+  await run(name);
 });
 test('approval-call fails when the metadata is absent', async () => {
   await assert.rejects(run('approval-call', 'omit-approval-call'), /carries modular-agent.approvalCall/);

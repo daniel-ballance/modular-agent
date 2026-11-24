@@ -39,10 +39,10 @@ The first check compares the file, tool results and final answer with the transc
 
 ## Run with a real model
 
-For a Claude subscription, sign in with `ma login claude` or `claude auth login`. Build the existing [Claude Provider](../../typescript/sidecars/claude/README.md) and run the same task:
+For a Claude subscription, sign in with `ma login claude` or `claude auth login`. Build the existing [Claude Provider](../../typescript/packages/claude/README.md) and run the same task:
 
 ```sh
-(cd typescript/sidecars/claude && npm ci --ignore-scripts && npm run build)
+(cd typescript && npm ci && npm run build --workspace @modular-agent/claude)
 demos/project-notes/run.py --real claude/claude-haiku-5-5
 ```
 

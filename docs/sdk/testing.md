@@ -2,9 +2,9 @@
 
 Each SDK ships a testing kit for developers, and runs a shared set of scenarios against itself and the other SDKs. Both work offline, with no real model and no credentials.
 
-## Planned AG-UI kit
+## AG-UI kit
 
-The [AG-UI kit](../../conformance/agui/README.md) uses a scripted Provider, a controlled clock and store, and disposable tokens. It needs no real model or external tools. It targets these checks:
+The [AG-UI kit](../../conformance/agui/README.md) uses a scripted Provider, a controlled clock and store, and disposable tokens. It needs no real model or external tools. All four fixtures test the binding on their configured sessions, including the [wait-closure and kept-receipt reads](../bindings/agui.md#wait-closures). Each fixture must supply the required controls and declarations. The checks include:
 
 - Discovery, explicit AG-UI version, request and event limits, SSE framing, lifecycle validation and coexistence with ACP WebSocket on one listener. Check TLS, actor and client scope, tenant and project filters, and no setup on an unauthorized request.
 - Initial prompt, one turn per run, stable message IDs, message snapshots, duplicate input keys, mismatched copies, history with and without a cursor, stale cursors, branch moves and erasure. Reconnect must not replay live chunks or execute work.
@@ -14,19 +14,19 @@ The [AG-UI kit](../../conformance/agui/README.md) uses a scripted Provider, a co
 - State snapshot, delta base and resnapshot after withholding. Check recipient gating on state, errors, native output, extensions and replay. No keys or opaque Provider data appear. Strip unknown input fields without granting anything; reject malformed known values.
 - Trusted per-request trace context, no baggage or content, pending execution and later settlement spans, and trace continuity from the authoritative turn checkpoint rather than a reconnect's headers.
 
-## Planned checks for approvals that wait
+## Checks for approvals that wait
 
-[ADR 0034](../adr/0034-approvals-that-wait.md) is accepted; implementations follow in 0.3.0. The following are test plans, not scenarios that pass today. Use a scripted model and the `bump` counter. Observe its file as well as the committed records: an open question alone does not show that the tool never ran.
+[ADR 0034](../adr/0034-approvals-that-wait.md) defines the waiting policy. Every SDK runs the following shared checks. Use a scripted model and the `bump` counter. Observe its file as well as the committed records: an open question alone does not show that the tool never ran.
 
-| Proposed shared scenario | What to observe |
+| Shared scenario | What to observe |
 |---|---|
-| Opt-in and default | Keep `approval-without-handler` passing unchanged. Even on a capable agent, `approvalWait: "live"` refuses with no eligible route. The two ordinary late-question declarations alone cannot enable waiting approval. Reject an opt-in without support and an invalid maximum. In an opted-in session `off`, `never` and a trusted read-only call under `ask` still do not open an approval. |
+| Opt-in and default | Without a handler, live approval refuses the call. Even on a capable agent, `approvalWait: "live"` refuses with no eligible route. The two ordinary late-question declarations alone cannot enable waiting approval. Reject an opt-in without support and an invalid maximum. In an opted-in session `off`, `never` and a trusted read-only call under `ask` still do not open an approval. |
 | Allow after turn end | With `approval: "all"`, an eligible member but no handler or connection present, prompt for one `bump`. Expect the bound request and gate pending record, one completed origin with that call open, count zero and no `toolStarted`. Finish the prompt and `waitIdle`. Poll as present, check the exact call and deadline, then allow. Expect one linked continuation, one start with the original call/step IDs under the new turn, one result and count one. No new `inputAccepted` or `input`. Answering again cannot add work. |
 | Decline and expiry | Decline gives `refused`. Use a short requested timeout and one above the maximum; verify the absolute deadline in both cases. Advance to the deadline before answering: expect one `timeLimit` closure, `notStarted`, no start and count zero. Hold continuation dispatch, allow just before the deadline and advance to it before release: keep the actor answer, but get the same unstarted result. |
 | Recheck at handoff | Change the registered source, definition, or final input from a `tool.before` transform in separate runs. Gate the display for one recipient. Revoke the work actor's `tools`, then in another run the approver's `approve`, **after** allow and before handoff. Expect no effect and no substitute question; the stale call is `refused`. As a control, an approver with `watch` and `approve` but no `tools` may approve a worker's otherwise authorized call. |
 | Reopen | Stop after the completed origin and separately after the committed answer. Reopen both `kept` and `durable` sessions. With an open question, recover the same request, call and deadline but require a fresh view. With an allow, recheck its recorded proof; do not need a second answer or presence. Kill after the counter effect but before its result: no second effect on reopen, `outcomeUnknown` if unconfirmed. |
 
-The [shared format](../../conformance/sdk/README.md#waiting-approval-scenarios) would need setup for the maximum and declared capabilities, authenticated polling on a session handle, a controlled clock, and barriers at answer commit and dispatch. Add assertions for absent records, exact counts, IDs, associations, `openToolCalls` and deadlines; the existing ordered `records` assertion alone cannot prove these cases. Run applicable tool placements in all four SDKs. Use commit barriers, not sleeps or retries.
+The [shared format](../../conformance/sdk/README.md#waiting-approval-scenarios) provides setup for the maximum and declared capabilities, authenticated polling on a session handle, a controlled clock, and barriers at answer commit and dispatch. Check absent records, exact counts, IDs, associations, `openToolCalls` and deadlines; the existing ordered `records` assertion alone cannot prove these cases. Run applicable tool placements in all four SDKs. Use commit barriers, not sleeps or retries.
 
 The binding kits own checks the single-session scenario runner cannot make: [ACP](../../conformance/acp/README.md#waiting-approval-checks) for polling, actor races and portable reopen; [AG-UI](../../conformance/agui/README.md#waiting-approval-checks) for presence routes, snapshots and mixed waits; [telemetry](../../conformance/telemetry/README.md#waiting-approval-checks) for spans. No real Provider or credentials are needed.
 
@@ -173,7 +173,7 @@ The runner MUST report each failed expectation with the scenario, placement, ste
 
 ## Shared telemetry check
 
-The planned [`conformance/telemetry/` check](../../conformance/telemetry/README.md) reuses the [shared scenarios](#the-shared-scenarios) without replacing their outcome or history assertions. It needs no live Provider or collector.
+The [`conformance/telemetry/` check](../../conformance/telemetry/README.md) reuses the [shared scenarios](#the-shared-scenarios) without replacing their outcome or history assertions. It needs no live Provider or collector.
 
 The harness runs a receiver on a fresh loopback port outside the agent and plugin process groups. It accepts [OTLP/HTTP](https://opentelemetry.io/docs/specs/otlp/#otlphttp) at `/v1/traces` in both encodings, protobuf and JSON, and returns a successful OTLP response. Each SDK's scenario runner and each participating fixture program install their language's OpenTelemetry SDK with an always-on sampler and the language's official OTLP/HTTP span exporter, using `http/protobuf`, pointed at that receiver. Every language's official exporter supports protobuf, and it is the encoding `ma` and common backends such as Arize Phoenix use; Go's exporter has no JSON encoding. Pass the endpoint explicitly to children. Do not use production credentials or endpoints. Force a flush on normal exit and wait for the acknowledged exports before comparing spans. Do not require a flush from a killed process.
 
@@ -182,8 +182,8 @@ Run these cases for each host SDK:
 | Scenario | Placements and assertions |
 |---|---|
 | `first-turn` | `inProcess`. Check one invocation, one step, one scripted inference attempt and the history commits that the host observes. Check `telemetry: 1` in both agent and session declarations, with and without an OpenTelemetry SDK. Without it the turn still completes and no spans reach the receiver. |
-| `tool-call` | `inProcess` and `process:<sdk>` for every other SDK. With both handshake members present, the plugin client span is under the tool execution; the fixture's server span has the same trace ID and the client span ID as parent. Check the injected context in the request. Repeat with the fixture omitting acceptance, then with the host omitting the offer. Observe both directions of the wire: no work request or notification has `params.traceContext` in either case, and no response has it in any case. Work still settles. |
-| `nested-call` | `inProcess` and the same cross-language process pairs. In process, the child tool span is a direct child of the parent tool span. In the cross-language run, observe the scoped `host/tools/call` callback under the parent tool's trace and check the nested call's parent call ID. Repeat the two handshake omissions here to exercise a callback as well. |
+| `tool-call` | `inProcess` and `process:<sdk>` for every other SDK. The plugin client span is under the tool execution; the fixture's server span has the same trace ID and the client span ID as parent. Check the injected context in the request. Control messages and responses carry no context. |
+| `nested-call` | `inProcess` and the same cross-language process pairs. In process, the child tool span is a direct child of the parent tool span. In the cross-language run, observe the scoped `host/tools/call` callback under the parent tool's trace and check the nested call's parent call ID. |
 | `gate-refusal`, `question-answered` | `inProcess`. A pre-dispatch refusal produces a disposition event and no execution span. An answered question has open and close events with the matching ID, kind and disposition, without the question or answer body. |
 | `durable-crash`, `kept-crash` | `inProcess`. Use the scenario's counter barrier and kill the agent group with `SIGKILL` (`kill -9`). Save the committed initial context and turn ID outside that group before killing it. After restart over the same data, the durable run has an invocation with the same trace and turn IDs, a fresh span ID, `modular_agent.turn.resumed=true`, and both a parent and a link to the saved segment. Do not require the old invocation span to have been exported. Observe the new checkpoint before resumed effects. In the kept run there is no resumed invocation; neither run repeats the counter effect. |
 

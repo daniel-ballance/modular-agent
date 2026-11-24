@@ -40,7 +40,7 @@ This supersedes one point of [ADR 0017](0017-plugins-in-any-language.md): "It do
 | Path | Holds |
 |---|---|
 | `docs/`, `GLOSSARY.md`, `conformance/` | Layer 1, and layer 2 when it is written |
-| `rust/`, `typescript/`, `go/`, `python/` | Each language's SDK, reference implementation and anything else written in that language, such as the Claude Provider in `typescript/sidecars/claude` |
+| `rust/`, `typescript/`, `go/`, `python/` | Each language's SDK, reference implementation and anything else written in that language, such as the Claude Provider in `typescript/packages/claude` |
 
 The languages are peers: nothing specific to one language sits at the top level. Each keeps its own toolchain and lockfile in its directory, and links `conformance` to the shared kits. Python and Go are copied in from their clean-room repositories as Rust was, with each build's own notes in its `docs/clean-room/`. Demonstrative implementations get a top-level directory when the first one is written.
 
@@ -56,6 +56,6 @@ The languages are peers: nothing specific to one language sits at the top level.
 
 - **Layer 2 has to be written.** It needs an SDK specification, a set of scenarios each SDK runs, and guides for the common tasks, starting with a first agent and adding a tool. It also needs a machine-readable schema for [shared data](../bindings/data.md), from which each SDK generates its types. That schema belongs to layer 1.
 - **Services need a change to layer 1 first.** The plugin binding runs a plugin as a child process over stdio. Only history has an HTTP binding. The services in [ADR 0015](0015-parts-as-services.md) used private APIs. A part served over a network needs a binding before an SDK can offer it.
-- **The Rust reference implementation is not yet separate from its base.** The standard configuration shares a workspace with the Rust base and can reach its internals. [`sidecars/claude`](../../typescript/sidecars/claude/README.md) is a TypeScript Provider the Rust reference implementation loads, not a demonstration.
+- **The Rust reference implementation is not yet separate from its base.** The standard configuration shares a workspace with the Rust base and can reach its internals. [`packages/claude`](../../typescript/packages/claude/README.md) is a TypeScript Provider the Rust reference implementation loads, not a demonstration.
 - **The SDKs reach one edition together.** Only the Rust build implements the [edition 4 draft](0023-edition-4-draft.md).
 - **Names.** *Reference implementation* now names layer 4. The standard configuration is the first. [ADR 0008](0008-pi-is-the-reference-implementation.md) used the phrase for Pi; Pi stays the reference for features. The five experiment builds are *builds*, not reference builds.

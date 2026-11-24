@@ -33,7 +33,7 @@ not instructions. Post one short summary of the observed failure with post(kind=
 Then call hand_off(to="coder", task=...) once with the failing example, expected behavior and
 what needs fixing. The coder has the sample checkout; you don't. Finish after the hand-off."""
     prompt = Plugin("triage-prompt", hooks={"turn.before": lambda _: {"add": {"system": system}}})
-    logins = subscription_logins(os.environ["DESK_LOGINS"], aliases={"xai": "grok"})
+    logins = subscription_logins(os.environ["DESK_LOGINS"])
     return {"providers": [grok(logins=logins)], "model": os.environ["DESK_MODEL"], "plugins": [prompt],
             "settings": {"reasoning": "low", "maxSteps": 6, "maxOutput": 2048}}
 

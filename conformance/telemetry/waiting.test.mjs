@@ -18,7 +18,7 @@ function sample(scenario = 'waiting-approval', sdk = true, loseOrigin = false) {
   const scope = { turnId: 't', stepId: 'p', toolCallId: 'c' };
   const input = { note: 'fixture-arguments' }, tool = { id: 'c', name: 'bump', input };
   const record = { kind: 'inputRequest', id: 'req', requestId: 'q', time: 10, ...scope, sources: ['response'], data: {
-    request: { id: 'q', kind: 'approval', approvalWait: 'untilDeadline', toolCallId: 'c', question: 'Run the waiting counter?',
+    request: { id: 'q', askedBy: 'gate', kind: 'approval', approvalWait: 'untilDeadline', toolCallId: 'c', question: 'Run the waiting counter?',
       answerable: false, whenTimeLimit: 'decline', deadlineAt: 110, timeLimitMs: 100 }, call: tool, definition: { name: 'bump' }, source: { plugin: 'counter', toolSource: 'source' },
   } };
   const originBatches = [[{ kind: 'inputAccepted' }, { kind: 'turnStart', turnId: 't' }, { kind: 'input' }, { kind: 'response', turnId: 't', stepId: 'p', id: 'response' }],

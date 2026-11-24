@@ -6,7 +6,7 @@ Both peers MUST use the [shared data](data.md) shapes. The tables define method 
 
 ## Transport
 
-After the [handshake](#starting-the-handshake) agrees to `traceContext: 1`, either peer MAY send `params.traceContext: { traceparent: string, tracestate?: string }` on work requests and notifications. Peers MUST NOT send it on responses or control messages. They MUST ignore absent, invalid or unagreed context. See [Context on the wire](../telemetry.md#context-on-the-wire).
+Either peer MAY send a valid, trusted context for the current operation in `params.traceContext: { traceparent: string, tracestate?: string }` on work requests and notifications. Peers MUST omit it when there is no such context, MUST NOT send it on responses or control messages, and MUST ignore invalid or untrusted context. See [Context on the wire](../telemetry.md#context-on-the-wire).
 
 - The host MUST start the plugin as a child process and send and receive JSON-RPC 2.0 over its stdin and stdout, or connect to a plugin service over the [WebSocket transport](websocket.md), which replaces this section's stdio rules. See [Stdio authentication](../security.md#authentication-on-each-wire) for the peer and trust rules. The plugin MUST NOT write anything else to stdout. The host MAY route stderr to operator diagnostics. Each peer MUST NOT include secrets in errors, traces or diagnostics.
 - Each peer MUST send one UTF-8 JSON-RPC object per line, with no byte order mark or batch. Receivers MUST accept LF and CRLF. The 64 MiB cap counts 67,108,864 [actual line bytes](data.md#general-rules), excluding the line ending. Receivers MUST bound input before decoding or parsing and close the connection on an oversized frame, including a frame with no newline. Senders MUST substitute `result_too_large` for an oversized success result. For an oversized outgoing error, senders MUST replace its diagnostic text and data with the minimal envelope for the same code. A sender MUST NOT send an oversized request or notification.
@@ -45,12 +45,10 @@ The host MUST treat unexpected EOF, process exit, an unusable stream, a required
 
 | Host request | Params | Result | Errors |
 |---|---|---|---|
-| `plugin/initialize` | `{ binding: string, data: string, host: { name: string, version: string }, project: string, home: string, config: object, traceContext?: 1 }` | `Registration` | `not_supported` for an unsupported version |
+| `plugin/initialize` | `{ binding: string, host: { name: string, version: string }, project: string, home: string, config: object }` | `Registration` | `not_supported` for an unsupported version |
 | `plugin/shutdown` | `{ reason: "stop" \| "reload" \| "refused", detail?: string }` | `{}` | Common errors only |
 
-The first frame MUST be `plugin/initialize`, with `binding: "modular-agent-plugin/1"` and `data: "modular-agent-data/1"`. `project` and `home` are absolute paths to the project and the plugin's state folder. `config` is the plugin's settings, `{}` if none. A plugin MUST reject a second initialize with `invalid_request`. Until registration is accepted, only initialize, ping, cancel, shutdown and `host/problem` are available; there is no separate acceptance frame. The host's first request for registered work signals acceptance.
-
-A plugin MUST return `traceContext: 1` only if the host offered it. Both members MUST equal `1`; otherwise neither peer sends the work field. A peer that does not recognize the member MUST ignore it.
+The first frame MUST be `plugin/initialize`, with `binding: "modular-agent-plugin/1"`. This binding uses the [shared data vocabulary](data.md). `project` and `home` are absolute paths to the project and the plugin's state folder. `config` is the plugin's settings, `{}` if none. A plugin MUST reject a second initialize with `invalid_request`. Until registration is accepted, only initialize, ping, cancel, shutdown and `host/problem` are available; there is no separate acceptance frame. The host's first request for registered work signals acceptance.
 
 **Registration**
 
@@ -58,7 +56,6 @@ A plugin MUST return `traceContext: 1` only if the host offered it. Both members
 |---|---|
 | `binding` | `"modular-agent-plugin/1"` |
 | `name` | Nonempty string, stable plugin identity |
-| `traceContext?` | `1`; acceptance of the host's offer. Omission means no agreement. |
 | `providers?` | `{ id: Id, supports: ProviderSupports, models: ModelInfo[] }[]`; default `[]` |
 | `toolSources?` | `{ id: Id, tools: ToolDefinition[], perSession?: boolean }[]`; defaults `[]` and `perSession: false` |
 | `workingEnvironment?` | `{ containment: "strong" \| "processGroup" \| "none", platforms?: string[], points?: boolean, confinesFiles?: boolean }`; default absent; omitted platforms makes no platform claim; omitted flags are false |
@@ -160,7 +157,7 @@ Example:
 
 ### Command lifetime
 
-- `command` is a string for the working environment's shell. The interpreter and shell syntax outside the fixture are deployment choices. `timeoutMs` MUST be a safe integer from 0 upwards. Omission and 0 both mean no requested deadline. The operator MAY set a shorter command deadline.
+- `command` is a string for the working environment's shell. The interpreter and shell syntax outside the fixture are deployment choices. Omit `timeoutMs` when no deadline is requested. If present, it MUST be a positive safe integer. The operator MAY impose an independent deadline.
 - The environment MUST decode stdout and stderr as UTF-8 with U+FFFD replacement and merge in observed order. `output` MUST concatenate the chunks the sender retained, not the subset delivered to a recipient. The environment MUST bound retained output to fit the result frame, stop retaining and emitting on overflow, and report `truncated: true` with the terminal status. The host MUST forward only authorized pieces before the answer.
 - An exit code MUST be an integer or `null` when killed. A command stopped by a deadline MUST return `timedOut: true` and `exitCode: null`. A wire cancel that wins the race MUST return `cancelled`, not a timeout result. The environment MUST stop a timed-out or cancelled command within the scope advertised below, within five seconds of timeout or cancel, or answer `lost` if that cleanup is unconfirmed.
 - A normal exec answer and cancellation of a later turn MUST NOT by themselves stop background processes left by that command. The host MUST request `env/sessionEnded` on close and not issue new work for that session while it closes. The environment MUST clean up only that session's processes in scope and settle its outstanding commands before acknowledging. Repeating `env/sessionEnded` is safe. Agent or worker loss follows [connection loss](#errors-and-connection-loss); unconfirmed cleanup is not proof an interrupted command is safe to repeat.
@@ -364,7 +361,7 @@ Trace context on a callback MUST come from work under a live `parentRequestId` o
 |---|---|---|
 | `host/env/output` | `{ parentRequestId: RpcId, chunk: string }`; id of `host/env/exec` | notify |
 
-`host/tools/list` and `host/tools/call` are the wire form of [nested calls](../contracts.md#nested-calls). `host/tools/list` MUST return the session's registered tools that a plugin may start, as they stand at the request. `host/tools/call` MUST answer with the nested call's committed terminal result, whatever its status: a refused, failed or cancelled nested call is a ToolResult, not a protocol error. The host assigns the nested call's id and returns it as `callId`. The host MUST NOT forward the nested call's progress to the asking plugin. An unknown or unregistered `name` is a nested call that settles `refused`, so that it is recorded. `env/list` is optional: a caller MUST treat `not_supported` as absence and MAY fall back to `env/exec`.
+`host/tools/list` and `host/tools/call` are the wire form of [nested calls](../contracts.md#nested-calls). `host/tools/list` MUST return the session's registered tools that a plugin may start, as they stand at the request. `host/tools/call` MUST answer with the nested call's committed terminal result, whatever its status: a refused, failed or cancelled nested call is a ToolResult, not a protocol error. The host assigns the nested call's id and returns it as `callId`. The host MUST NOT forward the nested call's progress to the asking plugin. An unknown or unregistered `name` is a nested call that settles `refused`, so that it is recorded. If an environment refuses `env/list`, a caller MUST NOT bypass the refusal through `env/exec`.
 
 `host/ask` MUST NOT return a secret value, only its stored name or the non-value fields of the [shared Answer](data.md#questions). For `host/emit`, the host MUST accept only dotted custom event names that do not impersonate standard events. The host MUST attribute them to the sending plugin and gate them as output. `host/problem` is operator diagnostics, not an event or a history write.
 
@@ -422,14 +419,14 @@ A build serving the conformance plugin MUST document its command and support the
 | Part | Registers | Replaces |
 |---|---|---|
 | `provider` | Provider `conformance`, model `echo`, as in [ACP conformance mode](acp.md#conformance-mode) | `provider:conformance` |
-| `tools` | Source `conformance-tools` with `bash { command: string }` using `host/env/exec` and `read { path: string }` using `host/env/read`. A build that can ask for nested calls also registers `nest { name: string, input: object }` using `host/tools/call`. | `tool:bash`, `tool:read`, and `tool:nest` when registered |
+| `tools` | Source `conformance-tools` with `bash { command: string }` using `host/env/exec` and `read { path: string }` using `host/env/read`. The tools fixture also registers `nest { name: string, input: object }` using `host/tools/call`. | `tool:bash`, `tool:read`, and `tool:nest` |
 | `environment` | Local environment; executes the fixture commands with Bash | `working-environment` |
 | `runtime` | Transient Runtime | `runtime` |
 | `durable-runtime` | Durable Runtime | `runtime` |
 | `hooks` | `tool.before`, `turn.before` and `output`, as below | Nothing |
 
 - `read` MUST return `completed` with one text part containing the file decoded as UTF-8, or `failed` with an explanation if the read fails. `bash` MUST forward each output chunk as a text progress part and return one text part containing combined output followed by a newline and `[exit code N]`, where `N` is the returned exit code or `null`. Its status MUST be `completed` only for exit code 0, and `failed` otherwise. Wire cancellation follows [Transport](#transport).
-- `nest` MUST send one `host/tools/call` with its `name` and `input` and return the nested result's `status` and `content` unchanged. If the request fails with a protocol error it MUST return `failed` with one text part holding the error code's name. The fixture environment MUST answer `env/list` with the directory's entries or with `not_supported`.
+- `nest` MUST send one `host/tools/call` with its `name` and `input` and return the nested result's `status` and `content` unchanged. If the request fails with a protocol error it MUST return `failed` with one text part holding the error code's name. The fixture environment MUST answer `env/list` with the directory's entries and their kinds, or the specified path error.
 - The `tool.before` fixture MUST refuse a call whose input JSON contains `conformance-forbidden`, with reason `refused by the conformance plugin`. The `turn.before` fixture MUST contribute `{ "system": "The conformance plugin is loaded." }`. The `output` fixture MUST replace `conformance-secret` with `[redacted]` in editable strings, including a match across text events within one segment, without making other changes.
 
 ## Changes

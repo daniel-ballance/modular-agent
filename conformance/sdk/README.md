@@ -41,9 +41,9 @@ SDK specification 0.1 after the fifth build round. Each runner ran all seventeen
 
 ## Waiting approval scenarios
 
-The [28 conditional fixtures](fixtures/waiting-approval/) use the [shared format](../../docs/sdk/testing.md#the-format). Enumerate the JSON files in this subdirectory **in addition to** the unconditional scenarios. Do not treat them as plugin launch manifests. [waiting.mjs](waiting.mjs) provides a reference interpreter for the new steps and expectations. Run `npm test` here to check the fixture contracts. This is not a result from a language runner.
+The [28 waiting fixtures](fixtures/waiting-approval/) use the [shared format](../../docs/sdk/testing.md#the-format). In a full run, require the [waiting fixture manifest](waiting-scenarios.json), every fixture it lists and the ordinary scenarios. An absent or empty group fails the run. Do not treat them as plugin launch manifests. [waiting.mjs](waiting.mjs) provides a reference interpreter for the new steps and expectations. Run `npm test` here to check the fixture contracts. This is not a result from a language runner.
 
-**Opt-in.** Probe a kept, compatible test composition with an approval gate, explicit positive `maxApprovalWaitMs` and the planned tool placement. Read its session declaration, not its version or language name. Run the fixture when **every** key in `requires` is true; otherwise report the scenario, placement and missing declaration as skipped. Probe with several actors enabled for fixtures that require that feature. Use this probe even for the controls that deliberately use an invalid composition or omit the maximum. The fixture itself uses exactly its listed composition, no handler and no initial polling presence. Existing scenarios, including `approval-without-handler`, keep their existing requirements.
+Run each fixture on its specified composition, with no handler or initial polling presence. Assert the actual session declaration with `checkWaitingDeclaration`; a missing capability on a positive fixture fails the case. Exercise unsupported settings and invalid compositions directly.
 
 | Group | Cases |
 |---|---|

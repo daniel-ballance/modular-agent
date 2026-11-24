@@ -1,12 +1,11 @@
 import assert from 'node:assert/strict';
 
-// The offer is on the snapshot, not discovery or the create reply. Older agents
-// need neither a control port nor a second credential to report a skip.
+// Check the offered read on the actual thread snapshot.
 export function hostRead(field, model, run, { restart, roles = [], control = true } = {}) {
-  return { model, requires: field, control, restart, async run(peer) {
+  return { model, control, restart, roles, async run(peer) {
     const { threadId } = await peer.api.create();
     const view = await peer.api.view(threadId);
-    if (!Object.hasOwn(view, field)) return { skipped: `thread snapshot does not offer ${field}` };
+    assert.ok(Object.hasOwn(view, field), `thread snapshot does not offer ${field}`);
     if (field === 'waitCursor') assert.ok(typeof view.waitCursor === 'string' && view.waitCursor.length, 'snapshot offers a wait cursor string');
     else assert.equal(view.runReceipts, 1, 'snapshot offers runReceipts: 1');
     if (control) assert.ok(peer.control, `${field} case requires fixture controls`);

@@ -35,7 +35,7 @@ export function fakeWaiting(name, fault, model, covers) {
         metadata: { ...(covers && fault !== 'missing-waiting-coverage' && { 'modular-agent.coversNested': true }),
           'modular-agent.approvalCall': { name: call.name, input: fault === 'wrong-waiting-call' ? {} : call.input } },
         expiresAt: new Date(deadlineAt).toISOString() };
-      s.entry = append(s, 'inputRequest', { request: { id: s.qid, toolCallId, question, deadlineAt, timeLimitMs: 5000,
+      s.entry = append(s, 'inputRequest', { request: { id: s.qid, askedBy: 'gate', toolCallId, question, deadlineAt, timeLimitMs: 5000,
         ...(covers && { coversNested: true }), whenTimeLimit: 'decline', kind: 'approval', approvalWait: 'untilDeadline', answerable: false }, call: { ...call, id: toolCallId },
         source: { plugin: 'counter', toolSource: 'counter' }, definition: { name: call.name } }, { ...s.scope, requestId: s.qid, sources: [response.id] });
       const pending = append(s, 'toolPending', { requestIds: [s.qid] }, s.scope);
@@ -56,7 +56,7 @@ export function fakeWaiting(name, fault, model, covers) {
     const actorId = client === 'foreign' ? 'kit-foreign' : 'kit-owner', value = allow ? { value: 'allow', actorId,
       approvalView: { requestEntryId: s.entry.id, submittedBy: actorId, routeId: client, rights: ['approve', 'watch'] } } :
       { declined: true, ...(system ? { reason: 'timeLimit' } : { actorId }) };
-    s.answer = append(s, 'inputAnswer', { requestId: s.qid, ...value }, { ...s.scope, requestId: s.qid, sources: [s.entry.id] });
+    s.answer = append(s, 'inputAnswer', value, { ...s.scope, requestId: s.qid, sources: [s.entry.id] });
     s.status = allow ? 'completed' : system && fault !== 'wait-expiry-refused' ? 'notStarted' : fault === 'wait-decline-runs' ? 'completed' : 'refused';
     s.question = undefined; s.cause = { kind: 'answer', id: s.qid }; signal(s, 'answerCommitted');
   }

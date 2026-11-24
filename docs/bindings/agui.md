@@ -114,7 +114,7 @@ For example, an approved browser tool can be left open by turn `t1`. Run `r1` fi
 
 ## Wait closures
 
-[ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md), accepted, adds an optional `waitCursor` string in the thread snapshot. If supplied, use it with `GET /agui/v1/threads/{threadId}/wait-closures?after={waitCursor}`. If absent, recheck the snapshot as today. This read and the proposed receipt below use the same [HTTP authentication and origin rules](#listener-and-authentication) as the snapshot. The cursor covers exactly the snapshot's committed watermark. It is opaque, scoped to that client, actor, thread and view. It is not a message history cursor or an SSE offset.
+A deployment offering the [wait-closure feed](../adr/0035-host-limits-from-the-ops-desk.md) includes a `waitCursor` string in the thread snapshot. A client may subscribe with `GET /agui/v1/threads/{threadId}/wait-closures?after={waitCursor}`. Clients need not subscribe. They may recheck the snapshot. This read and the run receipt below use the same [HTTP authentication and origin rules](#listener-and-authentication) as the snapshot. The cursor covers exactly the snapshot's committed watermark. It is opaque, scoped to that client, actor, thread and view. It is not a message history cursor or an SSE offset.
 
 This GET returns `text/event-stream`. It uses the [framing and bounds](#framing-and-versions) above, not the AG-UI run lifecycle. Each `data` item is one of the following. There are no prompts, answer values, arguments, results or executable handoffs in the stream.
 
@@ -133,7 +133,7 @@ A client can save the cursor after applying each item. Disconnect a slow reader 
 
 ## Run receipts
 
-[ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md), accepted, adds a separate optional read. A thread snapshot with `runReceipts: 1` offers `GET /agui/v1/threads/{threadId}/run-receipt?runId={runId}`. Encode the run ID as one query value. After masking an inaccessible thread, return 400 `invalid_request` for a missing, empty or repeated `runId`. Offer the read only for sessions configured to keep history. With the field absent, reconnect by snapshot as today. The GET requires the original authenticated principal and client ID, current membership, `watch` and the thread's project and tenant scope. It does not open a writer, start recovery, mark presence or attach to a run.
+On kept history the thread snapshot includes `runReceipts: 1` and offers `GET /agui/v1/threads/{threadId}/run-receipt?runId={runId}`. Encode the run ID as one query value. After masking an inaccessible thread, return 400 `invalid_request` for a missing, empty or repeated `runId`. Offer the read only for sessions configured to keep history. Clients need not use receipts to reconnect by snapshot. The GET requires the original authenticated principal and client ID, current membership, `watch` and the thread's project and tenant scope. It does not open a writer, start recovery, mark presence or attach to a run.
 
 Return HTTP 200 with `{ terminal, work }` at one committed watermark. These strings answer different questions:
 

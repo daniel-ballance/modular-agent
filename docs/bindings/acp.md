@@ -238,7 +238,7 @@ The agent MUST decide admission and its receipt in the same serialized operation
 | `after` | Start a turn; receipt `now`. | Queue a new turn; receipt `after`. |
 | `propose` | Keep a proposal; receipt `proposed`. | Keep a proposal; receipt `proposed`. |
 
-The agent MUST refuse mixed-actor steering under `mixedActorInput: "refused"` with `conflict`. It MUST acknowledge extension input without waiting for its turn and keep the initial `taken` with the admission. A duplicate MUST reuse that disposition, not infer it from current state. For a legacy admission without a provable `taken`, the agent MUST return `conflict` without running new work. A duplicate prompt MUST observe the original turn or no-turn disposition in the caller's version, except that an unreleased proposal returns `conflict`. Cancelling or losing a duplicate waiter MUST NOT affect work. A host MAY retry keyed input to reconcile admission.
+The agent MUST refuse mixed-actor steering under `mixedActorInput: "refused"` with `conflict`. It MUST acknowledge extension input without waiting for its turn and keep the initial `taken` with the admission. A duplicate MUST reuse that disposition, not infer it from current state. A duplicate prompt MUST observe the original turn or no-turn disposition in the caller's version, except that an unreleased proposal returns `conflict`. Cancelling or losing a duplicate waiter MUST NOT affect work. A host MAY retry keyed input to reconcile admission.
 
 ## Updates
 
@@ -349,7 +349,7 @@ An ACP `Entry` is a recipient projection of a [shared history entry](data.md#his
 
 | Entry kinds | Fields in `data` |
 |---|---|
-| `inputAccepted`, `input`, `inputHandedBack` | `inputIds`, `when`, `content`, `releasedBy`, `reason`, `parked` where present; no input keys |
+| `inputAccepted`, `input`, `inputHandedBack` | `when`, `content`, `releasedBy`, `reason`, `parked` where present; no input keys |
 | `turnStart`, `modelRequest` | `startedBy`, `model` where present |
 | `toolStarted`, `toolResult` | `call`, `status` where present; on a covered nested start, `approvalCoveredBy: { toolCallId, requestId }` |
 | `inputRequest`, `inputAnswer` | `request` using [Request](#request) below, or the shared Answer without `stored` or the private `approvalView` binding |
@@ -432,11 +432,11 @@ The fixture MUST select the last user message and concatenate its text parts wit
 | Valid `tool:<name> <json>` with a tool result after the latest user message | The model MUST return `stop: "finished"` and `done: ` followed by the first 200 Unicode code points of the first such result's text parts, concatenated without separators. |
 | Other text | The model MUST return `stop: "finished"` and one text part `echo: <text>`. |
 
-An agent that declares `nestedToolCalls` MUST also offer the fixture tool `nest` (`{ name: string, input: object }`). `nest` MUST start one nested call with that name and input and settle with the nested result's status and content unchanged.
+The full conformance fixture MUST declare `nestedToolCalls` and offer the fixture tool `nest` (`{ name: string, input: object }`). `nest` MUST start one nested call with that name and input and settle with the nested result's status and content unchanged.
 
 For the opt-in production checks, a conformance launcher without `ma`'s policy file MUST accept `MODULAR_AGENT_CONFORMANCE_POLICY` as an absolute path to an operator file in the [reference policy format](../reference/standard-configuration.md#connection-policy-and-limits). It MUST apply the policy and limits through the normal serving options and fail startup with a diagnostic for an invalid file. The launcher MUST NOT honor this test option outside conformance mode. `ma` uses its normal policy path or `--policy`.
 
-An agent participating in the shared-erasure check MUST take its authoritative test registry location from the operator. A launcher MAY use `MODULAR_AGENT_CONFORMANCE_ERASURE_DIR` for this location in conformance mode. All participants in the check MUST use the same authoritative state. The directory does not define a registry format or allow a composition without coordination to claim `erasure`.
+The shared-erasure fixture MUST use the history service’s [pending-erasure registry](history-http.md#pending-erasure-registry-profile-pendingerasure-1) across independent writers. A composition without coordination MUST NOT claim `erasure`.
 
 The [conformance kit](../../conformance/acp/README.md) exercises this mode. See [Conformance and versioning](../conformance.md) for what passing the kit establishes.
 

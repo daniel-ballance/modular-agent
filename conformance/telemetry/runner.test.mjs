@@ -9,28 +9,26 @@ import { fileURLToPath } from "node:url";
 import { caseMatrix, runCase, sdks } from "./runner.mjs";
 import { readWire } from "./wire.mjs";
 
-test("matrix covers all four hosts and each cross-language handshake variation", () => {
+test("matrix covers all four hosts and each cross-language peer", () => {
   const cases = sdks.flatMap(caseMatrix);
-  assert.equal(cases.length, 136);
+  assert.equal(cases.length, 88);
   assert.equal(new Set(cases.map(JSON.stringify)).size, cases.length);
   for (const host of sdks) {
     const own = caseMatrix(host);
-    assert.equal(own.filter(c => c.placement === "inProcess" && !c.requires).length, 8);
-    assert.equal(own.filter(c => !c.sdk && !c.requires).length, 1);
-    assert.equal(own.filter(c => c.requires?.includes('approvalsOutlastTurns')).length, 8);
+    assert.equal(own.filter(c => c.placement === "inProcess" && !c.scenario.startsWith("waiting-approval")).length, 8);
+    assert.equal(own.filter(c => !c.sdk && !c.scenario.startsWith("waiting-approval")).length, 1);
+    assert.equal(own.filter(c => c.scenario.startsWith("waiting-approval")).length, 8);
     for (const peer of sdks.filter(sdk => sdk !== host)) {
       for (const scenario of ["tool-call", "nested-call"]) {
-        assert.deepEqual(own.filter(c => c.placement === `process:${peer}` && c.scenario === scenario)
-          .map(c => c.handshake), ["agreed", "no-acceptance", "no-offer"]);
+        assert.equal(own.filter(c => c.placement === `process:${peer}` && c.scenario === scenario).length, 1);
       }
     }
   }
 });
 
-test("undeclared waiting cases skip without launching an adapter", async () => {
-  for (const c of caseMatrix("rust").filter(c => c.requires)) {
-    assert.match((await runCase(c, [], { declaration: { questionsOutlastTurns: true } })).skipped, /approvalsOutlastTurns/);
-  }
+test("waiting cases require a real adapter", async () => {
+  const c = caseMatrix("rust").find(c => c.scenario === "waiting-approval");
+  await assert.rejects(runCase(c, []), /Missing SDK adapter command/);
 });
 
 test("runner supplies the selected scenario and receiver to an isolated adapter", async () => {

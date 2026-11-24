@@ -3,7 +3,7 @@ status: accepted
 date: 2026-11-19
 ---
 
-**Current rule:** accepted as edition 4 by [ADR 0027](0027-sdk-0-1-and-edition-4.md) once all four builds implemented it and the cross-language matrix ran. The text below is the record of the draft.
+**Current rule:** use the [specification and kits at the same revision](../conformance.md#versioning). The full [tools and environment fixture](../bindings/plugin.md#the-conformance-plugin) implements nested calls and directory listing. This draft was accepted as edition 4 by [ADR 0027](0027-sdk-0-1-and-edition-4.md) once all four builds implemented it and the cross-language matrix ran. The text below is the record of the draft.
 
 # Edition 4 draft: rules from the first working build
 

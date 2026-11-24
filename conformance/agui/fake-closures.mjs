@@ -23,7 +23,7 @@ export function fakeClosures(name, fault, model) {
   function decide(s, data, reason) {
     const requestId = s.waitQ; s.waitQ = undefined;
     if (s.question?.id === requestId) delete s.question;
-    s.batches.push([{ kind: 'inputAnswer', id: randomUUID(), data: { requestId, ...data } }]);
+    s.batches.push([{ kind: 'inputAnswer', id: randomUUID(), requestId, data }]);
     publish(s, { requestId, reason, ...(fault === 'answer-in-notice' && { value: 'yes' }) });
   }
   return {
@@ -82,7 +82,7 @@ export function fakeClosures(name, fault, model) {
         const q = s.question?.id;
         base.disconnect(s, client);
         if (q && !s.question) {
-          if (fault === 'mark-loss-revoked') s.batches.flat().find(e => e.kind === 'inputAnswer' && e.data.requestId === q).data.cause = 'revoked';
+          if (fault === 'mark-loss-revoked') s.batches.flat().find(e => e.kind === 'inputAnswer' && e.requestId === q).data.cause = 'revoked';
           publish(s, { requestId: q, reason: fault === 'guess-revocation' ? 'revoked' : 'refused' });
         }
       }
@@ -106,7 +106,7 @@ export function fakeClosures(name, fault, model) {
         case 'inspect': return { ...await base.control(operation, s, args), project: '/fixture' };
         case 'openWait':
           s.waitKind = args.kind; s.waitQ = randomUUID();
-          s.batches.push([{ kind: 'inputRequest', id: randomUUID(), data: { request: { id: s.waitQ, whenTimeLimit: args.kind === 'leaveOpen' ? 'leaveOpen' : 'decline' } } }]);
+          s.batches.push([{ kind: 'inputRequest', id: randomUUID(), requestId: s.waitQ, data: { request: { id: s.waitQ, askedBy: 'fixture', whenTimeLimit: args.kind === 'leaveOpen' ? 'leaveOpen' : 'decline' } } }]);
           return { requestId: s.waitQ };
         case 'advance':
           if (s.waitKind === 'leaveOpen') {

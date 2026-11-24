@@ -263,7 +263,7 @@ def run_case(root, *, crash=False, model="scripted/script"):
             elif model.startswith("claude/"):
                 args += [
                     "--claude-sidecar",
-                    REPO / "typescript/sidecars/claude/dist/main.js",
+                    REPO / "typescript/packages/claude/dist/src/main.js",
                 ]
                 agent_env["HOME"] = str(Path.home())
                 if config := os.environ.get("CLAUDE_CONFIG_DIR"):
@@ -362,7 +362,7 @@ def main():
             parser.error("set OPENAI_API_KEY before using an OpenAI model")
         if (
             provider == "claude"
-            and not (REPO / "typescript/sidecars/claude/dist/main.js").is_file()
+            and not (REPO / "typescript/packages/claude/dist/src/main.js").is_file()
         ):
             parser.error("build the Claude sidecar first (see the demo README)")
 

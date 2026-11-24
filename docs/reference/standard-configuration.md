@@ -7,7 +7,7 @@ The standard configuration is the reference implementation of layer 4 ([ADR 0024
 ## Rules for every implementation
 
 - **Built only on its language's SDK.** It uses the public API of that SDK ([`docs/sdk`](../sdk/README.md)) and nothing else from the base build. When it needs something the SDK cannot give, the SDK gains it first, then the SDK specification records it.
-- **One language.** It is written in its own language. The one exception is the Claude Provider, which needs the Claude Agent SDK for TypeScript: the Rust, Go and Python implementations load [`typescript/sidecars/claude`](../../typescript/sidecars/claude/README.md) as a process plugin. The TypeScript implementation may load it in process.
+- **One language.** It is written in its own language. Rust and Go load the [TypeScript Claude Provider](../../typescript/packages/claude/README.md) as a process plugin. TypeScript and Python can use their native Claude Agent SDKs.
 - **The same product.** Commands, options, file names and formats, tool names, inputs, descriptions and limits, the prompt's structure and wording, and error messages a person reads are the same in all four. The Rust implementation's texts are the reference: the tool definitions in `rust/crates/tools-files` and `rust/crates/tools-code`, the prompt in `rust/crates/standard/src/prompt.rs` and the skills listing in `rust/crates/standard/src/skills.rs`. A difference is a bug in one of them, fixed by changing this page or the code that is wrong.
 - **Shared configuration, separate state.** All four read the same configuration folder, so a person can switch implementation without setting anything up again. Each keeps its sessions in its own state folder, because their native session files differ.
 
@@ -82,7 +82,6 @@ With no `--model` and none in settings, `ma` uses the first Provider that is sig
 - **The configuration folder** is `$XDG_CONFIG_HOME/modular-agent`, or `~/.config/modular-agent`.
 - **The state folder** is `$XDG_STATE_HOME/modular-agent/<language>`, or `~/.local/state/modular-agent/<language>`, where `<language>` is `rust`, `typescript`, `go` or `python`. It holds sessions, command state and the full output of commands whose output was cut.
 - **`MODULAR_AGENT_DATA_DIR`** puts both in that one folder, as the ACP binding requires of a host that isolates an agent: the configuration files directly in it, and the state in `state/` under it. It affects only `ma`, not other programs reading `XDG_CONFIG_HOME` or `XDG_STATE_HOME`.
-- **Earlier Rust sessions.** Before this page, the Rust `ma` kept state directly in `modular-agent/`. To keep those sessions, stop the agent and move `sessions/` and `commands/` together into `modular-agent/rust/`.
 
 **`auth.json`** is `{"logins": {PROVIDER: LOGIN}, "answers": {NAME: VALUE}}`. A login is `{"type": "oauth", "access", "refresh", "expires", "account"?}`, with `expires` in milliseconds since the epoch already brought forward by the refresh margin, or `{"type": "api_key", "key"}`. Every implementation writes it with mode 0600 and, while refreshing a token, holds an exclusive lock on `auth.lock` beside it, so two agents in any languages never spend one refresh token.
 
@@ -117,7 +116,7 @@ The ordinary pool cannot use control headroom or outstanding settlement reservat
 | `grok` | The X Subscription's Grok models | `ma login grok` |
 | `claude` | Claude plan models, through the Claude Agent SDK | `ma login claude` runs `claude auth login`, Anthropic's own sign-in; Claude Code keeps it |
 
-These are the SDK's [subscription Providers](../sdk/subscription-providers.md), with their sign-in, login file, refresh, request shapes and model table; `ma` adds none of its own. `auth.json` is their login file. `ma` accepts the former ids `openai-codex` (for `chatgpt`) and `xai` (for `grok`) in `--model`, `ma login`, `ma logout`, settings, `models.json` and reopened sessions, and moves a login stored under a former id to the new id the next time it writes `auth.json` ([ADR 0031](../adr/0031-subscription-providers.md)).
+These are the SDK's [subscription Providers](../sdk/subscription-providers.md), with their sign-in, login file, refresh, request shapes and model table; `ma` adds none of its own. `auth.json` is their login file. For subscriptions, use only `chatgpt`, `grok` and `claude` for selection, configuration, stored sessions and login records ([ADR 0031](../adr/0031-subscription-providers.md)).
 
 **Signing in to ChatGPT** works where the browser is not on the agent's machine, as over SSH:
 
