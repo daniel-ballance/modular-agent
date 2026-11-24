@@ -8,10 +8,10 @@ import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 
 const [python, kit, directory, path, placement, ...command] = process.argv.slice(2);
-const { waitingStep, waitingRecords } = await import(pathToFileURL(kit));
+const { checkWaitingDeclaration, waitingStep, waitingRecords } = await import(pathToFileURL(kit));
 const fixture = JSON.parse(await readFile(path, 'utf8'));
 const telemetry = process.env.MODULAR_AGENT_TELEMETRY_RUN && JSON.parse(await readFile(process.env.MODULAR_AGENT_TELEMETRY_RUN, 'utf8'));
-let child, lines, exited, sid, declaration, last, stage = 'probe';
+let child, lines, exited, sid, declaration, last, stage = 'create';
 const state = {}, observations = {};
 async function optional(name, fallback) {
   try { return await readFile(join(directory, name), 'utf8'); }
@@ -58,24 +58,13 @@ const io = {
 };
 async function run() {
   await io.setClock(1800000000000);
-  // A probe must not export spans for an unrelated session.
-  const saved = process.env.MODULAR_AGENT_TELEMETRY_RUN;
-  delete process.env.MODULAR_AGENT_TELEMETRY_RUN;
-  writer();
-  const probe = await ask('probe');
-  await stop('close');
-  if (saved) process.env.MODULAR_AGENT_TELEMETRY_RUN = saved;
-  for (const k of Object.keys(fixture.requires)) {
-    if (probe.declaration[k] !== true) { console.log('SKIP ' + placement + ': missing ' + k); return; }
-  }
-  stage = 'create';
   writer();
   if (fixture.expectCreateError) {
     await assert.rejects(ask('new'), e => e.code === fixture.expectCreateError.code && e.message.includes(fixture.expectCreateError.messageContains ?? ''));
     return;
   }
   ({sessionId: sid, declaration} = await ask('new'));
-  for (const [k,v] of Object.entries(fixture.expectDeclaration ?? {})) assert.equal(declaration[k] ?? false, v, k);
+  checkWaitingDeclaration(fixture, declaration);
   for (const [index, step] of fixture.steps.entries()) {
     stage = 'step ' + index;
     const expect = step.expect ?? {};

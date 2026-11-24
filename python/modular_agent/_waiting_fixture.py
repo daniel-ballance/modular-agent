@@ -136,12 +136,10 @@ class Worker:
                 event["data"]["result"]["question"] = "redacted"
                 return {"redact": payload["events"]}
 
-    async def build(self, op: str, sid: str | None) -> dict[str, Any]:
+    async def build(self, sid: str | None) -> dict[str, Any]:
         scenario = self.scenario
         opts = dict(scenario["agent"])
-        if op == "probe":
-            opts.update(maxApprovalWaitMs=100, approval="all", durability="kept")
-        settings = {} if op == "probe" else dict(opts.get("settings", {}))
+        settings = dict(opts.get("settings", {}))
         if (ms := scenario.get("fixture", {}).get("requestedApprovalMs")) is not None:
             settings["approval_timeout"] = ms / 1000
         opts["settings"] = {}
@@ -219,8 +217,8 @@ class Worker:
 
     async def command_line(self, msg: dict[str, Any]) -> Any:
         op = msg["op"]
-        if op in ("probe", "new", "reopen"):
-            return await self.build(op, msg.get("sid"))
+        if op in ("new", "reopen"):
+            return await self.build(msg.get("sid"))
         assert self.agent and self.session
         actor = msg.get("actor", "user")
         if actor not in self.handles:
