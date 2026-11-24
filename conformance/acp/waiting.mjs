@@ -301,6 +301,12 @@ for (const target of ['inputRequest', 'inputAnswer']) cases[`erase-${target}`] =
   await c.control('pause', { at: 'beforeHandoff' }); assert.deepEqual(await answer(p, c.sid, e.requestId), accepted);
   await c.control('reached', { at: 'beforeHandoff' });
   const victim = one((await c.batches()).flat(), target);
+  if (c.d.erasureDuringTurn === 'refused') { // the continuation turn is running: the declaration must hold
+    await assert.rejects(ext(c.a, 'erase', c.sid, { entryIds: [victim.id] }), errorCode(-32602, 'busy'));
+    await c.control('release', { at: 'beforeHandoff' }); await finish(c, e, 'completed', 'allow', p.actor);
+    assert.ok(!(await c.batches()).flat().some(r => r.id === victim.id && r.erased), 'a refused erase changes nothing');
+    return;
+  }
   await c.control('pause', { at: 'pendingErasure' });
   const erasing = ext(c.a, 'erase', c.sid, { entryIds: [victim.id] }); erasing.catch(() => {});
   await c.control('reached', { at: 'pendingErasure' });
@@ -325,10 +331,10 @@ export async function waitingChecks(kit) {
     const label = `ACP/${v} waiting approval`;
     for (const [name, scenario] of Object.entries(cases)) await kit.attempt(`${label}: ${name}`, async () => {
       await launch(kit, name, v, async c => {
-        const feature = ({ 'remove-one': 'severalActors', 'remove-last': 'severalActors', fork: 'forking', rewind: 'rewinding', 'erase-inputRequest': 'erasure', 'erase-inputAnswer': 'erasure', capacity: 'resourceReservations' })[name];
+        const feature = ({ 'remove-one': 'severalActors', 'remove-last': 'severalActors', fork: 'forking', rewind: 'rewinding', 'erase-inputRequest': 'erasure', 'erase-inputAnswer': 'erasure', })[name];
         if (feature) assert.equal(c.d[feature], true, `fixture must declare ${feature}`);
         if (name === 'move') assert.ok(c.extensions.includes('move'), 'fixture must offer move');
-        if (name.startsWith('erase-')) assert.equal(c.d.erasureDuringTurn, 'allowed', 'fixture must allow erasure during a turn');
+        if (name === 'capacity') assert.equal(typeof c.d.resourceReservations?.session, 'object', 'fixture must declare its reservation ceilings');
         await select(c.a, c.sid, 'model', 'conformance/echo'); await select(c.a, c.sid, 'approval', 'all');
         if (name !== 'live-offline') await c.optIn();
         await scenario(c); kit.check(`${label}: ${name}`, true);
