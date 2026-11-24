@@ -244,7 +244,7 @@ const agent = await createAgent({ providers: [chatgpt({ logins }), grok({ logins
 
 Call `signIn("chatgpt", logins, { onStep, paste, device, clientIdentity })` or `signIn("grok", logins, { onStep, clientIdentity })` from `@modular-agent/subscription`. ChatGPT reports `openAndPaste` for browser sign-in, or `deviceCode` and `waiting` for device sign-in. Grok reports `deviceCode` then `waiting` and ignores `device` and `paste`. The SDK opens no browser. `signOut("chatgpt", logins)` or `signOut("grok", logins)` removes that login. The login file must be private. Refresh uses `flock(2)` through util-linux `flock` on Linux or system Perl on macOS. `available()` reads the login file without contacting either service. Both constructors accept `models` to enroll an unlisted id. See the [terms of use](../../../docs/sdk/subscription-providers.md#terms-of-use) for the sign-in clients.
 
-Claude uses Claude Code's plan sign-in and rejects API-key use; `unavailableReason()` gives the reason after the availability check. The [Claude package](../claude/README.md) also builds the process entry used by Rust and Go, including the compatibility path `typescript/sidecars/claude/dist/main.js`.
+Claude uses Claude Code's plan sign-in and rejects API-key use; `unavailableReason()` gives the reason after the availability check. The [Claude package](../claude/README.md) builds the process entry used by Rust and Go: `typescript/packages/claude/dist/src/main.js`.
 
 ### Registering or serving a custom history store
 

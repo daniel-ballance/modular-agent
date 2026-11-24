@@ -10,7 +10,6 @@ This directory contains the TypeScript base, the public SDK, and [`ma`](packages
 | `packages/fixtures/` | SDK fixture program and shared-scenario runner |
 | `packages/openai/`, `packages/anthropic/` | SDK API-key Providers |
 | `packages/subscription/`, `packages/claude/` | The SDK subscription Providers, shared login file and sign-in API. See the [SDK README](packages/core/README.md#subscription-providers). |
-| `sidecars/claude/` | Compatibility entry for Rust and Go. The Claude Provider and its plugin program are in [the Claude package](packages/claude/README.md). |
 | `scripts/acp-smoke.mjs` | Drives `ma --acp` over stdio with a real model |
 | `conformance` | A link to this repository's kits |
 

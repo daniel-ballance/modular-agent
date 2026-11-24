@@ -96,7 +96,6 @@ npm ci --prefix conformance/tools
 npm ci --prefix conformance/telemetry
 (cd typescript && npm ci && npm run build && npm test)
 (cd typescript && MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test)
-(cd typescript/sidecars/claude && npm ci && npm test)
 node conformance/reference/run.mjs --agent typescript
 MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- node "$PWD/typescript/packages/ma/dist/src/main.js" --acp
 scripts/websocket-kits.sh typescript
