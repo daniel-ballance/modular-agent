@@ -524,8 +524,8 @@ async function eraseAcrossWriters(kit, cutoff) {
 	try {
 		const { a, hello } = await h.peer();
 		const source = await open(a, project);
-		check("agent and session declare coordination when the shared mechanism is configured",
-			meta(hello)?.declaration?.erasure === true && meta(source)?.declaration?.erasure === true);
+		if (meta(hello)?.declaration?.erasure !== true || meta(source)?.declaration?.erasure !== true)
+			throw Error("agent and source session must declare coordinated erasure");
 		const sid = await approvalOff(a, source);
 		sourcePath = store.path(sid);
 		stage = "commit source prompt";
