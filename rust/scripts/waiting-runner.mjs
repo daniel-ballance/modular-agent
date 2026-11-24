@@ -5,11 +5,9 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, watch, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { dirname, join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { join } from 'node:path';
+import { waitingStep, waitingRecords, checkWaitingDeclaration } from '../../conformance/sdk/waiting.mjs';
 const [path, dir, binary, placement, ...command] = process.argv.slice(2);
-const reference=process.env.MA_SDK_WAITING_FIXTURES ? resolve(process.env.MA_SDK_WAITING_FIXTURES,'../../waiting.mjs') : resolve(dirname(path),'../../waiting.mjs');
-const { waitingStep, waitingRecords, skipReason } = await import(pathToFileURL(existsSync(reference)?reference:resolve('conformance/sdk/waiting.mjs')));
 const trace=process.env.MODULAR_AGENT_TELEMETRY_RUN && JSON.parse(readFileSync(process.env.MODULAR_AGENT_TELEMETRY_RUN));
 let declaration, parked;
 const spec = JSON.parse(readFileSync(path));
@@ -59,14 +57,11 @@ async function afterEffect() {
   });
 }
 async function run() {
-  const probe=await start('probe'); const reason=skipReason(spec,probe.declaration);
-  await stop('close');
-  if(reason){console.error(`${spec.scenario} ${placement}: ${reason}`);return;}
   try {
     const actual=await start('init');session=actual.id;declaration=actual.declaration;
-    for(const [k,v] of Object.entries(spec.expectDeclaration??{})) assert.equal(actual.declaration[k]??false,v);
+    checkWaitingDeclaration(spec,declaration);
   } catch(e) {
-    if(e.code!==spec.expectCreateError?.code || (spec.expectCreateError?.messageContains && !e.message.includes(spec.expectCreateError.messageContains))) throw e;
+    if(!spec.expectCreateError || e.code!==spec.expectCreateError.code || (spec.expectCreateError?.messageContains && !e.message.includes(spec.expectCreateError.messageContains))) throw e;
     return;
   }
   assert.equal(spec.expectCreateError,undefined);
