@@ -147,7 +147,7 @@ export const closures = {
     await follow(peer.api, id, snap.waitCursor, async feed => {
       await control('advance', { milliseconds: 5000 });
       const evidence = await control('inspect');
-      const opening = records(evidence, 'inputRequest').find(e => e.data.request.id === q);
+      const opening = records(evidence, 'inputRequest').find(e => e.requestId === q && e.data.request.id === q);
       assert.ok(opening?.data.request.whenTimeLimit === 'leaveOpen' && records(evidence, 'toolPending').some(e => e.data.requestIds.includes(q)), 'the leaveOpen wait actually reached pending');
       assert.ok(!records(evidence, 'inputAnswer').some(e => e.requestId === q), 'the timeout did not commit a decision');
       await poll(q); await answer(q);

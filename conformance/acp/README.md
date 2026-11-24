@@ -51,7 +51,7 @@ The cases run on each binding. They cover live refusal with no approver present,
 
 The primary ACP connection runs the worker. Give it input, tools, settings and the administrative rights needed for branch/erasure checks, but no answer route. Seed two eligible offline members (`approver` and `other`, with watch and approve but not tools). In a single-member composition use the same member on distinct routes with different connection ceilings. The `representative` can act for the approver, but its own poll is not a delivery for that actor. `answerOnly` has watch and answer, not approve. `tenant` is outside the session's tenant. Do not make any of these actors present at startup. The kit attaches each on a **real**, separately authenticated ACP connection to the same writer, even when the worker uses stdio.
 
-Before replying to initialize, a supporting launcher writes `{acp, control}` to `ready`: the numeric-loopback WebSocket URL and a separate loopback HTTP test URL. The latter accepts only the control bearer and a JSON POST `{operation, sessionId, ...}`; return HTTP 200 and a JSON object after the operation. A non-supporting launcher needs no control endpoint.
+Before replying to initialize, the fixture launcher writes `{acp, control}` to `ready`: the numeric-loopback WebSocket URL and a separate loopback HTTP test URL. The latter accepts only the control bearer and a JSON POST `{operation, sessionId, ...}`; return HTTP 200 and a JSON object after the operation.
 
 | Control | What the fixture does |
 |---|---|
@@ -63,7 +63,7 @@ Before replying to initialize, a supporting launcher writes `{acp, control}` to 
 | `cut` | `worker-ceiling` removes tools from the session ceiling; `approver-rights` revokes approve; `route-authorization` removes authorization of the recorded answer route; `stale-writer` fences the writer in the store. Do not use socket loss to implement revocation. |
 | `barred` | Wait for held work to observe the pending erasure and abandon its handoff, before completing deletion. |
 
-Only in the two corrupt/unsupported reopen cases the new launch file has `reopen`: `unsupported` omits the feature, or `missing-proof` drops the allow's private view binding in the disposable store before the new writer acquires it. In both cases the old decision cannot run the tool. Run `npm test` here for the kit's assertion and skip-path self-tests.
+Only in the two corrupt/unsupported reopen cases the new launch file has `reopen`: `unsupported` omits the feature, or `missing-proof` drops the allow's private view binding in the disposable store before the new writer acquires it. In both cases the old decision cannot run the tool. Run `npm test` here for the kit’s self-tests.
 
 ## Over WebSocket
 
