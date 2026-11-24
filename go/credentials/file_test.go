@@ -2,6 +2,8 @@ package credentials_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"github.com/daniel-ballance/modular-agent/go/credentials"
 	"os"
 	"path/filepath"
@@ -25,6 +27,12 @@ func TestFileCredentialIsReadOnDemandAndNeverCached(t *testing.T) {
 	}
 	if got, err := store.Get(context.Background(), "anthropic"); err != nil || got != "refreshed-test-token" {
 		t.Fatal("credential was cached")
+	}
+	if err := os.Mkdir(path+".d", 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path+".d", fmt.Sprintf("%x", sha256.Sum256([]byte("other")))), []byte("stale"), 0600); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := store.Get(context.Background(), "other"); err == nil {
 		t.Fatal("unknown credential accepted")

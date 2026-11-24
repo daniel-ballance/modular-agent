@@ -72,6 +72,7 @@ func JSONStore(path string) Store {
 		if err != nil {
 			return v, errors.New("credential file unavailable")
 		}
+		v.Answers = nil
 		if json.Unmarshal(b, &v) != nil || v.Answers == nil {
 			return v, errors.New("invalid credential file")
 		}
