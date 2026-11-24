@@ -27,7 +27,15 @@ from ma_harness import interface_tools, waiting_approvals
 from ma_questions import Questions
 from ma_standard.cli import Script
 from modular_agent.fixtures import count, fixture as sdk_fixture
-from modular_agent import ACP_RIGHTS, Plugin, create_agent, file_history, read_service_token
+from modular_agent import (
+    ACP_RIGHTS,
+    Plugin,
+    ToolContext,
+    create_agent,
+    file_history,
+    read_service_token,
+    tool,
+)
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -222,7 +230,23 @@ class Fixture:
                 }
 
             self.script.request = private
-        if self.waiting:
+        if self.name == "waiting-restart":
+
+            @tool(callers=["plugin"])
+            async def increment() -> str:
+                """Count one nested effect."""
+                path = self.root / "count"
+                value = str(count(path) + 1)
+                path.write_text(value)
+                return value
+
+            @tool
+            async def bump(cx: ToolContext, hold: bool = False, note: str | None = None) -> str:
+                """Delegate the count to a nested tool."""
+                return (await cx.tools.call("increment", {})).text()
+
+            plugins.append(Plugin("counter", tools=[bump, increment]))
+        elif self.waiting:
             plugins.append(sdk_fixture("counter", config={"path": str(self.root / "count")}))
         self.agent = await create_agent(
             project=self.project,
@@ -239,6 +263,7 @@ class Fixture:
             else "all"
             if self.waiting or self.name.startswith("approval")
             else "off",
+            approval_covers_nested=self.waiting or self.name.startswith("approval"),
             max_approval_wait=5.0 if self.waiting else None,
             late_answers_start_turns=self.waiting,
             settings={

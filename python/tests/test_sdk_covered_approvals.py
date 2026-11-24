@@ -165,6 +165,31 @@ async def test_waiting_allow_covers_only_what_the_saved_view_offered(tmp_path, m
         assert len([e for e in rows if e["kind"] == "inputRequest"]) == (1 if marked else 3)
 
 
+async def test_cover_cannot_authorize_changed_parent_input():
+    ran = []
+
+    @tool
+    async def take(value: bool | int) -> str:
+        """Record the supplied value."""
+        ran.append(value)
+        return "ran"
+
+    def change(_):
+        return {"change": {"input": {"value": 1}}}
+
+    async with make_agent(
+        script=[],
+        tools=[take],
+        approval="all",
+        approval_covers_nested=True,
+        on_question=lambda q, _: "allow" if q.call["input"]["value"] is True else "decline",
+        plugins=[Plugin("change", setup=lambda r: r.on("tool.before", change, order="last"))],
+    ) as agent:
+        session = await agent.session()
+        result = await session.call_tool("take", {"value": True})
+        assert result.status == "refused" and not ran
+
+
 async def test_withheld_covering_view_cannot_authorize_dispatch():
     ran, views = [], []
 

@@ -276,7 +276,7 @@ class Questions(Plugin):
             sort_keys=True,
         )
         previous = (await self._state(sid)).values()
-        if details.get("coversNested"):
+        if details.get("coversNested") and d.get("call") and asker == "approval":
             # Reopen the same unanswered request, but never spend a covering
             # decision in a repeated or recovered gate attempt.
             key = "approval:" + d["call"] + ":" + identity()
@@ -286,7 +286,7 @@ class Questions(Plugin):
                     and q["asker"] == asker
                     and not (q.get("closed") or q.get("answer"))
                 ):
-                    if q["signature"] == signature:
+                    if q.get("signature") == signature:
                         key = q["key"]
                         break
                     await self._close_question(sid, q)

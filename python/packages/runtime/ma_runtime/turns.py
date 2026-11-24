@@ -10,6 +10,7 @@ from ma_core import TOOL_RESULT_BYTES, lower_reasoning, AgentError, content, ide
 from ma_core import telemetry as ot
 from ma_core.recovery import HANDOFF, STEP_AFTER
 from ma_core.wire import (
+    json_equal,
     model_out,
     model_request_fields,
     recorded_as,
@@ -1085,7 +1086,9 @@ class Turns:
             caller = "plugin" if call.get("parentCallId") else call.get("initiator", "model")
             if definition and caller not in definition.get("callers", []):
                 gate = {**gate, "refused": True, "reason": "Tool does not allow this initiator"}
-            if "checked_input" in gate and gate["checked_input"] != gate["call"]["input"]:
+            if "checked_input" in gate and not json_equal(
+                gate["checked_input"], gate["call"]["input"]
+            ):
                 gate = {**gate, "refused": True, "reason": "Tool input changed after approval"}
             if gate.get("pending") and not gate.get("refused"):
                 if replay:

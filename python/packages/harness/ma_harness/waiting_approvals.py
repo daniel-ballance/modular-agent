@@ -18,6 +18,8 @@ from .interface_tools import branch_entries, continuation_origin
 
 UNTIL = "untilDeadline"
 MAX_COUNT = 2**53 - 1
+# Python approval routes display UTC with datetime's four-digit year.
+MAX_DEADLINE = 253402300799999  # 9999-12-31T23:59:59.999Z
 
 
 def marked(e):
@@ -140,7 +142,7 @@ class WaitingApprovals:
             type(limit) is not int
             or not 0 <= limit <= MAX_COUNT
             or type(deadline) is not int
-            or not 0 <= deadline <= MAX_COUNT
+            or not 0 <= deadline <= MAX_DEADLINE
             or deadline != recorded + limit
         ):
             return "noLongerAnswerable", "not_started"
@@ -209,7 +211,7 @@ class WaitingApprovals:
             requested = s["settings"].get("approval_timeout")
             limit = min(maximum, round(requested * 1000)) if requested is not None else maximum
             ms = clock_ms()
-            if limit < 0 or ms + limit > MAX_COUNT:
+            if limit < 0 or ms + limit > MAX_DEADLINE:
                 return {**d, "refused": True, "reason": "Unrepresentable approval deadline"}
             qid = identity()
             source, offered = self.registration(sid, definition)

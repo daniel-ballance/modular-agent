@@ -118,6 +118,13 @@ async def test_wait_bound_in_seconds_is_recorded_in_whole_milliseconds(
         assert datetime.fromisoformat(q.deadline) == datetime.fromtimestamp((now + ms) / 1000, UTC)
 
 
+async def test_refuse_a_deadline_the_approval_view_cannot_show(tmp_path):
+    async with make_agent(**options(tmp_path, max_approval_wait=300_000_000_000.0)) as agent:
+        session = await agent.session(settings={"approvalWait": "untilDeadline"})
+        [result] = (await session.prompt("bump")).tool_results()
+        assert result.status == "refused" and not await session.questions()
+
+
 @pytest.mark.parametrize("bad", [True, 0, -1, 0.0005, 0.0015, float("nan"), float("inf"), 2**53])
 async def test_invalid_maximum(tmp_path, bad):
     with pytest.raises(AgentError) as error:

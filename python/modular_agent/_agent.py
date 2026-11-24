@@ -416,7 +416,7 @@ class Agent:
             if exact and self._handlers.get(original["session"], self._handler) is not None:
                 self._live_views.setdefault(q["id"], set()).add(("user", None))
             if not exact:
-                self._live_views.pop(q["id"], None)
+                self._live_views.get(q["id"], set()).discard(("user", None))
                 return  # A changed or withheld request cannot be answered on this route.
         elif kind == "input_request_answered":
             self._live_views.pop(original["answer"]["request"], None)

@@ -13,6 +13,7 @@ from ma_core.wire import (
     STATUS_IN,
     call_out,
     entry_out,
+    json_equal,
     model_out,
     model_request_fields,
     recorded_as,
@@ -1011,7 +1012,7 @@ class TurnHost:
                     "refused": "Call already settled",
                     "result": self.results[cid],
                 }
-            if "checked_input" in a and a["checked_input"] != call["input"]:
+            if "checked_input" in a and not json_equal(a["checked_input"], call["input"]):
                 a = {**a, "refused": True, "reason": "Tool input changed after approval"}
             if a.get("open") and isinstance(a.get("pending"), dict) and not a.get("refused"):
                 if not self.runtime.declarations.get("open_calls"):
@@ -1151,7 +1152,7 @@ class TurnHost:
                 return await self.finish_tool(
                     call, step, {"status": "outcome_unknown", "content": content(UNKNOWN)}
                 )
-        if call["name"] != wire["name"] or call["input"] != wire["input"]:
+        if call["name"] != wire["name"] or not json_equal(call["input"], wire["input"]):
             self.attempted.add(cid)
             return await self.finish_tool(
                 call,
