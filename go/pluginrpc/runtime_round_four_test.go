@@ -243,7 +243,7 @@ func seedStandardRuntimeHistory(t *testing.T, opt vanilla.Options, revoked bool)
 	callIDs := []string{"yes", "no-then", "already-done", "no-now", "new"}
 	add("modelRequest", map[string]any{"stepId": "first-step", "data": map[string]any{
 		"model": map[string]string{"provider": "fake", "id": "fake"}, "safeToRepeat": false,
-		"tools": []string{"again", "unsafe-now", "fresh"}, "tracksStepAfter": true,
+		"tools": []string{"again", "unsafe-now", "fresh"},
 	}})
 	var content []any
 	for i, id := range callIDs {

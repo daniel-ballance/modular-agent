@@ -101,7 +101,6 @@ type Entry struct {
 	RequestRef         string          `json:"request_ref,omitempty"`
 	ContinuesTurn      string          `json:"continues_turn,omitempty"`
 	JobKey             string          `json:"job_key,omitempty"`
-	TracksStepAfter    bool            `json:"tracks_step_after,omitempty"`
 	SafeToRepeat       *bool           `json:"safe_to_repeat,omitempty"`
 	OfferedTools       *[]string       `json:"offered_tools,omitempty"`
 	Point              string          `json:"point,omitempty"`

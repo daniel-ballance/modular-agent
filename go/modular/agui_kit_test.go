@@ -269,7 +269,7 @@ func (f *agFixture) parts() api.Plugin {
 				if portable.EqualJSON(c.Call.Input, []byte(`{"color":"draft-blue"}`)) {
 					c.Call.Input = api.JSON(map[string]string{"color": "dispatch-blue"})
 				}
-				if strings.HasPrefix(f.Name, "approval") || f.Name == "closure-presence" {
+				if f.Name != "approval" && (strings.HasPrefix(f.Name, "approval") || f.Name == "closure-presence") {
 					qs, _ := a.Get("questions")
 					ans, err := qs.(api.Questions).Ask(ctx, api.Question{Session: c.Session, Turn: c.Turn, Actor: c.Call.Actor, Call: c.Call.ID, Kind: "approval", Key: "check:" + c.Call.ID, Prompt: "Allow " + c.Call.Name + " " + string(c.Call.Input) + "?", ApprovalCall: &c.Call, Wait: 5 * time.Second})
 					if err != nil || ans.Value != "allow" || ans.Declined {
@@ -592,6 +592,9 @@ func TestAGUIKitProgram(t *testing.T) {
 				return "counted", f.log("counter", 1)
 			}, modular.Callers("plugin"))))
 		}
+	}
+	if f.Name == "approval" {
+		opts = append(opts, modular.WithApproval(modular.All), modular.WithApprovalCoversNested(true))
 	}
 	if f.Name == "closure-routes" {
 		opts = append(opts, modular.WithApproval(modular.All), modular.WithTool(modular.NewTool("review", "Review.", func(context.Context, struct{}, *modular.ToolContext) (string, error) { return "reviewed", nil })))

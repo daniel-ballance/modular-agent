@@ -229,9 +229,6 @@ func Entry(e api.Entry) map[string]any {
 		}
 		d["model"] = model
 		d["safeToRepeat"] = e.SafeToRepeat != nil && *e.SafeToRepeat
-		if e.TracksStepAfter {
-			d["tracksStepAfter"] = true
-		}
 		if e.OfferedTools != nil {
 			d["tools"] = *e.OfferedTools
 		}
@@ -532,7 +529,6 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 			return e, fmt.Errorf("hand-back %s lacks inputId", e.ID)
 		}
 	case "model.request":
-		e.TracksStepAfter = boolean(d, "tracksStepAfter")
 		m := asObject(d["model"])
 		e.Data = api.JSON(api.Model{ID: modelID(m), Provider: str(m, "provider")})
 		b := boolean(d, "safeToRepeat")

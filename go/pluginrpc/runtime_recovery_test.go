@@ -42,7 +42,7 @@ func TestRecoverySettlesBeforeHandoffAndReplaysGate(t *testing.T) {
 		return saved
 	}
 	offered := []string{"unsafe"}
-	add(api.Entry{Kind: "model.request", Step: "s", TracksStepAfter: true, OfferedTools: &offered})
+	add(api.Entry{Kind: "model.request", Step: "s", OfferedTools: &offered})
 	c := api.Call{ID: "c", Name: "unsafe", Input: api.JSON(object{}), Origin: "model", Actor: "actor", Step: "s"}
 	response := responseDraft("s", responseOut(api.Response{Stop: "tools", Content: api.Content{{Type: "tool_call", Call: &c}}}))
 	response.ID = ""
