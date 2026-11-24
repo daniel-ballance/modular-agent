@@ -58,6 +58,22 @@ for (const platform of new Set<NodeJS.Platform>([process.platform, "darwin"])) t
 	if (escaped !== undefined) assert.ok(await until(() => !alive(escaped!)), "the process that left its group died too");
 });
 
+test("Linux cannot start a command if the owner dies before registering its group", { skip: process.platform !== "linux" }, async () => {
+	const dir = mkdtempSync(join(tmpdir(), "ma-launch-barrier-"));
+	const script = `import { writeFileSync } from 'node:fs';
+		import { LocalEnvironment, ProcessTracker } from ${JSON.stringify(envLocal)};
+		class InterruptedTracker extends ProcessTracker {
+			started(pid) { writeFileSync('pid', String(pid)); process.kill(process.pid, 'SIGKILL'); }
+		}
+		const env = new LocalEnvironment(process.cwd(), new InterruptedTracker('run'));
+		await env.exec('echo started > effect', { signal: new AbortController().signal });`;
+	const owner = spawn(process.execPath, ["--input-type=module", "-e", script], { cwd: dir, stdio: "ignore" });
+	assert.equal(await new Promise(resolve => owner.once("exit", (_, signal) => resolve(signal))), "SIGKILL");
+	const pid = Number(readFileSync(join(dir, "pid"), "utf8"));
+	assert.ok(await until(() => !alive(pid)));
+	assert.equal(existsSync(join(dir, "effect")), false);
+});
+
 test("Darwin groups stop on timeout, cancellation and session close", async t => {
 	const dir = mkdtempSync(join(tmpdir(), "ma-proc-"));
 	const { LocalEnvironment, ProcessTracker } = await import(envLocal);
