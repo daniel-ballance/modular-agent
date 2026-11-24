@@ -11,14 +11,19 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { realpathSync } from "node:fs";
 import { isDeepStrictEqual as equal } from "node:util";
 import { codeOf, rpcError } from "./peer.mjs";
+import { namedCallers } from "./named-callers.mjs";
 import { checkUpgrades, CONTROL_MS, PLUGIN_PROTOCOL, socketPeer, upgradeStatus, websocketOptions } from "../tools/websocket.mjs";
 
 const args = process.argv.slice(2);
 const dash = args.indexOf("--");
 const argv = dash < 0 ? args : args.slice(0, dash);
 const verbose = argv.includes("--verbose");
+const named = argv.includes("--named-callers");
+const skipNamed = "SKIP  named callers (no named-caller fixture command; use --named-callers -- FIXTURE)";
+if (named && argv.length === 1 && dash < 0) { console.log(skipNamed); process.exit(0); }
 let network, isolation;
 try {
+	if (named && argv.some(a => !["--named-callers", "--verbose"].includes(a))) throw Error("--named-callers needs a launcher, not another run mode");
 	const options = websocketOptions(argv);
 	network = options && { ...options, protocol: PLUGIN_PROTOCOL };
 	// A service registers its parts at startup, so each Runtime tier is a separate service.
@@ -529,6 +534,13 @@ const statusOf = (e) => e?.data?.status;
 const textOf = (content) => (content ?? []).filter((p) => p.type === "text").map((p) => p.text).join("");
 const initParams = { binding: BINDING, data: "modular-agent-data/1", host: { name: "conformance-kit", version: "1" }, project: work, home, config: {} };
 
+if (named) {
+	await attempt("named caller fixture", () => namedCallers(command, safeEnv, check, async (first, configured) => {
+		network = first; isolation = configured; await checkIsolation();
+	}));
+	finish();
+}
+console.log(skipNamed);
 if (isolation) {
 	await attempt("plugin service isolation", checkIsolation);
 	finish();
@@ -1148,14 +1160,27 @@ if (!argv.includes("--no-runtime")) {
 async function checkIsolation() {
 	const scopes = isolation.projects.map((project, i) => ({
 		label: i === 0 ? "A" : "B", project, connection: i === 0 ? network : isolation.second,
+		callerId: isolation.names?.[i], otherId: isolation.names?.[1 - i],
 	}));
 	const [a, b] = scopes;
 	const peers = [];
-	const attach = async (connection, project) => {
-		const peer = start({}, connection);
+	let freshFactories = true;
+	const init = (scope, project, claim = scope.otherId) => ({ ...initParams, project, home: isolation.home, config: named ? { callerId: claim } : {} });
+	const attach = async (scope, claim) => {
+		const offset = isolation.audit?.().length;
+		const peer = start({}, scope.connection);
 		peers.push(peer);
-		peer.state.reg = await peer.request("plugin/initialize", { ...initParams, project, home: isolation.home });
+		peer.state.reg = await peer.request("plugin/initialize", init(scope, scope.project, claim));
+		if (named) freshFactories &&= equal(isolation.audit().slice(offset), ["factory", "setup"].map(event => ({ event, callerId: scope.callerId })));
 		return peer;
+	};
+	const probe = async (peer, own, id, input) => {
+		const source = peer.state.reg.toolSources?.find(s => s.tools.some(t => t.name === "caller_probe"));
+		if (!source) throw Error("named caller fixture must register caller_probe");
+		const r = await peer.request("tools/call", { toolSource: source.id, project: own.project, sessionId: "s1",
+			call: { id, name: "caller_probe", startedBy: "model", input: { callerId: own.otherId, ...input } } });
+		check(`named callers: credential selects the factory ID for ${own.label}`, r.status === "completed" && r.value?.callerId === own.callerId);
+		return r.value?.previous;
 	};
 	const deferred = () => { let finish; const wait = new Promise((resolve) => { finish = resolve; }); return { wait, finish }; };
 	try {
@@ -1167,16 +1192,16 @@ async function checkIsolation() {
 		}
 		const toolSource = (p) => p.state.reg.toolSources.find((s) => s.tools.some((t) => t.name === "bash")).id;
 		const pairs = [["same credential A", a, a], ["different credentials", a, b]];
-		if (isolation.separate) pairs.splice(1, 0, ["same credential B", b, b]);
+		if (isolation.separate || named) pairs.splice(1, 0, ["same credential B", b, b]);
 		for (const [label, first, second] of pairs) {
 			// Fresh peers allocate the same request ID on different connections.
-			const left = await attach(first.connection, first.project);
-			const right = await attach(second.connection, second.project);
+			const left = await attach(first);
+			const right = await attach(second);
 			const waitLeft = deferred(), waitRight = deferred(), allowLeft = deferred(), allowRight = deferred();
 			left.state.holdExec = (m) => { waitLeft.finish(m); return allowLeft.wait; };
 			right.state.holdExec = (m) => { waitRight.finish(m); return allowRight.wait; };
 			const send = (p, cwd) => p.request("tools/call", { toolSource: toolSource(p), sessionId: "s1", project: cwd,
-				call: { id: "same-call", name: "bash", input: { command: "echo kit-out; echo more" } } });
+				call: { id: "same-call", name: "bash", startedBy: "model", input: { command: "echo kit-out; echo more" } } });
 			const l = send(left, first.project), r = send(right, second.project);
 			const leftReply = l.catch((e) => e), rightReply = r.catch((e) => e);
 			try {
@@ -1205,9 +1230,18 @@ async function checkIsolation() {
 		const name = `isolation-${randomUUID()}.txt`;
 		const env = (peer, op, cwd, params = {}) => peer.request(`env/${op}`, { cwd, sessionId: "s1", ...params });
 		const read = (peer, cwd, path = name) => env(peer, "read", cwd, { path }).catch((e) => e);
-		for (const scope of scopes) scope.peer = await attach(scope.connection, scope.project);
+		for (const scope of scopes) scope.peer = await attach(scope);
+		if (named) {
+			for (const own of scopes) {
+				own.saved = randomUUID();
+				check(`named callers: ${own.label} has independent retained state despite the shared home and session`,
+					await probe(own.peer, own, "write-marker", { write: own.saved }) === null);
+			}
+			for (const own of scopes) check(`named callers: a changed tool claim cannot select another state slot`,
+				await probe(own.peer, own, "read-marker", { callerId: own.callerId }) === own.saved);
+		}
 		if (!scopes.every(({ peer }) => peer.state.reg.workingEnvironment)) {
-			if (isolation.separate) throw Error("the separate-listener fixture needs a working environment on both listeners");
+			if (named || isolation.separate) throw Error("the fixture needs a working environment on both connections");
 			console.log("SKIP  project and point isolation (both hosts need a working environment)");
 			return;
 		}
@@ -1222,7 +1256,7 @@ async function checkIsolation() {
 		for (const [own, other] of [[a, b], [b, a]]) {
 			const wrongInit = start({}, own.connection);
 			peers.push(wrongInit);
-			const rejected = await wrongInit.request("plugin/initialize", { ...initParams, project: other.project, home: isolation.home }).catch((e) => e);
+			const rejected = await wrongInit.request("plugin/initialize", init(own, other.project)).catch((e) => e);
 			const denied = invalidScope(rejected) || code(rejected) === "not_supported" ||
 				(!!rejected.binding && invalidScope(await read(wrongInit, other.project, join(other.project, name))));
 			check(`plugin isolation: host ${own.label} cannot read project ${other.label} through initialize or env/read`,
@@ -1241,10 +1275,15 @@ async function checkIsolation() {
 		}
 		await Promise.all(scopes.map(({ peer }) => peer.stop()));
 		for (const [own, other] of [[a, b], [b, a]]) {
-			const again = await attach(own.connection, own.project);
+			// A new setup claim cannot rebind the credential or its retained state.
+			const again = await attach(own, own.callerId);
+			if (named) check(`named callers: ${own.label} reconnects to its own retained state`,
+				await probe(again, own, "reopen-marker", {}) === own.saved);
 			check(`plugin isolation: host ${own.label} reconnects and reads only its own retained fixture file`,
-				(await read(again, own.project)).data === own.marker && invalidScope(await read(again, other.project)));
+				(await read(again, own.project)).data === own.marker && invalidScope(await read(again, other.project)) &&
+				(!named || invalidScope(await read(again, own.project, join(other.project, name)))));
 		}
+		if (named) check("named callers: each successful setup uses a fresh factory for the authenticated ID", freshFactories);
 	} finally { await Promise.all(peers.map((p) => p.stop())); }
 }
 
