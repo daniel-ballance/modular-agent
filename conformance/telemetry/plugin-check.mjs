@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { rejectBaggage } from "./privacy.mjs";
 
-const control = new Set(["plugin/initialize", "plugin/shutdown", "host/problem", "host/credentials/get"]);
+const control = new Set(["plugin/initialize", "plugin/shutdown", "host/problem", "host/credentials/read"]);
 const field = (object, key) => object != null && Object.hasOwn(object, key);
 
 export function parseContext(context) {
