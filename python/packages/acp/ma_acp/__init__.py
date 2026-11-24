@@ -34,20 +34,13 @@ EXTENSIONS = [
     "proposals",
     "limit",
     "tenant",
-    # Pre-binding Python host aliases remain available for existing clients.
-    "declaration",
-    "follow",
-    "submit",
     "withdraw",
     "command",
     "move",
     "fork",
     "erase",
     "jobs",
-    "job_cancel",
-    "questions",
     "answer",
-    "tool",
 ]
 
 
@@ -92,9 +85,7 @@ def rpc(fn):
     async def checked(self, *args, **kwargs):
         bound = parameters.bind_partial(self, *args, **kwargs).arguments
         params = bound.get("params") or {}
-        token = OUTPUT_SESSION.set(
-            bound.get("session_id") or params.get("sessionId") or params.get("session")
-        )
+        token = OUTPUT_SESSION.set(bound.get("session_id") or params.get("sessionId"))
         scope = self.project_scope()
         try:
             metadata = params.get("_meta") if fn.__name__ == "ext_method" else kwargs
@@ -718,7 +709,7 @@ class ACP(Plugin):
     async def prompt(self, session_id, prompt, **kwargs):
         await self.get(session_id, include_entries=False)
         if session_id in self.prompts:
-            raise AgentError("One ACP prompt at a time; use the declared submit extension to steer")
+            raise AgentError("One ACP prompt at a time; use the input extension to steer")
         if any(p.type != "text" for p in prompt):
             raise acp.RequestError.invalid_params({"reason": "Only text input is supported"})
         metadata = kwargs.get(NAMESPACE, {})
@@ -741,15 +732,7 @@ class ACP(Plugin):
             if receipt.get("erased"):
                 return s.PromptResponse(stop_reason="end_turn", field_meta={NAMESPACE: receipt})
             if receipt.get("handled"):
-                await self.update(
-                    session_id,
-                    s.AgentMessageChunk(
-                        content=text_block(json.dumps(await self.view(receipt["result"])))
-                    ),
-                )
-                return s.PromptResponse(
-                    stop_reason="end_turn", field_meta={NAMESPACE: await self.view(receipt)}
-                )
+                raise AgentError("Use the command extension for slash commands")
             # A duplicate describes its original turn, even if another turn is
             # now running. A closing session may disappear before wait returns.
             if receipt.get("duplicate") and any(
@@ -769,9 +752,6 @@ class ACP(Plugin):
                 "duplicate": receipt.get("duplicate", False),
                 "outcome": binding.outcome(result),
                 "openToolCalls": result.get("open_calls", []),
-                # Additional legacy fields for pre-binding Python hosts.
-                "receipt": receipt,
-                "result": result,
             }
             if result["outcome"] == "cancelled":
                 metadata["handedBack"] = result.get("handed_back", [])
@@ -1080,80 +1060,6 @@ class ACP(Plugin):
         if not method.startswith("modular-agent/") or method.split("/", 1)[1] not in EXTENSIONS:
             raise acp.RequestError.method_not_found("_" + method)
         operation = method.split("/", 1)[1]
-        if "sessionId" in params:
-            return await self.bound_extension(operation, params)
-        sid = params["session"]
-        await self.get(sid)
-        d = {k: v for k, v in params.items() if k not in {"actor", "authority", "session"}}
-        base = {"session": sid, "actor": self.actor}
-        if operation == "declaration":
-            result = await self.declaration(sid)
-        elif operation == "follow":
-            es = (await self.get(sid))["entries"]
-            point = params.get("after")
-            if point is not None:
-                if point not in {e["id"] for e in es}:
-                    raise AgentError("Unknown follow point")
-                es = es[next(i for i, e in enumerate(es) if e["id"] == point) + 1 :]
-            result = {
-                "entries": [ot.project_entry(e) for e in es],
-                "questions": await self.api.call("questions", "list", base),
-            }
-        elif operation == "submit":
-            result = await self.api.call(
-                "runtime",
-                "submit",
-                {
-                    **base,
-                    "content": params["content"],
-                    **{k: params[k] for k in ("key", "when") if k in params},
-                },
-            )
-        elif operation == "withdraw":
-            result = await self.api.call("runtime", "withdraw", {**base, "input": params["input"]})
-        elif operation in {"move", "fork", "erase", "command"}:
-            allowed = {
-                "move": {"point", "rewind"},
-                "fork": {"point"},
-                "erase": {"entries"},
-                "command": {"text"},
-            }[operation]
-            result = await self.api.session(
-                operation, **base, **{k: d[k] for k in allowed if k in d}
-            )
-            if operation == "fork":
-                self.sessions.add(result["id"])
-                await self.api.call(
-                    "questions", "connect", {"session": result["id"], "actor": self.actor}
-                )
-        elif operation in {"jobs", "job_cancel"}:
-            result = await self.api.call(
-                "jobs",
-                "list" if operation == "jobs" else "cancel",
-                {**base, **({"job": params["job"]} if operation == "job_cancel" else {})},
-            )
-        elif operation in {"questions", "answer"}:
-            result = await self.api.call(
-                "questions",
-                "list" if operation == "questions" else "answer",
-                {
-                    **base,
-                    **(
-                        {"request": params["request"], "value": params["value"]}
-                        if operation == "answer"
-                        else {}
-                    ),
-                },
-            )
-        elif operation == "tool":
-            result = await self.api.call(
-                "runtime", "run_tool", {**base, "name": params["name"], "input": params["input"]}
-            )
-        else:
-            raise acp.RequestError.method_not_found("_" + method)
-        return {"value": await self.view(result)}
-
-    async def bound_extension(self, operation, params):
         sid = params["sessionId"]
         await self.check_session(sid)
         # Proposals, release and withdraw also serve parked job reports.
@@ -1412,16 +1318,9 @@ class ACP(Plugin):
         if operation == "cancel-job":
             await self.api.call("jobs", "cancel", {**base, "job": params["jobId"]})
             return {}
-        # Build-specific extensions also accept the binding's sessionId envelope.
-        return (
-            await self.ext_method(
-                "modular-agent/" + operation,
-                {
-                    **{k: v for k, v in params.items() if k != "sessionId"},
-                    "session": sid,
-                },
-            )
-        )["value"]
+        if operation == "command":
+            return await self.api.session("command", **base, text=params["text"])
+        raise acp.RequestError.method_not_found("_" + method)
 
     async def attribution(self, sid, actor):
         if actor == self.actor:
