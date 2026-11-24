@@ -191,6 +191,10 @@ async def test_waiting_approval_on_returning_presence(tmp_path):
                 assert q["reason"] == "approval" and q["toolCallId"] and q["expiresAt"]
                 assert snapshot["declaration"]["approvalCoversNested"] is True
                 assert q["metadata"]["modular-agent.coversNested"] is True
+                assert q["metadata"]["modular-agent.approvalCall"] == {
+                    "name": "bump",
+                    "input": {"amount": 1},
+                }
                 assert "covers the nested calls" in q["message"]
                 assert "bump" in q["message"] and "amount" in q["message"]
                 assert not effects

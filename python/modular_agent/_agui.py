@@ -652,8 +652,10 @@ class View:
             i["expiresAt"] = iso(q["deadlineAt"]) if q.get("approvalWait") else q["deadline"]
         if kind == "approval":
             i["toolCallId"] = q["call"]
+            if call := q.get("approval_call"):
+                i["metadata"] = {"modular-agent.approvalCall": call}
             if q.get("coversNested") is True:
-                i["metadata"] = {"modular-agent.coversNested": True}
+                i.setdefault("metadata", {})["modular-agent.coversNested"] = True
             i["responseSchema"] = {
                 "type": "object",
                 "properties": {"allow": {"type": "boolean"}},
