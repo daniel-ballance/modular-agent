@@ -109,6 +109,7 @@ export const receipts = {
   'receipt-result': scenario(async (peer, view) => {
     const first = input(view, [user('Hand off once.')], options);
     const call = handoff(await peer.api.run(first, opts(view)));
+    await recorded(controls(peer, view.threadId), first); // Do not race the origin's terminal marker with the kill.
     const open = await peer.api.view(view.threadId), report = input(open, [tool(call.id, rawReport)]);
     const { control, dropped } = await pausePost(peer, open, report, 'afterResult');
     const before = await control('inspect');
@@ -124,6 +125,15 @@ export const receipts = {
     assert.equal(records(after, 'inputAccepted').length, 1, 'one opening input, no result-only admission');
     assert.deepEqual(after.dispatches, [call.id], 'original handoff released only once');
     await receipt(peer.api, first, 'success', 'completed'); await readAndRetry(peer, report, 'unknown', 'failed');
+    // With transport intact the same failing continuation releases RUN_ERROR.
+    const live = await peer.api.view((await peer.api.create()).threadId);
+    const origin = input(live, [user('Hand off and stay connected.')], options);
+    const hand = handoff(await peer.api.run(origin, opts(live)));
+    const current = await peer.api.view(live.threadId), result = input(current, [tool(hand.id, rawReport)]);
+    const run = await peer.api.run(result, opts(current)); assert.equal(run.terminal.type, 'RUN_ERROR');
+    const currentCtl = controls(peer, live.threadId);
+    await recorded(currentCtl, origin); await recorded(currentCtl, result);
+    await receipt(peer.api, origin, 'success', 'completed'); await readAndRetry(peer, result, 'error', 'failed');
   }, [frontend[0], { error: { kind: 'other', message: 'Fixture continuation failed.' } }], { restart: true }),
   'receipt-visibility': scenario(async (peer, view) => {
     const { api, origin, tokens } = peer, id = view.threadId, ctl = controls(peer, id);
@@ -139,8 +149,10 @@ export const receipts = {
       await missing(other, post);
     }
     await ctl('receiptGate', { mode: 'settlement' }); await missing(api, post);
-    await ctl('receiptGate', { mode: 'reply' });
-    await refused(await api.request(path(post)), 403, 'output_withheld');
+    for (const mode of ['terminal', 'work', 'reply']) {
+      await ctl('receiptGate', { mode });
+      await refused(await api.request(path(post)), 403, 'output_withheld');
+    }
     await missing(api, absent); await missing(at(origin, tokens.sibling), post);
     await ctl('receiptGate', { mode: 'allow' }); await receipt(api, post, 'success', 'completed');
     await ctl('hold', { name: 'pendingErasure' });

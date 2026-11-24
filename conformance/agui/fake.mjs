@@ -31,7 +31,11 @@ export async function fake({ model = simple, tokens = fixtureTokens(), fault, sc
   let clock = Date.now();
   const waits = scenario?.startsWith('waiting-');
   const covers = (waits || scenario?.startsWith('approval')) && fault !== 'no-covered-approvals';
-  const fixture = scenario?.startsWith('receipt-') ? fakeReceipts(scenario, fault) : scenario?.startsWith('closure-') ? fakeClosures(scenario, fault, model) : waits ? fakeWaiting(scenario, fault, model, covers) : scenario && fakeFixture(scenario, fault, model, covers);
+  let fixture;
+  if (scenario?.startsWith('receipt-')) fixture = fakeReceipts(scenario, fault);
+  else if (scenario?.startsWith('closure-')) fixture = fakeClosures(scenario, fault, model);
+  else if (waits) fixture = fakeWaiting(scenario, fault, model, covers);
+  else if (scenario) fixture = fakeFixture(scenario, fault, model, covers);
   const declaration = { interfaceTools: true, telemetry: 1, ...(covers && { approvalCoversNested: true }), ...(waits && { approvalsOutlastTurns: true, portableSessions: true, questionsOutlastTurns: true, lateAnswersStartTurns: true }) };
   const sockets = new WebSocketServer({ noServer: true, handleProtocols: protocols => protocols.has('modular-agent-acp-1') ? 'modular-agent-acp-1' : false });
   const peer = request => Object.keys(tokens).find(key => request.headers.authorization === `Bearer ${tokens[key]}`);
