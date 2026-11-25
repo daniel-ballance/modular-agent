@@ -89,6 +89,16 @@ test("a literal <!-- in a fence or inline code does not hide the text after it",
   repo.check([6, 9].map((line) => `README.md:${line}: Gap or finding has no issue`));
 });
 
+test("ATX headings follow CommonMark: an empty heading ends a section, and # only closes after a space", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "## Known gaps", "##", "Tracked in #31.",
+    "## Production gaps###", "Not a gap heading.",
+    "## Production gaps ##", "Tracked in #32.",
+  ].join("\n"));
+  repo.check(["README.md:1: Gap or finding has no issue"]);
+});
+
 test("issue numbers and URLs satisfy gap headings; history and untracked files are skipped", (t) => {
   const repo = checkout(t);
   repo.track("README.md", [

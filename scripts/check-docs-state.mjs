@@ -65,14 +65,20 @@ function markdownLines(text) {
   });
 }
 
+// CommonMark ATX heading: a closing run of # counts only after a space, and an empty heading is still a heading.
+function atxTitle(line) {
+  const match = line.match(/^ {0,3}#{1,6}(?:[ \t]+(.*?))?[ \t]*$/);
+  return match ? (match[1] ?? "").replace(/(?:^|[ \t]+)#+$/, "").trim() : undefined;
+}
+
 function checkGaps(file, lines) {
   let heading;
   const finish = () => {
     if (heading && !heading.tracked) fail(file, heading.line, "Gap or finding has no issue", "Link an issue below the heading, before the next heading");
   };
   for (const [i, line] of lines.entries()) {
-    const title = line.match(/^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$/)?.[1];
-    if (title) {
+    const title = atxTitle(line);
+    if (title !== undefined) {
       finish();
       heading = gapHeading.test(title) ? { line: i + 1, tracked: false } : undefined;
     } else if (heading) {
