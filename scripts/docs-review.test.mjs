@@ -202,6 +202,19 @@ test("completion wording beside a named ADR is a candidate", (t) => {
   assert.match(result.stdout, /^README\.md:1: status "accepted"\. Links ADR 0008 proposed\.$/m);
 });
 
+test("file names that look like pathspec magic are read literally, and a rename counts only its edited lines", (t) => {
+  const repo = checkout(t);
+  repo.track("docs/old.md", ["Support is planned.", "", "A stable line.", ""]);
+  repo.commit("Start");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  repo.write(":(glob)magic.md", "Support is planned.\n");
+  repo.git("--literal-pathspecs", "add", "--", ":(glob)magic.md");
+  repo.git("mv", "docs/old.md", "docs/new.md");
+  repo.track("docs/new.md", ["Support is planned.", "", "A stable line.", "Streaming is not implemented.", ""]);
+  repo.commit("Docs");
+  assert.deepEqual(repo.run().at, [":(glob)magic.md:1", "docs/new.md:4"]);
+});
+
 test("--base picks another merge base, and main is used without origin/main", (t) => {
   const repo = checkout(t);
   repo.track("README.md", "First gap.\n");
