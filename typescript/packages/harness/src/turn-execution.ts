@@ -613,6 +613,7 @@ export class TurnExecution {
 		return !!this.questionSettlement(s, branch, origin, call.id, call.stepId, true);
 	}
 
+	/** The last answer to the questions named by this call's Harness checkpoint, once every one of them has a recorded answer. */
 	private questionSettlement(s: Session, branch: HistoryEntry[], origin: string, callId: string, stepId?: string, dispatch = false) {
 		const own = branch.filter(e => !e.erased && e.sessionId === s.id && !s.copied.has(e.id) && e.turnId === origin && e.toolCallId === callId);
 		const checkpoints = own.filter(e => e.kind === "toolPending");

@@ -13,6 +13,7 @@ export interface Plugin {
 	name: string;
 	/** Global plugins load; project plugins load only once the project is trusted. */
 	origin?: "global" | "project";
+	/** A plugin this one deliberately replaces. */
 	replaces?: string;
 	/** How to load this plugin somewhere else, such as in another process: a module, the factory it exports, and options it can take as JSON. */
 	spawn?: { module: string; export: string; options?: unknown };
@@ -41,6 +42,7 @@ export interface JobHandle {
 	id: string;
 	started: boolean;
 	ready: Promise<unknown>;
+	/** The entry that recorded this job starting. */
 	startEntryId?: string;
 	progress(content: ContentPart[] | string): void;
 	/** Finish the job. Its result enters the session as input and may start a turn, unless report is false. */
@@ -71,6 +73,7 @@ export interface ListingViewer {
 	present?: readonly string[];
 }
 
+/** What a plugin can ask of the agent. It does not confine trusted plugin code. */
 export interface PluginApi {
 	readonly name: string;
 	readonly project: string;
