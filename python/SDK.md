@@ -198,21 +198,6 @@ Call `await claude_provider.available()` before displaying account-specific mode
 
 The launcher of a stdio ACP host is trusted for per-request trace context unless `serve_acp(trace_trusted=False)` disables it. Set `trace_trusted=True` in an embedded network ACP `actors` entry only for a peer allowed to share trace IDs. Network principals are not trace-trusted by default. Configured history and plugin destinations get context per request. The SDK does not accept or send baggage. AG-UI can accept allowlisted vendor state on a trusted work POST.
 
-### ADR 0033 spec findings
-
-Tracked in #14.
-
-- The [SDK API](../docs/sdk/api.md#the-agent) now defines a session-bound executor handle. Python's existing handle is scoped to the configured project and actor; its `advertise`, `release` and `report_tool_result` take the session ID explicitly. For a language note:
-
-  > | `connection.reportToolResult(sessionId, report)` | `accepted`, `alreadySettled` or `refused`. The connection is bound to an independently authenticated actor and operator-configured Interface route. The report uses the [shared shape](../docs/bindings/data.md#interface-handoff-records). This operation never dispatches a tool. |
-
-- For [Serving AG-UI](../docs/sdk/placement.md#serving-ag-ui), replace “The app advertises the exact definitions it can run.” with:
-
-  > The binding attaches an executor connection using the authenticated actor, the operator-configured route, and the connection scope. The connection replaces its per-session availability with an exact subset of the registered definitions. The Harness sends executable requests only through that connection, after committing the handoff. Closing the connection clears its availability without settling any call. Another independently authenticated connection on the same route can report a result without advertising availability.
-
-- The [connection rules](../docs/contracts.md#authority) say: “The Harness MUST refuse unless operator policy admits that principal for this session's project and tenant, `joinOnOpen` is enabled and the session supports another member if needed.” The Python network policy has no `joinOnOpen` option. The listener refuses unrecorded actors; a trusted Interface must grant them membership first. The kit fixture uses that grant operation.
-- The [binding](../docs/bindings/agui.md#shared-state) says: “The adapter starts each run with the plugin's current snapshot if the plugin is present.” For [placement](../docs/sdk/placement.md#serving-ag-ui), add: “To expose state, select its emitting plugin and supply its current snapshot reader. The reader takes a session ID and returns the plugin's revision and snapshot, or no snapshot. Do not use a client's input state as that snapshot.”
-
 ## Plugin traffic for one tool turn
 
 Run `cd python && uv run --offline python scripts/plugin_traffic.py > traffic.jsonl`.
@@ -270,43 +255,6 @@ committed checkpoint by turn ID through `host/history`. The current binding page
 branch (or all kept entries), not just that turn. A peer cannot substitute a truncated
 page or a cached history after a move or erasure.
 
-### Proposed binding text (not implemented)
-
-Tracked in #14.
-
-For a negotiated extension to [Runtime callbacks](../docs/bindings/plugin.md#runtime-callbacks)
-and [Provider requests](../docs/bindings/plugin.md#the-host-asks-a-provider):
-
-> The host MAY offer `requestRefs: 1` at initialization. A plugin MAY accept by returning
-> `requestRefs: 1` in its registration. Without agreement the existing method schemas apply.
-> With agreement a Runtime MAY send `byStep: true` in `host/runtime/prepareStep`. After
-> normal preparation the host MUST then reply `{ prepared: true }` and retain the exact
-> prepared ModelRequest for that parent and step. In `host/runtime/model` the Runtime
-> MAY omit `request` for that preparation only. The host MUST use that request and apply
-> the same single-attempt, phase, limit and authority checks as for a literal request.
-> On `model.failed` the Runtime MAY omit `payload.request` for that attempt; the host MUST
-> supply the retained request to the hook chain. This option does not authorize a retry
-> or a recovery replay. Retained requests expire with the live parent; an unknown or
-> ineligible reference is `invalid_request`.
-
-> With agreement a Provider MAY omit `payload.request` on its one `provider.request`
-> callback. Omission means the exact request of the named live `provider/request` parent
-> on this connection. The host MUST perform the same transform, commit and final dispatch
-> checks. If the effective request is unchanged by JSON value, it MAY reply
-> `{ unchanged: true }` to this abbreviated callback; otherwise it MUST return the full
-> transformed payload. Only the successful reply authorizes inference. The response
-> callback, cancellation and loss rules do not change.
-
-For [paging history](../docs/bindings/plugin.md#paging-history):
-
-> The host MAY offer `historySelect: 1` at initialization. A plugin MAY accept by returning
-> the same member. Only with agreement, `host/history` MAY carry `turnId: Id` or
-> `toolCallId: Id`, but not both. The host MUST select the branch or kept view as before,
-> then filter by that association, then apply `after` and `limit`. A cursor outside the
-> selected view is `invalid_request`. Page size, order, erasure freshness, trace projection
-> and authority rules remain unchanged. A turn filter does not prove a call has no later
-> settlement. A reader needing that proof MUST also check by call ID across kept history.
-
 ## Remaining Python implementation gaps
 
 Tracked in #35. ADR 0030 work is tracked in #19.
@@ -328,24 +276,12 @@ ADR 0030 is not complete. Represented actors can send attributed input and expli
 | History isolation (shared SDK service, not per agent) | 3/3 isolation, 42/42 overall | 3/3 isolation, 42/42 overall |
 | Plugin multi-credential isolation | Not run | Not run |
 
-A diagnostic run with the two fixture corrections below passed 43/43 combined stdio isolation and capacity checks for `ma` and 45/45 for the base. The table uses the unchanged kit.
+The ACP counts use the kit before the capacity fixture sequenced its seed prompts and the representation fixture completed a turn before closing the session. A diagnostic run with both fixes passed 43/43 combined stdio isolation and capacity checks for `ma` and 45/45 for the base.
 
-The plugin opt-in needs several credentials with distinct project grants on one listener. Python uses the separate-listener deployment selected by ADR 0030. The default WebSocket kit covers independent connections with one credential but does not test distinct grants.
+The plugin row refers to multiple credentials on one listener. The [separate-listener check](../conformance/plugin/README.md#plugin-service-isolation) uses distinct credentials, project grants and state directories, as ADR 0030 specifies.
 
 For coordinated HTTP erasure, use `http_history(url, token_file)` or set `MODULAR_AGENT_HISTORY_URL` and `MODULAR_AGENT_HISTORY_TOKEN_FILE` for `ma`. The built-in `serve_history(file_history(...))` advertises the [pending-erasure registry profile](../docs/bindings/history-http.md#pending-erasure-registry-profile-pendingerasure-1). A custom `HistoryPort` served by the base HTTP adapter does not advertise it. Participating agents do not open the service's database. The private coordination arguments and environment variables were removed. A store with recorded private intents refuses coordinated mutations and registry reads instead of dropping those marks; finish and export it using the old deployment before switching stores.
 
 The service keeps marks and revisions with its records. Keep raw writers outside the coordinated scope. Before serving restored history, verify its freshness against an authority that was not restored with it. `serve_history(..., witness=path)` can keep a separate local witness. Do not restore the witness from a history backup. The service advances it before database commit; a mismatch refuses access and requires operator recovery. Without a witness the operator must supply another independent freshness check.
 
 The history kit passed 42/42 base and restart checks and 18/18 profile checks, including publication, refusal and takeover by separate wire clients. The ACP erasure check ran against the Python service without shared filesystem state.
-
-## Specification findings
-
-Tracked in #14.
-
-- **SDK API, Questions.** After the `call` row, insert: “| `coversNested` | True when an explicit allow for this top-level call also answers the approval check for its nested calls in this dispatch. Omission means false. |”
-- **AG-UI, Questions.** After the sentence beginning “For approvals include”, insert: “For an approval marked `coversNested: true`, the message MUST say the allow covers the call's nested calls and the interrupt MUST include `metadata[\"modular-agent.coversNested\"]: true`. Otherwise omit the key.”
-
-- **SDK API, The agent.** The stdio options describe how to constrain a configured principal but give no way to select that principal, which `ma` policy requires. Replace the first sentence starting “On stdio, `serveAcp` accepts” with: “On stdio, `serveAcp` accepts an operator-supplied `actor` with `id`, `kind` and `rights`, and optional `projects`, `tenants`, `rights` and `represents` lists. When both the actor and a rights list are supplied, intersect the two rights lists. Without an actor, use the local principal as defined in the ACP binding.”
-- **ACP capacity fixture.** Both tenant and agent fixtures race two initial admissions for one pending slot, but need both initial prompts to start a turn before racing the admissions they measure. Replace the simultaneous initial starts with: “Start each initial prompt in sequence. Wait for its committed input consumption and open question before starting the next prompt. Then race the two new input keys for the last pending slot.”
-- **ACP isolation fixture, configured representation.** The fixture closes a session without admitting any input. The binding says unused sessions leave no records, so the second launcher cannot reopen this session. Before capturing `before`, insert: “Prompt the session as the configured principal and wait for the committed turn to finish. Then capture the history used for the no-admission assertion.”
-- **Plugin isolation fixture.** The single-listener test does not cover the accepted separate-listener deployment. Add: “For a separate-listener deployment, give the kit two URLs, each with its own token, project grant and state directory. Cross credentials must fail upgrade. Check one same-credential pair on each listener and check that neither listener can read or restore the other's project or retained state.”
