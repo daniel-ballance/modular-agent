@@ -1,4 +1,4 @@
-import { untilAborted } from "./harness.js";
+import { untilAborted } from "./session-lifecycle.js";
 import { parseModel } from "./settings.js";
 import type { Command, InputOptions } from "./plugin-api.js";
 import { TurnExecution, inputActors } from "./turn-execution.js";

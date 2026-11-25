@@ -1,4 +1,4 @@
-import { untilAborted } from "./harness.js";
+import { untilAborted } from "./session-lifecycle.js";
 import type { TurnState } from "./turn-state.js";
 import { shapeViolation } from "./result-shape.js";
 import { InterfaceToolRoutes } from "./interface-tool-routes.js";

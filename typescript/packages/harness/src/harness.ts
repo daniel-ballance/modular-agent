@@ -23,9 +23,7 @@ import { safeName } from "./telemetry.js";
 import { Follower } from "./output-gate.js";
 import { Reservations, reservationLimits, type ReservationOptions } from "./reservations.js";
 import { RunReceipts, type ReceiptOperation } from "./run-receipts.js";
-import { addAbortListener } from "node:events";
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
 import { HookRegistry } from "./hooks.js";
 import { INTERFACE_SOURCE, type InterfaceToolConnection, type InterfaceToolConnectionOptions, type InterfaceToolSource } from "./interface-tools.js";
 import { Session } from "./session.js";
@@ -974,17 +972,5 @@ export class Harness {
 }
 
 /** One recipient following a session, through the output gate. */
-
-/** Wait for work against one writer generation, independently of event delivery. */
-export async function untilAborted<T>(signal: AbortSignal, work: () => Promise<T>): Promise<T> {
-	signal.throwIfAborted();
-	return new Promise<T>((resolve, reject) => {
-		const subscription = addAbortListener(signal, () => reject(signal.reason));
-		void Promise.resolve().then(() => {
-			signal.throwIfAborted();
-			return work();
-		}).then(resolve, reject).finally(() => subscription[Symbol.dispose]());
-	});
-}
 
 export type { GateResult };

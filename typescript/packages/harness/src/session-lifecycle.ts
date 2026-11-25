@@ -669,3 +669,14 @@ export function actorJoined(actor: Actor, writer: string, actorId?: string): Ent
 	return { kind: "actorJoined", writer, actorId, modelVisible: false, data: { actor: { ...details, kind: details.kind === "plugin" ? "program" : details.kind, rights: authority }, ...(actorId ? {} : { operatorAdmission: true }) } };
 }
 
+/** Wait for work against one writer generation, independently of event delivery. */
+export async function untilAborted<T>(signal: AbortSignal, work: () => Promise<T>): Promise<T> {
+	signal.throwIfAborted();
+	return new Promise<T>((resolve, reject) => {
+		const subscription = addAbortListener(signal, () => reject(signal.reason));
+		void Promise.resolve().then(() => {
+			signal.throwIfAborted();
+			return work();
+		}).then(resolve, reject).finally(() => subscription[Symbol.dispose]());
+	});
+}
