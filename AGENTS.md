@@ -17,6 +17,7 @@ Open work lives only in GitHub Issues. Read `gh issue list` before you start. Ev
 - Delegates keep scratch and worktrees in their own subfolder of `~/.cache/ma-std-tmp/`, not `/tmp`, and delete only that subfolder before they report. Never delete the shared folder, `check-slot.sh` or `slots/`. Never run tests under `git rebase -x`, `git bisect run` or anything else that exports `GIT_DIR`.
 - A gap, finding or follow-up you find becomes an issue, with the `finding`, `layer:` and `lang:` labels that apply. It never becomes a README section, a TODO comment or a chat note.
 - A decision that outlives your session goes into an issue comment, an ADR or the document it changes.
+- Learn a lesson once. When a rule was broken, a review finding repeated or a run went wrong, write the lesson down before you finish: one line here if every agent needs it, the detail in `CONTRIBUTING.md`, or a check in `scripts/` when the rule is exact. An issue comment or chat note alone is lost to the next agent.
 - Move the issue's Status on the GitHub Project: In progress when its branch exists, In review when its pull request is open.
 - When you change a rule, a status or a user-facing string, find every other place that states it with `git grep -n`, which also reads `.github/`. Change them in the same pull request, in all four languages. A language you cannot change there gets an issue with its `lang:` label.
 - Open a pull request whose body says `Closes #N`. That keyword goes only in the pull request body; a closing keyword in a commit message fails the maintainability check. A reviewer who did not write it runs the agent check in `CONTRIBUTING.md` and posts a verdict naming its head SHA. A content-filter refusal is not a verdict. A pull request lands only with a passing verdict that covers the exact SHA given to `--match-head-commit`. The two exceptions are a wording-only push to lines already reviewed and a restack whose `git patch-id --stable` is unchanged. The operator lands it, so leave it open.
@@ -34,5 +35,7 @@ scripts/check.sh --quick
 scripts/check.sh
 scripts/check.sh go python
 ```
+
+Read each command's own exit code; a pipe hides it. A suite run on its own in a fresh worktree first needs the setup steps `scripts/check.sh` runs, such as `npm ci` in `conformance/acp`, `conformance/tools` and `conformance/telemetry`.
 
 Leave `TMPDIR` and `CARGO_INCREMENTAL` unset. No suite needs an on-disk temp directory. The check scripts choose their own scratch directory. A suite run on its own uses the system temp directory.
