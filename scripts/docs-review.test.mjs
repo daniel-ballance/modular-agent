@@ -142,6 +142,30 @@ test("empty front matter closes on its second line, and an unclosed block is not
   assert.match(result.stdout, /^docs\/empty\.md:8: status "planned"\. Links ADR 0009 has no status\.$/m);
 });
 
+test("a byte-order mark and lone CR line endings keep every line number", (t) => {
+  const repo = checkout(t);
+  repo.track("docs/bom.md", "\uFEFFSupport is planned<br>.\n\nResume is planned `x`.\n");
+  repo.track("docs/bom-front.md", "\uFEFF---\ntitle: Planned\n---\n\nSupport is planned.\n");
+  repo.track("docs/cr.md", "---\rtitle: Planned\r---\r\rIntro.\r\rSupport is planned.\r");
+  repo.commit("Docs");
+  const result = repo.run("--all");
+  assert.deepEqual(result.at, ["docs/bom-front.md:5", "docs/bom.md:1", "docs/bom.md:3", "docs/cr.md:7"]);
+  assert.match(result.stdout, /^docs\/bom\.md:1: status "planned"\.\n {4}Support is planned<br>\.$/m);
+});
+
+test("only what the parser calls code or HTML is blanked: escaped backticks, a bare < and an autolink are prose", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "# Notes", "",
+    "Type \\` and support is planned \\` here.", "",
+    "If x < 3 the resume is planned > y.", "",
+    "## Known gaps", "",
+    "A gap in Go. See <https://github.com/o/r/issues/5>.", "",
+  ]);
+  repo.commit("Docs");
+  assert.deepEqual(repo.run("--all").at, ["README.md:3", "README.md:5"]);
+});
+
 test("missing parser dependencies give a one-line install instruction", (t) => {
   const cwd = mkdtempSync(join(tmpdir(), "docs-review-no-deps-"));
   t.after(() => rmSync(cwd, { force: true, recursive: true }));

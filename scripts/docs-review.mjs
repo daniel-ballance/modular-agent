@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const { adrStatus, parseMarkdown, walk, withoutFrontMatter } = await import("./markdown.mjs").catch((error) => {
+const { adrStatus, linesOf, parseMarkdown, walk, withoutFrontMatter } = await import("./markdown.mjs").catch((error) => {
   if (error.code !== "ERR_MODULE_NOT_FOUND") throw error;
   console.error("scripts/docs-review.mjs: Missing parser dependencies. Run npm ci --prefix scripts.");
   process.exit(2);
@@ -71,7 +71,6 @@ function decodable(bytes) {
     return undefined;
   }
 }
-const linesOf = (text) => text.split(/\r?\n/);
 // The review reads the committed head, the same snapshot the diff compares, not the working tree.
 // Every file read is in HEAD, so a failed read is an error, never an empty file.
 const read = (file) => git("show", `HEAD:${file}`);
@@ -118,8 +117,7 @@ function words(text, pattern) {
   return [...new Set([...text.matchAll(pattern)].map((match) => match[0].toLowerCase()))];
 }
 
-const prose = (text) => text.replace(/(`+).*?\1|<[^>\n]*>/g, (span) => " ".repeat(span.length));
-const tracked = (text) => issueUrl.test(prose(text)) || issueNumber.test(prose(text).replace(link, "$1"));
+const tracked = (text) => issueUrl.test(text) || issueNumber.test(text.replace(link, "$1"));
 
 function candidates(file, wanted, adrs) {
   const source = read(file);
@@ -128,9 +126,9 @@ function candidates(file, wanted, adrs) {
   const found = [];
   for (const [i, line] of lines.entries()) {
     if (wanted && !wanted.has(i + 1)) continue;
-    const text = prose(line).replace(link, "$1");
+    const text = line.replace(link, "$1");
     const reasons = [];
-    const named = adrsIn(file, prose(line), adrs).size > 0;
+    const named = adrsIn(file, line, adrs).size > 0;
     const status = [...new Set([...words(text, statusWords), ...words(text, todo), ...(named ? words(text, adrStatusWords) : [])])];
     if (status.length) reasons.push(`status ${status.map((word) => `"${word}"`).join(", ")}`);
     const open = [...words(text, openWords), ...(normative.test(text) ? [] : words(text, absentWords))];
