@@ -17,9 +17,10 @@ Every change starts from a GitHub issue. An issue is a bug, a change, or a findi
 To move an issue on the Project, look up the IDs, then set the Status field:
 
 ```sh
+ISSUE=26                                                           # your issue's number
 gh project view 1 --owner daniel-ballance --format json --jq .id    # project ID
 gh project item-list 1 --owner daniel-ballance --format json --limit 500 \
-  --jq '.items[] | select(.content.number==N) | .id'               # item ID of issue N
+  --jq ".items[] | select(.content.number==$ISSUE) | .id"          # item ID of the issue
 gh project field-list 1 --owner daniel-ballance --format json \
   --jq '.fields[] | select(.name=="Status")'                        # field and option IDs
 gh project item-edit --project-id PROJECT_ID --id ITEM_ID \
@@ -35,9 +36,9 @@ A release gives the four SDKs and `ma` one new version, named by its milestone. 
    - TypeScript: `version` in each `typescript/packages/*/package.json`, the exact versions those packages pin for each other, and `typescript/package-lock.json`.
    - Python: `version` in `python/pyproject.toml` and each `python/packages/*/pyproject.toml`, the exact versions they pin for each other, and `python/uv.lock`.
    - Go: `ImplementationVersion` in `go/api/api.go`.
-   - The manifests and lock files of the demonstrative implementations in `demos/`, and the status line in `README.md`.
+   - The manifests and lock files of the demonstrative implementations in `demos/`, the status line in `README.md`, and the `ma --version` example in `.github/ISSUE_TEMPLATE/bug.yml`.
 
-   Then search for the old version with `rg -F` and change each place that still gives it as current.
+   Then search the tracked files for the old version with `git grep -n -F OLD`, which also reads `.github/`, and change each place that still gives it as current.
 2. Update the status line at the top of `docs/sdk/README.md`. It gives the SDK specification's revision and what the four SDKs pass.
 3. Add a section for the release to `docs/status.md`, with the step counts of `scripts/check.sh` and `scripts/macos-check.sh` on the release commit.
 4. Add a section for the release to `CHANGELOG.md`.

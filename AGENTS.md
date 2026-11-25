@@ -15,7 +15,7 @@ Open work lives only in GitHub Issues. Read `gh issue list` before you start. Ev
 - A gap, finding or follow-up you find becomes an issue, with the `finding`, `layer:` and `lang:` labels that apply. It never becomes a README section, a TODO comment or a chat note.
 - A decision that outlives your session goes into an issue comment, an ADR or the document it changes.
 - Move the issue's Status on the GitHub Project: In progress when its branch exists, In review when its pull request is open.
-- When you change a rule, a status or a user-facing string, find every other place that states it with `rg`. Change them in the same pull request, in all four languages.
+- When you change a rule, a status or a user-facing string, find every other place that states it with `rg`. Change them in the same pull request, in all four languages. A language you cannot change there gets an issue with its `lang:` label.
 - Open a pull request whose body says `Closes #N`. A reviewer who did not write it gives a verdict at its current head. Then the operator lands it, so leave it open.
 - After your pull request merges, remove your worktree and local branch. GitHub deletes the remote branch.
 
