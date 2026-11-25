@@ -1,5 +1,15 @@
 # Contributing
 
+## How work is tracked
+
+Every change starts from a GitHub issue. An issue is a bug, a change, or a finding: a gap that a higher layer found in a lower one.
+
+- **Labels.** A `layer:` label gives the layer the work starts in. A `lang:` label marks work or a gap in one language only.
+- **Milestones.** Each release has a milestone, starting with 0.4.0. An issue belongs to the milestone it is planned for.
+- **Project.** The "Modular Agent" GitHub Project shows each issue's status (Todo, In progress, In review, Done) and priority.
+- **Branch and pull request.** Work on one branch per issue. The pull request says `Closes #N` and lists the checks run, with their counts.
+- **Landing.** The operator lands pull requests.
+
 ## How work moves through the layers
 
 The project has five layers, and each is made only from the layers below it ([ADR 0024](docs/adr/0024-five-layers.md)):
@@ -15,7 +25,7 @@ The project has five layers, and each is made only from the layers below it ([AD
 - A change to what an agent or part must do starts in `docs/contracts.md`, `docs/security.md` or a binding, with a kit check where one can be written, and an ADR if it is hard to reverse.
 - A change to the developer API starts in `docs/sdk/`, usually with a shared scenario in `conformance/sdk/scenarios/` that every SDK then passes, and a guide example that runs as a test.
 - A change to `ma` starts in `docs/reference/standard-configuration.md`, with a reference check where the behavior can be seen from outside.
-- The four SDKs are one SDK in four languages, and the four `ma` builds are one program. A change to one language is a change to all four, or a recorded gap in the others.
+- The four SDKs are one SDK in four languages, and the four `ma` builds are one program. A change to one language is a change to all four, or a recorded gap in the others ([ADR 0036](docs/adr/0036-four-languages-in-lockstep.md)). A recorded gap is an issue with that language's `lang:` label.
 
 **No backward compatibility before 1.0.** The project's owner is its only user. Change or remove a rule, field, option or API outright; do not keep an old spelling, alias, fallback, migration or "optional for older builds" form beside the new one. Interoperability with outside protocols and clients (ACP, AG-UI, OpenTelemetry, model APIs) is not backward compatibility and stays.
 

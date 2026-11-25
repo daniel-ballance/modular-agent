@@ -1,0 +1,46 @@
+name: Bug
+description: Something that does not do what the documents say.
+labels: ["bug", "needs triage"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The commands, configuration and input that show the bug.
+    validations:
+      required: true
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Layer
+      description: The layer where the bug is, if you know it. Triage applies the matching `layer:` label.
+      options:
+        - "1 spec: docs/, the binding kits"
+        - "2 SDK spec: docs/sdk/, the shared scenarios"
+        - "3 SDK: the four SDKs"
+        - "4 reference: ma, the standard configuration, the reference checks"
+        - "5 demo: demonstrative implementations in demos/"
+        - Not sure
+  - type: checkboxes
+    id: languages
+    attributes:
+      label: Languages
+      description: The languages where you saw the bug.
+      options:
+        - label: Rust
+        - label: TypeScript
+        - label: Go
+        - label: Python
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `ma --version`.
+      placeholder: ma 0.3.0 (rust)
