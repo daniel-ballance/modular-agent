@@ -163,11 +163,14 @@ class History(Plugin):
 
     async def open(self, d, emit):
         self._lock(d["session"])
-        s = await self.read(d, emit)
-        if s is None:
+        try:
+            s = await self.read(d, emit)
+            if s is None:
+                raise AgentError("Unknown session")
+            return s
+        except BaseException:
             await self.close(d, emit)
-            raise AgentError("Unknown session")
-        return s
+            raise
 
     async def list(self, d, emit):
         if not self.db.exists():

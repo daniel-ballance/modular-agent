@@ -84,22 +84,42 @@ test("the Registrar history port creates without id and resumes reads and lists 
   assert.equal((await follower.next()).done, true);
 });
 
-test("an unrecognized recorded approval value reopens as never", async t => {
-  const history = memoryHistory();
+async function recordApproval(history: ReturnType<typeof memoryHistory>, value: unknown, batch = false) {
   const store = memoryStore(history);
   const id = "foreign-session";
   await store.create({ id, project: process.cwd(), created: 1 });
   await store.openForWriting(id);
   await store.append(id, [{
     id: "setting", sessionId: id, parentId: null, time: 1, kind: "setting",
-    writer: "foreign-writer", modelVisible: false, data: { key: "approval", value: ["off"] },
+    writer: "foreign-writer", modelVisible: false,
+    data: batch ? { key: "settings", value: { approval: value } } : { key: "approval", value },
   }]);
   await store.close(id);
+  return id;
+}
 
-  const agent = await testAgent({ history, approval: "off", script: [] });
-  t.after(() => agent.close());
-  const resumed = await agent.openSession(id);
-  assert.equal(resumed.settings().approval, "never");
+test("an unrecognized recorded approval string reopens as never", async t => {
+  for (const value of ["", "future"]) {
+    const history = memoryHistory();
+    const agent = await testAgent({ history, approval: "off", script: [] });
+    t.after(() => agent.close());
+    const id = await recordApproval(history, value);
+    const resumed = await agent.openSession(id);
+    assert.equal(resumed.settings().approval, "never");
+  }
+});
+
+test("a non-string recorded approval setting refuses the history", async t => {
+  const deep = Array.from({ length: 48 }).reduce<unknown>((nested) => ({ nested }), "off");
+  for (const value of [null, 1, ["off"], { approval: "off" }, true, Array(2048).fill("off"), deep]) {
+    for (const batch of [false, true]) {
+      const history = memoryHistory();
+      const agent = await testAgent({ history, approval: "off", script: [] });
+      t.after(() => agent.close());
+      const id = await recordApproval(history, value, batch);
+      await assert.rejects(agent.openSession(id), /approval.*string/i);
+    }
+  }
 });
 
 // Force continuation at the store boundary, as when a page hits the byte cap.

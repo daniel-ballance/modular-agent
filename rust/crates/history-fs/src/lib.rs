@@ -22,7 +22,9 @@ use std::{
 fn decode(bytes: &[u8]) -> Result<SessionData> {
     let v: Value = serde_json::from_slice(bytes)?;
     if v.get("historyBinding").is_none() {
-        return Ok(serde_json::from_value(v)?);
+        let data: SessionData = serde_json::from_value(v)?;
+        wire::validate_recorded_approval(&data.settings)?;
+        return Ok(data);
     }
     let mut data = portable::session(
         &v,
@@ -31,6 +33,7 @@ fn decode(bytes: &[u8]) -> Result<SessionData> {
             .ok_or_else(|| anyhow!("entries required"))?,
     )?;
     let mut defaults = v.get("defaults").cloned().unwrap_or(json!({}));
+    wire::validate_recorded_approval(&defaults)?;
     merge(&mut defaults, data.settings);
     data.settings = defaults;
     data.plugins = serde_json::from_value(v["plugins"].clone())?;

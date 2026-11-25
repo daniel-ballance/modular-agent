@@ -82,6 +82,15 @@ func settingsOut(s api.Settings) object {
 	set(v, "go.contextLimit", s.ContextLimit, s.ContextLimit != 0)
 	return v
 }
+func validateRecordedApproval(settings object) error {
+	if value, present := settings["approval"]; present {
+		if _, ok := value.(string); !ok {
+			return fmt.Errorf("recorded approval must be a string")
+		}
+	}
+	return nil
+}
+
 func applySettings(s *api.Settings, v object) {
 	for k, x := range v {
 		switch k {
@@ -96,7 +105,10 @@ func applySettings(s *api.Settings, v object) {
 		case "approvalWait":
 			s.ApprovalWait = str(v, k)
 		case "approval":
-			policy, _ := x.(string)
+			policy, ok := x.(string)
+			if !ok {
+				continue // ReadEntry rejects malformed values before folding.
+			}
 			if policy == "" {
 				policy = "never"
 			}
@@ -564,7 +576,11 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 		}
 		// Model identity doubles as the model setting for the running turn.
 		s.Model = api.Model{ID: s.Settings.Model, Provider: str(m, "provider")}
-		applySettings(&s.Settings, asObject(d["settings"]))
+		settings := asObject(d["settings"])
+		if err := validateRecordedApproval(settings); err != nil {
+			return e, err
+		}
+		applySettings(&s.Settings, settings)
 		s.Settings.Model = s.Model.ID
 		for _, t := range api.Decode[[]object](api.JSON(d["tools"])) {
 			s.Tools = append(s.Tools, toolIn(t))
@@ -667,8 +683,12 @@ func ReadEntry(raw json.RawMessage) (api.Entry, error) {
 		e.Content = api.Text(str(d, "summary"))
 		e.Data = api.JSON(summaryData{e.Copies, usageIn(asObject(d["go.usage"]))})
 	case "setting":
+		patch := settingPatch(d)
+		if err := validateRecordedApproval(patch); err != nil {
+			return e, err
+		}
 		var s api.Settings
-		applySetting(&s, d)
+		applySettings(&s, patch)
 		e.Data = api.JSON(s)
 	case "actor.set":
 		e.Data = api.JSON(d["actor"])

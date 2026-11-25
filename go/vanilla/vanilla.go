@@ -74,7 +74,7 @@ func New(opt Options) (*harness.Harness, error) {
 	}
 	plugins := []api.Plugin{
 		store,
-		configuration.PluginAt(opt.Global, api.Settings{Model: opt.Model, Thinking: "off", MaxSteps: 12, MaxOutput: 1024}, opt.DataDir),
+		configuration.PluginAt(opt.Global, api.Settings{Model: opt.Model, Thinking: "off", Approval: "off", MaxSteps: 12, MaxOutput: 1024}, opt.DataDir),
 		provider, modelselect.Plugin(),
 		environment, tools.Plugin(), runtime, contextview.Plugin(), systemprompt.Plugin(),
 		commands.Plugin(), questions.Plugin(), approval.Plugin(), jobs.Plugin(), subagents.Plugin(opt.DurableSubagents, opt.MaxSubagentDepth), guardrail.Plugin(opt.Secrets), mcptools.Plugin(nil, opt.Project), terminal.Plugin(), acpinterface.Plugin(opt.Project),

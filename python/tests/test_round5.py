@@ -12,7 +12,9 @@ from ma_core.wire import entry_out
 from ma_fake import Fake, reply
 from ma_fake.conformance import Echo
 from ma_history.http import HTTPHistory
+from ma_history.portable import session_view
 from ma_cli import build
+from modular_agent import create_agent
 
 
 async def test_acp_v2_reports_a_failed_turn_as_an_error(tmp_path, runtime_kind):
@@ -74,7 +76,8 @@ async def test_rewind_restores_ui_effect_and_refuses_a_lost_point(tmp_path, runt
 
 
 @pytest.mark.parametrize(
-    "recorded, expected", [("off", "ask always"), ("future", "never ask, refuse")]
+    "recorded, expected",
+    [("off", "ask always"), ("", "never ask, refuse"), ("future", "never ask, refuse")],
 )
 async def test_portable_records_and_approval_fails_closed_after_reopen(
     tmp_path, runtime_type, recorded, expected
@@ -129,6 +132,56 @@ async def test_portable_records_and_approval_fails_closed_after_reopen(
         } | {"erased": True}
     finally:
         await h.stop()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        1,
+        ["off"],
+        {"approval": "off"},
+        True,
+        ["off"] * 2048,
+        json.loads('{"nested":' * 48 + '"off"' + "}" * 48),
+    ],
+)
+@pytest.mark.parametrize("batch", [False, True])
+def test_malformed_approval_refuses_portable_history(tmp_path, value, batch):
+    setting = (
+        {"key": "settings", "value": {"approval": value}}
+        if batch
+        else {
+            "key": "approval",
+            "value": value,
+        }
+    )
+    entry = {
+        "id": "setting",
+        "kind": "setting",
+        "sessionId": "foreign",
+        "parentId": None,
+        "time": 1,
+        "data": setting,
+    }
+    with pytest.raises(ValueError, match="approval.*string"):
+        session_view({"id": "foreign", "project": str(tmp_path)}, [entry])
+
+
+async def test_base_agent_defaults_to_explicit_off(tmp_path, runtime_type):
+    h = await build(tmp_path / "state", Fake([]), runtime=runtime_type(), project=tmp_path)
+    try:
+        a = h.api()
+        session = await a.session("create", project=str(tmp_path))
+        assert session["settings"]["approval"] == "off"
+    finally:
+        await h.stop()
+
+
+async def test_sdk_conformance_defaults_to_explicit_off(tmp_path):
+    async with create_agent(project=tmp_path, conformance=True) as agent:
+        session = await agent.session()
+        assert (await session.settings())["approval"] == "off"
 
 
 async def test_plugin_job_kit_offline(runtime_kind):

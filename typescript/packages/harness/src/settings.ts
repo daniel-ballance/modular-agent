@@ -1,4 +1,4 @@
-import type { ModelInfo } from "./types.js";
+import type { HistoryEntry, ModelInfo } from "./types.js";
 
 export function parseModel(value: unknown): { provider: string; id: string } | undefined {
 	if (typeof value === "string" && value.includes("/")) {
@@ -20,6 +20,21 @@ export function lowerReasoning(value: unknown, model?: ModelInfo): string | unde
 	if (!model) return value;
 	const index = REASONING_LEVELS.findIndex((level) => level === value);
 	return thinkingLevels(model).findLast((level) => REASONING_LEVELS.findIndex((known) => known === level) <= index);
+}
+
+export function validateRecordedApproval(entry: HistoryEntry): void {
+	if (entry.erased) return;
+	const data = entry.data as { key?: string; value?: unknown; settings?: unknown } | undefined;
+	if (!data) return;
+	const patch = entry.kind === "turnStart" ? data.settings :
+		entry.kind !== "setting" ? undefined :
+		data.key === "settings" ? data.value : { [data.key ?? ""]: data.value };
+	if (!patch || typeof patch !== "object") return;
+	for (const key of ["approval", "approvalPolicy"] as const) {
+		if (Object.hasOwn(patch, key) && typeof (patch as Record<string, unknown>)[key] !== "string") {
+			throw new Error("Recorded approval must be a string");
+		}
+	}
 }
 
 export function recordedApproval(value: unknown): "off" | "ask" | "all" | "never" {

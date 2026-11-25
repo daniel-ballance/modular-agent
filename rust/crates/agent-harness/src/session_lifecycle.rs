@@ -215,6 +215,7 @@ impl Harness {
             if let Some(tenant) = tenants::name(&data) {
                 self.check_tenant(tenant)?;
             }
+            wire::validate_recorded_approval(&data.settings)?;
             match data.settings.get("approval") {
                 None => data.settings["approval"] = json!("ask_always"),
                 Some(value)
