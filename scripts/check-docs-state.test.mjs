@@ -78,6 +78,17 @@ test("a heading needs an issue in its own body, not in its title, child, comment
   repo.check([2, 13, 15, 17].map((line) => `README.md:${line}: Gap or finding has no issue. Link an issue below the heading`));
 });
 
+test("a literal <!-- in a fence or inline code does not hide the text after it", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "## Known gaps", "```md", "<!--", "```", "Tracked in #31.",
+    "## Known gaps", "Write `<!--` to start a comment.", "",
+    "## Findings", "```md", "<!--", "```",
+    "## Gaps <!-- note --> in the core", "Tracked in #32.",
+  ].join("\n"));
+  repo.check([6, 9].map((line) => `README.md:${line}: Gap or finding has no issue`));
+});
+
 test("issue numbers and URLs satisfy gap headings; history and untracked files are skipped", (t) => {
   const repo = checkout(t);
   repo.track("README.md", [

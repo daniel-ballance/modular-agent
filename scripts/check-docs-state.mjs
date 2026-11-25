@@ -32,19 +32,36 @@ function fail(file, line, problem, fix) {
   bad++;
 }
 
+// Blank fenced code and HTML comments, keeping line numbers. A fence or inline
+// code can hold a literal "<!--"; it does not open a comment.
 function markdownLines(text) {
   let fence;
-  return linesOf(text.replace(/<!--[^]*?(?:-->|$)/g, (comment) => comment.replace(/[^\n]/g, " "))).map((line) => {
+  let comment = false;
+  return linesOf(text).map((line) => {
     const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
     if (fence) {
       if (marker?.[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = undefined;
       return "";
     }
-    if (marker) {
+    if (marker && !comment) {
       fence = marker[1];
       return "";
     }
-    return line;
+    const code = line.replace(/(`+)[^`]*?\1/g, (span) => " ".repeat(span.length));
+    let out = "";
+    let at = 0;
+    while (at < line.length) {
+      const next = comment ? line.indexOf("-->", at) : code.indexOf("<!--", at);
+      if (next === -1) {
+        out += comment ? " ".repeat(line.length - at) : line.slice(at);
+        break;
+      }
+      const end = comment ? next + 3 : next + 4;
+      out += comment ? " ".repeat(end - at) : line.slice(at, next) + "    ";
+      at = end;
+      comment = !comment;
+    }
+    return out;
   });
 }
 
