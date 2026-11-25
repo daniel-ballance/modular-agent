@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -43,11 +44,24 @@ func (f *fakeTerminal) echoOff() (func(), error) {
 	return func() { f.on.Add(1) }, nil
 }
 
+type testTerminal struct {
+	t      *testing.T
+	stderr *lockedBuffer
+	write  *io.PipeWriter
+	done   chan error
+}
+
+func startTestTerminal(t *testing.T, s *modular.Session, input func(*io.PipeReader) io.Reader) *testTerminal {
+	t.Helper()
+	r, w := io.Pipe()
+	t.Cleanup(func() { _ = w.Close(); _ = r.Close() })
+	term := &testTerminal{t: t, stderr: &lockedBuffer{}, write: w, done: make(chan error, 1)}
+	go func() { term.done <- lineMode(t.Context(), s, options{}, input(r), io.Discard, term.stderr, nil) }()
+	return term
+}
+
 type secretTerminal struct {
-	t           *testing.T
-	stderr      *lockedBuffer
-	write       *io.PipeWriter
-	done        chan error
+	*testTerminal
 	results     chan string
 	credentials string
 }
@@ -77,26 +91,29 @@ func startSecretTerminal(t *testing.T, input func(*io.PipeReader) io.Reader) *se
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, w := io.Pipe()
-	term := &secretTerminal{t: t, stderr: &lockedBuffer{}, write: w, done: make(chan error, 1), results: results, credentials: credentials}
-	go func() { term.done <- lineMode(t.Context(), s, options{}, input(r), io.Discard, term.stderr, nil) }()
-	return term
+	return &secretTerminal{startTestTerminal(t, s, input), results, credentials}
 }
 
-func (s *secretTerminal) typeLine(text string) {
+func (s *testTerminal) typeLine(text string) {
+	s.t.Helper()
 	if _, err := io.WriteString(s.write, text+"\n"); err != nil {
 		s.t.Fatal(err)
 	}
 }
 
-func (s *secretTerminal) waitFor(text string) string {
+func (s *testTerminal) waitFor(text string) string {
+	s.t.Helper()
+	return s.waitForCount(text, 1)
+}
+
+func (s *testTerminal) waitForCount(text string, count int) string {
 	s.t.Helper()
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		if shown := s.stderr.String(); strings.Contains(shown, text) {
+		if shown := s.stderr.String(); strings.Count(shown, text) >= count {
 			return shown
 		}
 	}
-	s.t.Fatalf("waiting for %q; shown:\n%s", text, s.stderr.String())
+	s.t.Fatalf("waiting for %d occurrences of %q; shown:\n%s", count, text, s.stderr.String())
 	return ""
 }
 
@@ -111,11 +128,130 @@ func (s *secretTerminal) result() string {
 	}
 }
 
-func (s *secretTerminal) end() {
+func (s *testTerminal) end() {
 	s.t.Helper()
 	_ = s.write.Close()
-	if err := <-s.done; err != nil {
-		s.t.Fatal(err)
+	select {
+	case err := <-s.done:
+		if err != nil {
+			s.t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		s.t.Fatalf("terminal did not exit; shown:\n%s", s.stderr.String())
+	}
+}
+
+func TestTerminalListsCommands(t *testing.T) {
+	_, project, log := isolated(t)
+	var out, stderr bytes.Buffer
+	if err := run(t.Context(), []string{"--project", project}, io.NopCloser(strings.NewReader("/commands\n")), &out, &stderr, nil); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	for _, name := range []string{"/after", "/answer", "/cancel", "/commands", "/compact", "/model", "/skill:NAME", "/skills", "/thinking"} {
+		if !slices.Contains(lines, name) {
+			t.Errorf("missing %s; stdout: %q; stderr: %q", name, out.String(), stderr.String())
+		}
+	}
+	if !slices.IsSorted(lines) {
+		t.Fatalf("commands are not sorted: %q", lines)
+	}
+	if _, err := os.Stat(log); !os.IsNotExist(err) {
+		t.Fatalf("unexpected model request log: %v", err)
+	}
+}
+
+const twoToolCalls = `[{"toolCalls":[{"name":"first","input":{}},{"name":"second","input":{}}]},{"text":"Done."}]`
+
+func openTwoTerminalQuestions(t *testing.T) (*testTerminal, <-chan string, [][]string) {
+	t.Helper()
+	results := make(chan string, 2)
+	tool := func(name string) modular.Tool {
+		return modular.NewTool(name, "Ask a question.", func(ctx context.Context, _ struct{}, tc *modular.ToolContext) (string, error) {
+			a, err := tc.Ask(ctx, modular.Question{Kind: "text", Question: name + "?"})
+			if a.Declined {
+				results <- name + " declined: " + a.Reason
+			} else {
+				results <- name + "=" + a.Value
+			}
+			return a.Value, err
+		}, modular.Parallel())
+	}
+	a := modulartest.Agent(t, modulartest.Script(twoToolCalls), modular.WithTool(tool("first")), modular.WithTool(tool("second")))
+	s, err := a.Session(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	term := startTestTerminal(t, s, func(r *io.PipeReader) io.Reader { return r })
+	term.typeLine("Ask.")
+	term.waitFor("first?\nUse /answer REQUEST_ID VALUE")
+	shown := term.waitFor("second?\nUse /answer REQUEST_ID VALUE")
+	prompts := regexp.MustCompile(`Question (\S+): (first|second)\?`).FindAllStringSubmatch(shown, -1)
+	if len(prompts) != 2 {
+		t.Fatalf("want two question IDs; shown:\n%s", shown)
+	}
+	return term, results, prompts
+}
+
+func TestTerminalAnswersOpenQuestionsByID(t *testing.T) {
+	term, results, prompts := openTwoTerminalQuestions(t)
+	for _, p := range slices.Backward(prompts) {
+		term.typeLine("/answer " + p[1] + " value for " + p[2])
+		select {
+		case got := <-results:
+			if want := p[2] + "=value for " + p[2]; got != want {
+				t.Fatalf("got %q, want %q", got, want)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("no answer for " + p[2])
+		}
+	}
+	term.end()
+}
+
+func TestTerminalDeclinesAllOpenQuestionsOnEOF(t *testing.T) {
+	term, results, _ := openTwoTerminalQuestions(t)
+	term.end()
+	var declined []string
+	for len(results) > 0 {
+		declined = append(declined, <-results)
+	}
+	slices.Sort(declined)
+	if !slices.Equal(declined, []string{"first declined: end of input", "second declined: end of input"}) {
+		t.Fatalf("unexpected tool answers: %q", declined)
+	}
+}
+
+func TestTerminalShowsApprovalsOneAtATime(t *testing.T) {
+	ran := make(chan string, 2)
+	tool := func(name string) modular.Tool {
+		return modular.NewTool(name, "Needs approval.", func(context.Context, struct{}, *modular.ToolContext) (string, error) {
+			ran <- name
+			return name, nil
+		}, modular.Parallel())
+	}
+	a := modulartest.Agent(t, modulartest.Script(twoToolCalls), modular.WithApproval(modular.All), modular.WithTool(tool("first")), modular.WithTool(tool("second")))
+	s, err := a.Session(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	term := startTestTerminal(t, s, func(r *io.PipeReader) io.Reader { return r })
+	term.typeLine("Approve.")
+	term.waitFor("Allow? (y/n)")
+	term.typeLine("not an answer")
+	shown := term.waitFor("Answer y or n.")
+	if strings.Count(shown, "Allow? (y/n)") != 1 {
+		t.Fatalf("want only one approval prompt; shown:\n%s", shown)
+	}
+	term.typeLine("y")
+	term.waitForCount("Allow? (y/n)", 2)
+	term.typeLine("y")
+	term.end()
+	if shown := term.stderr.String(); strings.Count(shown, "Allow? (y/n)") != 2 {
+		t.Fatalf("want two approval prompts; shown:\n%s", shown)
+	}
+	if len(ran) != 2 {
+		t.Fatalf("%d approved tools ran, want 2", len(ran))
 	}
 }
 

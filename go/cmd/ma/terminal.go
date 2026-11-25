@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/daniel-ballance/modular-agent/go/modular"
@@ -178,6 +179,21 @@ func printTurn(ctx context.Context, s *modular.Session, o options, out, stderr i
 	return nil
 }
 
+func listCommands(ctx context.Context, s *modular.Session, out io.Writer) error {
+	names, err := s.Commands(ctx)
+	if err != nil {
+		return err
+	}
+	names = append(names, "after", "answer", "cancel", "commands", "skill:NAME")
+	slices.Sort(names)
+	for _, name := range slices.Compact(names) {
+		if _, err := fmt.Fprintln(out, "/"+name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type ask struct {
 	q     modular.Question
 	reply chan modular.Answer
@@ -203,16 +219,25 @@ func lineMode(ctx context.Context, s *modular.Session, o options, in io.Reader, 
 		close(lines)
 	}()
 	queries := make(chan ask)
-	if err := s.OnQuestion(ctx, func(ctx context.Context, q modular.Question) (modular.Answer, error) {
-		a := ask{q, make(chan modular.Answer, 1), ctx.Done()}
+	expired := make(chan string)
+	if err := s.OnQuestion(ctx, func(work context.Context, q modular.Question) (modular.Answer, error) {
+		a := ask{q, make(chan modular.Answer, 1), work.Done()}
 		select {
 		case queries <- a:
+		case <-work.Done():
+			return modular.Answer{}, work.Err()
 		case <-ctx.Done():
 			return modular.Answer{}, ctx.Err()
 		}
 		select {
 		case ans := <-a.reply:
 			return ans, nil
+		case <-work.Done():
+			select {
+			case expired <- q.ID:
+			case <-ctx.Done():
+			}
+			return modular.Answer{}, work.Err()
 		case <-ctx.Done():
 			return modular.Answer{}, ctx.Err()
 		}
@@ -246,11 +271,10 @@ func lineMode(ctx context.Context, s *modular.Session, o options, in io.Reader, 
 	}()
 	d := display{out: out, err: stderr, json: o.json, verbose: o.verbose, line: true, calls: map[string]modular.ToolCall{}}
 	fmt.Fprintln(stderr, "Session "+s.ID())
-	var question *ask
-	var questionDone <-chan struct{}
+	var pending []ask
+	var shownApproval string
 	var waiting chan error
 	hidden := hiddenInput(in)
-	// restore is set while a secret is read with echo off.
 	var restore func()
 	var secretFor string
 	defer func() {
@@ -265,21 +289,32 @@ func lineMode(ctx context.Context, s *modular.Session, o options, in io.Reader, 
 		fmt.Fprintln(stderr)
 		return id
 	}
+	find := func(id string) int {
+		return slices.IndexFunc(pending, func(q ask) bool { return q.q.ID == id })
+	}
 	reply := func(id string, a modular.Answer) bool {
-		if question == nil || question.q.ID != id {
+		i := find(id)
+		if i < 0 {
 			return false
 		}
-		question.reply <- a
-		question, questionDone = nil, nil
-		return true
+		q := pending[i]
+		pending = slices.Delete(pending, i, i+1)
+		select {
+		case <-q.done:
+			return false
+		default:
+			q.reply <- a
+			return true
+		}
 	}
 	answerLine := func(args string) {
 		id, value, given := strings.Cut(args, " ")
-		if question == nil || question.q.ID != id {
+		i := find(id)
+		if i < 0 {
 			fmt.Fprintln(stderr, "no question named "+id)
 			return
 		}
-		secret := question.q.Kind == "secret"
+		secret := pending[i].q.Kind == "secret"
 		switch {
 		case given && value == "decline":
 			reply(id, modular.Decline("declined"))
@@ -301,6 +336,18 @@ func lineMode(ctx context.Context, s *modular.Session, o options, in io.Reader, 
 		}
 	}
 	for {
+		approval := ""
+		if restore == nil {
+			if i := slices.IndexFunc(pending, func(q ask) bool { return q.q.Kind == "approval" }); i >= 0 {
+				q := pending[i].q
+				approval = q.ID
+				if approval != shownApproval {
+					fmt.Fprintln(stderr, q.Question)
+					fmt.Fprintln(stderr, "Allow? (y/n)")
+				}
+			}
+			shownApproval = approval
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -310,8 +357,11 @@ func lineMode(ctx context.Context, s *modular.Session, o options, in io.Reader, 
 			if err := d.event(event); err != nil {
 				return err
 			}
-		case <-questionDone:
-			question, questionDone = nil, nil
+			if closed, ok := event.(modular.TypedEvent[modular.QuestionClosedData]); ok {
+				reply(closed.Data.QuestionID, modular.Decline(closed.Data.Reason))
+			}
+		case id := <-expired:
+			reply(id, modular.Decline("question expired"))
 		case q := <-queries:
 			if lines == nil {
 				q.reply <- modular.Decline("end of input")
@@ -321,16 +371,8 @@ func lineMode(ctx context.Context, s *modular.Session, o options, in io.Reader, 
 				q.reply <- modular.Decline("a secret needs a terminal to hide it")
 				continue
 			}
-			if question != nil {
-				q.reply <- modular.Decline("another question is open")
-				continue
-			}
-			question = &q
-			questionDone = q.done
-			if q.q.Kind == "approval" {
-				fmt.Fprintln(stderr, q.q.Question)
-				fmt.Fprintln(stderr, "Allow? (y/n)")
-			} else {
+			pending = append(pending, q)
+			if q.q.Kind != "approval" {
 				options, usage := "", "VALUE"
 				if len(q.q.Options) > 0 {
 					raw, _ := json.Marshal(q.q.Options)
@@ -377,10 +419,10 @@ func lineMode(ctx context.Context, s *modular.Session, o options, in io.Reader, 
 				if e := <-readErr; e != nil {
 					return e
 				}
-				if question != nil {
-					question.reply <- modular.Decline("end of input")
-					question, questionDone = nil, nil
+				for _, q := range pending {
+					q.reply <- modular.Decline("end of input")
 				}
+				pending = nil
 				waiting = make(chan error, 1)
 				go func() { waiting <- s.WaitIdle(ctx) }()
 				continue
@@ -402,12 +444,12 @@ func lineMode(ctx context.Context, s *modular.Session, o options, in io.Reader, 
 				}
 				continue
 			}
-			if question != nil && question.q.Kind == "approval" {
-				switch text {
+			if approval != "" {
+				switch strings.ToLower(text) {
 				case "y":
-					reply(question.q.ID, modular.Allow())
+					reply(approval, modular.Allow())
 				case "n":
-					reply(question.q.ID, modular.Decline("declined"))
+					reply(approval, modular.Decline("declined"))
 				default:
 					fmt.Fprintln(stderr, "Answer y or n.")
 				}
@@ -415,6 +457,16 @@ func lineMode(ctx context.Context, s *modular.Session, o options, in io.Reader, 
 			}
 			if args, ok := strings.CutPrefix(text, "/answer "); ok {
 				answerLine(args)
+				continue
+			}
+			if text == "/commands" {
+				w := out
+				if o.json {
+					w = stderr
+				}
+				if err := listCommands(ctx, s, w); err != nil {
+					fmt.Fprintln(stderr, err)
+				}
 				continue
 			}
 			if body, after := strings.CutPrefix(text, "/after "); after {
