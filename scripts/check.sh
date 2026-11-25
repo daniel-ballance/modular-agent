@@ -39,69 +39,15 @@ logs="$(mktemp -d "$TMPDIR/check-XXXXXX")" || exit 1
 printf 'Step logs: %s\n' "$logs"
 start_run=$SECONDS
 
-point_refs() {
-  git for-each-ref --format='%(refname) %(objectname)' refs/modular-agent/ | LC_ALL=C sort
-}
-worktree_roots() { # every worktree of this repository, canonical where it still exists
-  local record
-  git worktree list --porcelain -z | while IFS= read -r -d '' record; do
-    [[ $record == 'worktree '* ]] || continue
-    record=${record#worktree }
-    (cd "$record" 2>/dev/null && pwd -P) || printf '%s\n' "$record"
-  done
-}
-if ! point_refs >"$logs/refs-before" || ! worktree_roots >"$logs/worktrees-before"; then
+. "$repo/scripts/point-refs.sh"
+if ! point_refs >"$logs/refs-before"; then
   echo "check.sh: cannot list refs/modular-agent/ in $repo; run it from a Git checkout" >&2
   exit 1
 fi
-
-# Worktrees share one ref store, so another checkout's run can add points while this one runs.
-# Each point commit names its project in a `project:` trailer. A new point counts only when Git
-# says that project lies in this worktree; a sibling or nested worktree, a missing trailer or
-# more than one is not this run's. A project folder that no longer exists belongs to the deepest
-# worktree, seen at the start or the end of the run, that contains it, so removing a nested
-# worktree during the run does not hand its points to this one.
-point_owner() { # project: print the canonical top level of the worktree holding project, or nothing
-  local project=$1 root best=
-  if [ -d "$project" ]; then
-    root=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) && (cd "$root" && pwd -P)
-    return 0
-  fi
-  while IFS= read -r root; do
-    [[ $project == "$root" || $project == "$root"/* ]] && [ "${#root}" -gt "${#best}" ] && best=$root
-  done <"$logs/worktrees"
-  [ -n "$best" ] && printf '%s\n' "$best"
-  return 0
-}
-
-check_test_refs() {
-  local root ref sha record project
-  local -A projects=() owners=()
-  root="$(cd "$repo" && pwd -P)" || return
-  point_refs >"$logs/refs-after" || return
-  LC_ALL=C comm -13 "$logs/refs-before" "$logs/refs-after" >"$logs/refs-new" || return
-  : >"$logs/refs-added"
-  [ -s "$logs/refs-new" ] || return 0
-  { cat "$logs/worktrees-before"; worktree_roots; } | LC_ALL=C sort -u >"$logs/worktrees" || return
-  # The SDKs write `project: PATH`; a user's trailer.separators must not change how it reads.
-  cut -d' ' -f2 "$logs/refs-new" |
-    git -c trailer.separators=: log --no-walk=unsorted --stdin -z \
-      --format='%H %(trailers:key=project,valueonly,separator=%x01)' >"$logs/refs-projects" || return
-  while IFS= read -r -d '' record; do
-    projects[${record%% *}]=${record#* }
-  done <"$logs/refs-projects"
-  while read -r ref sha; do
-    project=${projects[$sha]-}
-    [ -n "$project" ] && [[ $project != *[$'\n\001']* ]] || continue
-    [ -n "${owners[$project]+set}" ] || owners[$project]=$(point_owner "$project")
-    [ "${owners[$project]}" = "$root" ] && printf '%s %s\n' "$ref" "$sha" >>"$logs/refs-added"
-  done <"$logs/refs-new"
-  if [ -s "$logs/refs-added" ]; then
-    printf 'Tests added %s refs under refs/modular-agent/ to the enclosing repository. See %s\n' \
-      "$(wc -l <"$logs/refs-added")" "$logs/refs-added" >&2
-    return 1
-  fi
-}
+if ! worktree_roots >"$logs/worktrees-before"; then
+  echo "check.sh: cannot list the worktrees of $repo with git worktree list" >&2
+  exit 1
+fi
 
 step_limit=${MA_CHECK_STEP_LIMIT:-1800}
 kill_tree() { # pid: stop it and every process below it, deepest first
@@ -196,6 +142,7 @@ plan() {
   step docs "docs: state tests" node --test scripts/check-docs-state.test.mjs
   step docs "docs: review candidate tests" node --test scripts/docs-review.test.mjs
   step docs "docs: check slot tests" node --test scripts/check-slot.test.mjs
+  step docs "docs: point ref guard tests" node --test scripts/point-refs.test.mjs
 
   if $quick; then
     step rust "rust: SDK tests" bash -c "cd rust && mise exec -- cargo test -q -p modular-agent -p standard -- --test-threads=1"
