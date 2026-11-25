@@ -60,6 +60,20 @@ test('invalid groups and core switches in another group are usage errors', async
   for (const args of [['--group', 'unknown'], ['--group', 'waiting', '--crash-checks']])
     await assert.rejects(run(...args, '--', process.execPath, '-v'), e => e.code === 2);
 });
+test('WebSocket retries require two distinct credentials and a disposable history service', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'acp-retries-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const first = join(dir, 'first'), other = join(dir, 'other');
+  writeFileSync(first, 'disposable-first-test-token', { mode: 0o600 });
+  writeFileSync(other, 'disposable-other-test-token', { mode: 0o600 });
+  const args = ['--group', 'websocket-retries', '--connect', 'ws://127.0.0.1:1/',
+    '--token-file', first, '--actor', 'writer', '--service-command', 'exit 45'];
+  await assert.rejects(run(...args, '--other-token-file', other), e => e.code === 2 && /needs .*--portable-checks/.test(e.stderr));
+  await assert.rejects(run(...args, '--portable-checks'), e => e.code === 2 && /needs .*--other-token-file/.test(e.stderr));
+  await assert.rejects(run(...args, '--portable-checks', '--other-token-file', first), e => e.code === 2 && /different token/.test(e.stderr));
+  await assert.rejects(run(...args, '--portable-checks', '--other-token-file', other), e => e.code === 2 && /disposable service settings/.test(e.stderr));
+});
+
 test('a fixture lacking the waiting declaration fails in both ACP bindings', async () => {
   const agent = `require('node:readline').createInterface({input:process.stdin}).on('line', l => {
     const {id, params} = JSON.parse(l); if (id === undefined) return;

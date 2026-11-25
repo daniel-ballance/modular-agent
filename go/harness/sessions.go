@@ -247,17 +247,17 @@ func (c *client) registerNew(s *session, commit bool) error {
 }
 
 func (c *client) Open(ctx context.Context, id string) error {
-	return c.open(ctx, id, nil, false)
+	return c.open(ctx, id, nil, false, false)
 }
 
-func (c *client) OpenForHost(ctx context.Context, id string, host api.Actor) error {
-	return c.open(ctx, id, &host, false)
+func (c *client) OpenForHost(ctx context.Context, id string, host api.Actor, joinOnOpen bool) error {
+	return c.open(ctx, id, &host, joinOnOpen, false)
 }
 
 // OpenInterruptedForHost uses normal recovery, but checks the candidate again
 // under a nonwaiting lease before it joins an actor or installs any work.
 func (c *client) OpenInterruptedForHost(ctx context.Context, id string, host api.Actor) error {
-	return c.open(ctx, id, &host, true)
+	return c.open(ctx, id, &host, false, true)
 }
 
 func (c *client) StartupWriter(id string) bool {
@@ -265,7 +265,7 @@ func (c *client) StartupWriter(id string) bool {
 	return err == nil && s.startupWriter
 }
 
-func (c *client) open(ctx context.Context, id string, host *api.Actor, interruptedOnly bool) (errOut error) {
+func (c *client) open(ctx context.Context, id string, host *api.Actor, joinOnOpen, interruptedOnly bool) (errOut error) {
 	ctx, span := telemetry.Start(telemetry.Session(ctx, id), "modular_agent.session.open", trace.WithAttributes(telemetry.String("modular_agent.session.operation", "load")))
 	defer func() { telemetry.Finish(span, errOut) }()
 	if err := c.seedCapacity(); err != nil {
@@ -301,7 +301,7 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor, interrupt
 		_ = lease.Close()
 		return err
 	}
-	if host != nil && (!api.ConnectionAllows(ctx, "watch") || !c.DiscoverForHost(snap, *host)) {
+	if host != nil && (!api.ConnectionAllows(ctx, "watch") || !c.DiscoverForHost(snap, *host, joinOnOpen)) {
 		_ = lease.Close()
 		return api.ErrAuthority
 	}

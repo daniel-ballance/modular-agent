@@ -307,11 +307,12 @@ class ACP(Plugin):
     async def view(self, value, sid=None, *, already_gated=False, method=None, event_type=None):
         if isinstance(value, dict):
             sid = sid or value.get("sessionId") or value.get("session")
+        sid = None if method == "session/close" and value == {} else sid or OUTPUT_SESSION.get()
         return await self.api.session(
             "view",
             value=value,
             recipient=self.actor,
-            session=sid or OUTPUT_SESSION.get(),
+            session=sid,
             alreadyGated=already_gated,
             **({"type": "reply", "method": method} if method else {}),
             **({"type": event_type} if event_type else {}),
@@ -1436,8 +1437,7 @@ class ACP(Plugin):
 
     @staticmethod
     def guards_frame(method):
-        # The open/new replies carry control metadata. Replay goes through the
-        # separate update boundary. An erase reply reports plan progress.
+        # Replay uses the update boundary. An erase reply reports plan progress.
         return method not in {
             "session/new",
             "session/load",

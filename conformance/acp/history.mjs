@@ -1,7 +1,7 @@
 // Disposable history client and write-batch observation for the ACP kit.
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 
 const digest = (value) => createHash("sha256").update(value).digest();
 
@@ -29,6 +29,19 @@ export function historyService(raw, tokenFile) {
 				cursor = r.next;
 			}
 			throw new Error("history fixture exceeded the page watchdog");
+		},
+		async grantRecordedActor(id, granter, actor) {
+			const base = path(id), writer = randomUUID();
+			const { lease } = await this.json(base + "/lease", "POST", { owner: writer });
+			try {
+				const last = (await this.pages(id)).at(-1);
+				if (!last) throw Error("cannot grant membership in an empty fixture");
+				const parentId = last.kind === "position" ? last.data.to : last.id;
+				await this.json(base + "/entries", "POST", { lease, entries: [{
+					id: randomUUID(), sessionId: id, parentId, time: Date.now(), writer, modelVisible: false,
+					kind: "actorJoined", actorId: granter, data: { actor },
+				}] });
+			} finally { await this.json(base + "/lease/" + encodeURIComponent(lease), "DELETE"); }
 		},
 		// Shared data: Job reports. Observe actual append boundaries, not just two adjacent records.
 		async observe({ onRequest, beforeReply, fixtureReply, onTrace } = {}) {

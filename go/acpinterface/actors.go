@@ -12,7 +12,7 @@ import (
 
 type actorSessions interface {
 	NewForHost(context.Context, string, string, api.Actor) (string, error)
-	OpenForHost(context.Context, string, api.Actor) error
+	OpenForHost(context.Context, string, api.Actor, bool) error
 	LeaveActor(context.Context, string, string) error
 	ReleaseInput(context.Context, string, string, string, bool) (api.Receipt, error)
 }

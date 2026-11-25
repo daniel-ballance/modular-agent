@@ -117,6 +117,7 @@ func (i *Interface) ServeStdio(ctx context.Context, in io.ReadCloser, out io.Wri
 			return errors.New("MODULAR_AGENT_ACP_REPRESENTS must be a JSON array of principal IDs")
 		}
 	}
+	policy.joinOnOpen = true
 	return i.serve(ctx, in, out, declared, config, policy.Actor.ID, &policy)
 }
 
@@ -522,7 +523,7 @@ func (s *server) reopen(ctx context.Context, id, cwd string, servers []acp.McpSe
 	}
 	st := s.attach(id, true)
 	if openErr != nil {
-		if err = s.a.(actorSessions).OpenForHost(st.ctx, id, s.hostActor()); err != nil {
+		if err = s.a.(actorSessions).OpenForHost(st.ctx, id, s.hostActor(), s.principal.joinOnOpen); err != nil {
 			s.detach(id, st)
 			if held := heldError(err); held != nil {
 				return result, held
