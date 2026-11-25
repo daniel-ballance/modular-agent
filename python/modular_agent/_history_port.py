@@ -120,32 +120,28 @@ class _SQLitePort:
     persistent = True
 
     def __init__(self, store: Any) -> None:
-        from threading import Lock
-
         self._store = store
-        self._lock = Lock()
         self.ttl_ms: int = store.ttl_ms
 
     def _call(
         self, method: str, route: str, sid: str = "", lease: str = "", **params: Any
     ) -> JsonObject:
         try:
-            with self._lock, self._store.db:
-                return cast(
-                    JsonObject,
-                    self._store.route(
-                        method,
-                        route,
-                        sid,
-                        lease or None,
-                        {
-                            key: str(value)
-                            for key, value in params.get("query", {}).items()
-                            if value is not None
-                        },
-                        params.get("body"),
-                    ),
-                )
+            return cast(
+                JsonObject,
+                self._store.request(
+                    method,
+                    route,
+                    sid,
+                    lease or None,
+                    {
+                        key: str(value)
+                        for key, value in params.get("query", {}).items()
+                        if value is not None
+                    },
+                    params.get("body"),
+                ),
+            )
         except Refusal as exc:
             code = exc.body["code"]
             raise HistoryError(
