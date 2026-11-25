@@ -329,6 +329,13 @@ test("a key that decodes to the probe marker does not move a Node pin's line", (
   repo.check([`${node}:2: Package version`]);
 });
 
+test("a deeply nested package.json value does not stop the Node pin check", (t) => {
+  const repo = checkout(t);
+  const deep = "[".repeat(10000) + "0" + "]".repeat(10000);
+  repo.write(node, `{\n  "version": "0.2.0",\n  "metadata": ${deep}\n}\n`);
+  repo.check([`${node}:2: Package version`]);
+});
+
 test("Python pins are read from dependency arrays, not from other project strings", (t) => {
   const repo = checkout(t);
   repo.write(python, [

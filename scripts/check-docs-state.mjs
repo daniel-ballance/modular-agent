@@ -206,13 +206,16 @@ function checkNodePackage(file, text, version) {
     return;
   }
   // An escaped key such as "\u005f..." can spell the marker without the text containing it.
-  const keys = [...function* keysOf(value) {
-    if (value === null || typeof value !== "object") return;
+  // A loop, not recursion: valid JSON can nest deeper than the call stack.
+  const keys = [];
+  for (const pending = [pkg]; pending.length > 0; ) {
+    const value = pending.pop();
+    if (value === null || typeof value !== "object") continue;
     for (const [key, child] of Object.entries(value)) {
-      yield key;
-      yield* keysOf(child);
+      keys.push(key);
+      pending.push(child);
     }
-  }(pkg)];
+  }
   let marker = "_docs_state_probe_";
   while (text.includes(marker) || keys.some((key) => key.includes(marker))) marker += "_";
   // JSON.parse has no positions, and a key has many spellings ("\/" or "\u002f" for "/"). Mark the
