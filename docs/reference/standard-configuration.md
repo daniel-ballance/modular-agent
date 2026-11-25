@@ -53,7 +53,7 @@ ACP project scope, tenant reach and any narrower rights come from operator confi
 
 With no `--model` and none in settings, `ma` uses the first Provider that is signed in, in the order `chatgpt`, `grok`, `claude`. With none signed in it exits with status 1 and says how to sign in.
 
-**Listing sessions.** `ma sessions` prints one line for each saved session of the project: the session ID, two spaces, and the project's canonical folder. The most recently active session comes first; sessions active at the same time follow in ID order. `--all` lists the saved sessions of every project, in the same form and order. With no sessions to list, `ma sessions` prints nothing. It exits with status 0 in both cases.
+**Listing sessions.** `ma sessions` prints one line for each saved session of the project (the current folder, or `--project DIR`): the session ID, two spaces, and the project's canonical folder. The most recently active session comes first; sessions active at the same time follow in ID order. `--all` lists the saved sessions of every project, in the same form and order. With no sessions to list, `ma sessions` prints nothing. It exits with status 0 in both cases.
 
 ```
 $ ma sessions --all
