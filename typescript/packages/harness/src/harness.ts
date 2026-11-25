@@ -1,3 +1,4 @@
+import { SessionErasure } from "./session-erasure.js";
 import { ApprovalReconciliation } from "./approval-reconciliation.js";
 import { failure } from "./failure.js";
 import { sameJson, waitingApprovals, type ApprovalBinding, type ApprovalProof, type ApprovalDelivery, type ApprovalRoute, type WaitingApproval } from "./waiting-approval.js";
@@ -6,7 +7,6 @@ import { activeOperation, carrier, conversation, currentSpan, historyForPeer, ob
 import { mapOutput, OUTPUT_SEGMENT_BYTES } from "./output.js";
 import { Reservations, resourceBytes, reservationLimits, type ReservationOptions } from "./reservations.js";
 import { RunReceipts, type ReceiptOperation } from "./run-receipts.js";
-import { memoryPendingErasure, type ErasureIntent, type ErasurePlan, type HistoryErasureRegistry, type PendingErasure } from "./erasure.js";
 import { addAbortListener } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
@@ -304,11 +304,11 @@ export class Harness {
 	private caps = new Map<string, { plugin: string; impl: unknown }[]>();
 	private loaded: { plugin: Plugin; api: PluginApi }[] = [];
 	private sessions = new Map<string, Session>();
+	private readonly erasure: SessionErasure;
 	private opening = new Set<string>();
 	private readonly tenants: Map<string, Tenant>;
 	private reservations: Reservations;
 	private reservationScan?: Promise<void>;
-	private readonly ephemeralErasure = memoryPendingErasure();
 	private listeners: { plugin: string; raw: boolean; fn: (e: AgentEvent) => void }[] = [];
 	private commandTable = new Map<string, Command & { plugin: string }>();
 	private now: () => number;
@@ -354,6 +354,23 @@ export class Harness {
 		this.project = options.project;
 		this.home = options.home;
 		this.receipts = new RunReceipts(options.receiptDir ?? options.home);
+		this.erasure = new SessionErasure({
+			sessions: this.sessions,
+			receipts: this.receipts,
+			store: () => this.use<HistoryStore>("history-store"),
+			providers: () => this.useAll<Provider>("provider"),
+			checkWriter: s => this.checkWriter(s),
+			hasUnfinishedJobs: s => this.runningJobs(s).length > 0,
+			invalidateErasedHandoffs: (...args) => this.invalidateErasedHandoffs(...args),
+			commitNow: (...args) => this.commitNow(...args),
+			write: (s, write) => this.write(s, write),
+			emit: (...args) => this.emit(...args),
+			loadInto: id => this.loadInto(id),
+			requireAuthority: (...args) => this.requireAuthority(...args),
+			newId: () => this.newId(),
+			problem: (...args) => this.problem(...args),
+			actorRights: (s, actor) => this.actorRights(s, actor),
+		});
 		this.now = options.now ?? Date.now;
 		this.newId = options.newId ?? randomUUID;
 		this.questionsOutlastTurns = options.questionsOutlastTurns ?? true;
@@ -466,7 +483,7 @@ export class Harness {
 				if (options?.raw) {
 					let queue = Promise.resolve();
 					const entry = { plugin: pluginName, raw: true, fn: (event: AgentEvent) => {
-						if (!this.httpErasure() || !event.sessionId) return fn(event);
+						if (!this.erasure.httpErasure() || !event.sessionId) return fn(event);
 						// Preserve event order for consumers that track input and turn IDs.
 						queue = queue.then(async () => { await this.eventAdmission(event); fn(event); })
 							.catch(e => this.problem(pluginName, "event listener", e));
@@ -534,19 +551,19 @@ export class Harness {
 			setSetting: (sessionId, key, value, actorId) => this.setSetting(this.session(sessionId), key, value, pluginName, actorId),
 			setLimit: (id, rights, actorId) => this.setLimit(this.session(id), rights, actorId, pluginName),
 			tenant: (id) => this.tenantInfo(this.session(id)),
-			checkPending: id => this.admitHistory(this.session(id)),
+			checkPending: id => this.erasure.admitHistory(this.session(id)),
 			readHistory: (id, options) => this.inspectHistory(id, options ?? {}, entries => entries),
 			inspectHistory: (id, options, inspect) => this.inspectHistory(id, options, inspect),
 			history: (sessionId, options) => {
 				const s = this.session(sessionId);
 				this.checkScopedWork(s, "watch");
-				if (this.httpErasure() && !s.provisional) throw failure("unavailable", "HTTP history requires asynchronous readHistory");
-				this.checkPending(s);
+				if (this.erasure.httpErasure() && !s.provisional) throw failure("unavailable", "HTTP history requires asynchronous readHistory");
+				this.erasure.checkPending(s);
 				return options?.all ? s.order.map((id) => s.entries.get(id)!) : s.branch();
 			},
 			append: async (sessionId, draft) => (await this.commit(this.session(sessionId), [{ ...draft, writer: draft.writer ?? pluginName }], true))[0],
 			transaction: (sessionId, fn) => this.transaction(this.session(sessionId), pluginName, fn),
-			erase: (sessionId, ids, actorId) => this.erase(this.session(sessionId), ids, actorId, pluginName),
+			erase: (sessionId, ids, actorId) => this.erasure.erase(this.session(sessionId), ids, actorId, pluginName),
 			tools: (sessionId) => this.toolDefinitions(sessionId ? this.session(sessionId) : undefined),
 			callTool: (sessionId, call) => this.callTool(this.session(sessionId), { ...call, id: call.id ?? this.newId() }),
 			ask: (sessionId, request) => this.ask(this.session(sessionId), request, pluginName),
@@ -595,32 +612,32 @@ export class Harness {
 			},
 			gateOutput: async (sessionId, recipient, type, data, ids) => {
 				const s = this.sessions.get(sessionId);
-				const freshness = s && await this.admitHistory(s);
+				const freshness = s && await this.erasure.admitHistory(s);
 				let out: typeof data | undefined;
 				let overflow = false;
 				const follower = new Follower(this.hooks, recipient, false, (e) => { if (e.type === type) out = e.data; }, (e) => { if ((e as {code?: string}).code === "result_too_large") overflow = true; else this.problem("harness", "output gate", e); }, undefined, undefined,
-					s && this.httpErasure() ? () => this.admitHistory(s).then(current => { if (current !== freshness) throw failure("unavailable", "Erasure changed the output view"); }) : undefined);
+					s && this.erasure.httpErasure() ? () => this.erasure.admitHistory(s).then(current => { if (current !== freshness) throw failure("unavailable", "Erasure changed the output view"); }) : undefined);
 				follower.push({ type, time: this.now(), sessionId, source: pluginName, ...ids, data });
 				if (type === "model.output") follower.push({ type: "model.streamEnd", time: this.now(), sessionId, source: pluginName, ...ids });
 				await follower.idle();
-				if (s && await this.admitHistory(s) !== freshness) throw failure("unavailable", "Erasure changed the output view");
+				if (s && await this.erasure.admitHistory(s) !== freshness) throw failure("unavailable", "Erasure changed the output view");
 				if (overflow && type === "reply") throw failure("result_too_large", "Reply exceeds the gate limit");
 				return out;
 			},
 			declaration: (sessionId) => this.declaration(sessionId ? this.session(sessionId) : undefined),
 			gatedHistory: async (sessionId, options) => {
 				const s = this.session(sessionId);
-				await this.reconcilePending(s);
-				const freshness = await this.admitHistory(s);
+				await this.erasure.reconcilePending(s);
+				const freshness = await this.erasure.admitHistory(s);
 				const entries = options.all ? s.order.map((id) => s.entries.get(id)!) : s.branch();
 				const out: HistoryEntry[] = [];
 				const follower = new Follower(this.hooks, options.recipient, false, (e) => { if (e.type === "entry") out.push(e.data as HistoryEntry); }, (e) => this.problem("harness", "gated history", e), undefined, undefined,
-					this.httpErasure() ? () => this.admitHistory(s).then(current => { if (current !== freshness) throw failure("unavailable", "Erasure changed the history view"); }) : undefined);
+					this.erasure.httpErasure() ? () => this.erasure.admitHistory(s).then(current => { if (current !== freshness) throw failure("unavailable", "Erasure changed the history view"); }) : undefined);
 				for (const entry of entries) {
 					follower.push({ type: "entry", time: this.now(), sessionId: s.id, source: "harness", data: entry });
 					await follower.idle();
 				}
-				if (await this.admitHistory(s) !== freshness) throw failure("unavailable", "Erasure changed the history view");
+				if (await this.erasure.admitHistory(s) !== freshness) throw failure("unavailable", "Erasure changed the history view");
 				return out;
 			},
 			modelAccess: (sessionId) => this.modelAccess(this.session(sessionId)),
@@ -677,7 +694,7 @@ export class Harness {
 		const s = this.sessions.get(sessionId);
 		if (typeof session !== "string" && session !== s) return; // An old writer must not publish to a reopened session.
 		const event: AgentEvent = { type, time: this.now(), sessionId, source, ...ids, data };
-		if (s) this.eventViews.set(event, { session: s, epoch: this.erasureEpoch.get(s) ?? 0 });
+		if (s) this.eventViews.set(event, { session: s, epoch: this.erasure.epoch(s) });
 		if (s?.interruption.signal.aborted && type !== "session.ended") return;
 		if (type !== "session.interrupted") s?.remember(event);
 		for (const l of [...this.listeners]) {
@@ -701,19 +718,17 @@ export class Harness {
 
 	private pluginFollowers: Follower[] = [];
 	private eventViews = new WeakMap<AgentEvent, { session: Session; epoch: number }>();
-	private erasureEpoch = new WeakMap<Session, number>();
-	private storedTombstones = new WeakMap<Session, Set<string>>();
 	private eventAdmission(event: AgentEvent): Promise<void> | undefined {
-		if (!this.httpErasure() || !event.sessionId || ["session.interrupted", "entries.erased", "session.ended"].includes(event.type)) return;
+		if (!this.erasure.httpErasure() || !event.sessionId || ["session.interrupted", "entries.erased", "session.ended"].includes(event.type)) return;
 		const view = this.eventViews.get(event);
 		const s = view?.session ?? this.sessions.get(event.sessionId);
-		if (!s || s !== this.sessions.get(event.sessionId) || view && view.epoch !== (this.erasureEpoch.get(s) ?? 0)) return Promise.reject(failure("unavailable", "The queued event no longer has a current view"));
-		return this.admitHistory(s).then(() => undefined);
+		if (!s || s !== this.sessions.get(event.sessionId) || view && view.epoch !== this.erasure.epoch(s)) return Promise.reject(failure("unavailable", "The queued event no longer has a current view"));
+		return this.erasure.admitHistory(s).then(() => undefined);
 	}
 
 	private follow(s: Session, options: FollowOptions, listener: (event: AgentEvent) => unknown): (() => void) & { idle(): Promise<void> } {
 		const follower = new Follower(this.hooks, options.recipient, options.raw ?? false, event => {
-			if (!["session.interrupted", "entries.erased"].includes(event.type)) this.checkPending(s);
+			if (!["session.interrupted", "entries.erased"].includes(event.type)) this.erasure.checkPending(s);
 			if (event.type === "entry" || event.type === "entry.added") {
 				const current = s.entries.get((event.data as HistoryEntry)?.id);
 				if (current?.erased && !event.data?.erased) return;
@@ -730,7 +745,7 @@ export class Harness {
 		const from = options.fromEntry ?? s.order.length;
 		for (const id of s.order.slice(from)) {
 			const event = { type: "entry", time: this.now(), sessionId: s.id, source: "harness", data: s.entries.get(id) };
-			this.eventViews.set(event, { session: s, epoch: this.erasureEpoch.get(s) ?? 0 });
+			this.eventViews.set(event, { session: s, epoch: this.erasure.epoch(s) });
 			follower.push(event);
 		}
 		if (!follower.closed) s.followers.add(follower);
@@ -743,7 +758,7 @@ export class Harness {
 		const match = /^\/(\S+)\s?([\s\S]*)$/.exec(line.trimStart());
 		if (!match) throw failure("invalid_params", "Not a command");
 		const session = this.session(sessionId);
-		await this.reconcilePending(session);
+		await this.erasure.reconcilePending(session);
 		this.requireAuthority(session, actorId, "input");
 		this.checkWriter(session);
 		const command = this.commandTable.get(match[1]);
@@ -761,7 +776,7 @@ export class Harness {
 				throw Object.assign(new Error("Command context has settled"), { code: "invalid_request" });
 			}
 			signal.throwIfAborted();
-			this.checkPending(session);
+			this.erasure.checkPending(session);
 			this.checkWriter(session);
 			this.requireAuthority(session, actorId, "input");
 		};
@@ -907,7 +922,7 @@ export class Harness {
 		const store = this.use<HistoryStore>("history-store");
 		const sourceId = options.forkFrom?.sessionId ?? options.parentSessionId;
 		const ancestor = sourceId ? this.sessions.get(sourceId) ?? await this.loadInto(sourceId) : undefined;
-		const ancestorView = ancestor && await this.admitHistory(ancestor);
+		const ancestorView = ancestor && await this.erasure.admitHistory(ancestor);
 		const tenant = ancestor?.tenant ?? options.tenant;
 		if (tenant !== undefined && !this.tenants.has(tenant)) throw Object.assign(new Error(`Unknown tenant ${tenant}`), { code: "invalid_params" });
 		const cwd = options.settings?.cwd;
@@ -968,11 +983,11 @@ export class Harness {
 				});
 				const batch = [...copies, ...setup];
 				const publish = async () => {
-					if (ancestor && await this.admitHistory(ancestor) !== ancestorView) throw failure("unavailable", "Erasure changed the fork source");
+					if (ancestor && await this.erasure.admitHistory(ancestor) !== ancestorView) throw failure("unavailable", "Erasure changed the fork source");
 					await this.observeCommit(s, batch.length, () => this.write(s, () => store?.append(s.id, batch, { forkErasureView: ancestorView })));
 					for (const e of batch) s.apply(e);
 				};
-				const registry = this.pendingRegistry();
+				const registry = this.erasure.pendingRegistry();
 				if (registry) await registry.exclusive(publish);
 				else await publish();
 			} else {
@@ -996,7 +1011,7 @@ export class Harness {
 		const { meta, entries } = await store.load(id);
 		if (!entries.length) return undefined;
 		const s = new Session(meta, false);
-		if (store.historyErasure) this.storedTombstones.set(s, new Set(entries.filter(e => e.erased === true).map(e => e.id)));
+		if (store.historyErasure) this.erasure.loadTombstones(s, new Set(entries.filter(e => e.erased === true).map(e => e.id)));
 		for (const e of entries) s.apply(e);
 		const interrupted = this.unfinishedTurn(s, s.branch());
 		if (interrupted) recordedSnapshot(interrupted);
@@ -1041,7 +1056,7 @@ export class Harness {
 		if (opened && !opened.interruption.signal.aborted) {
 			if (interruptedOnly) return;
 			if (actor) await this.authorizeOpeningActor(opened, actor);
-			await this.reconcilePending(opened);
+			await this.erasure.reconcilePending(opened);
 			await prepare?.(id);
 			return id;
 		}
@@ -1068,7 +1083,7 @@ export class Harness {
 		this.watchWriter(s);
 		s.reopening = true;
 		try {
-			await this.reconcilePending(s);
+			await this.erasure.reconcilePending(s);
 			await this.recoverSecrets(s);
 		}
 		catch (error) { this.sessions.delete(id); await this.closeWriter(s); throw error; }
@@ -1131,7 +1146,7 @@ export class Harness {
 		const live = this.sessions.get(id);
 		const s = live && !live.closed && !live.suspended ? live : await this.loadInto(id);
 		if (!s || !scope(s.meta.project, s.tenant ?? null)) throw failure("not_found", "Thread not found");
-		const freshness = await this.admitHistory(s);
+		const freshness = await this.erasure.admitHistory(s);
 		const rights = this.discoveryRights(s, actor, false);
 		if (!rights.includes("watch")) throw failure("not_found", "Thread not found");
 		const order = s.order.slice();
@@ -1158,7 +1173,7 @@ export class Harness {
 			throw error;
 		});
 		if (!s || s.ephemeral || s.provisional || viewer.scope && !viewer.scope(s.meta.project, s.tenant)) return;
-		await this.admitHistory(s);
+		await this.erasure.admitHistory(s);
 		const rights = this.discoveryRights(s, viewer.actor, viewer.allowJoin);
 		if (!rights.includes("watch")) return;
 		const branch = s.branch(), start = this.unfinishedTurn(s, branch);
@@ -1257,7 +1272,7 @@ export class Harness {
 
 	async forkSession(sessionId: string, entryId: string): Promise<string> {
 		const s = this.session(sessionId);
-		await this.admitHistory(s);
+		await this.erasure.admitHistory(s);
 		if (s.erasing) throw failure("busy", "Erasure is in progress");
 		// Forking at unfinished work would copy work that is still running: refused.
 		if (s.running || this.runningJobs(s).length || this.waitingRequests(s).length || this.openCalls(s).length || this.unsettledHandoffs(s).length) throw failure("busy", "Can't fork while the session has unfinished work: a running turn, a job, or a call waiting for an answer");
@@ -1381,7 +1396,7 @@ export class Harness {
 	commit(s: Session, drafts: EntryDraft[], pluginRecord = false, guard?: () => boolean | Promise<boolean>): Promise<HistoryEntry[]> {
 		// A suspended session's process has stopped: nothing more is recorded for it here.
 		const run = s.committing.then(() => {
-			const registry = this.pendingRegistry();
+			const registry = this.erasure.pendingRegistry();
 			const write = async () => guard && !await guard() ? [] : this.commitNow(s, drafts, pluginRecord);
 			return registry ? registry.exclusive(write) : write();
 		});
@@ -1666,343 +1681,17 @@ export class Harness {
 		catch (error) { s.suspended = true; throw error; }
 	}
 
-	private pendingRegistry(): PendingErasure | undefined {
-		const store = this.use<HistoryStore>("history-store");
-		return store ? store.pendingErasure : this.ephemeralErasure;
-	}
-
 	private inspectHistory<T>(id: string, options: { all?: boolean }, inspect: (entries: HistoryEntry[]) => T): T | Promise<T> {
 		const s = this.session(id);
 		const snapshot = () => {
 			this.checkScopedWork(s, "watch");
 			return inspect(options.all ? s.order.map(id => s.entries.get(id)!) : s.branch());
 		};
-		if (this.httpErasure() && !s.provisional) return this.admitHistory(s).then(snapshot);
-		this.checkPending(s);
+		if (this.erasure.httpErasure() && !s.provisional) return this.erasure.admitHistory(s).then(snapshot);
+		this.erasure.checkPending(s);
 		return snapshot();
 	}
 
-	private checkPending(s: Session): string {
-		const intents = this.pendingRegistry()?.intents().filter(intent => intent.copies.some(copy => copy.sessionId === s.id)) ?? [];
-		if (intents.some(intent => intent.copies.some(copy =>
-			copy.sessionId === s.id && (!copy.erased || s.entries.get(copy.id)?.erased !== true)))) {
-			throw Object.assign(failure("unavailable", "Session has unresolved pending erasure"), {pendingErasure:true});
-		}
-		return JSON.stringify(intents.map(intent => intent.id));
-	}
-
-	private httpErasure(): HistoryErasureRegistry | undefined { return this.use<HistoryStore>("history-store")?.historyErasure; }
-
-	private async admitHistory(s: Session): Promise<string> {
-		const registry = this.httpErasure();
-		if (!registry || s.provisional) return this.checkPending(s);
-		// Compare completed marks with the view as prepared, not a view updated during the request.
-		const view = new Map(s.entries);
-		const stored = this.storedTombstones.get(s);
-		const { plans } = await registry.read(s.id);
-		if (plans.some(p => p.copies.some(c => !c.complete || view.get(c.entryId)?.erased !== true || !stored?.has(c.entryId)))) {
-			throw Object.assign(failure("unavailable", "Session has unresolved pending erasure"), {pendingErasure:true});
-		}
-		return JSON.stringify(plans.map(plan => plan.intentId));
-	}
-
-	private async reconcilePending(s: Session): Promise<void> {
-		const remote = this.httpErasure();
-		if (remote && !s.provisional) {
-			const { plans } = await remote.read(s.id);
-			for (const plan of plans) if (plan.copies.some(c => !c.complete)) await this.completeHttpErasure(s, plan);
-			await this.admitHistory(s);
-			return;
-		}
-		const registry = this.pendingRegistry();
-		if (!registry) return;
-		for (const intent of registry.intents()) {
-			if (intent.copies.some(copy => copy.sessionId === s.id && !copy.erased)) {
-				await this.reconcileErasure(s, intent.id);
-			}
-		}
-		this.checkPending(s);
-	}
-
-	private checkProviderErasure(s: Session, provider: string): void {
-		if (this.pendingRegistry()?.intents().some(intent =>
-			intent.providers?.some(copy => copy.sessionId === s.id && copy.provider === provider && !copy.confirmed))) {
-			throw failure("unavailable", "Provider deletion is unconfirmed");
-		}
-	}
-
-	private async reconcileProviderErasure(s: Session, providerId?: string, observe?: (provider: string, reply: { pending?: string[]; outOfReach?: string[] }) => void): Promise<void> {
-		const registry = this.pendingRegistry();
-		if (!registry) return;
-		const providers = this.useAll<Provider>("provider");
-		for (const intent of registry.intents()) {
-			for (const copy of intent.providers ?? []) {
-				if (copy.sessionId !== s.id || copy.confirmed || providerId !== undefined && copy.provider !== providerId) continue;
-				const provider = providers.find(p => p.id === copy.provider);
-				if (!provider?.discardState) continue;
-				try {
-					this.checkWriter(s);
-					const entryIds = intent.copies.filter(c => c.sessionId === s.id).map(c => c.id);
-					const reply = await provider.discardState(s.id, { erase: true, entryIds });
-					if (reply) observe?.(copy.provider, reply);
-					if (reply?.pending?.length || reply?.outOfReach?.length) continue;
-					this.checkWriter(s);
-					await registry.exclusive(async () => {
-						const current = registry.intents().find(i => i.id === intent.id);
-						const mark = current?.providers?.find(m => m.sessionId === s.id && m.provider === copy.provider);
-						if (mark && current) { mark.confirmed = true; registry.keep(current); }
-					});
-				} catch (error) { this.problem("harness", `erase at ${copy.provider}`, error); }
-			}
-		}
-	}
-
-	private async reconcileErasure(s: Session, operation: string): Promise<void> {
-		const registry = this.pendingRegistry()!;
-		const store = this.use<HistoryStore>("history-store");
-		if (s.erasing || s.moving || s.outsideTools) return;
-		s.erasing = true;
-		try {
-			if (s.running) {
-				s.running.abort.abort();
-				await s.running.done;
-			}
-			if (this.runningJobs(s).length) return;
-			await s.committing;
-			await registry.exclusive(async () => {
-				const intent = registry.intents().find(i => i.id === operation);
-				if (!intent) return;
-				const unresolved = intent.copies.filter(c => c.sessionId === s.id && !c.erased);
-				if (!unresolved.length) return;
-				const existing = s.order.map(id => s.entries.get(id)!).find(e => e.kind === "erasure" &&
-					(e.data as { operation?: string })?.operation === operation);
-				if (!existing) {
-					const entryIds = unresolved.map(copy => copy.id).filter(id => s.entries.has(id));
-					if (!entryIds.length) return;
-					await this.invalidateErasedHandoffs(s, entryIds);
-					const keys = entryIds.flatMap(id => {
-						const e = s.entries.get(id)!;
-						const d = e.data as { key?: string; submittedBy?: string; delegatedBy?: string } | undefined;
-						const inputId = inputIdOf(e);
-						return e.kind === "inputAccepted" && inputId && d?.key ? [{ inputId, key: d.key, actorId: e.actorId, submittedBy: d.submittedBy ?? d.delegatedBy ?? e.actorId }] : [];
-					});
-					const inputKeys = [...new Map(keys.map(k => [k.inputId, k])).values()];
-					await this.commitNow(s, [{ kind: "erasure", writer: "harness", actorId: intent.actorId, modelVisible: false,
-						data: { operation, entryIds, ...(inputKeys.length ? { inputKeys } : {}) } }]);
-				}
-				const book = existing ?? s.order.map(id => s.entries.get(id)!).find(e => e.kind === "erasure" &&
-					(e.data as { operation?: string })?.operation === operation);
-				const recorded = new Set((book?.data as { entryIds?: string[] } | undefined)?.entryIds);
-				this.receipts.erase(s.id, recorded, [...s.entries.values()]);
-				if (!s.ephemeral) await this.write(s, () => store!.erase!(s.id, [...recorded]));
-				const kept = s.ephemeral ? [...s.entries.values()] : (await store!.load(s.id)).entries;
-				const tombstones = new Set(kept.filter(e => e.erased).map(e => e.id));
-				let confirmed = 0;
-				for (const copy of unresolved) if (recorded.has(copy.id) && tombstones.has(copy.id)) { copy.erased = true; confirmed++; }
-				registry.keep(intent);
-				s.recent.length = 0;
-				if (confirmed) this.emit(s, "entries.erased", { count: confirmed }, "harness", { actorId: intent.actorId });
-			});
-		} finally { s.erasing = false; }
-	}
-
-	private async completeHttpErasure(s: Session, plan: ErasurePlan, actorId = "harness"): Promise<void> {
-		const store = this.use<HistoryStore>("history-store")!;
-		if (s.erasing || s.moving || s.outsideTools) return;
-		s.erasing = true;
-		try {
-			if (s.running) { s.running.abort.abort(); await s.running.done; }
-			if (this.runningJobs(s).length) return;
-			await s.committing;
-			this.checkWriter(s);
-			const pending = plan.copies.filter(copy => !copy.complete).map(copy => copy.entryId);
-			if (!pending.length) return;
-			if (!s.entries.has(plan.recordId)) {
-				const entryIds = plan.copies.map(copy => copy.entryId);
-				if (entryIds.some(id => !s.entries.has(id))) throw failure("unavailable", "Erasure plan names missing history");
-				await this.invalidateErasedHandoffs(s, entryIds);
-				const keys = entryIds.flatMap(id => {
-					const e = s.entries.get(id)!;
-					const d = e.data as { key?: string; submittedBy?: string; delegatedBy?: string } | undefined;
-					const inputId = inputIdOf(e);
-					return e.kind === "inputAccepted" && inputId && d?.key ? [{ inputId, key: d.key, actorId: e.actorId, submittedBy: d.submittedBy ?? d.delegatedBy ?? e.actorId }] : [];
-				});
-				const inputKeys = [...new Map(keys.map(k => [k.inputId, k])).values()];
-				await this.commitNow(s, [{ id: plan.recordId, kind: "erasure", writer: "harness", actorId, modelVisible: false,
-					data: { operation: plan.intentId, entryIds, ...(inputKeys.length ? { inputKeys } : {}) } }]);
-			}
-			const book = s.entries.get(plan.recordId);
-			const recorded = new Set((book?.data as { entryIds?: string[] } | undefined)?.entryIds);
-			if (!book || book.erased || book.kind !== "erasure" || pending.some(id => !recorded.has(id))) throw failure("unavailable", "Erasure bookkeeping does not match the plan");
-			this.receipts.erase(s.id, recorded, [...s.entries.values()]);
-			await this.write(s, () => store.erase!(s.id, pending));
-			const tombstones = new Set((await store.load(s.id)).entries.filter(e => e.erased === true).map(e => e.id));
-			this.storedTombstones.set(s, tombstones);
-			if (pending.some(id => !tombstones.has(id))) throw failure("unavailable", "Erasure has no matching tombstones");
-			this.erasureEpoch.set(s, (this.erasureEpoch.get(s) ?? 0) + 1);
-			await store.historyErasure!.complete(s.id, plan.intentId, pending);
-			s.recent.length = 0;
-			this.emit(s, "entries.erased", { count: pending.length }, "harness", { actorId });
-		} finally { s.erasing = false; }
-	}
-
-	private async eraseHttp(s: Session, entryIds: string[], actorId: string, writer: string, store: HistoryStore, registry: HistoryErasureRegistry): Promise<ErasureReport> {
-		const requested = [...new Set(entryIds)].sort();
-		if (!requested.length) throw failure("invalid_request", "Erasure requires at least one entry");
-		let publication: Awaited<ReturnType<HistoryErasureRegistry["publish"]>>;
-		let sessions: Map<string, Session>;
-		for (;;) {
-			this.checkWriter(s);
-			const { revision } = await registry.read(s.id);
-			// Use stored rows rather than open views; another writer may have added
-			// copies, and an erasure record alone is not a verified tombstone.
-			sessions = new Map();
-			const metadata = await store.list();
-			for (const id of new Set([s.id, ...metadata.map(meta => meta.id)])) {
-				const view = await this.loadInto(id);
-				if (!view) throw failure("unavailable", "Cannot discover the full erasure scope");
-				sessions.set(id, view);
-			}
-			const targets = eraseCopies(sessions.get(s.id)!, requested, sessions);
-			this.requireAuthority(s, actorId, "erase");
-			try {
-				publication = await registry.publish(s.id, { revision, intentId: this.newId(), entryIds: requested,
-					copies: [...targets].map(([view, ids]) => ({ sessionId: view.id, recordId: this.newId(), entryIds: [...ids] })) });
-				break;
-			} catch (error) {
-				if ((error as { code?: string }).code !== "stale_revision") throw error;
-			}
-		}
-		const report: ErasureReport = { erased: [], pending: [], erasedPairs: [], pendingPairs: [], outOfReach: [] };
-		const note = (value: string) => { if (!report.outOfReach.includes(value)) report.outOfReach.push(value); };
-		const { intentId, sessionIds } = publication;
-		const readPlan = async (id: string) => {
-			const plan = (await registry.read(id)).plans.find(p => p.intentId === intentId && p.sourceSessionId === s.id);
-			if (!plan) throw failure("unavailable", "Published erasure plan is missing");
-			return plan;
-		};
-		for (const id of sessionIds) {
-			let plan = await readPlan(id);
-			// Retention can remove the history, but not its plan. Without the
-			// history we cannot verify the actor's right to see its copy IDs.
-			const view = sessions.get(id) ?? await this.loadInto(id).catch(error => {
-				if ((error as { code?: string }).code !== "unknown_session") throw error;
-				return undefined;
-			});
-			if (!view) {
-				s.interruption.signal.throwIfAborted();
-				note("copies in other sessions");
-				continue;
-			}
-			let session = this.sessions.get(id);
-			let acquired = false;
-			try {
-				if (plan.copies.some(c => !c.complete)) {
-					if (!session) {
-						await store.openForWriting(id);
-						acquired = true;
-						session = await this.loadInto(id);
-					}
-					if (session) await this.completeHttpErasure(session, plan, actorId);
-				}
-			} catch (error) {
-				const code = (error as { code?: string }).code;
-				if (code !== "held" && code !== "unknown_session") this.problem(writer, "reconcile erasure", error);
-			} finally { if (acquired) await store.close(id); }
-			s.interruption.signal.throwIfAborted();
-			plan = await readPlan(id);
-			if (id !== s.id && !this.actorRights(view, actorId).includes("watch")) { note("copies in other sessions"); continue; }
-			for (const copy of plan.copies) {
-				(copy.complete ? report.erased : report.pending).push(copy.entryId);
-				(copy.complete ? report.erasedPairs : report.pendingPairs).push({ sessionId: id, id: copy.entryId });
-			}
-			for (const provider of this.useAll<Provider>("provider")) if (provider.supports.keepsState) note(`Unconfirmed deletion at ${provider.id}`);
-		}
-		if (report.erased.length) note("Output already delivered and copies beyond the agent");
-		return report;
-	}
-
-	private async erase(s: Session, entryIds: string[], actorId: string, writer: string): Promise<ErasureReport> {
-		this.requireAuthority(s, actorId, "erase");
-		if (s.provisional) throw failure("invalid_request", "Session has not admitted its first input");
-		const store = this.use<HistoryStore>("history-store");
-		const registry = this.pendingRegistry();
-		const remote = this.httpErasure();
-		if ((!registry && !remote) || !s.ephemeral && !store?.erase) throw failure("not_supported", "This history has no shared erasure coordination");
-		if (s.running || this.runningJobs(s).length || s.erasing || s.moving) throw failure("busy", "Cannot erase during work");
-		if (remote) return this.eraseHttp(s, entryIds, actorId, writer, store!, remote);
-		if (!registry) throw failure("not_supported", "Missing local erasure coordination");
-		const sessions = new Map(this.sessions);
-		const requested = [...new Set(entryIds)].sort();
-		const operation = await registry.exclusive(async () => {
-			this.requireAuthority(s, actorId, "erase");
-			const earlier = registry.intents().find(i => i.sessionId === s.id && isDeepStrictEqual(i.targets, requested));
-			if (earlier) return earlier;
-			for (const meta of await store?.list() ?? []) {
-				if (!sessions.has(meta.id)) {
-					const other = await this.loadInto(meta.id);
-					if (other) sessions.set(meta.id, other);
-				}
-			}
-			const targets = eraseCopies(s, requested, sessions);
-			const stateful = new Set(this.useAll<Provider>("provider").filter(p => p.supports.keepsState).map(p => p.id));
-			const providers = [...targets].flatMap(([session, ids]) => {
-				// A kept-state Provider may have retained data not named in a request record.
-				const used = new Set(stateful);
-				for (const id of ids) {
-					const entry = session.entries.get(id);
-					const data = entry?.data as { model?: { provider?: string }; keepsState?: boolean } | undefined;
-					const provider = data?.model?.provider;
-					if (entry?.kind === "modelRequest" && provider && (data?.keepsState === true || stateful.has(provider))) used.add(provider);
-				}
-				return [...used].map(provider => ({ sessionId: session.id, provider, confirmed: false }));
-			});
-			const intent: ErasureIntent = { id: this.newId(), sessionId: s.id, targets: requested, actorId, providers,
-				copies: [...targets].flatMap(([session, ids]) =>
-					[...ids].map(id => ({ sessionId: session.id, id, erased: false }))) };
-			registry.keep(intent);
-			return intent;
-		});
-		const report: ErasureReport = { erased: [], pending: [], erasedPairs: [], pendingPairs: [], outOfReach: [] };
-		const add = (description: string) => { if (!report.outOfReach.includes(description)) report.outOfReach.push(description); };
-		for (const id of new Set(operation.copies.map(copy => copy.sessionId))) {
-			let session = this.sessions.get(id);
-			const replies = new Map<string, { pending?: string[]; outOfReach?: string[] }>();
-			let acquired = false;
-			try {
-				if (!session && store) {
-					await store.openForWriting(id);
-					acquired = true;
-					session = await this.loadInto(id);
-				}
-				if (session) {
-					await this.reconcileErasure(session, operation.id);
-					await this.reconcileProviderErasure(session, undefined, (provider, reply) => replies.set(provider, reply));
-				}
-			} catch (error) {
-				if ((error as { code?: string }).code !== "held") this.problem(writer, "reconcile erasure", error);
-			} finally { if (acquired) await store!.close(id); }
-			s.interruption.signal.throwIfAborted();
-			const view = session ?? sessions.get(id) ?? await this.loadInto(id).catch(() => undefined);
-			const marks = registry.intents().find(intent => intent.id === operation.id)!.copies.filter(copy => copy.sessionId === id);
-			const visible = id === s.id || !!view && this.actorRights(view, actorId).includes("watch");
-			for (const mark of marks) {
-				if (!visible) { add("copies in other sessions"); continue; }
-				(mark.erased ? report.erased : report.pending).push(mark.id);
-				(mark.erased ? report.erasedPairs : report.pendingPairs).push({ sessionId: id, id: mark.id });
-			}
-			for (const remote of registry.intents().find(intent => intent.id === operation.id)?.providers ?? []) {
-				if (remote.sessionId !== id || remote.confirmed) continue;
-				if (!visible) { add("copies in other sessions"); continue; }
-				const reply = replies.get(remote.provider);
-				report.pending.push(...(reply?.pending ?? []));
-				for (const description of reply?.outOfReach ?? []) add(description);
-				add(`Unconfirmed deletion at ${remote.provider}`);
-			}
-		}
-		if (report.erased.length) add("Output already delivered and copies beyond the agent");
-		return { ...report, pending: [...new Set(report.pending)] };
-	}
 
 	// ---------- authority ----------
 
@@ -2144,7 +1833,7 @@ export class Harness {
 
 	private async inputWithin(sessionId: string, options: InputOptions): Promise<InputReceipt & { handled?: boolean; output?: string }> {
 		const s = this.session(sessionId);
-		await this.reconcilePending(s);
+		await this.erasure.reconcilePending(s);
 		this.checkWriter(s);
 		if (s.erasing) throw failure("busy", "Erasure is in progress");
 		const right = options.when === "propose" ? "propose" : "input";
@@ -2232,7 +1921,7 @@ export class Harness {
 			await this.providerFor(s)?.refreshModels?.();
 			if (!this.modelAccess(s)) throw Object.assign(new Error("The selected model is not offered"), { code: "invalid_request" });
 		}
-		await this.admitHistory(s);
+		await this.erasure.admitHistory(s);
 		if (q.startedBy.kind !== "job" && !q.releasedBy) {
 			const right = q.when === "propose" ? "propose" : "input";
 			for (const actor of inputActors(q)) this.requireAuthority(s, actor, right);
@@ -2413,10 +2102,10 @@ export class Harness {
 				const env = await this.environmentFor(s);
 				if (env?.save && (env.keepsPoints?.(this.projectOf(s)) ?? env.points)) {
 					withAuthority(() => this.checkScopedWork(s, "watch"));
-					await this.admitHistory(s);
+					await this.erasure.admitHistory(s);
 					point = await env.save();
 				}
-				await this.admitHistory(s);
+				await this.erasure.admitHistory(s);
 				contributions = await withAuthority(() => this.hooks.collect("turn.before", { sessionId: s.id, turnId, input: queued.content }));
 			}
 		} catch (error) { failure = String(error); }
@@ -2707,7 +2396,7 @@ export class Harness {
 			return span ? span.run(work) : work();
 		};
 		const withAuthority = <T>(fn: () => T): T => this.turnAuthority.run({ sessionId: s.id, actors: state.actors, jobs: state.jobs, state }, fn);
-		const checkRead = async () => { await this.admitHistory(s); withAuthority(() => this.checkScopedWork(s, "watch")); };
+		const checkRead = async () => { await this.erasure.admitHistory(s); withAuthority(() => this.checkScopedWork(s, "watch")); };
 		return {
 			newId: async () => this.newId(),
 			callActor: () => state.actors.values().next().value ?? this.actorForJob(s, state.jobs),
@@ -2882,10 +2571,10 @@ export class Harness {
 			const work = () => this.turnAuthority.run({ sessionId: s.id, actors: state.actors, jobs: state.jobs, state }, async () => {
 				options.signal.throwIfAborted();
 				if (state.tenantLimit || await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
-				const freshness = await this.admitHistory(s);
-				await this.reconcileProviderErasure(s, model.model.provider);
-				this.checkProviderErasure(s, model.model.provider);
-				if (this.httpErasure() && freshness !== "[]" && model.supports.keepsState !== false) {
+				const freshness = await this.erasure.admitHistory(s);
+				await this.erasure.reconcileProviderErasure(s, model.model.provider);
+				this.erasure.checkProviderErasure(s, model.model.provider);
+				if (this.erasure.httpErasure() && freshness !== "[]" && model.supports.keepsState !== false) {
 					throw failure("unavailable", "The history registry cannot verify deletion of kept Provider state");
 				}
 				const attempt = `model:${stepId}`;
@@ -2900,11 +2589,11 @@ export class Harness {
 				const safeToRepeat = !!turnId && (model.supports.safeToRepeat === true || (model.supports.keepsState === false && model.supports.runsTools === false));
 				let intentId: string | undefined;
 				const finalCheck = async () => {
-					if (await this.admitHistory(s) !== freshness) throw failure("unavailable", "Erasure changed the model view");
+					if (await this.erasure.admitHistory(s) !== freshness) throw failure("unavailable", "Erasure changed the model view");
 					options.signal.throwIfAborted();
 					authorize?.();
 					this.checkScopedWork(s, "watch");
-					this.checkProviderErasure(s, model.model.provider);
+					this.erasure.checkProviderErasure(s, model.model.provider);
 					this.checkWriter(s);
 				};
 				const check = async () => {
@@ -2914,7 +2603,7 @@ export class Harness {
 				};
 				const handoff = async (send: () => void) => {
 					const publish = async () => { await finalCheck(); send(); };
-					const registry = this.pendingRegistry();
+					const registry = this.erasure.pendingRegistry();
 					if (registry) await registry.exclusive(publish); else await publish();
 				};
 				const prepareDispatch = async () => {
@@ -3232,12 +2921,12 @@ export class Harness {
 		};
 		const deadline = this.now() + source.resultTimeoutMs;
 		if (!Number.isSafeInteger(deadline) || !eligible()) return refused();
-		await this.admitHistory(s);
+		await this.erasure.admitHistory(s);
 		if (!eligible()) return refused();
 		const request = { sessionId: s.id, turnId, deadline, call };
 		if (!(await this.gateHandoff(s, connection, request))) return refused();
 		return this.admit(s, async () => {
-			const freshness = await this.admitHistory(s);
+			const freshness = await this.erasure.admitHistory(s);
 			const previous = this.interfaceRecords(s).has(call.id);
 			if (!eligible() || previous || deadline <= this.now()) return refused();
 			this.checkWriter(s);
@@ -3251,7 +2940,7 @@ export class Harness {
 						authorizers: [...state.actors].map(actorId => ({ sessionId: s.id, actorId })), rights: this.workRights(s, state.actors, state.jobs) } },
 				{ ...scope, kind: INTERFACE_HANDOFF, writer: "harness", modelVisible: false, sources: [startId], data: { ...scope, ...data } },
 			], false, () => eligible() && deadline > this.now() && data.rights.every(r => this.executorRights(s, connection).includes(r)) &&
-				(!this.pendingRegistry() || this.checkPending(s) === freshness));
+				(!this.erasure.pendingRegistry() || this.erasure.checkPending(s) === freshness));
 			if (!committed.length) return refused();
 			const pinned = AsyncLocalStorage.snapshot();
 			const live: LiveHandoff = { connection, released: false, check: () => pinned(() => eligible() && deadline > this.now()),
@@ -3262,7 +2951,7 @@ export class Harness {
 			state.dispatched.add(call.id);
 			const item = this.interfaceRecords(s).get(call.id)!;
 			let fresh = false;
-			try { fresh = (await this.admitHistory(s)) === freshness; } catch { /* fail closed */ }
+			try { fresh = (await this.erasure.admitHistory(s)) === freshness; } catch { /* fail closed */ }
 			if (!fresh || !live.check()) {
 				// No executable request left the Harness.
 				await this.settleInterfaceCall(s, item);
@@ -3300,9 +2989,9 @@ export class Harness {
 			if (!item || item.result || !live || !this.validHandoff(s, item)) return false;
 			const { data, dispatch, checkpoint } = item;
 			const request = { sessionId: s.id, turnId: checkpoint!.turnId!, deadline: data!.deadline, call: dispatch!.call };
-			const freshness = await this.admitHistory(s);
+			const freshness = await this.erasure.admitHistory(s);
 			if (!live.check() || !(await this.gateHandoff(s, connection, request))) return false;
-			if (await this.admitHistory(s) !== freshness) return false;
+			if (await this.erasure.admitHistory(s) !== freshness) return false;
 			this.checkWriter(s);
 			if (!live.check()) return false;
 			live.deliver(request);
@@ -3382,7 +3071,7 @@ export class Harness {
 				intersectRights(data.rights, this.executorRights(s, connection)).includes("watch") &&
 				intersectRights(data.rights, this.executorRights(s, connection)).includes("tools");
 			if (!authorized()) return refused;
-			try { await this.admitHistory(s); } catch { return refused; }
+			try { await this.erasure.admitHistory(s); } catch { return refused; }
 			if (!authorized()) return refused;
 			if (data.deadline <= this.now()) {
 				if (!item.result) { await this.settleInterfaceCall(s, item); this.maybeContinueOpenCalls(s); }
@@ -3436,7 +3125,7 @@ export class Harness {
 			const written = erasure ? await this.commitNow(s, [draft]) : await this.commit(s, [draft], false, async () => {
 				if (this.interfaceRecords(s).get(id)?.result) return false;
 				if (!submitted) return true;
-				try { await this.admitHistory(s); } catch { return false; }
+				try { await this.erasure.admitHistory(s); } catch { return false; }
 				return submitted.authorized();
 			});
 			if (!written.length) return;
@@ -3552,7 +3241,7 @@ export class Harness {
 		this.checkWriter(s);
 		if (signal.aborted) return { callId: call.id, status: "notStarted", content: [text("Cancelled before it ran")] };
 		if (wait && !await this.approvals.approverStillAllows(s, wait)) return denied();
-		await this.admitHistory(s);
+		await this.erasure.admitHistory(s);
 		this.checkWriter(s);
 		if (wait && !consent(start)) return denied();
 		if (signal.aborted || !eligible(this.findTool(s, call.name))) return refused();
@@ -3584,7 +3273,7 @@ export class Harness {
 		let live = true;
 		const check = () => {
 			if (!live) throw Object.assign(new Error("There is no live parent"), { code: "invalid_request" });
-			this.checkPending(s);
+			this.erasure.checkPending(s);
 			if (signal.aborted) throw Object.assign(new Error("The parent was cancelled"), { code: "cancelled" });
 			if (!allowed() || s.erasing || s.suspended) throw Object.assign(new Error("The parent cannot run tools"), { code: "invalid_request" });
 			this.checkWriter(s);
@@ -3871,7 +3560,7 @@ export class Harness {
 
 	/** A tool call a UI or plugin starts. The same checks apply. */
 	private async callTool(s: Session, call: ToolCall): Promise<ToolResult> {
-		await this.reconcilePending(s);
+		await this.erasure.reconcilePending(s);
 		if (s.provisional) throw failure("invalid_request", "Session has not admitted its first input");
 		if (s.closed) throw failure("not_open", "Session is closed");
 		if (s.suspended) throw failure("lost", "Session has lost its writer");
@@ -4161,7 +3850,7 @@ export class Harness {
 		const gateSignal = this.gateSignal.getStore();
 		signal = signal && gateSignal ? AbortSignal.any([signal, gateSignal]) : signal ?? gateSignal;
 		signal?.throwIfAborted();
-		await this.admitHistory(s);
+		await this.erasure.admitHistory(s);
 		if (draft.whenTimeLimit === "leaveOpen" && !this.questionsOutlastTurns) throw Object.assign(new Error("Questions cannot outlast the turn"), { code: "not_supported" });
 		const call = this.toolWork.getStore();
 		if (call && call.id === draft.toolCallId) draft = { ...draft, boundCall: { name: call.name, input: call.input } };
@@ -4383,7 +4072,7 @@ export class Harness {
 	}
 
 	private async submitAnswer(s: Session, answer: Answer, handle?: object): Promise<{ accepted: boolean; reason?: string }> {
-		await this.admitHistory(s);
+		await this.erasure.admitHistory(s);
 		if (resourceBytes(answer) + 2048 > this.reservations.limits.settlementBytes) throw failure("result_too_large", "Answer exceeds reserved capacity");
 		const find = () => s.requests.get(answer.requestId)?.request ?? this.waitingRequests(s).find(r => r.id === answer.requestId);
 		const may = (request: InputRequest) => this.mayAnswer(s, request, answer.actorId) &&
@@ -4430,7 +4119,7 @@ export class Harness {
 	}
 
 	private startJob(s: Session, options: JobStart, plugin: string): JobHandle {
-		this.checkPending(s);
+		this.erasure.checkPending(s);
 		if (s.provisional) throw failure("invalid_request", "Session has not admitted its first input");
 		if (s.moving || s.closing || s.closed || s.suspended || s.erasing) throw failure("invalid_request", "Session cannot start jobs right now");
 		const current = [...this.workActors(s), ...(options.actors ?? [])];
@@ -4632,7 +4321,7 @@ export class Harness {
 			startsTurnsUnasked: this.jobReportsStartTurns ? "when a job reports back" : "never",
 			cancellingTurnCancelsJobs: false,
 			pluginsDuringSession: false,
-			erasure: (!!this.pendingRegistry() || !!this.httpErasure()) && (!store || !!store.erase),
+			erasure: (!!this.erasure.pendingRegistry() || !!this.erasure.httpErasure()) && (!store || !!store.erase),
 			inputKeys: true,
 			resourceReservations: this.reservations.declaration(),
 			telemetry: 1,
@@ -4893,61 +4582,6 @@ export async function untilAborted<T>(signal: AbortSignal, work: () => Promise<T
 			return work();
 		}).then(resolve, reject).finally(() => subscription[Symbol.dispose]());
 	});
-}
-
-function eraseCopies(origin: Session, ids: string[], sessions: Map<string, Session>): Map<Session, Set<string>> {
-	const targets = new Map<Session, Set<string>>();
-	const authority = (kind: string) => ["actorJoined", "actorLeft", "limit", "tenant", "grant", "authority.grant", "authority.revoke", "position", "erasure", "jobCleanupUnconfirmed"].includes(kind);
-	const add = (session: Session, id: string) => {
-		const e = session.entries.get(id);
-		if (!e || targets.get(session)?.has(id)) return false;
-		if (authority(e.kind) && !session.copied.has(e.id)) throw Object.assign(new Error("Records of authority cannot be erased"), { code: "forbidden" });
-		if (!targets.has(session)) targets.set(session, new Set());
-		targets.get(session)!.add(id);
-		return true;
-	};
-	for (const id of ids) { if (!origin.entries.has(id)) throw Object.assign(new Error("Unknown erasure target"), { code: "not_found" }); add(origin, id); }
-	const all = [...sessions.values()];
-	for (let grew = true; grew;) {
-		grew = false;
-		for (const session of all) {
-			const targetsHere = targets.get(session);
-			const entries = [...session.entries.values()];
-			const erased = entries.filter((e) => targetsHere?.has(e.id));
-			const handoffs = handoffRecords(entries);
-			const calls = new Set(erased.flatMap((e) => [
-				...(e.kind !== "toolResult" && e.toolCallId ? [e.toolCallId] : []),
-				...(e.message?.role === "assistant" ? e.message.content.filter(isToolCall).map((c) => c.id) : []),
-			]));
-			for (const e of entries) {
-				if (targetsHere?.has(e.id) || authority(e.kind)) continue;
-				const forkedFrom = session.copied.has(e.id) ? session.meta.forkedFrom : undefined;
-				const links = forkedFrom ? e.sources?.some((id) => targets.get(sessions.get(forkedFrom.sessionId)!)?.has(id)) : e.sources?.some((id) => targetsHere?.has(id));
-				const callCopy = e.toolCallId && calls.has(e.toolCallId) ||
-					e.kind === "response" && e.message?.role === "assistant" &&
-					e.message.content.some(p => isToolCall(p) && calls.has(p.id) && handoffs.has(p.id));
-				const turnResult = e.kind === "turnEnd" && erased.some((x) => x.turnId === e.turnId && ["response", "toolResult"].includes(x.kind));
-				// A completed turn with an erased outcome must not look like an interrupted turn on reopen.
-				const endedTurnStart = e.kind === "turnStart" && erased.some((x) => x.kind === "turnEnd" && x.turnId === e.turnId);
-				const jobId = e.jobId ?? (e.data as { value?: { jobId?: string } } | undefined)?.value?.jobId;
-				const jobCopy = jobId && erased.some((x) => x.jobId === jobId && ["jobStarted", "jobEnded", "harness.jobStarted", "harness.jobEnded"].includes(x.kind));
-				const startedByCall = (e.kind === "harness.jobStarted" || e.kind === "jobStarted") && !e.toolCallId && erased.some((x) => x.turnId === e.turnId && x.kind === "toolStarted");
-				// Older or foreign responses need not give sources. Earlier branch entries may all have been in the request.
-				let ancestry = false;
-				if (e.kind === "response" && !e.sources && erased.length) {
-					const seen = new Set<string>();
-					for (let id = e.parentId; id && !seen.has(id); id = session.entries.get(id)?.parentId ?? null) {
-						if (targetsHere?.has(id)) { ancestry = true; break; }
-						seen.add(id);
-					}
-				}
-				const inputId = e.inputId;
-				const takingInput = inputId && erased.some((x) => x.inputId === inputId);
-				if (links || callCopy || turnResult || endedTurnStart || jobCopy || startedByCall || ancestry || takingInput) grew = add(session, e.id) || grew;
-			}
-		}
-	}
-	return targets;
 }
 
 const turnLimit = (limit: string) => Object.assign(new Error(`Turn limit: ${limit}`), { code: "turn_limit", limit });
