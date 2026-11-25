@@ -47,8 +47,8 @@ function checkout(t) {
     index(...rows) {
       this.track(adrIndex, ["| ADR | Decision | Status | Rule |", "| --- | --- | --- | --- |", ...rows].join("\n"));
     },
-    check(failures = []) {
-      const result = spawnSync(process.execPath, [checker, "--root", cwd], { cwd, encoding: "utf8" });
+    check(failures = [], timeout = 0) {
+      const result = spawnSync(process.execPath, [checker, "--root", cwd], { cwd, encoding: "utf8", timeout });
       const diagnostics = result.stderr.trim().split("\n").filter(Boolean);
       assert.equal(result.status, Number(failures.length > 0), result.stderr);
       assert.match(result.stdout, new RegExp(`Failures: ${failures.length}\\.$`, "m"));
@@ -334,6 +334,13 @@ test("a deeply nested package.json value does not stop the Node pin check", (t) 
   const deep = "[".repeat(10000) + "0" + "]".repeat(10000);
   repo.write(node, `{\n  "version": "0.2.0",\n  "metadata": ${deep}\n}\n`);
   repo.check([`${node}:2: Package version`]);
+});
+
+test("deeply nested objects after a stale Node version are read in one pass", (t) => {
+  const repo = checkout(t);
+  const deep = '{"k": '.repeat(20000) + "0" + "}".repeat(20000);
+  repo.write(node, `{\n  "version": "0.2.0",\n  "metadata": ${deep}\n}\n`);
+  repo.check([`${node}:2: Package version`], 10_000);
 });
 
 test("Python pins are read from dependency arrays, not from other project strings", (t) => {

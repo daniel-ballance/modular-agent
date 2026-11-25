@@ -197,6 +197,42 @@ function checkCargo(file, manifest, version) {
   }
 }
 
+// JSON.parse has no positions, so one pass over the text it accepted records the line of each
+// object key by its path. JSON.parse decodes each key, so "\/" and "\u002f" match "/", and the last
+// of duplicate keys wins, as in JSON.parse. Array elements hold null in the path. Pins are at most two
+// keys deep, so only those paths are kept; a deeper one would cost its whole path for each key.
+function keyLines(text) {
+  const lines = new Map();
+  const path = [];
+  const inObject = [];
+  let line = 1;
+  let expectKey = false;
+  for (let at = 0; at < text.length; at++) {
+    const char = text[at];
+    if (char === "\n") line++;
+    else if (char === "{" || char === "[") {
+      inObject.push(char === "{");
+      path.push(null);
+      expectKey = char === "{";
+    } else if (char === "}" || char === "]") {
+      inObject.pop();
+      path.pop();
+      expectKey = false;
+    } else if (char === ",") expectKey = inObject.at(-1) === true;
+    else if (char === '"') {
+      let end = at + 1;
+      while (text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
+      if (expectKey && path.length <= 2) {
+        path[path.length - 1] = JSON.parse(text.slice(at, end + 1));
+        lines.set(JSON.stringify(path), line);
+      }
+      expectKey = false;
+      at = end;
+    }
+  }
+  return lines;
+}
+
 function checkNodePackage(file, text, version) {
   let pkg;
   try {
@@ -205,36 +241,8 @@ function checkNodePackage(file, text, version) {
     fail(file, 1, "Invalid package JSON", "Restore a valid package manifest");
     return;
   }
-  // An escaped key such as "\u005f..." can spell the marker without the text containing it.
-  // A loop, not recursion: valid JSON can nest deeper than the call stack.
-  const keys = [];
-  for (const pending = [pkg]; pending.length > 0; ) {
-    const value = pending.pop();
-    if (value === null || typeof value !== "object") continue;
-    for (const [key, child] of Object.entries(value)) {
-      keys.push(key);
-      pending.push(child);
-    }
-  }
-  let marker = "_docs_state_probe_";
-  while (text.includes(marker) || keys.some((key) => key.includes(marker))) marker += "_";
-  // JSON.parse has no positions, and a key has many spellings ("\/" or "\u002f" for "/"). Mark the
-  // text after each quote and reparse: a quote that opens this path's key renames only that key.
-  // JSON.parse keeps the last of duplicate keys, so the last such quote opens the effective one.
-  const probe = (offset) => {
-    try {
-      return JSON.parse(text.slice(0, offset) + marker + text.slice(offset));
-    } catch {
-      return undefined;
-    }
-  };
-  const lineOf = (path) => {
-    const markedPath = [...path.slice(0, -1), marker + path.at(-1)];
-    for (const quote of [...text.matchAll(/"/g)].reverse()) {
-      if (atPath(probe(quote.index + 1), markedPath) !== undefined) return linesOf(text.slice(0, quote.index)).length;
-    }
-    return 1;
-  };
+  const lines = keyLines(text);
+  const lineOf = (path) => lines.get(JSON.stringify(path)) ?? 1;
   const check = (path, value) => {
     if (value === version) return;
     const field = path.length === 1 ? "Package version" : `Dependency ${path[1]}`;
