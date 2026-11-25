@@ -433,7 +433,7 @@ A build serving the conformance plugin MUST document its command and support the
 
 - **2026-11-22.** Agree to per-operation trace context in the handshake. Add the optional telemetry declaration to the ACP projection used by `host/declaration`.
 
-- **Proposed production rules.** Hosted callbacks resolve parent IDs and ownership within their connection. Reservation refusal uses `busy` before a new operation or `turn_limit` with `capacity` at the model boundary. Raw plugin reads enforce pending erasure.
+- **Accepted 2026-11-21 ([ADR 0030](../adr/0030-production-gaps.md)).** Hosted callbacks resolve parent IDs and ownership within their connection. Reservation refusal uses `busy` before a new operation or `turn_limit` with `capacity` at the model boundary. Raw plugin reads enforce pending erasure.
 
 - **Edition 4** ([ADR 0023](../adr/0023-edition-4-draft.md), accepted by [ADR 0027](../adr/0027-sdk-0-1-and-edition-4.md)). Still `/1`: every addition is an optional method that an edition 3 peer answers with the method-not-found or `not_supported` error. `host/tools/list` and `host/tools/call` let a tool source in another process make nested calls (the standard configuration's code tool could not be served over the wire). `env/list` and `host/env/list` list a directory (its `find` and `list` tools had to shell out). A cancelled Provider request sends no `provider.response`, and `outOfReach` items are for people (both guessed by the Claude sidecar). The fixture gains the optional tool `nest`.
 

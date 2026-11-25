@@ -68,6 +68,6 @@ Each entry of `MODULAR_AGENT_PLUGINS` is either the stdio form `{ command, env?,
 
 - **2026-11-22.** Carry the binding's optional trace fields per message, not as connection context.
 
-- **Proposed production rules.** Connection-local plugin instances, authenticated host scope for state and projects, and configuration of represented ACP actors.
+- **Accepted 2026-11-21 ([ADR 0030](../adr/0030-production-gaps.md)).** Connection-local plugin instances, authenticated host scope for state and projects, and configuration of represented ACP actors.
 
 - **New with [ADR 0028](../adr/0028-websocket-transport.md).** No method or shape changed; stdio builds are unaffected.

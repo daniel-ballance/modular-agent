@@ -448,7 +448,7 @@ The [conformance kit](../../conformance/acp/README.md) exercises this mode. See 
 
 - **2026-11-22.** Allow optional W3C context in work request metadata in both versions. Add `telemetry: 1` to the declaration; keep stored context out of history views.
 
-- **Proposed production rules.** Stdio scope and an optional rights ceiling, connection-local configured representation, and scope checks on attached operations and delivery. Declare reservation ceilings and report capacity refusals without an admission receipt. Erasure reports distinguish pending from confirmed deletion.
+- **Accepted 2026-11-21 ([ADR 0030](../adr/0030-production-gaps.md)).** Stdio scope and an optional rights ceiling, connection-local configured representation, and scope checks on attached operations and delivery. Declare reservation ceilings and report capacity refusals without an admission receipt. Erasure reports distinguish pending from confirmed deletion.
 
 - **Edition 4** ([ADR 0023](../adr/0023-edition-4-draft.md), accepted by [ADR 0027](../adr/0027-sdk-0-1-and-edition-4.md)). Both versions keep their numbers. The optional declaration key `nestedToolCalls`, the fixture tool `nest` for agents that declare it, and `parentToolCallId` on a nested call's first update.
 

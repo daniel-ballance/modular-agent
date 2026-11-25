@@ -442,7 +442,7 @@ While an intent is unresolved, the Harness MUST block project work and keep othe
 
 - **2026-11-22.** Add optional Harness trace context on turn start and a private segment checkpoint for recovery. Exclude both from fork copies and model views.
 
-- **Proposed production rules.** `capacity` uses the existing `limit` outcome. Erasure records preserve key reservations but do not prove deletion.
+- **Accepted 2026-11-21 ([ADR 0030](../adr/0030-production-gaps.md)).** `capacity` uses the existing `limit` outcome. Erasure records preserve key reservations but do not prove deletion.
 
 - **2026-11-21, after the SDK's fifth build round.** `toolOutput` may carry the progress as reported, `content`, beside its text `chunk`, so a tool's image progress is not reduced to text. Additive; a reader that knows only `chunk` is unaffected (Rust SDK).
 
