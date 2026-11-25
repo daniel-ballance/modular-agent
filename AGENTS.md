@@ -14,7 +14,7 @@ Open work lives only in GitHub Issues. Read `gh issue list` before you start. Ev
 
 - Work in parallel only on files that no open pull request changes. If yours overlap one, wait for it to land or stack on it.
 - `scripts/check.sh` and `scripts/stress.sh` wait for a free check slot on the machine by themselves. Leave `MA_CHECK_SLOTS` unset. Stop a run with `systemctl --user stop UNIT`.
-- Delegates keep scratch and worktrees under `~/.cache/ma-std-tmp/`, not `/tmp`, and remove them before they report. Never run tests under `git rebase -x`, `git bisect run` or anything else that exports `GIT_DIR`.
+- Delegates keep scratch and worktrees in their own subfolder of `~/.cache/ma-std-tmp/`, not `/tmp`, and delete only that subfolder before they report. Never delete the shared folder, `check-slot.sh` or `slots/`. Never run tests under `git rebase -x`, `git bisect run` or anything else that exports `GIT_DIR`.
 - A gap, finding or follow-up you find becomes an issue, with the `finding`, `layer:` and `lang:` labels that apply. It never becomes a README section, a TODO comment or a chat note.
 - A decision that outlives your session goes into an issue comment, an ADR or the document it changes.
 - Move the issue's Status on the GitHub Project: In progress when its branch exists, In review when its pull request is open.

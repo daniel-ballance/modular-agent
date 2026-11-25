@@ -129,6 +129,9 @@ test("MA_CHECK_SLOTS with leading zeros is read as decimal", (t) => {
   const ten = box.run("take_check_slots 10", { MA_CHECK_SLOTS: "010" });
   assert.equal(ten.status, 0, ten.stderr);
   assert.match(ten.stderr, /took slot 1 2 3 4 5 6 7 8 9 10 of 10/);
+  const padded = box.run("take_check_slots 8", { MA_CHECK_SLOTS: "00000000000000000008" });
+  assert.equal(padded.status, 0, padded.stderr);
+  assert.match(padded.stderr, /took slot 1 2 3 4 5 6 7 8 of 8/);
 });
 
 test("a process left behind after drop_check_slots does not keep the slot", async (t) => {
@@ -181,6 +184,16 @@ test("a handed-over MA_CHECK_SLOT_FD must name an open descriptor", (t) => {
     assert.equal(result.status, 2, `MA_CHECK_SLOT_FD=${fd}: ${result.stderr}`);
     assert.match(result.stderr, /MA_CHECK_SLOT_FD must be the number of an open descriptor on a slot file/);
   }
+});
+
+test("a handed-over MA_CHECK_SLOT_FD must hold the lock on its slot file", (t) => {
+  const box = machine(t, 1);
+  const open = String.raw`dir="$HOME/.cache/ma-std-tmp/slots"; mkdir -p "$dir"; exec 7>"$dir/slot-2.lock"`;
+  const unlocked = box.run(`${open}; take_check_slots 1`, { MA_CHECK_SLOT_HELD: "1", MA_CHECK_SLOT_FD: "7" });
+  assert.equal(unlocked.status, 2, unlocked.stderr);
+  assert.match(unlocked.stderr, /MA_CHECK_SLOT_FD 7 is open on .*slot-2\.lock, but no process holds its lock/);
+  const locked = box.run(`${open}; flock -n 7 || exit 9; take_check_slots 1`, { MA_CHECK_SLOT_HELD: "1", MA_CHECK_SLOT_FD: "7" });
+  assert.equal(locked.status, 0, locked.stderr);
 });
 
 test("check.sh waits for a slot before its first step", async (t) => {

@@ -9,20 +9,30 @@
 check_slot_fds=()
 
 check_slot_number() { # value max: print value as a decimal, or fail if it is not one from 0 to max
-  [[ $1 =~ ^[0-9]{1,9}$ ]] && (( 10#$1 <= $2 )) && echo $((10#$1))
+  [[ $1 =~ ^0*([0-9]{1,9})$ ]] && (( 10#${BASH_REMATCH[1]} <= $2 )) && echo $((10#${BASH_REMATCH[1]}))
 }
 
-check_slot_file() { # fd count dir: succeed if fd is open on one of the first count slot files
+check_slot_file() { # fd count dir: print the slot file among the first count that fd is open on
   local i
   for ((i = 1; i <= $2; i++)); do
-    [ "/dev/fd/$1" -ef "$3/slot-$i.lock" ] && return 0
+    [ "/dev/fd/$1" -ef "$3/slot-$i.lock" ] && { echo "$3/slot-$i.lock"; return 0; }
   done
   return 1
 }
 
+check_slot_locked() { # file: succeed if some process holds the lock on file
+  local probe
+  exec {probe}<"$1" || return 1
+  if flock -n "$probe"; then
+    exec {probe}<&-
+    return 1
+  fi
+  exec {probe}<&-
+}
+
 take_check_slots() { # count: wait until this many slots are free, then hold them
   local want=$1 slots dir="$HOME/.cache/ma-std-tmp/slots"
-  local i fd started=$SECONDS waiting=false
+  local i fd file started=$SECONDS waiting=false
   local -a taken fds
   if ! slots=$(check_slot_number "${MA_CHECK_SLOTS:-3}" 64); then
     echo "check-slot: MA_CHECK_SLOTS must be a whole number from 0 to 64, not '$MA_CHECK_SLOTS'" >&2
@@ -36,8 +46,12 @@ take_check_slots() { # count: wait until this many slots are free, then hold the
       return 2
     fi
     if [ -n "${MA_CHECK_SLOT_FD:-}" ]; then
-      if ! fd=$(check_slot_number "$MA_CHECK_SLOT_FD" 999999999) || ! check_slot_file "$fd" 64 "$dir"; then
+      if ! fd=$(check_slot_number "$MA_CHECK_SLOT_FD" 999999999) || ! file=$(check_slot_file "$fd" 64 "$dir"); then
         echo "check-slot: MA_CHECK_SLOT_FD must be the number of an open descriptor on a slot file in $dir, not '$MA_CHECK_SLOT_FD'" >&2
+        return 2
+      fi
+      if ! check_slot_locked "$file"; then
+        echo "check-slot: MA_CHECK_SLOT_FD $fd is open on $file, but no process holds its lock" >&2
         return 2
       fi
       check_slot_fds+=("$fd")
