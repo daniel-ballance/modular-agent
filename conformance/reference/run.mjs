@@ -483,6 +483,19 @@ const checks = [
     },
   },
   {
+    name: "secret-answer-tty",
+    about: "In a pseudo-terminal, a secret answer is not echoed, is kept only in auth.json, and echo is restored afterwards.",
+    script: [
+      codemode("print('secret_result=' + tools.test_ask_secret(question='Deploy key?', credential='deploy'))"),
+      { text: "SECRET_TURN_DONE" },
+      { text: "ECHO_PROBE_DONE" },
+    ],
+    async run(command, invoke, skip, t) {
+      const { checkSecretAnswerTty } = await import("./secret-answer-tty.mjs");
+      await checkSecretAnswerTty(command, invoke, skip, t, environment(t));
+    },
+  },
+  {
     name: "version",
     about: "ma --version names the implementation's language.",
     script: [],
