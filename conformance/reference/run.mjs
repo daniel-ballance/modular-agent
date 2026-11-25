@@ -8,7 +8,7 @@
 //   node run.mjs [--only ...] --all                (every built agent; MODULAR_AGENT_REF_REQUIRE as for fixtures)
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -404,8 +404,8 @@ const checks = [
   },
   {
     name: "sessions",
-    about: "ma sessions prints ID and canonical project per line, most recently active first; --all adds other projects; none prints nothing.",
-    script: [{ text: "one" }, { text: "two" }, { text: "three" }, { text: "four" }],
+    about: "ma sessions prints ID and canonical project per line, most recently active first; --all adds other projects; none prints nothing; --project follows a symlink before '..'.",
+    script: [{ text: "one" }, { text: "two" }, { text: "three" }, { text: "four" }, { text: "five" }],
     async run(command, invoke, skip, t) {
       const other = join(t.dir, "other");
       mkdirSync(other);
@@ -432,6 +432,21 @@ const checks = [
       assert.equal(await session(["--session", first, "-p", "fourth"]), first, "--session reopens the first session");
       await listing(["sessions"], `${first}  ${project}\n${third}  ${project}\n`);
       await listing(["sessions", "--all"], `${first}  ${project}\n${third}  ${project}\n${elsewhere}  ${otherProject}\n`);
+      // b/alias is a symlink to a/sub, so the operating system takes b/alias/.. to a, not b.
+      mkdirSync(join(t.project, "a", "sub"), { recursive: true });
+      mkdirSync(join(t.project, "b"));
+      symlinkSync(join(t.project, "a", "sub"), join(t.project, "b", "alias"));
+      const inA = await session(["--project", "a", "-p", "fifth"]);
+      await listing(["sessions", "--project", "b/alias/.."], `${inA}  ${realpathSync(join(t.project, "a"))}\n`);
+    },
+  },
+  {
+    name: "sessions-service",
+    about: "Over the history service, ma sessions orders by the last stored entry's time, even when an older entry has a later time, then by ID; ma -c reopens the top session.",
+    script: [{ text: "one" }, { text: "two" }, { text: "three" }, { text: "four" }, { text: "five" }],
+    async run(command, invoke, skip, t) {
+      const { checkSessionsService } = await import("./sessions-service.mjs");
+      await checkSessionsService(command, invoke, skip, t);
     },
   },
   {
