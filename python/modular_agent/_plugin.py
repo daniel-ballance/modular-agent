@@ -492,6 +492,9 @@ class Plugin:
             *(f"provider:{n}" for n in registrar._providers),
             *(["runtime"] if registrar._runtime is not None else []),
             *(["working-environment"] if registrar._environment is not None else []),
+            *(["history"] if registrar._history_store is not None else []),
+            *(["credentials"] if registrar._credential_store is not None else []),
+            *(["configuration"] if registrar._configuration is not None else []),
         }
         if len(set(self.replaces)) != len(self.replaces) or set(self.replaces) - items:
             raise AgentError(ErrorCode.INVALID_COMPOSITION, f"Invalid replacements in {self.name}")

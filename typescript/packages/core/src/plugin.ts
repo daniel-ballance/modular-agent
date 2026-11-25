@@ -226,6 +226,12 @@ function context(api: PluginApi, ids: Pick<CallContext, "sessionId" | "actorId" 
   return { cx, assert, finish: () => { live = false; } };
 }
 
+export function capabilityForItem(item: string): string {
+  if (item === "history") return "history-store";
+  if (item === "credentials") return "credential-store";
+  return item;
+}
+
 async function readCredential(api: PluginApi, name: string, signal?: AbortSignal): Promise<string | undefined> {
   if (typeof name !== "string" || !name) throw new AgentError("invalid_request", "A credential name is required");
   const value = await api.use<CredentialStore>("credential-store")?.read(name, { signal });
@@ -269,10 +275,10 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
   const unavailable = (item: string) => {
     throw new AgentError("not_supported", `${plugin.name}: cannot serve ${item}`);
   };
-  const part = (name: string, value: unknown, servable: boolean) => {
-    add(name);
-    if (served && !servable) unavailable(name);
-    registrations.push(api => api.provide(name, value));
+  const part = (item: string, value: unknown, servable: boolean) => {
+    add(item);
+    if (served && !servable) unavailable(item);
+    registrations.push(api => api.provide(capabilityForItem(item), value));
   };
   const toolsAt = (api: PluginApi, id: string, tools: Tool[]) => toolSource(id, tools, base => {
     const { cx, assert, finish } = context(api, { sessionId: base.sessionId }, base);
@@ -288,13 +294,13 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
     environment: env => part("working-environment", env, true),
     runtime: runtime => part("runtime", runtime, true),
     historyStore(store) {
-      add("history-store");
-      if (served) unavailable("history-store");
+      add("history");
+      if (served) unavailable("history");
       registrations.push(async api => {
         api.provide("history-store", "ttlMs" in store ? await customHistoryWriter(store) : store);
       });
     },
-    credentialStore: store => part("credential-store", store, false),
+    credentialStore: store => part("credentials", store, false),
     configuration(source) {
       add("configuration");
       if (served) unavailable("configuration");

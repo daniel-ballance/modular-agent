@@ -127,7 +127,7 @@ for (const reason of ["commitFailed", "writerLost"] as const) {
       },
     });
     const agent = await testAgent({ project: dir, dataDir: dir, durability: "kept", tools: [hold],
-      plugins: [definePlugin({ name: "lease-fixture", replaces: ["history-store"], setup: r => r.historyStore(store) })],
+      plugins: [definePlugin({ name: "lease-fixture", replaces: ["history"], setup: r => r.historyStore(store) })],
       script: [{ toolCalls: [{ name: "hold", input: {} }] }, { text: "Recovered" }],
     });
     t.after(() => agent.close());

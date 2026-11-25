@@ -56,7 +56,7 @@ test("the Registrar history port creates without id and resumes reads and lists 
     },
   };
   const agent = await testAgent({ durability: "kept", script: [{ text: "Done" }],
-    plugins: [definePlugin({ name: "paged-history", replaces: ["history-store"], setup: r => r.historyStore(store) })],
+    plugins: [definePlugin({ name: "paged-history", replaces: ["history"], setup: r => r.historyStore(store) })],
   });
   t.after(() => agent.close());
   const first = await agent.session({ settings: { title: "One" } });

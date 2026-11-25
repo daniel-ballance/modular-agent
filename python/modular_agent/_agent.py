@@ -1281,8 +1281,6 @@ def create_agent(
                 await h.load(_Approval(covers_nested=approval_covers_nested))
             registered_tools: dict[str, _LocalPlugin] = {}
             interfaces: list[tuple[str, Interface]] = []
-            credential_registered = credentials is not None
-            history_registered = history is not None
             for plugin in [
                 *(Plugin(t.name, tools=[t]) for t in tools),
                 *(
@@ -1298,8 +1296,8 @@ def create_agent(
                 try:
                     registrar = await plugin._register(plugin.config)
                     if registrar._history_store is not None:
-                        if history_registered:
-                            raise ValueError("Duplicate history store")
+                        if "history" not in plugin.replaces:
+                            raise ValueError("Unlisted history replacement")
                         port = registrar._history_store
                         if port.persistent == (durability == "ephemeral"):
                             raise ValueError(
@@ -1307,14 +1305,12 @@ def create_agent(
                                 if port.persistent
                                 else "Kept history needs a persistent store"
                             )
-                        history_registered = True
                         await h.unload(h.capabilities["history"][0])
                         await h.load(_PortHistory(port))
                         agent._memory_store = None
                     if registrar._credential_store is not None:
-                        if credential_registered:
-                            raise ValueError("Duplicate credential store")
-                        credential_registered = True
+                        if "credentials" not in plugin.replaces:
+                            raise ValueError("Unlisted credentials replacement")
                         agent._credentials = registrar._credential_store
                         await h.unload("credentials")
                         await h.load(_CredentialAdapter(agent._credentials))
@@ -1322,8 +1318,10 @@ def create_agent(
                             if isinstance(owner, _ProviderAdapter):
                                 owner.credentials = agent._credentials
                     if registrar._configuration is not None:
-                        if "config" in h.capabilities:
-                            raise ValueError("Duplicate configuration source")
+                        if "configuration" not in plugin.replaces:
+                            raise ValueError("Unlisted configuration replacement")
+                        if prior := h.capabilities.get("config"):
+                            await h.unload(prior[0])
                         await h.load(_Configuration(plugin.name, registrar._configuration))
                     if registrar._interface is not None:
                         interfaces.append((plugin.name, registrar._interface))

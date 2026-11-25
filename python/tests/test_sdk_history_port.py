@@ -88,7 +88,19 @@ async def test_history_port_create_and_paging(tmp_path):
             return await backend.list(project=project, after=after, limit=1)
 
     with sqlite_history_port(tmp_path / "store", ttl_ms=10_000) as backend:
-        plugin = Plugin("paged-store", setup=lambda r: r.history_store(PagedStore()))
+
+        def setup(r):
+            r.history_store(PagedStore())
+
+        with pytest.raises(AgentError, match="Unlisted history replacement") as denied:
+            await make_agent(
+                project=tmp_path,
+                durability="kept",
+                plugins=[Plugin("paged-store", setup=setup)],
+                script=[],
+            )
+        assert denied.value.code is ErrorCode.INVALID_COMPOSITION
+        plugin = Plugin("paged-store", setup=setup, replaces=["history"])
         async with make_agent(
             project=tmp_path,
             durability="kept",

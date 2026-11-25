@@ -40,7 +40,8 @@ test("a custom Runtime, history, configuration, credential store and Interface w
   let turns = 0, stopped = false;
   const baseTurn = runtime.runTurn.bind(runtime);
   runtime.runTurn = (...args) => { turns++; return baseTurn(...args); };
-  const plugin = definePlugin({ name: "adapters", replaces: ["runtime", "history-store", "configuration", "credential-store"], setup(r) {
+  const replaces = ["runtime", "history", "configuration", "credentials"];
+  const plugin = definePlugin({ name: "adapters", replaces, setup(r) {
     r.runtime(runtime);
     r.historyStore(store);
     r.configuration({
@@ -50,7 +51,17 @@ test("a custom Runtime, history, configuration, credential store and Interface w
     r.credentialStore({ ...environmentCredentials(), read: async () => "example-only" });
     r.interface({ async start(agent) { assert.equal(agent.models()[0].provider, provider.id); }, stop() { stopped = true; } });
   } });
-  const agent = await createAgent({ model: provider.models()[0], providers: [provider], plugins: [plugin], environment: memoryEnvironment() });
+  const options = { model: provider.models()[0], providers: [provider], environment: memoryEnvironment(),
+    credentials: { ...environmentCredentials(), read: async () => "option-only" } };
+  for (const item of ["history", "configuration", "credentials"]) {
+    await assert.rejects(createAgent({ ...options, plugins: [{ ...plugin, replaces: replaces.filter(r => r !== item) }] }),
+      { code: "invalid_composition", message: `${item} is already registered` });
+  }
+  for (const old of ["history-store", "credential-store"]) {
+    await assert.rejects(createAgent({ ...options, plugins: [{ ...plugin, replaces: [...replaces, old] }] }),
+      { code: "invalid_composition" });
+  }
+  const agent = await createAgent({ ...options, plugins: [plugin] });
   t.after(() => agent.close());
   const s = await agent.session();
   assert.equal(s.settings().title, "From configuration");

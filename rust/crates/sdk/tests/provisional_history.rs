@@ -154,8 +154,11 @@ async fn compose(root: &Path, store: &str, served: bool, url: &str) -> Result<Ag
         "http" => builder.history(http_history(url, root.join("token"))?),
         "custom" => {
             let history = History::from_portable(RecordingStore::new(root)?, true)?;
-            builder
-                .plugin(Plugin::new("test-store").setup(move |r| r.history_store(history.clone())))
+            builder.plugin(
+                Plugin::new("test-store")
+                    .replaces("history")
+                    .setup(move |r| r.history_store(history.clone())),
+            )
         }
         _ => unreachable!(),
     };

@@ -68,7 +68,7 @@ const snapshot = id => documents.get(id) ?? { revisionId: '0', snapshot: { count
 const ns = 'modular-agent.agui.';
 const question = tool({ name: 'kit_choice', description: 'Ask a test question', input: {type:'object'}, callers: ['ui'],
   async run(_input, cx) { await cx.ask({ kind: 'choice', question: 'Choose a color?', options: ['yes','no'], timeLimitMs: 5000 }); return ''; } });
-const plugin = definePlugin({ name: 'kit', replaces: ['history-store'], setup(r) {
+const plugin = definePlugin({ name: 'kit', replaces: ['history'], setup(r) {
   r.historyStore(store);
   if (waiting) {
     const increment = async () => { await appendFile(join(dataDir, 'counter'), '1'); return 'Incremented'; };

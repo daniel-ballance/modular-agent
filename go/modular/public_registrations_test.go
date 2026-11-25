@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"slices"
 	"testing"
 
 	"github.com/daniel-ballance/modular-agent/go/modular"
@@ -71,6 +72,17 @@ func TestLocalRegistrarParts(t *testing.T) {
 	}
 	_, err := modular.New(ctx, modular.WithPlugin(plugin(true)))
 	assertCode(t, err, modular.InvalidComposition)
+	for _, missing := range []string{"history", "credentials", "configuration"} {
+		t.Run("unlisted "+missing, func(t *testing.T) {
+			incomplete := plugin(false)
+			incomplete.Replaces = slices.DeleteFunc(incomplete.Replaces, func(item string) bool { return item == missing })
+			agent, err := modular.New(t.Context(), modular.WithPlugin(incomplete))
+			if err == nil {
+				_ = agent.Close(t.Context())
+			}
+			assertCode(t, err, modular.InvalidComposition)
+		})
+	}
 	a := modulartest.Agent(t, modular.WithProvider(p), modular.WithPlugin(plugin(false)))
 	if front.agent != a {
 		t.Fatal("custom Interface was not started")

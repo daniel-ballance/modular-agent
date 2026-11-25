@@ -466,12 +466,6 @@ impl Registrar {
     pub(crate) fn history_part(&self) -> Option<&crate::History> {
         self.history.as_ref()
     }
-    pub(crate) fn has_credentials(&self) -> bool {
-        self.credentials.is_some()
-    }
-    pub(crate) fn has_configuration(&self) -> bool {
-        self.configuration.is_some()
-    }
     pub(crate) fn has_environment(&self) -> bool {
         self.environment.is_some()
     }
@@ -575,24 +569,17 @@ impl base::Plugin for InProcess {
             r.provide::<dyn base::Runtime>("runtime", runtime)?;
         }
         if let Some(part) = &self.registered.history {
-            r.provide_over_default::<dyn base::HistoryStore>(
-                "history",
-                "sdk.core",
-                part.0.clone(),
-            )?;
-            r.provide::<crate::History>("sdk.history.part", Arc::new(part.clone()))?;
+            r.provide::<dyn base::HistoryStore>("history", part.0.clone())?;
         }
         if let Some(part) = &self.registered.configuration {
-            r.provide_over_default::<dyn base::Configuration>(
+            r.provide::<dyn base::Configuration>(
                 "configuration",
-                "sdk.core",
                 Arc::new(crate::parts::ConfigurationAdapter(part.clone())),
             )?;
         }
         if let Some(part) = &self.registered.credentials {
-            r.provide_over_default::<dyn base::CredentialStore>(
+            r.provide::<dyn base::CredentialStore>(
                 "credentials",
-                "sdk.core",
                 Arc::new(crate::credentials::StoreAdapter(part.clone())),
             )?;
         }

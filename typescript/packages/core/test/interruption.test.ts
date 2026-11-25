@@ -16,7 +16,7 @@ function deferred<T>() {
 test("an idle kept session reports a revoked writer before another write", { timeout: 5000 }, async t => {
   const { store, revoke } = interruptedHistory();
   const agent = await testAgent({ durability: "kept", history: undefined,
-    plugins: [definePlugin({ name: "idle-lease", replaces: ["history-store"], setup: r => r.historyStore(store) })],
+    plugins: [definePlugin({ name: "idle-lease", replaces: ["history"], setup: r => r.historyStore(store) })],
     script: [{ text: "Finished" }],
   });
   t.after(() => agent.close());
@@ -54,7 +54,7 @@ for (const reason of ["writerLost", "commitFailed"] as const) {
       },
     });
     const agent = await testAgent({ project: dir, durability: "kept", dataDir: dir, tools: [hold],
-      plugins: [definePlugin({ name: "lease-fixture", replaces: ["history-store"], setup: r => r.historyStore(store) })],
+      plugins: [definePlugin({ name: "lease-fixture", replaces: ["history"], setup: r => r.historyStore(store) })],
       script: [{ toolCalls: [{ name: "hold", input: {} }] }, { text: "After recovery" }],
     });
     t.after(async () => { await agent.close(); await rm(dir, { recursive: true, force: true }); });

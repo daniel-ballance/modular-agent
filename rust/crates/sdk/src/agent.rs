@@ -655,9 +655,6 @@ impl AgentBuilder {
         }
         let has_data_dir = self.data_dir.is_some();
         let local = matches!(environment, EnvironmentKind::Local(_));
-        let explicit_history = self.history.is_some();
-        let explicit_credentials = self.credentials.is_some();
-        let explicit_configuration = self.configuration.is_some();
         // The local environment keeps command state on disk; an ephemeral agent puts it
         // in a scratch folder that goes with the agent.
         let (state, scratch) = match &self.data_dir {
@@ -683,10 +680,9 @@ impl AgentBuilder {
                 "waiting approvals need a positive safe maximum, kept history and the approval plugin",
             ));
         }
-        let mut saved_history = History(history.clone(), persistent, store_name, portable.clone());
+        let default_history = History(history.clone(), persistent, store_name, portable);
         if let Some(recipe) = &mut restart {
             recipe.project = Some(project.clone());
-            recipe.history = Some(History(history.clone(), persistent, store_name, portable));
         }
         let mut defaults = base::portable::settings_from_wire(&Value::Object(self.settings));
         if let Some(policy) = self.approval {
@@ -779,6 +775,7 @@ impl AgentBuilder {
             }
         }
         let mut interfaces = Vec::new();
+        let mut history_replacement = None;
         let mut replaces_default_env = false;
         for plugin in &self.plugins {
             let loaded = match InProcess::new(plugin) {
@@ -794,23 +791,16 @@ impl AgentBuilder {
                             "persistent history requires kept or durable, not ephemeral",
                         ));
                     }
-                    let collision = (explicit_history && registrar.history_part().is_some())
-                        || (explicit_credentials && registrar.has_credentials())
-                        || (explicit_configuration && registrar.has_configuration());
-                    if collision {
-                        Err(Error::new(
-                            Code::InvalidComposition,
-                            "plugin collides with an explicit part option",
-                        ))
-                    } else {
-                        interfaces.extend(registrar.interfaces.iter().cloned());
-                        replaces_default_env |= registrar.has_environment()
-                            && plugin.replaces.iter().any(|i| i == "working-environment");
-                        harness
-                            .load_replacing(Arc::new(registered), &plugin.replaces)
-                            .await
-                            .map_err(Error::from)
+                    if let Some(part) = registrar.history_part() {
+                        history_replacement = Some(part.clone());
                     }
+                    interfaces.extend(registrar.interfaces.iter().cloned());
+                    replaces_default_env |= registrar.has_environment()
+                        && plugin.replaces.iter().any(|i| i == "working-environment");
+                    harness
+                        .load_replacing(Arc::new(registered), &plugin.replaces)
+                        .await
+                        .map_err(Error::from)
                 }
                 Err(e) => Err(e),
             };
@@ -908,13 +898,12 @@ impl AgentBuilder {
                 ));
             }
         }
-        if let Ok(custom) = base::capability::<History>(harness.as_ref(), "sdk.history.part") {
-            saved_history = (*custom).clone();
-            if let Some(recipe) = &mut restart {
-                // The plugin installs its store again on restart.
-                recipe.history = None;
-            }
+        if history_replacement.is_none()
+            && let Some(recipe) = &mut restart
+        {
+            recipe.history = Some(default_history.clone());
         }
+        let saved_history = history_replacement.unwrap_or(default_history);
         if saved_history.1 != (self.durability != Durability::Ephemeral) {
             let _ = base::AgentApi::shutdown(harness.as_ref()).await;
             return Err(Error::new(

@@ -58,7 +58,7 @@ export class ScenarioEvidence {
       if (this.run.scenario === "first-turn") this.batches.push(structuredClone(batch));
       if (this.crash) this.afterRestart.push(...batch.filter(e => e.kind === "modular-agent.turnTrace").map(e => structuredClone(e)));
     };
-    return definePlugin({ name: "scenario-history", replaces: ["history-store"], setup: r => r.historyStore(store) });
+    return definePlugin({ name: "scenario-history", replaces: ["history"], setup: r => r.historyStore(store) });
   }
 
   provider(scripted: Provider): Provider {
