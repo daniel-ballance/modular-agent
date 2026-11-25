@@ -281,6 +281,12 @@ test("each release version source reports drift with a line and fix", (t) => {
   ]);
 });
 
+test("one Node pin in two dependency groups is reported at each group's line", (t) => {
+  const repo = checkout(t);
+  repo.write(node, '{\n  "version": "0.3.2",\n  "devDependencies": { "@modular-agent/demo": "0.2.0" },\n  "dependencies": { "@modular-agent/demo": "0.2.0" }\n}\n');
+  repo.check([`${node}:3: Dependency @modular-agent/demo`, `${node}:4: Dependency @modular-agent/demo`]);
+});
+
 test("Python pins are read from dependency arrays, not from other project strings", (t) => {
   const repo = checkout(t);
   repo.write(python, [

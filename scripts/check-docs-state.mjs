@@ -206,16 +206,32 @@ function checkNodePackage(file, text, version) {
     return;
   }
   const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const check = (key, value) => {
-    const entry = new RegExp(`${escape(JSON.stringify(key))}\\s*:\\s*${escape(JSON.stringify(value) ?? "")}`);
-    const index = value === undefined ? 0 : text.search(entry);
-    const line = linesOf(text.slice(0, Math.max(index, 0))).length;
-    checkVersion(file, { line, value }, version, key === "version" ? "Package version" : `Dependency ${key}`);
+  let marker = "_docs_state_probe_";
+  while (text.includes(marker)) marker += "_";
+  const lineOf = (path, value) => {
+    if (value === undefined) return 1;
+    const quoted = JSON.stringify(value) ?? "";
+    const entries = [...text.matchAll(new RegExp(`${escape(JSON.stringify(path.at(-1)))}\\s*:\\s*${escape(quoted)}`, "g"))];
+    // One pin can sit in two dependency groups. Mark each match and reparse to find the one at this path.
+    const own = typeof value !== "string" ? entries[0] : entries.find((entry) => {
+      const offset = entry.index + entry[0].length - quoted.length + 1;
+      try {
+        return atPath(JSON.parse(text.slice(0, offset) + marker + text.slice(offset)), path) === marker + value;
+      } catch {
+        return false;
+      }
+    });
+    return own ? linesOf(text.slice(0, own.index)).length : 1;
   };
-  check("version", pkg?.version);
+  const check = (path, value) => {
+    if (value === version) return;
+    const field = path.length === 1 ? "Package version" : `Dependency ${path[1]}`;
+    checkVersion(file, { line: lineOf(path, value), value }, version, field);
+  };
+  check(["version"], pkg?.version);
   for (const group of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
     for (const [name, pin] of Object.entries(pkg?.[group] ?? {})) {
-      if (name.startsWith("@modular-agent/")) check(name, pin);
+      if (name.startsWith("@modular-agent/")) check([group, name], pin);
     }
   }
 }
