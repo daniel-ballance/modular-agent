@@ -6,6 +6,7 @@
 //   node run.mjs [--only NAME[,NAME]] -- <ma command...>
 //   node run.mjs [--only ...] --agent LANGUAGE     (from agents/LANGUAGE.json)
 //   node run.mjs [--only ...] --all                (every built agent; MODULAR_AGENT_REF_REQUIRE as for fixtures)
+import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -37,6 +38,7 @@ const CODEMODE_VALUES = [
   ["class P:\n    def __init__(self):\n        self.x = 1\n        self.y = 'a'\n    def __repr__(self):\n        return 'custom'\n[P(), {1}]", "[P(x=1, y='a'), {1}]"],
 ];
 const SIX = ["read", "exec", "edit", "write", "find", "list"];
+const approvalRead = { toolCalls: [{ name: "read", input: { path: "hello.txt" } }] };
 
 const checks = [
   {
@@ -65,6 +67,38 @@ const checks = [
     about: "A live or waiting allow covers both writes in this script, once. A refusal writes neither file.",
     script: [codemode(approvalScript), { text: "Done." }],
     run: (command, _invoke, _skip, t) => checkApprovalCoversScript(command, t, environment(t)),
+  },
+  {
+    name: "reopen-approval",
+    about: "A new default does not replace a recorded approval policy or fill in a missing policy on reopen.",
+    files: { "data/settings.json": JSON.stringify({ model_tools: null }), "project/hello.txt": "Hello.\n" },
+    script: [{ text: "First." }, approvalRead, { text: "Second." }, approvalRead, { text: "Third." }],
+    async run(command, invoke, _skip, t) {
+      const ma = async (...args) => {
+        const result = await invoke(command, { args });
+        assert.equal(result.exit, 0, `ma ${args.join(" ")}: ${result.stderr}`);
+        return result.stdout.trim();
+      };
+      const lastTurn = async () => {
+        const history = JSON.parse(await ma("-c", "--history"));
+        const entries = Array.isArray(history) ? history : history.entries;
+        const start = entries.findLast(e => e.kind === "turnStart");
+        assert.ok(start, "history contains a turn");
+        return entries.filter(e => e.turnId === start.turnId);
+      };
+      assert.equal(await ma("--approval", "off", "-p", "first"), "First.");
+      assert.equal(await ma("--approval", "never", "-c", "-p", "second"), "Second.");
+      const recorded = await lastTurn();
+      assert.ok(recorded.some(e => e.kind === "toolStarted"), "the recorded off policy lets the call start");
+      assert.ok(!recorded.some(e => e.kind === "inputRequest"), "the recorded off policy does not ask");
+
+      const omit = spawnSync("python3", [join(here, "omit-saved-approval.py"), join(t.data, "state")], { encoding: "utf8" });
+      assert.equal(omit.status, 0, omit.stderr || omit.error?.message);
+      assert.equal(await ma("--approval", "never", "-c", "-p", "third"), "Third.");
+      const missing = await lastTurn();
+      assert.ok(missing.some(e => e.kind === "inputRequest" && e.data.request.kind === "approval"), "all asks even for a read-only call");
+      assert.ok(!missing.some(e => e.kind === "toolStarted"), "no call starts without approval");
+    },
   },
   {
     name: "codemode-nested",

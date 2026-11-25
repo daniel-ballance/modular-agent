@@ -240,7 +240,7 @@ Each implementation honors these environment variables, so one set of [checks](.
 
 Off by default: with no `approval` setting and no `--approval`, `ma` loads no approval feature and behaves as without one. When configured:
 
-- `ma` loads the approval feature with the configured policy as each new session's default. An ACP or AG-UI client with the `settings` right can change it per session through the `approval` option. `ask` asks for every `codemode` call, since `codemode` is not read-only.
+- `ma` loads the approval feature with the configured policy as each new session's default. On reopen, `ma` uses the [recorded policy or its fallback](../contracts.md#approval-policy). An ACP or AG-UI client with the `settings` right can change it per session through the `approval` option. `ask` asks for every `codemode` call, since `codemode` is not read-only.
 - `ma` turns on [covered approvals](../contracts.md#approvals-that-cover-nested-calls) and declares `approvalCoversNested: true`. An allow for a `codemode` call covers the file and command calls its script makes in that run. The approval view shows the whole script and says that it covers them.
 - With `approvalWaitMaxMs` (a positive number of milliseconds) in [the operator policy](#connection-policy-and-limits), `ma` also supports [approvals that wait](../contracts.md#approvals-that-wait) and declares `approvalsOutlastTurns: true`. A session waits only when its `approval_wait` setting is `untilDeadline`; the default is `live`. Without `approvalWaitMaxMs`, approvals are live only.
 - In interactive mode the terminal asks on stderr and reads `y` or `n`; it is a present answerer for its own session.
