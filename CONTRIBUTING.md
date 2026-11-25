@@ -42,7 +42,7 @@ A release gives the four SDKs and `ma` one new version, named by its milestone. 
 2. Update the status line at the top of `docs/sdk/README.md`. It gives the SDK specification's revision and what the four SDKs pass.
 3. Add a section for the release to `docs/status.md`, with the step counts of `scripts/check.sh` and `scripts/macos-check.sh` on the release commit.
 4. Add a section for the release to `CHANGELOG.md`.
-5. Run the docs-state check (#27). It fails on a version that drifted or a stale status word.
+5. Run the docs-state check (#27). It fails on a version that drifted, an ADR index status that disagrees with its record, or a gap section without an issue.
 6. After the operator lands the release pull request and tags its commit on `main` as `vX.Y.Z`, close the milestone. First move each issue still open in it to the next milestone with `gh issue edit N --milestone NEXT`. Then close it with `gh api -X PATCH repos/daniel-ballance/modular-agent/milestones/NUMBER -f state=closed`.
 
 ## How work moves through the layers
@@ -76,7 +76,7 @@ Keep one concern per module. Split a module by the rule each part enforces, not 
 
 Keep tracked source files at 1,000 lines or fewer. The docs lane runs `scripts/check-maintainability.mjs` to check this. Files listed in `scripts/maintainability-baseline.json` may exceed the limit up to their recorded counts. Lower an entry when its file shrinks. Remove the entry if the file is gone or fits the limit. Adding or raising an entry requires review. Explain why in the PR.
 
-The docs lane checks that sections listing open work link to issues and that ADR status agrees with the records. Prose must not call an accepted decision or its rule proposed right beside the link, as in `the proposed [rule](...)`, `Proposed in [ADR N](...)` or `[ADR N](...) is still proposed`. Wording further from the link is left to review. It also checks that package versions and the SDK specification status match the release in `CHANGELOG.md`.
+The docs lane checks that sections listing open work link to issues and that ADR status agrees with the records. A gap section is one whose heading starts with Known gaps, Gaps, Findings or Remaining (alone, or ending in work or gaps), ends in gaps or findings, or names proposed text. Prose that still calls an accepted decision proposed is left to review. It also checks that package versions and the SDK specification status match the release in `CHANGELOG.md`.
 
 Do not merge a commit into `main` if its subject starts with `WIP`, regardless of case.
 

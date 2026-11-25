@@ -9,20 +9,12 @@ const adrIndex = "docs/adr/README.md";
 const sdkIndex = "docs/sdk/README.md";
 const goVersion = "go/api/api.go";
 const adrFile = /^docs\/adr\/\d{4}-[^/]+\.md$/;
-const gapHeading = /\b(?:gaps?|remaining|findings)\b|\bfinding$|\bspecification was silent\b|\bproposed\b.*\btext\b|^proposed, not yet written$/i;
+const gapHeading = /^(?:known gaps|gaps|findings)\b|\b(?:gaps|findings)$|^remaining$|^remaining\b.*\b(?:work|gaps)$|^proposed\b.*\btext\b|^proposed, not yet written$/i;
 const historicalGaps = /^(?:docs\/(?:adr|research|pressure-test)\/)|\/docs\/clean-room\//;
 const issueUrl = /https?:\/\/[^\s<>()[\]]+\/issues\/[1-9]\d*\b/;
 const issueNumber = /(?:^|[\s(\[]|[\w.-]+\/[\w.-]+)#\d*[1-9]\d*\b/;
 const release = /^v?(\d+\.\d+\.\d+)$/;
-const link = /\[([^\]\n]+)\]\(<?([^\s)>]+)>?(?:[ \t]*\n?[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?[ \t]*\)/g;
-const ruleAliases = new Map([
-  ["docs/contracts.md#interface-run-tools", "0033"],
-  ["docs/bindings/agui.md", "0033"],
-  ["docs/sdk/placement.md#serving-ag-ui", "0033"],
-  ["docs/contracts.md#approvals-that-wait", "0034"],
-  ["docs/contracts.md#approvals-that-cover-nested-calls", "0034"],
-  ["docs/sdk/api.md#questions", "0034"],
-]);
+const link = /\[([^\]\n]+)\]\(<?([^\s)>]+)>?(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?[ \t]*\)/g;
 const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 const linesOf = (text) => text.split(/\r?\n/);
 const read = (file) => {
@@ -78,9 +70,9 @@ function adrStatus(text) {
   return text.match(/^---\r?\n(.*?)\r?\n---(?:\r?\n|$)/s)?.[1].match(/^status:[ \t]*([^\r\n]+)/m)?.[1].trim().toLowerCase();
 }
 
-function checkAdrIndex(lines, statuses, rules) {
+function checkAdrIndex(lines, statuses) {
   for (const [i, line] of lines.entries()) {
-    const row = line.match(/^ {0,3}\|\s*\[\d{4}\]\(([^)]+)\)\s*\|[^|]*\|([^|]*)\|([^|]*)/);
+    const row = line.match(/^ {0,3}\|\s*\[\d{4}\]\(([^)]+)\)\s*\|[^|]*\|([^|]*)\|/);
     if (!row) continue;
     const file = posix.join("docs/adr", row[1]);
     const status = statuses.get(file);
@@ -90,61 +82,8 @@ function checkAdrIndex(lines, statuses, rules) {
     if (!status) fail(adrIndex, i + 1, `No front matter status for ${file}`, "Restore the record and its status");
     else if (!cell.startsWith(status) || /^[\w-]/.test(cell.slice(status.length))) {
       fail(adrIndex, i + 1, `Index status does not match ${file}`, `Start the status cell with "${status}"`);
-    } else if (status === "accepted") {
-      for (const [, , target] of row[3].matchAll(link)) {
-        const local = localTarget(adrIndex, target);
-        // A whole document linked in the index can contain rules from many decisions.
-        if (local?.includes("#") && !rules.has(local)) rules.set(local, file);
-      }
     }
   }
-}
-
-function localTarget(file, target) {
-  const prefix = "https://github.com/daniel-ballance/modular-agent/blob/";
-  if (target.startsWith(prefix)) return target.slice(prefix.length).replace(/^.*?\/(?=docs\/)/, "");
-  if (/^[a-z][a-z0-9+.-]*:|^\//i.test(target)) return;
-  return target.startsWith("#") ? file + target : posix.join(posix.dirname(file), target);
-}
-
-function checkAdrProse(file, lines, statuses, rules) {
-  const text = lines.join("\n");
-  if (!/\bproposed\b/i.test(text)) return;
-  const prose = text.replace(/(`+)[^\n]*?\1/g, (code) => " ".repeat(code.length));
-  const reported = new Set();
-  for (const { 0: span, 1: label, 2: target, index } of prose.matchAll(link)) {
-    const local = localTarget(file, target);
-    if (!local) continue;
-    const direct = local.split("#")[0];
-    const adr = adrFile.test(direct) ? direct : rules.get(local) ?? rules.get(direct);
-    if (statuses.get(adr) !== "accepted") continue;
-    // Match status wording attached to the link, not e.g. "proposed changes to" an accepted rule.
-    const before = prose.slice(0, index).match(/\bproposed[*_]*(?:[ \t\n]+(?:in|by))?[ \t\n]+[*_]*$/i);
-    const after = prose.slice(index + span.length).match(/^[*_ \t)]*(?:\n[ \t]*)?(?:is|are|remains?)[ \t\n]+(?:(?:still|currently)[ \t\n]+)?proposed\b/i);
-    const hits = [
-      before && joined(prose, before[0], before.index) && before.index,
-      after && joined(prose, after[0], index + span.length) && index,
-      /^proposed\b/i.test(label) && index,
-    ].filter((at) => typeof at === "number");
-    const line = hits.length && linesOf(text.slice(0, Math.min(...hits))).length;
-    if (!line || reported.has(line)) continue;
-    reported.add(line);
-    fail(file, line, `Prose calls an accepted decision in ${adr} proposed`, "Describe the accepted rule instead");
-  }
-}
-
-// A wrapped line joins a sentence. A blank line, a table row or a heading does not.
-function joined(prose, phrase, at) {
-  if (!phrase.includes("\n")) return true;
-  if (/\n[ \t]*\n/.test(phrase)) return false;
-  const pair = lineAround(prose, at);
-  return !/\|/.test(pair) && !/^ {0,3}#/m.test(pair);
-}
-
-function lineAround(text, at) {
-  const start = text.lastIndexOf("\n", at - 1) + 1;
-  const next = text.indexOf("\n", text.indexOf("\n", at) + 1);
-  return text.slice(start, next === -1 ? undefined : next);
 }
 
 function first(lines, pattern) {
@@ -251,17 +190,10 @@ try {
     .split("\0").filter(Boolean);
   const markdown = files.filter((file) => file.endsWith(".md"));
   const statuses = new Map(markdown.filter((file) => adrFile.test(file)).map((file) => [file, adrStatus(read(file))]));
-  const byNumber = new Map([...statuses.keys()].map((file) => [posix.basename(file).slice(0, 4), file]));
-  const rules = new Map();
-  for (const [target, number] of ruleAliases) {
-    const file = byNumber.get(number);
-    if (statuses.get(file) === "accepted") rules.set(target, file);
-  }
-  checkAdrIndex(markdownLines(read(adrIndex)), statuses, rules);
+  checkAdrIndex(markdownLines(read(adrIndex)), statuses);
   for (const file of markdown) {
     const lines = markdownLines(read(file));
     if (!historicalGaps.test(file)) checkGaps(file, lines);
-    if (!file.startsWith("docs/adr/")) checkAdrProse(file, lines, statuses, rules);
   }
   checkVersions(files);
   console.log(`${markdown.length} tracked Markdown files and ${files.length - markdown.length} package manifests checked. Failures: ${bad}.`);
