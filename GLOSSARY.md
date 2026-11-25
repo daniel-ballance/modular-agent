@@ -73,7 +73,7 @@ The operator's authorization to load executable plugins and plugin settings from
 The capability that supplies the agent's settings and plugin selection from sources such as global and project files.
 
 **History store**:
-The capability that keeps session history beyond the process.
+The capability that keeps session history. A persistent store keeps it beyond the process; an in-memory store keeps it only while the process runs.
 _Avoid_: Storage, database, persistence
 
 **Credential store**:
