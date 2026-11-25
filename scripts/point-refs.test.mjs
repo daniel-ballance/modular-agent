@@ -10,6 +10,7 @@ const library = fileURLToPath(new URL("point-refs.sh", import.meta.url));
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
 
 // The guard runs in `repo`, which snapshots, then `action` saves points, then the guard checks.
+// Every action but `true` must add or rewrite a point; one that saved nothing fails the harness.
 const harness = String.raw`
   . "$0"
   point() { # git-dir trailer-body ref
@@ -21,6 +22,7 @@ const harness = String.raw`
   own() { point "$repo" "project: $1" "refs/modular-agent/points/$2"; }
   cd "$repo" && point_refs >"$logs/refs-before" && worktree_roots >"$logs/worktrees-before" || exit 9
   eval "$1" || exit 8
+  [ "$1" = true ] || ! point_refs | cmp -s "$logs/refs-before" - || exit 7
   check_test_refs`;
 
 function machine(t) {
@@ -68,7 +70,7 @@ test("points from other worktrees, other folders and odd trailers are not this r
   assert.equal(box.guard('own "$home/norepo" c/4'), 0);
   assert.equal(box.guard('point "$main" "session: none" refs/modular-agent/points/c/5'), 0);
   assert.equal(box.guard('point "$main" "project: $main/python\nproject: $home/sib" refs/modular-agent/points/c/6'), 0);
-  assert.equal(box.guard('point "$main" "project: $main\n\nsession: t\nproject: $home/sib" refs/modular-agent/points/c/7'), 0,
+  assert.equal(box.guard('point "$main" "project: $main\n\nsession: t" refs/modular-agent/points/c/7'), 0,
     "a body line is not the trailer");
 });
 
@@ -85,8 +87,8 @@ test("a nested worktree removed before the scan keeps its points; a reused old p
   const odd = join(box.main, ".worktrees", "g*?[lob");
   box.git("-C", box.main, "worktree", "add", "-q", "--detach", nested);
   box.git("-C", box.main, "worktree", "add", "-q", "--detach", odd);
-  assert.equal(box.guard(`own "${nested}/go" e/1; git worktree remove --force "${nested}"`), 0);
-  assert.equal(box.guard(`own "${odd}/go" e/2; git worktree remove --force "${odd}"; mkdir -p "$main/.worktrees/glob"`), 0);
+  assert.equal(box.guard(`own "${nested}/go" e/1 && git worktree remove --force "${nested}"`), 0);
+  assert.equal(box.guard(`own "${odd}/go" e/2 && git worktree remove --force "${odd}" && mkdir -p "$main/.worktrees/glob"`), 0);
   box.git("-C", box.main, "worktree", "add", "-q", "--detach", nested);
   assert.equal(
     box.guard(`git worktree move "${nested}" "$home/moved" && mkdir -p "${nested}" && own "${nested}/go" e/3`), 1,
