@@ -162,9 +162,12 @@ function changedLines(base, committed) {
     const target = status[i++];
     if (!isMarkdown(target) || !committed.has(key(target)) || historical.test(key(target))) continue;
     const file = name(target);
-    // A rename source that is not UTF-8 cannot be named to Git; the target is then diffed alone,
-    // so all its lines count: more candidates, never a hidden one.
-    const from = source && kind.startsWith("R") ? decodable(source) : undefined;
+    // Only an edited rename (R090 to R099) of a file the review reads keeps its unedited lines out.
+    // An exact pair (R100) shows no edit, and Git pairs any identical add and delete; a file moved
+    // out of a historical folder was never reviewed; a source that is not UTF-8 cannot be named to
+    // Git. Each counts every line: more candidates, never a hidden one.
+    const moved = source && kind.startsWith("R") && kind !== "R100" && !historical.test(key(source));
+    const from = moved ? decodable(source) : undefined;
     const lines = new Set();
     // Literal pathspecs: a file name such as ":(glob)x.md" is a name, not pathspec magic.
     const paths = from ? [from, file] : [file];

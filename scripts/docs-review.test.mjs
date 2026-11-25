@@ -264,6 +264,23 @@ test("file names that look like pathspec magic are read literally, and a rename 
   assert.deepEqual(repo.run().at, [":(glob)magic.md:1", "docs/new.md:23"]);
 });
 
+test("an exact rename, and a file moved out of a historical folder, count every line", (t) => {
+  const repo = checkout(t);
+  const stable = (name) => Array.from({ length: 20 }, (_, i) => `Stable line ${i + 1} of ${name}.`);
+  repo.track("docs/old.md", ["Support is planned.", "", ...stable("the guide"), ""]);
+  repo.track("docs/research/notes.md", ["Resume is planned.", "", ...stable("the notes"), ""]);
+  repo.commit("Start");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  repo.git("mv", "docs/old.md", "docs/moved.md");
+  repo.git("mv", "docs/research/notes.md", "docs/notes.md");
+  repo.track("docs/notes.md", ["Resume is planned.", "", ...stable("the notes"), "Streaming is not implemented.", ""]);
+  repo.commit("Docs");
+  const pairs = repo.git("diff", "--name-status", "-M90%", "origin/main", "HEAD").toString();
+  assert.match(pairs, /^R100\tdocs\/old\.md\tdocs\/moved\.md$/m);
+  assert.match(pairs, /^R09\d\tdocs\/research\/notes\.md\tdocs\/notes\.md$/m);
+  assert.deepEqual(repo.run().at, ["docs/moved.md:1", "docs/notes.md:1", "docs/notes.md:23"]);
+});
+
 test("diff attributes and large files never hide a changed line", (t) => {
   const repo = checkout(t);
   repo.track("README.md", "Start.\n");
