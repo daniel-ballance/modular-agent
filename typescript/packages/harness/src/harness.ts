@@ -1,3 +1,4 @@
+import { TurnModelAccess } from "./model-access.js";
 import { ToolDispatch } from "./tool-dispatch.js";
 import type { TurnState } from "./turn-state.js";
 import { shapeViolation } from "./result-shape.js";
@@ -7,7 +8,7 @@ import { InputRequests, readRequest } from "./input-requests.js";
 import { Jobs, type JobStart, type KeptJob } from "./jobs.js";
 import { SessionErasure } from "./session-erasure.js";
 import { ApprovalReconciliation } from "./approval-reconciliation.js";
-import { failure } from "./failure.js";
+import { failure, turnLimit } from "./failure.js";
 import { sameJson, waitingApprovals, type ApprovalBinding, type ApprovalProof, type ApprovalDelivery, type ApprovalRoute, type WaitingApproval } from "./waiting-approval.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { activeOperation, carrier, conversation, currentSpan, historyForPeer, observeInference, readTrace, safeName, startOperation, telemetryEvent, toolAttributes, TURN_TRACE, withTrace, type Operation } from "./telemetry.js";
@@ -272,6 +273,21 @@ function recordedSnapshot(start: HistoryEntry): RecordedSnapshot {
  * It runs no turns, calls no models and runs no tools itself.
  */
 export class Harness {
+	private readonly turnModels: TurnModelAccess = new TurnModelAccess({
+		newId: (...args) => this.newId(...args),
+		turnAuthority: () => this.turnAuthority,
+		tenantBudgetReached: (...args) => this.tenantBudgetReached(...args),
+		erasure: () => this.erasure,
+		reservations: () => this.reservations,
+		checkScopedWork: (...args) => this.checkScopedWork(...args),
+		checkWriter: (...args) => this.checkWriter(...args),
+		hooks: () => this.hooks,
+		commit: (...args) => this.commit(...args),
+		emit: (...args) => this.emit(...args),
+		reserveCall: (...args) => this.reserveCall(...args),
+		step: (...args) => this.step(...args),
+	});
+
 	private readonly tools: ToolDispatch = new ToolDispatch({
 		now: (...args) => this.now(...args),
 		interfaceTools: () => this.interfaceTools,
@@ -874,7 +890,7 @@ export class Harness {
 						const maxOutput = Math.min(settings.maxOutput ?? Infinity, snapshot.settings.maxOutput ?? Infinity);
 						const request = { ...snapshot, tools, providerTools: "none" as const, settings: { ...snapshot.settings,
 							reasoning: snapshot.settings.reasoning ?? settings.reasoning, maxOutput: Number.isFinite(maxOutput) ? maxOutput : undefined } };
-						return this.turnModel(session, undefined, { ...authority, sources: new Map(), actors: scope.actors, jobs: scope.jobs }, model, live)
+						return this.turnModels.turnModel(session, undefined, { ...authority, sources: new Map(), actors: scope.actors, jobs: scope.jobs }, model, live)
 							.request(request, { signal, stepId });
 					});
 					tail = pending.then(() => {}, () => {});
@@ -2217,7 +2233,7 @@ export class Harness {
 				else {
 					try {
 						const input = {
-							sessionId: s.id, turnId, startedBy: queued.startedBy, model: this.turnModel(s, turnId, state, model),
+							sessionId: s.id, turnId, startedBy: queued.startedBy, model: this.turnModels.turnModel(s, turnId, state, model),
 							settings, resultShape,
 						};
 						const host = this.runtimeHost(s, turnId, state, resultShape);
@@ -2385,7 +2401,7 @@ export class Harness {
 			});
 			await this.endInterruptedTurn(s, { turnId, calls: calls.filter((c) => !eligible.includes(c)) });
 			outcome = await runtime.resumeTurn(
-				{ sessionId: s.id, turnId, startedBy: snapshot.startedBy, model: this.turnModel(s, turnId, state, model), settings: state.settings, resultShape: snapshot.resultShape },
+				{ sessionId: s.id, turnId, startedBy: snapshot.startedBy, model: this.turnModels.turnModel(s, turnId, state, model), settings: state.settings, resultShape: snapshot.resultShape },
 				this.runtimeHost(s, turnId, state, snapshot.resultShape, runtime.supports.continuesAfterRestart === true),
 				signal,
 				{ turnId, calls: eligible, ...(restored ? { lastStep: restored.lastStep } : {}) },
@@ -2632,159 +2648,6 @@ export class Harness {
 				if (type !== "model.output") this.emit(s, type, data, "runtime", { turnId, ...ids });
 			},
 		};
-	}
-
-	// ---------- models ----------
-
-	private turnModel(s: Session, turnId: string | undefined, state: Pick<TurnState, "sources" | "actors" | "jobs" | "tenantLimit" | "capacityLimit" | "connectionRights" | "startingRights">,
-		model: ModelAccess, authorize?: () => void): ModelAccess {
-		const turn = activeOperation();
-		const steps = "steps" in state ? (state as TurnState).steps : undefined;
-		return { ...model, request: async (request, options) => {
-			const stepId = options.stepId ?? [...state.sources.keys()].at(-1) ?? this.newId();
-			const work = () => this.turnAuthority.run({ sessionId: s.id, actors: state.actors, jobs: state.jobs, state }, async () => {
-				options.signal.throwIfAborted();
-				if (state.tenantLimit || await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
-				const freshness = await this.erasure.admitHistory(s);
-				await this.erasure.reconcileProviderErasure(s, model.model.provider);
-				this.erasure.checkProviderErasure(s, model.model.provider);
-				if (this.erasure.httpErasure() && freshness !== "[]" && model.supports.keepsState !== false) {
-					throw failure("unavailable", "The history registry cannot verify deletion of kept Provider state");
-				}
-				const attempt = `model:${stepId}`;
-				const bounds = this.reservations.limits;
-				const requestBytes = resourceBytes(request);
-				if (state.capacityLimit || requestBytes + 2048 > bounds.entryBytes ||
-					!this.reservations.reserve(s, attempt, { calls: 1, bufferedBytes: requestBytes, storageBytes: requestBytes + 3 * bounds.settlementBytes })) {
-					state.capacityLimit = true;
-					throw turnLimit("capacity");
-				}
-				const scope = { sessionId: s.id, turnId, stepId, provider: model.model.provider, model: { provider: model.model.provider, id: model.model.id } };
-				const safeToRepeat = !!turnId && (model.supports.safeToRepeat === true || (model.supports.keepsState === false && model.supports.runsTools === false));
-				let intentId: string | undefined;
-				const finalCheck = async () => {
-					if (await this.erasure.admitHistory(s) !== freshness) throw failure("unavailable", "Erasure changed the model view");
-					options.signal.throwIfAborted();
-					authorize?.();
-					this.checkScopedWork(s, "watch");
-					this.erasure.checkProviderErasure(s, model.model.provider);
-					this.checkWriter(s);
-				};
-				const check = async () => {
-					options.signal.throwIfAborted();
-					if (await this.tenantBudgetReached(s)) { state.tenantLimit = true; throw turnLimit("tenantTokens"); }
-					await finalCheck();
-				};
-				const handoff = async (send: () => void) => {
-					const publish = async () => { await finalCheck(); send(); };
-					const registry = this.erasure.pendingRegistry();
-					if (registry) await registry.exclusive(publish); else await publish();
-				};
-				const prepareDispatch = async () => {
-					await check();
-					const input = { ...scope, request };
-					const prepared = options.exactReplay ? input : (await this.hooks.transform("provider.request", input)).value;
-					if (!prepared || !isDeepStrictEqual(prepared.model, scope.model) || prepared.provider !== scope.provider || prepared.sessionId !== scope.sessionId ||
-						!Array.isArray(prepared.request?.tools) || prepared.request.tools.some((tool) => !request.tools.some((offered) => isDeepStrictEqual(offered, tool))) ||
-						!isDeepStrictEqual(prepared.request.providerTools, request.providerTools)) throw new Error("Invalid provider.request transform");
-					await check();
-					// A hook sees readable context. Restore opaque data only to unmodified,
-					// unambiguously matched messages belonging to the selected Provider.
-					const originals = options.exactReplay || !turnId ? [] : modelView(s.branch(), turnId, scope.provider)
-						.map(message => ({ message, readable: withoutProviderData(message) }));
-					const readable = options.exactReplay ? [] : prepared.request.messages.map(withoutProviderData);
-					const unchanged = readable.length === originals.length && readable.every((message, i) => isDeepStrictEqual(message, originals[i].readable));
-					const dispatched = options.exactReplay ? prepared.request : { ...prepared.request,
-						messages: unchanged ? originals.map(({ message }) => message) : readable.map(message => {
-							if (message.role !== "assistant") return message;
-							const matches = originals.filter(candidate => isDeepStrictEqual(candidate.readable, message));
-							return matches.length === 1 ? matches[0].message : message;
-						}),
-					};
-					const size = resourceBytes(dispatched);
-					if (size + 2048 > bounds.entryBytes || model.supports.runsTools !== false && dispatched.providerTools !== "none" ||
-						!this.reservations.resize(s, attempt, { calls: 1, bufferedBytes: size, storageBytes: size + 3 * bounds.settlementBytes })) {
-						state.capacityLimit = true;
-						throw turnLimit("capacity");
-					}
-					const [intent] = await this.commit(s, [{
-						kind: "modelRequest", writer: "harness", turnId, stepId, modelVisible: false,
-						actorId: turnId ? undefined : [...state.actors][0],
-						data: { model: scope.model, ...(model.supports.keepsState === true ? { keepsState: true } : {}), safeToRepeat, tools: prepared.request.tools.map((t) => t.name), ...(safeToRepeat ? { request: dispatched } : {}) },
-						sources: state.sources.get(stepId),
-					}]);
-					try { await check(); }
-					catch (error) {
-						if (intent && !s.suspended) {
-							await this.commit(s, [{ kind: "response", writer: "harness", turnId, stepId, modelVisible: false,
-								message: { role: "assistant", stop: "aborted", content: [] }, sources: [intent.id], data: { recovery: true } }]);
-						}
-						throw error;
-					}
-					intentId = intent?.id;
-					options.onEffectiveRequest?.(prepared.request);
-					return dispatched;
-				};
-				const attributes = { ...conversation(s.id), "modular_agent.turn.id": turnId, "modular_agent.step.id": stepId };
-				let observed = Promise.resolve();
-				const onEvent = (event: import("./types.js").ModelStreamEvent) => {
-					observed = observed.then(() => this.hooks.observe("provider.piece", { ...scope, turnId, stepId, piece: structuredClone(event) }));
-					if (turnId) this.emit(s, "model.output", event, "harness", { turnId, stepId });
-					options.onEvent?.(event);
-				};
-				try {
-					let message: AssistantMessage;
-					try {
-						if (model.prepareOnWire) {
-							const work = { sessionId: s.id, actors: state.actors, jobs: state.jobs, state };
-							message = await observeInference(scope.provider, scope.model.id, attributes, !!options.onEvent, () => model.request(request, { ...options, onEvent,
-								prepareDispatch: () => this.turnAuthority.run(work, prepareDispatch),
-								handoff: send => this.turnAuthority.run(work, () => handoff(send)) }));
-						} else {
-							const dispatched = await prepareDispatch();
-							let result!: Promise<AssistantMessage>;
-							await handoff(() => {
-								result = observeInference(scope.provider, scope.model.id, attributes, !!options.onEvent,
-									() => model.request(dispatched, { ...options, requestPrepared: true, onEvent }), model.inProcessInference !== true);
-								void result.catch(() => {});
-							});
-							message = await result;
-						}
-					} catch (error) {
-						if (turnId || !intentId) throw error;
-						message = options.signal.aborted ? { role: "assistant", stop: "aborted", content: [] }
-							: { role: "assistant", stop: "failed", content: [], error: { kind: "other", message: String(error) } };
-					}
-					const reserved: string[] = [];
-					const calls = message.content.filter(isToolCall);
-					const size = resourceBytes(message);
-					const replace = !!turnId && calls.length > 0;
-					let fits = size + 2048 <= bounds.entryBytes && this.reservations.resize(s, attempt, {
-						calls: replace ? 0 : 1, bufferedBytes: size, storageBytes: size + 2 * bounds.settlementBytes,
-					});
-					if (fits && turnId) for (const call of calls) {
-						if (!this.reserveCall(s, call.id)) { fits = false; break; }
-						reserved.push(call.id);
-					}
-					if (!fits) {
-						for (const id of reserved) this.reservations.release(s, `call:${id}`);
-						state.capacityLimit = true;
-						message = { role: "assistant", content: [], usage: message.usage, stop: "failed",
-							error: { kind: "other", message: "Response exceeds reserved capacity" } };
-					}
-					if (!model.prepareOnWire) await this.hooks.observe("provider.response", { ...scope, message: withoutProviderData(message) });
-					if (!turnId && intentId) await this.commit(s, [{ kind: "response", writer: "harness", stepId,
-						actorId: [...state.actors][0], message, modelVisible: false, sources: [intentId] }]);
-					return message;
-				} finally {
-					if (!turnId || !intentId) this.reservations.release(s, attempt);
-					await observed;
-					if (turnId) this.emit(s, "model.streamEnd", {}, "harness", { turnId, stepId }); }
-			});
-			if (!turnId || !steps) return work();
-			const step = () => this.step(s, turnId, steps, stepId);
-			return (turn ? turn.run(step) : step()).run(work);
-		} };
 	}
 
 	private providerFor(s: Session, ref = parseModel(s.settings.model) as ReturnType<typeof parseModel> | null): Provider | undefined {
@@ -3150,7 +3013,6 @@ export async function untilAborted<T>(signal: AbortSignal, work: () => Promise<T
 	});
 }
 
-const turnLimit = (limit: string) => Object.assign(new Error(`Turn limit: ${limit}`), { code: "turn_limit", limit });
 
 export const REASONING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 
