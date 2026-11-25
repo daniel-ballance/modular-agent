@@ -166,6 +166,19 @@ test("only what the parser calls code or HTML is blanked: escaped backticks, a b
   assert.deepEqual(repo.run("--all").at, ["README.md:3", "README.md:5"]);
 });
 
+test("an issue URL tracks a section from a link destination, a definition or visible text, never from a link title", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "## Known gaps", "",
+    'A gap in Go. See [guide](https://example.invalid "<https://github.com/o/r/issues/5>").', "",
+    "## Gaps in Rust", "", '[Issue](https://github.com/o/r/issues/6 "title").', "",
+    "## Gaps in Python", "", "[Issue][python].", "", "[python]: https://github.com/o/r/issues/7", "",
+    "## Gaps in TypeScript", "", "See https://github.com/o/r/issues/8 for it.", "",
+  ]);
+  repo.commit("Docs");
+  assert.deepEqual(repo.run("--all").at, ["README.md:1", "README.md:3"]);
+});
+
 test("missing parser dependencies give a one-line install instruction", (t) => {
   const cwd = mkdtempSync(join(tmpdir(), "docs-review-no-deps-"));
   t.after(() => rmSync(cwd, { force: true, recursive: true }));

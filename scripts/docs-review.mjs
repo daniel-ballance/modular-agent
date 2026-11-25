@@ -77,6 +77,9 @@ const read = (file) => git("show", `HEAD:${file}`);
 
 const unread = ["code", "inlineCode", "html"];
 const blocks = ["heading", "paragraph", "tableRow"];
+const destinations = ["link", "image", "definition"];
+// A link, autolink, image or definition names an issue by its destination, never its title; text by what it says.
+const namesIssue = (node) => (destinations.includes(node.type) ? issueUrl.test(node.url) : node.type === "text" && (issueUrl.test(node.value) || issueNumber.test(node.value)));
 
 // Code, inline code, HTML and front matter are blanked in place, not removed, so each line keeps its number.
 function markdown(source) {
@@ -84,9 +87,11 @@ function markdown(source) {
   let shown = "";
   let at = 0;
   const headings = [];
+  const issues = [];
   const blockOf = new Map();
   for (const node of walk(parseMarkdown(text))) {
     const { start, end } = node.position;
+    if (namesIssue(node)) issues.push(start.line - 1);
     if (unread.includes(node.type)) {
       shown += text.slice(at, start.offset) + text.slice(start.offset, end.offset).replace(/[^\r\n]/g, " ");
       at = end.offset;
@@ -98,7 +103,11 @@ function markdown(source) {
   return {
     lines,
     paragraph: (i) => lines.slice(...(blockOf.get(i) ?? [i, i + 1])).join("\n"),
-    section: (i) => lines.slice(headings.findLast((line) => line <= i) ?? 0, headings.find((line) => line > i)).join("\n"),
+    tracked: (i) => {
+      const from = headings.findLast((line) => line <= i) ?? 0;
+      const to = headings.find((line) => line > i) ?? lines.length;
+      return issues.some((line) => line >= from && line < to);
+    },
   };
 }
 
@@ -117,12 +126,10 @@ function words(text, pattern) {
   return [...new Set([...text.matchAll(pattern)].map((match) => match[0].toLowerCase()))];
 }
 
-const tracked = (text) => issueUrl.test(text) || issueNumber.test(text.replace(link, "$1"));
-
 function candidates(file, wanted, adrs) {
   const source = read(file);
   const raw = linesOf(source);
-  const { lines, paragraph, section } = markdown(source);
+  const { lines, paragraph, tracked } = markdown(source);
   const found = [];
   for (const [i, line] of lines.entries()) {
     if (wanted && !wanted.has(i + 1)) continue;
@@ -132,7 +139,7 @@ function candidates(file, wanted, adrs) {
     const status = [...new Set([...words(text, statusWords), ...words(text, todo), ...(named ? words(text, adrStatusWords) : [])])];
     if (status.length) reasons.push(`status ${status.map((word) => `"${word}"`).join(", ")}`);
     const open = [...words(text, openWords), ...(normative.test(text) ? [] : words(text, absentWords))];
-    if (open.length && !tracked(section(i))) {
+    if (open.length && !tracked(i)) {
       reasons.push(`open work ${open.map((word) => `"${word}"`).join(", ")} with no issue in its section`);
     }
     if (!reasons.length) continue;
