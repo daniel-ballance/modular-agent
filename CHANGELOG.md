@@ -2,7 +2,9 @@
 
 The four SDKs and `ma` share one project version. The [SDK specification](docs/sdk/README.md) has its own revision. Nothing is published to a registry; a version names a commit on `main`.
 
-## Unreleased
+## 0.3.0
+
+The third release, on Linux and macOS. Approvals can wait past their turn and cover a whole script, `ma` gains an approval setting, a host can learn why a wait closed and how a lost run ended, and code kept only for earlier versions of this project is gone. Results are in [docs/status.md](docs/status.md#030).
 
 - **Approvals that wait past their turn ([ADR 0034](docs/adr/0034-approvals-that-wait.md)), in all four SDKs.** With an operator maximum (`maxApprovalWaitMs`) and a session that opts in (`approvalWait: "untilDeadline"`), a model's call to a server tool that needs approval ends the turn unstarted, so the agent's process can stop. An approver who returns later is shown the exact call and answers on that route; one continuation then rechecks consent, rights, registration, input and the deadline before the call runs, and refuses a call that changed. The ACP and AG-UI kits, the shared scenarios (28 more, run only for agents that declare the feature) and the telemetry check cover it.
 - **Approvals that cover nested calls** (an [ADR 0034 amendment](docs/adr/0034-approvals-that-wait.md#amendment-approvals-that-cover-nested-calls)), in all four SDKs. With the operator option `approvalCoversNested`, an explicit allow for a top-level call also answers the approval check of each nested call it makes in that dispatch. Every other check still applies, the approval view says the allow covers nested calls, and each covered call's `toolStarted` records `approvalCoveredBy`.
@@ -23,6 +25,8 @@ The four SDKs and `ma` share one project version. The [SDK specification](docs/s
   - Rust's and Python's pre-binding ACP dispatchers, the TypeScript Claude sidecar wrapper, start-up migrations of erasure registries, fallback credential files, guessed lease intervals, and `MA_HOME`.
   Old private state is refused, not converted. Kit cases that skipped when a feature was absent now fail; every build's fixtures declare every feature.
 - **Fixed, found by the stricter kits:** TypeScript and Go re-showed a waiting approval that the output gate had hidden; Go placed a late tool result after a newer user message in the model context; Rust answered `invalid_params` instead of `busy` for erase, move and fork during a turn; Rust's conformance model read the turn's history instead of the request; Rust answered `lost` when a plugin call was cancelled while its environment callback was open; Python's history service promoted nested IDs into erasure tombstones.
+- **Fixed on macOS:** the kits, scenario runners and ops desk treated `EPERM` from signalling a process group that still held a zombie as an error; Python's history service listened with a backlog of 5, so several simultaneous connections were reset.
+- **`ma --version`** prints `ma VERSION (LANGUAGE)` with the language in lowercase in all four builds.
 
 ## 0.2.0
 

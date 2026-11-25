@@ -12,6 +12,23 @@
 
 **What the checks do not establish.** Byte limits are counted logically: they do not reserve physical disk, and the operator provides the extra space an atomic replacement needs. Scope is rechecked when a queued reply leaves its queue, but not every transport proves it at the last socket handoff. A deletion is not held until every external effect already in flight has finished, and restoring a backup still needs separate proof that it is current. Each SDK's README lists its own remaining items. Full production readiness is not claimed.
 
+## 0.3.0
+
+Recorded on 2026-11-24 for the commit tagged `v0.3.0`, from `scripts/check.sh` on Linux (Fedora, x86-64; 61 steps, all passed) and `scripts/macos-check.sh` on macOS (Apple silicon; 34 steps, all passed).
+
+| Check | Rust | TypeScript | Go | Python |
+|---|---|---|---|---|
+| Shared SDK scenarios (45, including 28 for approvals that wait), every placement | pass | 405/405 | pass | 405/405 |
+| Reference checks against `ma` | 28/28 | 28/28 | 28/28 | 28/28 |
+| ACP kit against `ma`: core, covered approvals, approvals that wait | 190, 2, 50 | 190, 2, 50 | 190, 2, 50 | 190, 2, 50 |
+| Over WebSocket: plugin kit, listener isolation, named callers, ACP kit | 157, 14, 29, 195 | 157, 14, 29, 195 | 157, 14, 31, 195 | 157, 14, 29, 195 |
+| [AG-UI kit](../conformance/agui/README.md) against `ma` and an SDK fixture | 49/49 | 49/49 | 49/49 | 49/49 |
+| [Telemetry check](../conformance/telemetry/README.md), as host: in process and with each other language's plugins | 16, 6 | 16, 6 | 16, 6 | 16, 6 |
+| [ADR 0030](adr/0030-production-gaps.md) kits | pass | pass | pass | pass |
+| Own suites | 494 tests | 652 in each of two layouts | 39 packages; race on 7 | 844 in each of four configurations |
+
+Rust and Go's scenario runners report pass or fail, not a count. Go's named-callers transcript has two more checks because its fixture also saves points. The telemetry peer cases fell from 18 to 6 when the plugin trace handshake was removed. Each language's agents passed the erasure checks on every other language's history service: 12 of 12 pairings. The [project notes demo](../demos/project-notes/README.md) passed with its crash run, and the [ops desk](../demos/ops-desk/README.md) passed its eight scripted checks. Every result above used scripted models.
+
 ## 0.2.0
 
 Recorded on 2026-11-23 for the commit tagged `v0.2.0`, from `scripts/check.sh` on Linux (Fedora, x86-64; 53 steps, all passed) and `scripts/macos-check.sh` on macOS (Apple silicon; 20 steps, all passed).
