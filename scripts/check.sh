@@ -123,6 +123,8 @@ plan() {
   step docs "docs: relative links resolve" node scripts/check-links.mjs
   step docs "docs: maintainability" node scripts/check-maintainability.mjs
   step docs "docs: maintainability tests" node --test scripts/check-maintainability.test.mjs
+  step docs "docs: state" node scripts/check-docs-state.mjs
+  step docs "docs: state tests" node --test scripts/check-docs-state.test.mjs
 
   if $quick; then
     step rust "rust: SDK tests" bash -c "cd rust && mise exec -- cargo test -q -p modular-agent -p standard -- --test-threads=1"

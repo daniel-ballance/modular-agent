@@ -76,6 +76,8 @@ Keep one concern per module. Split a module by the rule each part enforces, not 
 
 Keep tracked source files at 1,000 lines or fewer. The docs lane runs `scripts/check-maintainability.mjs` to check this. Files listed in `scripts/maintainability-baseline.json` may exceed the limit up to their recorded counts. Lower an entry when its file shrinks. Remove the entry if the file is gone or fits the limit. Adding or raising an entry requires review. Explain why in the PR.
 
+The docs lane checks that sections listing open work link to issues and that ADR status agrees with the records. It also checks that package versions and the SDK specification status match the release in `CHANGELOG.md`.
+
 Do not merge a commit into `main` if its subject starts with `WIP`, regardless of case.
 
 Follow the split issues for the four Harness modules over the limit: [TypeScript #8](https://github.com/daniel-ballance/modular-agent/issues/8), [Rust #9](https://github.com/daniel-ballance/modular-agent/issues/9), [Python #10](https://github.com/daniel-ballance/modular-agent/issues/10) and [Go #11](https://github.com/daniel-ballance/modular-agent/issues/11).
