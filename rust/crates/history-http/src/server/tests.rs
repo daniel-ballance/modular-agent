@@ -1,6 +1,13 @@
 use super::*;
 use crate::{HttpHistory, io};
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
+};
 
 #[derive(Default)]
 struct Snapshots(Mutex<BTreeMap<String, SessionData>>);
@@ -38,6 +45,108 @@ impl HistoryStore for Snapshots {
     fn erase(&self, _: Vec<String>, _: &[String]) -> agent_api::Result<Vec<SessionData>> {
         unreachable!()
     }
+}
+
+struct Gated {
+    inner: Snapshots,
+    stalled: String,
+    reached: Mutex<mpsc::Sender<()>>,
+    release: Mutex<mpsc::Receiver<()>>,
+    watched: String,
+    touched: AtomicUsize,
+}
+
+impl Gated {
+    fn watch(&self, id: &str) {
+        if id == self.watched {
+            self.touched.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl HistoryStore for Gated {
+    fn supports_service_snapshots(&self) -> bool {
+        true
+    }
+
+    fn acquire(&self, id: &str) -> agent_api::Result<Box<dyn Lease>> {
+        self.inner.acquire(id)
+    }
+
+    fn load(&self, id: &str) -> agent_api::Result<SessionData> {
+        self.watch(id);
+        self.inner.load(id)
+    }
+
+    fn save(&self, data: &SessionData) -> agent_api::Result<()> {
+        self.watch(&data.id);
+        if data.id == self.stalled {
+            self.reached.lock().unwrap().send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+        }
+        self.inner.save(data)
+    }
+
+    fn list(&self, project: Option<&Path>) -> agent_api::Result<Vec<SessionData>> {
+        self.inner.list(project)
+    }
+
+    fn erase(&self, _: Vec<String>, _: &[String]) -> agent_api::Result<Vec<SessionData>> {
+        unreachable!()
+    }
+}
+
+#[test]
+fn renewal_does_not_wait_for_another_sessions_commit() -> agent_api::Result<()> {
+    let (reached, stalled) = mpsc::channel();
+    let (release, held) = mpsc::channel();
+    let snapshots = Arc::new(Gated {
+        inner: Snapshots::default(),
+        stalled: storage_key("unrelated"),
+        reached: Mutex::new(reached),
+        release: Mutex::new(held),
+        watched: storage_key("writer"),
+        touched: AtomicUsize::new(0),
+    });
+    let service = Arc::new(SnapshotStore::new(
+        snapshots.clone(),
+        Duration::from_secs(30),
+        10,
+    )?);
+    let metadata = json!({"project":"/","created":0});
+    io().block_on(service.create("writer", metadata.clone()))
+        .unwrap();
+    let lease = io()
+        .block_on(service.acquire("writer", "owner"))
+        .unwrap()
+        .lease;
+    let unrelated = {
+        let service = service.clone();
+        std::thread::spawn(move || io().block_on(service.create("unrelated", metadata)))
+    };
+    stalled
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the unrelated commit never reached storage");
+    let touched = snapshots.touched.load(Ordering::SeqCst);
+    let (renewed, answer) = mpsc::channel();
+    let renewer = {
+        let service = service.clone();
+        std::thread::spawn(move || renewed.send(io().block_on(service.renew("writer", &lease))))
+    };
+    let answer = answer.recv_timeout(Duration::from_secs(5));
+    let finished_first = unrelated.is_finished();
+    release.send(()).unwrap();
+    unrelated.join().unwrap().unwrap();
+    renewer.join().unwrap().unwrap();
+    let ttl = answer.expect("renewal waited for another session's commit");
+    assert_eq!(ttl.unwrap(), 30_000);
+    assert!(!finished_first);
+    assert_eq!(
+        snapshots.touched.load(Ordering::SeqCst),
+        touched,
+        "renewal loaded or saved its session"
+    );
+    Ok(())
 }
 
 #[test]
