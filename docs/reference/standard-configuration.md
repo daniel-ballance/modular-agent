@@ -55,7 +55,7 @@ With no `--model` and none in settings, `ma` uses the first Provider that is sig
 
 **Interactive mode** is line-based. While the agent works, a line typed steers the running turn; `/after TEXT` queues a new turn; `/cancel` or Ctrl-C stops the turn. Commands: `/commands`, `/model`, `/thinking`, `/compact`, `/skills`, `/skill:NAME`. Model text streams to stdout; calls and diagnostics go to stderr.
 
-**Questions** in interactive mode go to stderr. Each shows `Question REQUEST_ID: QUESTION`, its options if it has any, and how to answer it. The terminal shows a question only once it can take the answer, so an answer sent as soon as the line appears is accepted. An approval of a tool call takes `y` or `n` ([Approval](#approval)). Any other question takes `/answer REQUEST_ID VALUE`, and `/answer REQUEST_ID decline` declines it. End of input declines every open question.
+**Questions** in interactive mode go to stderr. Each shows `Question REQUEST_ID: QUESTION`, its options if it has any, and how to answer it. The terminal registers a question before it shows it, so an `/answer` it reads after the line appears finds that question. An approval of a tool call takes `y` or `n` ([Approval](#approval)). Any other question takes `/answer REQUEST_ID VALUE`, and `/answer REQUEST_ID decline` declines it. End of input declines every open question.
 
 **Secret answers** are never typed on the visible line:
 
