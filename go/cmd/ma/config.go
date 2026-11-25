@@ -261,10 +261,18 @@ func listSessions(ctx context.Context, store modular.HistoryStore, project strin
 	})
 	return ss, nil
 }
+
+// canonical resolves a project folder as the operating system follows it:
+// each symlink before any ".." after it. filepath.Abs would first clean
+// "alias/.." away lexically, so a relative path is joined to the working
+// folder unchanged and EvalSymlinks walks it one component at a time.
 func canonical(p string) (string, error) {
-	p, err := filepath.Abs(p)
-	if err != nil {
-		return "", err
+	if !filepath.IsAbs(p) {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		p = wd + string(filepath.Separator) + p
 	}
 	return filepath.EvalSymlinks(p)
 }
