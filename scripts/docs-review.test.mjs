@@ -204,15 +204,16 @@ test("completion wording beside a named ADR is a candidate", (t) => {
 
 test("file names that look like pathspec magic are read literally, and a rename counts only its edited lines", (t) => {
   const repo = checkout(t);
-  repo.track("docs/old.md", ["Support is planned.", "", "A stable line.", ""]);
+  const stable = Array.from({ length: 20 }, (_, i) => `Stable line ${i + 1} of the guide.`);
+  repo.track("docs/old.md", ["Support is planned.", "", ...stable, ""]);
   repo.commit("Start");
   repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
-  repo.write(":(glob)magic.md", "Support is planned.\n");
+  repo.write(":(glob)magic.md", "Resume is planned.\n");
   repo.git("--literal-pathspecs", "add", "--", ":(glob)magic.md");
   repo.git("mv", "docs/old.md", "docs/new.md");
-  repo.track("docs/new.md", ["Support is planned.", "", "A stable line.", "Streaming is not implemented.", ""]);
+  repo.track("docs/new.md", ["Support is planned.", "", ...stable, "Streaming is not implemented.", ""]);
   repo.commit("Docs");
-  assert.deepEqual(repo.run().at, [":(glob)magic.md:1", "docs/new.md:4"]);
+  assert.deepEqual(repo.run().at, [":(glob)magic.md:1", "docs/new.md:23"]);
 });
 
 test("--base picks another merge base, and main is used without origin/main", (t) => {

@@ -142,8 +142,9 @@ function changedLines(base) {
   }
   const changed = new Map();
   // -z names each file exactly; patch headers quote or pad some paths, such as one with a space.
-  // A renamed file is diffed against its old path, so only its edited lines count.
-  const status = git("diff", "--name-status", "-z", "-M", "--diff-filter=d", merge, "HEAD", "--", "*.md").split("\0");
+  // A file at least 90% like a deleted one is a rename, diffed against its old path so only its
+  // edited lines count. Below that every line counts: a loose pairing could hide new lines.
+  const status = git("diff", "--name-status", "-z", "-M90%", "--diff-filter=d", merge, "HEAD", "--", "*.md").split("\0");
   for (let i = 0; i < status.length - 1;) {
     const kind = status[i++];
     const from = kind.startsWith("R") || kind.startsWith("C") ? status[i++] : undefined;
@@ -152,7 +153,7 @@ function changedLines(base) {
     const lines = new Set();
     // Literal pathspecs: a file name such as ":(glob)x.md" is a name, not pathspec magic.
     const paths = from && kind.startsWith("R") ? [from, file] : [file];
-    for (const line of git("--literal-pathspecs", "diff", "--unified=0", "--no-color", "--no-ext-diff", "-M", merge, "HEAD", "--", ...paths).split("\n")) {
+    for (const line of git("--literal-pathspecs", "diff", "--unified=0", "--no-color", "--no-ext-diff", "-M90%", merge, "HEAD", "--", ...paths).split("\n")) {
       const hunk = line.match(/^@@ -\S+ \+(\d+)(?:,(\d+))? @@/);
       if (!hunk) continue;
       const count = hunk[2] === undefined ? 1 : Number(hunk[2]);
