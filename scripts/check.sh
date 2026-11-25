@@ -40,13 +40,28 @@ printf 'Step logs: %s\n' "$logs"
 start_run=$SECONDS
 
 point_refs() {
-  git for-each-ref --format='%(refname)' refs/modular-agent/ | LC_ALL=C sort
+  git for-each-ref --format='%(refname) %(objectname)' refs/modular-agent/ | LC_ALL=C sort
 }
-point_refs >"$logs/refs-before" || exit 1
+if ! point_refs >"$logs/refs-before"; then
+  echo "check.sh: cannot list refs/modular-agent/ in $repo; run it from a Git checkout" >&2
+  exit 1
+fi
 
+# Worktrees share one ref store, so another checkout's run can add points while this one runs.
+# A point commit names its project; only points saved for a project inside this checkout count.
 check_test_refs() {
+  local root
+  root="$(cd "$repo" && pwd -P)" || return
   point_refs >"$logs/refs-after" || return
-  LC_ALL=C comm -13 "$logs/refs-before" "$logs/refs-after" >"$logs/refs-added" || return
+  LC_ALL=C comm -13 "$logs/refs-before" "$logs/refs-after" >"$logs/refs-new" || return
+  : >"$logs/refs-added"
+  [ -s "$logs/refs-new" ] || return 0
+  cut -d' ' -f2 "$logs/refs-new" | git log --no-walk=unsorted --stdin --format='%x01%H%n%B' |
+    awk -v root="$root" '
+      /^\001/ { sha = substr($0, 2); next }
+      /^project: / { project = substr($0, 10); if (project == root || index(project, root "/") == 1) print sha }
+    ' >"$logs/refs-ours" || return
+  awk 'NR == FNR { ours[$1]; next } $2 in ours' "$logs/refs-ours" "$logs/refs-new" >"$logs/refs-added" || return
   if [ -s "$logs/refs-added" ]; then
     printf 'Tests added %s refs under refs/modular-agent/ to the enclosing repository. See %s\n' \
       "$(wc -l <"$logs/refs-added")" "$logs/refs-added" >&2
