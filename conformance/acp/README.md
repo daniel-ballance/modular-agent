@@ -81,7 +81,9 @@ node conformance/acp/run.mjs [options] --connect ws://127.0.0.1:PORT/ --token-fi
   [--service-command COMMAND] [--actor ID] [--other-token-file FILE]
 ```
 
-The kit runs the default checks over the connection, plus transport checks: an upgrade with no token or a wrong token is refused with HTTP 401, an upgrade without the subprotocol is refused, and two connections with the same token are independent ACP connections acting as the token's actor. `--actor` names the actor the token should select. `--other-token-file` holds a token for a different actor; with `--portable-checks` or `--then`, it runs the retry-by-a-different-principal check, which is skipped without it.
+The kit runs the default checks over the connection, plus transport checks: an upgrade with no token or a wrong token is refused with HTTP 401, an upgrade without the subprotocol is refused, and two connections with the same token are independent ACP connections acting as the token's actor. `--actor` names the actor the token should select. `--other-token-file` holds a token for a different actor. With `--portable-checks`, the kit checks retries by both actors after reopening.
+
+The full gate runs `--group websocket-retries --portable-checks` separately from the core transcript. This group requires a managed listener, `--actor`, `--other-token-file` and a disposable shared history service. It restarts the listener, checks that the writer gets its original receipt, and checks that the other actor cannot reopen until the fixture records a grant. It then verifies that the other actor gets a new receipt and that the service kept one admission per actor for the same key. Use `--group core --portable-checks` for the broader portable checks.
 
 `--crash-checks`, `--probe-checks` and `--job-checks` need to kill and restart the service and to start it with fixture plugins. Give `--service-command`, a shell command that starts the service; the kit runs it with `MODULAR_AGENT_CONFORMANCE_URL` and `MODULAR_AGENT_CONFORMANCE_TOKEN_FILE` set, and starts extra copies on other loopback ports when a check needs a different startup configuration. Without `--service-command`, those checks are skipped with the reason.
 
@@ -93,7 +95,7 @@ MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-
   --service-command "node $PWD/conformance/tools/ws-bridge.mjs --binding acp -- $PWD/rust/target/debug/ma --acp"
 ```
 
-Results through the bridge: Rust `ma`, 96/96 with the default checks and 193/193 with the three options above (stdio: 188/188); the Rust base agent, 219/219 (stdio: 214/214). The bridge accepts one token, so it cannot exercise `--other-token-file`. Each `ma` serves ACP itself with `ma --acp --listen ADDR --token-file FILE`; [`scripts/websocket-kits.sh`](../../scripts/websocket-kits.sh) runs the kit against each with no bridge: 193/193 in all four languages.
+Results through the bridge: Rust `ma`, 96/96 with the default checks and 193/193 with the three options above (stdio: 188/188); the Rust base agent, 219/219 (stdio: 214/214). The bridge accepts one token, so it cannot exercise `--other-token-file`. [`scripts/websocket-kits.sh`](../../scripts/websocket-kits.sh) runs the core and two-credential checks against each `ma` directly, without a bridge.
 
 , the rights checks accept a completed turn with a refusal or a failed turn with `Invalid tool directive`. They check that no dispatch was recorded, the command did not run, and no result came from the tool. See [Tool dispatch](../../docs/contracts.md#tool-dispatch), [Prompts](../../docs/bindings/acp.md#prompts) and [Conformance mode](../../docs/bindings/acp.md#conformance-mode).
 

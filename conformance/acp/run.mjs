@@ -15,6 +15,7 @@ import { capacity, erasure, isolation } from "./production.mjs";
 import { coveredApproval } from "./covered.mjs";
 import { waitingChecks } from "./waiting.mjs";
 import { stdioRights } from "./stdio-rights.mjs";
+import { retryAsDifferentPrincipal, websocketRetries } from "./retries.mjs";
 import { ACP_PROTOCOL, checkUpgrades, CONTROL_MS, readToken, socketPeer, websocketOptions } from "../tools/websocket.mjs";
 
 const args = process.argv.slice(2);
@@ -29,8 +30,8 @@ try {
 		...Object.fromEntries(["verbose", ...coreOptions].map(k => [k, { type: "boolean" }])),
 	} });
 	group = values.group ?? "core";
-	if (!["core", "covered", "waiting", "stdio-rights", ...Object.keys(production)].includes(group)) throw Error("unknown ACP group: " + group);
-	if (group !== "core" && coreOptions.some(k => values[k])) throw Error("core check options require --group core");
+	if (!["core", "covered", "waiting", "stdio-rights", "websocket-retries", ...Object.keys(production)].includes(group)) throw Error("unknown ACP group: " + group);
+	if (group !== "core" && coreOptions.some(k => values[k] && !(group === "websocket-retries" && k === "portable-checks"))) throw Error("core check options require --group core");
 	const options = websocketOptions(argv);
 	network = options && { ...options, tokenFile: resolve(options.tokenFile), protocol: ACP_PROTOCOL };
 	const option = (key) => {
@@ -46,6 +47,8 @@ try {
 	expectedActor = option("--actor");
 	const otherFile = option("--other-token-file");
 	if (group === "stdio-rights" && (network || args.indexOf("--then", dash + 1) >= 0)) throw Error("stdio-rights requires one stdio fixture command");
+	if (group === "websocket-retries" && !(network && serviceCommand && values["portable-checks"] && expectedActor && otherFile))
+		throw Error("websocket-retries needs --connect, --token-file, --service-command, --portable-checks, --actor and --other-token-file");
 	if (network ? dash >= 0 : serviceCommand || expectedActor || otherFile || dash < 0 || dash === args.length - 1) throw new Error("choose a stdio command or a WebSocket URL");
 	if (otherFile) {
 		otherToken = readToken(otherFile);
@@ -57,7 +60,6 @@ try {
 }
 const canConfigure = !network || !!serviceCommand;
 const verbose = argv.includes("--verbose");
-// With --plugin-checks, also check the conformance plugin's hooks are in force (docs/bindings/plugin.md).
 const pluginChecks = argv.includes("--plugin-checks");
 const crashChecks = argv.includes("--crash-checks");
 const probeChecks = argv.includes("--probe-checks");
@@ -121,8 +123,7 @@ const sessionsUsed = [];
 // Tenants every agent is started with, for the tenant checks (docs/bindings/data.md#limits-and-tenants).
 const TENANTS = readFileSync(new URL("./tenants.json", import.meta.url), "utf8");
 const project = mkdtempSync(join(tmpdir(), "ma-conf-project-"));
-// A git work tree, so an environment that keeps points in git can declare rewinding
-// here. An environment that copies the project copies .git with it, unchanged.
+// Git-backed working environments need a work tree to declare rewinding.
 spawnSync("git", ["init", "-q", project], { stdio: "ignore" });
 const results = [];
 const children = [];
@@ -329,6 +330,7 @@ if (group !== "core") {
 	if (group === "waiting") await waitingChecks({ root: probeDir, project, command, second, connect, stop, crash, check, attempt, within });
 	else if (group === "covered") await runCovered();
 	else if (group === "stdio-rights") await stdioRights({ project, connect, stop, check, within, history, prompt, closeSession, attempt, command });
+	else if (group === "websocket-retries") await attempt(group, () => websocketRetries({ check, within, connect, prompt, closeSession, setOption, stop, crash, actor: expectedActor, otherToken, store, project, reopenWatchdog }));
 	else await runProduction();
 	await finish();
 }
@@ -549,7 +551,6 @@ if (["severalActors", "sessionLimits", "tenants"].some((feature) => decl[feature
 		// An unexpected success must not leave pending work or change rights in
 		// the session used by the other checks.
 		const s = await within(15000, agent.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] }), "open disabled extensions fixture");
-		sessionsUsed.push(s.sessionId);
 		try {
 			for (const [feature, method, params] of [
 				["severalActors", "input", { when: "propose", content: "unsupported proposal", key: randomUUID() }],
@@ -1406,20 +1407,20 @@ await attempt(network ? "load on a new connection" : "load in a new process", as
 	await agent.ctx.request(methods.agent.session.close, { sessionId });
 });
 
-if (portablePair && network && !otherToken) console.log("SKIP  retry by a different principal (requires --other-token-file configured for another actor)");
 if (portablePair && (!network || otherToken)) await attempt("Input admission: key retry by a different principal", async () => {
 	const peer = network ? connect(second, {}, otherToken) : connect(second, { MODULAR_AGENT_ACTOR: otherActor });
 	try {
 		const init = await within(15000, peer.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} }), "initialize different principal");
 		const readerActor = meta(init)?.actor?.id;
-		if (!check(network ? "WebSocket: the other token has a different principal" : "Starting: a different MODULAR_AGENT_ACTOR changes the reopener's principal", network ? !!writerActor && !!readerActor && writerActor !== readerActor : writerActor === portableActor && readerActor === otherActor, JSON.stringify({ writerActor, readerActor }))) return;
-		await within(await reopenWatchdog(), peer.ctx.request(methods.agent.session.load, { sessionId, cwd: project, mcpServers: [] }), "reopen as different principal");
-		const r = await within(15000, prompt(peer, sessionId, "retry with a different principal", "key-1"), "key in new scope").catch((e) => e);
-		const m = meta(r);
-		check("Input admission: a different principal gets a new admission, not the old receipt", !!firstInputId && m?.duplicate !== true && typeof m?.inputId === "string" && m.inputId !== firstInputId && m?.outcome?.kind === "completed", JSON.stringify(m ?? { code: r?.code, data: r?.data, message: r?.message }));
-		await closeSession(peer, sessionId);
+		if (!network && !check("Starting: a different MODULAR_AGENT_ACTOR changes the reopener's principal", writerActor === portableActor && readerActor === otherActor, JSON.stringify({ writerActor, readerActor }))) return;
+		const inputId = await retryAsDifferentPrincipal({ init, writer: writerActor, firstInputId, check,
+			grant: network ? actor => store.grantRecordedActor(sessionId, writerActor, actor) : undefined,
+			load: async () => within(await reopenWatchdog(), peer.ctx.request(methods.agent.session.load, { sessionId, cwd: project, mcpServers: [] }), "reopen as different principal"),
+			send: () => within(15000, prompt(peer, sessionId, "retry with a different principal", "key-1"), "key in new scope"),
+		});
+		if (inputId) await closeSession(peer, sessionId);
 	} finally { await stop(peer); }
-});
+}); else if (portablePair) console.log("SKIP  retry by a different principal (requires --other-token-file configured for another actor)");
 
 // ACP: Input admission and Extension methods (Erase). Resend through both admission routes.
 if (decl.erasure && extensions.includes("erase")) await attempt("erased input key", async () => {
@@ -1663,8 +1664,8 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 		for (const mode of ["incomplete-report", "nested-id", "missing-ceiling", "missing-disposition", "failed-position"]) {
 			const sid = await seed(mode), before = await store.pages(sid);
 			const reply = await load(sid);
-			check(`portable: refuse ${mode} without scheduling work or rewriting history`,
-				Number.isInteger(reply?.code) && equal(await store.pages(sid), before));
+			check(`portable: refuse ${mode} without scheduling work or rewriting history`, Number.isInteger(reply?.code) && equal(await store.pages(sid), before),
+				JSON.stringify({ code: reply?.code, data: reply?.data, message: reply?.message }));
 			if (!reply?.code && !(reply instanceof Error)) await closeSession(s, sid);
 		}
 		const revoked = await seed("revoked");
@@ -1969,7 +1970,6 @@ if (portableChecks) {
 		}
 	});
 }
-
 
 await finish();
 
