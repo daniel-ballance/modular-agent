@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -1088,45 +1087,6 @@ func (p *turnPorts) CheckWriter() error {
 	return p.s.checkWriterLocked()
 }
 
-// ToolRegistration resolves the currently registered source and definition.
-// The source may refresh, so do not hold either Harness lock while reading it.
-func (p *turnPorts) ToolRegistration(name string) (string, string, api.Tool, bool) {
-	plugin, source, definition, _, _, found := p.resolveTool(name)
-	return plugin, source, definition, found
-}
-
-func (p *turnPorts) resolveTool(name string) (plugin, source string, definition api.Tool, executor api.ToolSource, snap api.Session, found bool) {
-	snap, err := p.Snapshot()
-	if err != nil {
-		return
-	}
-	p.c.h.mu.RLock()
-	sources := map[string]registration{}
-	for id, r := range p.c.h.caps {
-		if strings.HasPrefix(id, "tools.") {
-			sources[id] = r
-		}
-	}
-	p.c.h.mu.RUnlock()
-	for id, r := range sources {
-		s := r.value.(api.ToolSource)
-		for _, tool := range s.Tools(snap) {
-			if tool.Name != name {
-				continue
-			}
-			if found {
-				return "", "", api.Tool{}, nil, snap, false
-			}
-			plugin, source = r.owner, strings.TrimPrefix(id, "tools.")
-			if identity, ok := s.(interface{ ToolSourceIdentity() (string, string) }); ok {
-				plugin, source = identity.ToolSourceIdentity()
-			}
-			definition, executor, found = tool, s, true
-		}
-	}
-	return
-}
-
 func (p *turnPorts) CheckTenantBudget() error {
 	p.s.mu.Lock()
 	name := p.s.data.Tenant
@@ -1147,44 +1107,4 @@ func (p *turnPorts) Snapshot() (api.Session, error) {
 		return api.Session{}, err
 	}
 	return snap, nil
-}
-func (p *turnPorts) RunTool(ctx context.Context, call api.Call) (result api.ToolResult) {
-	defer func() {
-		if result.NotDispatched {
-			toolDisposition(ctx, call, result.Status)
-		}
-	}()
-	plugin, id, def, source, snap, found := p.resolveTool(call.Name)
-	if !found || !api.CanCall(def, call.Origin) || !p.canRunTools(call.Actor) {
-		return api.ToolResult{Call: call.ID, Status: "refused", NotDispatched: true}
-	}
-	if err := validateToolInput(def, call.Input); err != nil {
-		return api.ToolResult{Call: call.ID, Status: "failed", Content: api.Text(err.Error()), NotDispatched: true}
-	}
-	if ctx.Err() != nil || p.CheckWriter() != nil || !p.canRunTools(call.Actor) {
-		return api.ToolResult{Call: call.ID, Status: "not_started", NotDispatched: true}
-	}
-	binding := api.ToolRegistration{Plugin: plugin, ToolSource: id}
-	q := api.Executing(ctx).LiveApproval
-	if p.c.h.SupportsWaitingApprovals() {
-		if sources, err := p.waitingProof(ctx, snap, call, &binding, &def, true); err != nil {
-			return api.ToolResult{Call: call.ID, Status: api.GateFailureStatus(err), NotDispatched: true}
-		} else if len(sources) != 0 {
-			// Use the immutable request that was answered, not today's composition default.
-			q = &api.WaitingApprovals(snap)[call.ID].Question
-		}
-	}
-	var cover *approvalCover
-	if p.c.h.approvalCoversNested && q != nil && q.CoversNested {
-		if q.ID == "" || !sameApprovalCall(*q, call, &binding, &def) {
-			return api.ToolResult{Call: call.ID, Status: "refused", NotDispatched: true}
-		}
-		cover = &approvalCover{ToolCallID: call.ID, RequestID: q.ID}
-	}
-	result, err := p.executeTool(ctx, source, snap, call, binding, 0, cover)
-	result.Returns = def.Output
-	if err != nil {
-		result.ProcessingError = err
-	}
-	return result
 }
