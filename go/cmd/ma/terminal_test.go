@@ -245,13 +245,85 @@ func TestTerminalShowsApprovalsOneAtATime(t *testing.T) {
 	}
 	term.typeLine("y")
 	term.waitForCount("Allow? (y/n)", 2)
-	term.typeLine("y")
+	term.typeLine("N")
+	// Wait before closing stdin so EOF cannot be what declines the second call.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if err := s.WaitIdle(ctx); err != nil {
+		t.Fatalf("turn did not finish after N: %v", err)
+	}
 	term.end()
 	if shown := term.stderr.String(); strings.Count(shown, "Allow? (y/n)") != 2 {
 		t.Fatalf("want two approval prompts; shown:\n%s", shown)
 	}
-	if len(ran) != 2 {
-		t.Fatalf("%d approved tools ran, want 2", len(ran))
+	if len(ran) != 1 {
+		t.Fatalf("%d tools ran, want only the approved tool", len(ran))
+	}
+	if got := <-ran; !strings.Contains(shown[:strings.Index(shown, "Allow? (y/n)")], "Allow "+got+" ") {
+		t.Fatalf("the first approved tool did not run; ran %q; shown:\n%s", got, shown)
+	}
+}
+
+func TestTerminalShowsApprovalWhileTextQuestionIsOpen(t *testing.T) {
+	callChild := make(chan struct{})
+	textAnswer := make(chan modular.Answer, 1)
+	childRan := make(chan struct{}, 1)
+	parent := modular.NewTool("parent", "Ask a question and call a tool.", func(ctx context.Context, _ struct{}, tc *modular.ToolContext) (string, error) {
+		asked := make(chan error, 1)
+		go func() {
+			a, err := tc.Ask(ctx, modular.Question{Kind: "text", Question: "Which name?"})
+			textAnswer <- a
+			asked <- err
+		}()
+		select {
+		case <-callChild:
+		case <-ctx.Done():
+			<-asked
+			return "", ctx.Err()
+		}
+		r, err := tc.Tools.Call(ctx, "child", struct{}{})
+		if askErr := <-asked; askErr != nil {
+			return "", askErr
+		}
+		return r.Text(), err
+	})
+	child := modular.NewTool("child", "Needs approval.", func(context.Context, struct{}, *modular.ToolContext) (string, error) {
+		childRan <- struct{}{}
+		return "ran", nil
+	}, modular.Callers("plugin"))
+	a := modulartest.Agent(t, modular.WithApproval(modular.All), modular.WithTool(parent), modular.WithTool(child),
+		modulartest.Script(`[{"toolCalls":[{"name":"parent","input":{}}]},{"text":"Done."}]`))
+	s, err := a.Session(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	term := startTestTerminal(t, s, func(r *io.PipeReader) io.Reader { return r })
+	term.typeLine("Run.")
+	term.waitFor("Allow parent {}?\nAllow? (y/n)")
+	term.typeLine("y")
+	shown := term.waitFor("Which name?\nUse /answer REQUEST_ID VALUE")
+	match := regexp.MustCompile(`Question (\S+): Which name\?`).FindStringSubmatch(shown)
+	if match == nil {
+		t.Fatalf("no text question ID; shown:\n%s", shown)
+	}
+	// Start the nested call only after the terminal shows the text question.
+	close(callChild)
+	term.waitFor("Allow child {}?\nAllow? (y/n)")
+	term.typeLine("/answer " + match[1] + " not yet")
+	term.waitFor("Answer y or n.")
+	term.typeLine("Y")
+	term.typeLine("/answer " + match[1] + " Ada")
+	term.end()
+	if len(childRan) != 1 {
+		t.Fatal("approved child did not run")
+	}
+	select {
+	case got := <-textAnswer:
+		if got.Declined || got.Value != "Ada" {
+			t.Fatalf("text question got %+v, want Ada", got)
+		}
+	default:
+		t.Fatal("no text answer")
 	}
 }
 
