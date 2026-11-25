@@ -64,10 +64,17 @@ function markdownLines(text) {
         out += comment ? "\0".repeat(line.length - at) : line.slice(at);
         break;
       }
-      const end = comment ? next + 3 : next + 4;
-      out += comment ? "\0".repeat(end - at) : line.slice(at, next) + "\0\0\0\0";
-      at = end;
-      comment = !comment;
+      if (!comment) {
+        // CommonMark also closes a comment at once with <!--> or <!--->.
+        const short = line.startsWith(">", next + 4) ? 5 : line.startsWith("->", next + 4) ? 6 : 0;
+        out += line.slice(at, next) + "\0".repeat(short || 4);
+        at = next + (short || 4);
+        comment = !short;
+        continue;
+      }
+      out += "\0".repeat(next + 3 - at);
+      at = next + 3;
+      comment = false;
     }
     return out;
   });
@@ -76,7 +83,7 @@ function markdownLines(text) {
 // CommonMark ATX heading: a closing run of # counts only after a space, and an empty heading is still a heading.
 function atxTitle(line) {
   const match = line.match(/^ {0,3}#{1,6}(?:[ \t]+(.*?))?[ \t]*$/);
-  return match ? (match[1] ?? "").replace(/\0/g, "").replace(/(?:^|[ \t]+)#+$/, "").trim() : undefined;
+  return match ? (match[1] ?? "").replace(/(?:^|[ \t]+)#+$/, "").replace(/\0/g, "").trim() : undefined;
 }
 
 function checkGaps(file, lines) {
@@ -90,7 +97,7 @@ function checkGaps(file, lines) {
       finish();
       heading = gapHeading.test(title) ? { line: i + 1, tracked: false } : undefined;
     } else if (heading) {
-      const prose = line.replace(codeSpan, "");
+      const prose = line.replace(codeSpan, "").replace(/\0/g, "");
       heading.tracked ||= issueUrl.test(prose) || issueNumber.test(prose.replace(link, "$1"));
     }
   }
@@ -104,7 +111,7 @@ function adrStatus(text) {
 function checkAdrIndex(lines, statuses) {
   const indexed = new Set();
   for (const [i, line] of lines.entries()) {
-    const row = line.match(/^ {0,3}\|?\s*\[\d{4}\]\(([^)]+)\)\s*\|[^|]*\|([^|]*)(?:\||$)/);
+    const row = line.replace(/\\\|/g, "\0").match(/^ {0,3}\|?\s*\[\d{4}\]\(([^)]+)\)\s*\|[^|]*\|([^|]*)(?:\||$)/);
     if (!row) continue;
     const file = posix.join("docs/adr", row[1]);
     indexed.add(file);
@@ -191,7 +198,13 @@ function checkPython(packages, version) {
     checkVersion(file, tomlValue(lines, "project", quotedVersion), version, "Python project version");
     for (const table of ["project", "project.optional-dependencies", "dependency-groups"]) {
       const part = section(lines, table);
+      // In [project] only the dependencies array holds pins; other strings are metadata.
+      let open = table !== "project";
       for (const [i, line] of part.lines.entries()) {
+        const starts = table === "project" && /^\s*dependencies\s*=\s*\[/.test(line);
+        if (!open && !starts) continue;
+        if (table === "project" && /\]/.test(line.replace(/"[^"\n]*"|'[^'\n]*'|#.*/g, ""))) open = false;
+        else if (starts) open = true;
         for (const token of line.matchAll(/"[^"\n]*"|'[^'\n]*'|#.*/g)) {
           const pin = token[0].slice(1, -1).match(/^([\w.-]+)(?:\[[^\]]+\])?\s*===?\s*([^\s;,]+)/);
           if (pin && names.has(pythonName(pin[1]))) {

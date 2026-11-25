@@ -112,6 +112,18 @@ test("code spans, fences and comments follow CommonMark around gap headings", (t
   repo.check([1, 4].map((line) => `README.md:${line}: Gap or finding has no issue`));
 });
 
+test("comments follow CommonMark: short forms close at once, and a masked comment neither hides an issue nor closes a heading", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "## Known gaps", "Tracked in <!-- note -->#31.",
+    "## Known gaps", "Tracked in <!--> #32.",
+    "## Known gaps", "Tracked in <!---> #33.",
+    "## Production gaps <!-- note -->###", "Ordinary prose.",
+    "## Known gaps", "<!-- Tracked in #34. -->",
+  ].join("\n"));
+  repo.check(["README.md:9: Gap or finding has no issue"]);
+});
+
 test("issue numbers and URLs satisfy gap headings; history and untracked files are skipped", (t) => {
   const repo = checkout(t);
   repo.track("README.md", [
@@ -155,6 +167,13 @@ test("every ADR needs an index row, with or without a leading pipe", (t) => {
   repo.check(["docs/adr/README.md:1: No index row for docs/adr/0034-approvals-that-wait.md"]);
 });
 
+test("an escaped pipe stays inside its ADR index cell", (t) => {
+  const repo = checkout(t);
+  record(repo, accepted, "accepted");
+  repo.track(adrIndex, `| [0033](${accepted.split("/").at(-1)}) | Host tools \\| AG-UI | Accepted | Rule |`);
+  repo.check();
+});
+
 test("ADR index allows annotations and calls accepted experiments historical", (t) => {
   const repo = checkout(t);
   const experiment = "docs/adr/0014-experiment.md";
@@ -193,6 +212,17 @@ test("each release version source reports drift with a line and fix", (t) => {
     `${pythonPackage}:4: Dependency modular-agent`,
     `${python}:6: Dependency demo-sdk`,
   ]);
+});
+
+test("Python pins are read from dependency arrays, not from other project strings", (t) => {
+  const repo = checkout(t);
+  repo.write(python, [
+    "[project]", 'name = "modular-agent"', 'version = "0.3.2"',
+    'description = "demo-sdk==0.2.0 was the old example"',
+    "dependencies = [", '  "outside==1.0.0",', '  "demo-sdk==0.2.0",', "]",
+    'readme = "demo-sdk==0.1.0"',
+  ].join("\n") + "\n");
+  repo.check([`${python}:7: Dependency demo-sdk`]);
 });
 
 test("a malformed newest changelog release cannot fall back to an older release", (t) => {
