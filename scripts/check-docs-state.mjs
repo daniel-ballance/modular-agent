@@ -208,7 +208,8 @@ function checkNodePackage(file, text, version) {
   let marker = "_docs_state_probe_";
   while (text.includes(marker)) marker += "_";
   // JSON.parse has no positions, and a key has many spellings ("\/" or "\u002f" for "/"). Mark the
-  // text after each quote and reparse: the quote that opens this path's key renames only that key.
+  // text after each quote and reparse: a quote that opens this path's key renames only that key.
+  // JSON.parse keeps the last of duplicate keys, so the last such quote opens the effective one.
   const probe = (offset) => {
     try {
       return JSON.parse(text.slice(0, offset) + marker + text.slice(offset));
@@ -218,9 +219,8 @@ function checkNodePackage(file, text, version) {
   };
   const lineOf = (path) => {
     const markedPath = [...path.slice(0, -1), marker + path.at(-1)];
-    for (const quote of text.matchAll(/"/g)) {
-      const marked = probe(quote.index + 1);
-      if (atPath(marked, path) === undefined && atPath(marked, markedPath) !== undefined) return linesOf(text.slice(0, quote.index)).length;
+    for (const quote of [...text.matchAll(/"/g)].reverse()) {
+      if (atPath(probe(quote.index + 1), markedPath) !== undefined) return linesOf(text.slice(0, quote.index)).length;
     }
     return 1;
   };
