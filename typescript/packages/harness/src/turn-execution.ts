@@ -708,4 +708,3 @@ export function tokenCount(usage?: Usage): number {
 export function inputActors(q: QueuedInput): string[] {
 	return [q.startedBy.kind === "job" ? undefined : q.actorId, q.releasedBy, q.delegatedBy, ...(q.authorityActors ?? [])].filter((id): id is string => id !== undefined);
 }
-

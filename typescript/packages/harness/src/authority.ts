@@ -209,4 +209,3 @@ export function readTenants(json: string | undefined): Map<string, Tenant> {
 export function intersectRights(...ceilings: readonly Authority[][]): Authority[] {
 	return ceilings.length ? ALL_AUTHORITY.filter(right => ceilings.every(ceiling => Array.isArray(ceiling) && ceiling.includes(right))) : [];
 }
-

@@ -440,4 +440,3 @@ export function readRequest(entry: HistoryEntry): InputRequest {
 	if (!entry.requestId || entry.requestId !== request.id) throw failure("unavailable", "Question identity does not match its envelope");
 	return { ...request, sessionId: entry.sessionId, answerers: request.answerers ?? [], toolCallId: entry.toolCallId ?? request.toolCallId ?? undefined, turnId: entry.turnId ?? request.turnId ?? undefined };
 }
-

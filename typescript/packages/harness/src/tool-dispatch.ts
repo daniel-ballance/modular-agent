@@ -491,4 +491,3 @@ function sameRegistration(a: { plugin: string; source: ToolSource; definition: T
 	b: { plugin: string; source: ToolSource; definition: ToolDefinition }): boolean {
 	return !!a && a.plugin === b.plugin && a.source === b.source && isDeepStrictEqual(a.definition, b.definition);
 }
-

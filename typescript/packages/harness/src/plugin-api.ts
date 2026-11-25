@@ -157,4 +157,3 @@ export interface PluginApi {
 	modelAccess(sessionId: string): ModelAccess | undefined;
 	config(): Record<string, unknown>;
 }
-
