@@ -371,6 +371,16 @@ test("a manifest nested two million levels deep is checked within a small heap",
   repo.check([`${node}:2: Package version`], cap);
 });
 
+test("a huge unrelated key or group name is skipped without being copied", (t) => {
+  const repo = checkout(t);
+  const cap = { timeout: 30_000, nodeArgs: ["--max-old-space-size=128"] };
+  const huge = "x".repeat(45 * 1024 * 1024);
+  repo.write(node, `{\n  "version": "0.2.0",\n  "${huge}": 0\n}\n`);
+  repo.check([`${node}:2: Package version`], cap);
+  repo.write(node, `{\n  "version": "0.3.2",\n  "${huge}": { "@modular-agent/demo": "0.1.0" },\n  "dependencies": { "@modular-agent/demo": "0.2.0" }\n}\n`);
+  repo.check([`${node}:4: Dependency @modular-agent/demo`], cap);
+});
+
 test("Python pins are read from dependency arrays, not from other project strings", (t) => {
   const repo = checkout(t);
   repo.write(python, [

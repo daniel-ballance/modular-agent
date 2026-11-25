@@ -200,11 +200,16 @@ function checkCargo(file, manifest, version) {
 // JSON.parse has no positions, so one pass over the text it accepted records the line of each
 // wanted key: a top-level key, or a key directly inside a dependency group. JSON.parse decodes each
 // key, so "\/" and "\u002f" match "/", and the last of duplicate keys wins, as in JSON.parse. The
-// pass keeps a depth count and the state of the top two levels only, and stores only wanted lines,
-// so its memory follows the number of diagnostics, not the size or depth of the manifest.
+// pass keeps a depth count and the state of the top two levels only. A JSON string spends at most six
+// characters per decoded one, so a key longer than that bound for every wanted name and group is
+// skipped undecoded. The pass then holds no copy of a key or value it does not need.
 const nodeGroups = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
 
-function keyLines(text, wanted) {
+function keyLines(text, paths) {
+  const wanted = new Set(paths.map((path) => JSON.stringify(path)));
+  let longest = 0;
+  for (const name of [...nodeGroups, ...paths.flat()]) longest = Math.max(longest, name.length);
+  const limit = 6 * longest + 2;
   const lines = new Map();
   const isObject = [false, false, false];
   let depth = 0;
@@ -227,7 +232,9 @@ function keyLines(text, wanted) {
     else if (char === '"') {
       let end = at + 1;
       while (text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
-      if (expectKey && (depth === 1 || nodeGroups.includes(group))) {
+      if (expectKey && end + 1 - at > limit) {
+        if (depth === 1) topKey = null;
+      } else if (expectKey && (depth === 1 || nodeGroups.includes(group))) {
         const key = JSON.parse(text.slice(at, end + 1));
         if (depth === 1) topKey = key;
         const path = JSON.stringify(depth === 1 ? [key] : [group, key]);
@@ -260,7 +267,7 @@ function checkNodePackage(file, text, version) {
   }
   // A missing value is reported at line 1, so only present values need the scan.
   const located = stale.filter(({ value }) => value !== undefined);
-  const lines = located.length === 0 ? new Map() : keyLines(text, new Set(located.map(({ path }) => JSON.stringify(path))));
+  const lines = located.length === 0 ? new Map() : keyLines(text, located.map(({ path }) => path));
   for (const { path, value } of stale) {
     const field = path.length === 1 ? "Package version" : `Dependency ${path[1]}`;
     checkVersion(file, { line: value === undefined ? 1 : lines.get(JSON.stringify(path)) ?? 1, value }, version, field);
