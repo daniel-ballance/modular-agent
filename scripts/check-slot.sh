@@ -80,5 +80,6 @@ take_check_slots() { # count: wait until this many slots are free, then hold the
 drop_check_slots() { # in a child process: close the slot files, so a process left behind cannot keep a slot
   local fd
   for fd in "${check_slot_fds[@]}"; do exec {fd}>&-; done
+  check_slot_fds=()
   unset MA_CHECK_SLOT_FD
 }

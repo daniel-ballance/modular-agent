@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -178,6 +178,25 @@ test("check.sh waits for a slot before its first step", async (t) => {
   const check = box.start("scripts/check.sh", ["--quick"]);
   await waitFor(check, /check-slot: waiting for 1 free of 1 slots/);
   assert.doesNotMatch(check.out, /Step logs/);
+});
+
+test("check.sh killed outright frees its slot while its lanes still run", async (t) => {
+  const box = machine(t, 1);
+  const bin = mkdtempSync(join(tmpdir(), "check-slot-bin-"));
+  t.after(() => rmSync(bin, { recursive: true, force: true }));
+  // node and npm pass at once, so the run reaches its rust lane, where mise only sleeps.
+  for (const tool of ["node", "npm"]) writeFileSync(join(bin, tool), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  writeFileSync(join(bin, "mise"), `#!/bin/sh\ntouch "${bin}/lane"\nexec sleep 60\n`, { mode: 0o755 });
+  const check = box.start("scripts/check.sh", ["rust"], { PATH: `${bin}:${process.env.PATH}` });
+  for (let waited = 0; !existsSync(join(bin, "lane")); waited += 50) {
+    if (waited > 10_000) assert.fail(`the rust lane did not start: ${check.out}${check.err}`);
+    await delay(50);
+  }
+  process.kill(check.pid, "SIGKILL");
+  await check.exited;
+  const next = box.run("take_check_slots 1");
+  assert.equal(next.status, 0, next.stderr);
+  assert.match(next.stderr, /after 0s/);
 });
 
 test("stress.sh reads its arguments before it waits for slots", async (t) => {

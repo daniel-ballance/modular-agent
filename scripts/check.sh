@@ -203,7 +203,7 @@ else
   plan docs
   pids=()
   for language in "${languages[@]}"; do
-    plan "$language" &
+    { drop_check_slots; plan "$language"; } &
     pids+=("$!")
   done
   for i in "${!pids[@]}"; do

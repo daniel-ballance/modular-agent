@@ -56,8 +56,8 @@ check() {
 }
 
 # Each run gets its own process group, so stopping stress.sh can stop all of
-# a run's processes. The runs do not hold the slot files: if stress.sh is
-# killed outright, its slots come free even though its runs carry on.
+# a run's processes. The runs do not hold the slot files, so if stress.sh is
+# killed outright its slots come free, though its runs carry on.
 pids=()
 stop_runs() { # exit status
   local pid
