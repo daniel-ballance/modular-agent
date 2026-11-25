@@ -21,11 +21,11 @@ This supersedes ADR 0036. It amends ADR 0024, whose layer 3 named four SDKs and 
 
 ## Why
 
-At `main` 3af75e6 on 2026-11-25, the tracked `.rs`, `.go`, `.py`, `.ts` and `.tsx` files held about 91,000 lines of Rust, 97,000 of Go, 64,000 of Python and 39,000 of TypeScript, counting source and tests. ADR 0036 asked for each rule to be implemented in all four. The day showed what that costs beyond the writing:
+At `main` 3af75e6 on 2026-11-25, each language's tracked files in its own directory held about 91,000 lines of Rust (`.rs` in `rust/`), 97,000 of Go (`.go` in `go/`), 64,000 of Python (`.py` in `python/`) and 39,000 of TypeScript (`.ts` and `.tsx` in `typescript/`), counting source and tests. ADR 0036 asked for each rule to be implemented in all four. The day showed what that costs beyond the writing:
 
 - **The full check took about 37 minutes** on the reference machine (2,198 s, recorded in [CONTRIBUTING](../../CONTRIBUTING.md#checking-a-change)). Each language runs its own lane, and Python runs its suite in four configurations.
 - **Most of the deadline issues were Go or Python steps.** Of the ten issues grouped under [#154](https://github.com/daniel-ballance/modular-agent/issues/154), five were Python only, one was Go only and one was TypeScript and Python.
-- **Seventeen open issues carried only `lang: go` or `lang: python` labels**, counted before #130 closed #76.
+- **Seventeen open issues had only `lang: go`, `lang: python` or both as their `lang:` labels**, counted before #130 closed #76.
 - **A reviewed pull request waited on those steps.** [#130](https://github.com/daniel-ballance/modular-agent/pull/130), whose review had passed, waited on reruns of a Go kit step and a Python test before it could land.
 
 Two builders keep what ADR 0036 was for: under the lockstep rule, each new rule is implemented from the documents in two separate SDKs instead of four, unless a gap is recorded. [ADR 0029](0029-sdk-decisions-after-four-builds.md) records the decisions the four builds needed, and those decisions are now in the documents.
