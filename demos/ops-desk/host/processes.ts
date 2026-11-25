@@ -16,10 +16,10 @@ import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { Agui } from './agui.js';
+import { rights } from './desk-agent.js';
 import { agents, type Agent, type Route } from './store.js';
 
 export const demo = fileURLToPath(new URL('../../', import.meta.url));
-export const rights = ['watch', 'input', 'tools', 'approve', 'answer'];
 export function token(root: string, name: string) {
   const path = join(root, name + '.token');
   if (!existsSync(path))
@@ -99,7 +99,6 @@ export function launch(projects: Projects, agent: Agent, pluginUrl: string, appr
   const model = live ? process.env['DESK_' + agent.toUpperCase() + '_MODEL'] : 'scripted/script';
   if (!model) throw Error('No live model for ' + agent);
   const plugins: object[] = [{ url: pluginUrl, tokenFile: token(root, agent + '-tools').path }];
-  const python = join(demo, 'triage', '.venv', 'bin', 'python');
   mkdirSync(data, { recursive: true });
   Object.assign(childEnv, {
     MODULAR_AGENT_DATA_DIR: data,
@@ -152,7 +151,7 @@ export function launch(projects: Projects, agent: Agent, pluginUrl: string, appr
     ];
   } else {
     if (live) Object.assign(childEnv, { DESK_MODEL: model, DESK_LOGINS: process.env.DESK_LOGINS });
-    cmd = agent === 'triage' ? [python, join(demo, 'triage', 'main.py')] : [join(demo, '.build', 'verifier')];
+    cmd = ['node', join(demo, 'host', 'dist', agent + '.js')];
   }
   childEnv.MODULAR_AGENT_PLUGINS = JSON.stringify(plugins);
   const log = openSync(join(root, agent + '.log'), 'a', 0o600);

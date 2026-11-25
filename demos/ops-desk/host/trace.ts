@@ -4,13 +4,13 @@ import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 
 let provider: TracerProvider | undefined;
-export function startTracing() {
+export function startTracing(serviceName = 'ops-desk') {
   const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
   if (!endpoint || process.env.OTEL_SDK_DISABLED === 'true') return;
   try {
     const exporter = new OTLPTraceExporter({ url: endpoint.replace(/\/$/, '') + '/v1/traces' });
     provider = new TracerProvider({
-      resource: resourceFromAttributes({ 'service.name': 'ops-desk' }),
+      resource: resourceFromAttributes({ 'service.name': serviceName }),
       spanProcessors: [new BatchSpanProcessor({ exporter })]
     });
     trace.setGlobalTracerProvider(provider);

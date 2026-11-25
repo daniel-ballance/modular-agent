@@ -4,6 +4,7 @@ The four SDKs and `ma` share one project version. The [SDK specification](docs/s
 
 ## Unreleased
 
+- The [project notes](demos/project-notes/README.md) and [ops desk](demos/ops-desk/README.md) demos now use only the Rust and TypeScript SDKs. Their scripted runs use the same process and service placements and still need no sign-in.
 - Go and Python `ma` sessions that previously recorded `off` without loading the approval feature keep that policy. Load the feature and change the policy with the ACP or AG-UI `approval` setting, or with `/approval` in Go's terminal.
 
 ## 0.3.0

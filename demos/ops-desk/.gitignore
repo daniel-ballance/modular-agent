@@ -1,4 +1,2 @@
-.build/
 .desk/
-.venv/
 __pycache__/
