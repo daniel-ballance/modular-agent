@@ -205,28 +205,29 @@ function checkNodePackage(file, text, version) {
     fail(file, 1, "Invalid package JSON", "Restore a valid package manifest");
     return;
   }
-  const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   let marker = "_docs_state_probe_";
   while (text.includes(marker)) marker += "_";
-  const lineOf = (path, value) => {
-    if (value === undefined) return 1;
-    const quoted = JSON.stringify(value) ?? "";
-    const entries = [...text.matchAll(new RegExp(`${escape(JSON.stringify(path.at(-1)))}\\s*:\\s*${escape(quoted)}`, "g"))];
-    // One pin can sit in two dependency groups. Mark each match and reparse to find the one at this path.
-    const own = typeof value !== "string" ? entries[0] : entries.find((entry) => {
-      const offset = entry.index + entry[0].length - quoted.length + 1;
-      try {
-        return atPath(JSON.parse(text.slice(0, offset) + marker + text.slice(offset)), path) === marker + value;
-      } catch {
-        return false;
-      }
-    });
-    return own ? linesOf(text.slice(0, own.index)).length : 1;
+  // JSON.parse has no positions, and a key has many spellings ("\/" or "\u002f" for "/"). Mark the
+  // text after each quote and reparse: the quote that opens this path's key renames only that key.
+  const probe = (offset) => {
+    try {
+      return JSON.parse(text.slice(0, offset) + marker + text.slice(offset));
+    } catch {
+      return undefined;
+    }
+  };
+  const lineOf = (path) => {
+    const markedPath = [...path.slice(0, -1), marker + path.at(-1)];
+    for (const quote of text.matchAll(/"/g)) {
+      const marked = probe(quote.index + 1);
+      if (atPath(marked, path) === undefined && atPath(marked, markedPath) !== undefined) return linesOf(text.slice(0, quote.index)).length;
+    }
+    return 1;
   };
   const check = (path, value) => {
     if (value === version) return;
     const field = path.length === 1 ? "Package version" : `Dependency ${path[1]}`;
-    checkVersion(file, { line: lineOf(path, value), value }, version, field);
+    checkVersion(file, { line: value === undefined ? 1 : lineOf(path), value }, version, field);
   };
   check(["version"], pkg?.version);
   for (const group of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
