@@ -198,11 +198,12 @@ function checkCargo(file, manifest, version) {
 }
 
 // JSON.parse has no positions, so one pass over the text it accepted records the line of each
-// wanted key: a top-level key, or a key directly inside a dependency group. JSON.parse decodes each
-// key, so "\/" and "\u002f" match "/", and the last of duplicate keys wins, as in JSON.parse. The
-// pass keeps a depth count and the state of the top two levels only. A JSON string spends at most six
-// characters per decoded one, so a key longer than that bound for every wanted name and group is
-// skipped undecoded. The pass then holds no copy of a key or value it does not need.
+// wanted key: a top-level key, or a key directly inside a dependency group. Keys it reads are decoded
+// with JSON.parse, so "\/" and "\u002f" match "/", and the last of duplicate keys wins, as in
+// JSON.parse. The pass keeps a depth count and the state of the top two levels only. A JSON string
+// spends at most six characters per decoded one, so a key longer than that bound for every wanted
+// name and group is skipped undecoded. A key within the bound may be decoded and serialized for a
+// moment before it is rejected, so the pass copies at most one bounded key at a time.
 const nodeGroups = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
 
 function keyLines(text, paths) {
