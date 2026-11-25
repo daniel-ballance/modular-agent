@@ -1,3 +1,4 @@
+import { ToolDispatch } from "./tool-dispatch.js";
 import type { TurnState } from "./turn-state.js";
 import { shapeViolation } from "./result-shape.js";
 import { InterfaceToolRoutes, type InterfaceConnection } from "./interface-tool-routes.js";
@@ -248,13 +249,6 @@ export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer"
 
 export interface Tenant { rights: Authority[]; tokens?: number }
 interface TenantInfo { tenant: string | null; rights: Authority[] | null; tokens: { budget: number; used: number } | null }
-/** Kept only from an approval gate through that invocation's live tools.call handle. */
-interface CoveringAllow { toolCallId: string; requestId: string; actorId: string }
-interface ApprovalPass {
-	callId: string; attempt: string; inherited?: CoveringAllow; allow?: CoveringAllow;
-}
-interface DispatchAllowance { call: ToolCall; binding: ApprovalBinding; policy: unknown; cover?: CoveringAllow }
-interface NestedDispatch { depth: number; registration: NonNullable<ReturnType<Harness["findTool"]>>; approval: unknown; inherited?: CoveringAllow }
 type RecordedSnapshot = TurnSnapshot & { startedBy: QueuedInput["startedBy"]; resultShape?: Record<string, unknown> };
 function recordedSnapshot(start: HistoryEntry): RecordedSnapshot {
 	const d = start.data as RecordedSnapshot | undefined;
@@ -278,6 +272,36 @@ function recordedSnapshot(start: HistoryEntry): RecordedSnapshot {
  * It runs no turns, calls no models and runs no tools itself.
  */
 export class Harness {
+	private readonly tools: ToolDispatch = new ToolDispatch({
+		now: (...args) => this.now(...args),
+		interfaceTools: () => this.interfaceTools,
+		approvals: () => this.approvals,
+		intactInheritedCall: (...args) => this.intactInheritedCall(...args),
+		findTool: (...args) => this.findTool(...args),
+		actorForJob: (...args) => this.actorForJob(...args),
+		workRights: (...args) => this.workRights(...args),
+		environmentFor: (...args) => this.environmentFor(...args),
+		projectOf: (...args) => this.projectOf(...args),
+		checkWriter: (...args) => this.checkWriter(...args),
+		commit: (...args) => this.commit(...args),
+		erasure: () => this.erasure,
+		agentName: () => this.agentName,
+		emit: (...args) => this.emit(...args),
+		jobWork: () => this.jobWork,
+		scopedEnvironment: (...args) => this.scopedEnvironment(...args),
+		runtime: (...args) => this.runtime(...args),
+		toolDefinitions: (...args) => this.toolDefinitions(...args),
+		questions: () => this.questions,
+		newId: (...args) => this.newId(...args),
+		reservations: () => this.reservations,
+		reserveCall: (...args) => this.reserveCall(...args),
+		problem: (...args) => this.problem(...args),
+		approvalCoversNested: () => this.approvalCoversNested,
+		plugins: (...args) => this.plugins(...args),
+		hooks: () => this.hooks,
+		rightsOf: (...args) => this.rightsOf(...args),
+	});
+
 	private readonly interfaceTools: InterfaceToolRoutes = new InterfaceToolRoutes({
 		runtime: (...args) => this.runtime(...args),
 		plugins: (...args) => this.plugins(...args),
@@ -307,7 +331,7 @@ export class Harness {
 		recordedTurnJobs: (...args) => this.recordedTurnJobs(...args),
 		recordedTurnRights: (...args) => this.recordedTurnRights(...args),
 		turnAuthority: () => this.turnAuthority,
-		toolAfter: (...args) => this.toolAfter(...args),
+		toolAfter: (...args) => this.tools.toolAfter(...args),
 		commitNow: (...args) => this.commitNow(...args),
 		emit: (...args) => this.emit(...args),
 	});
@@ -321,14 +345,14 @@ export class Harness {
 		use: (...args) => this.use(...args),
 		home: () => this.home,
 		commit: (...args) => this.commit(...args),
-		toolWork: () => this.toolWork,
+		toolWork: () => this.tools.toolWork,
 		questionsOutlastTurns: () => this.questionsOutlastTurns,
-		approvalPass: () => this.approvalPass,
-		gateSignal: () => this.gateSignal,
+		approvalPass: () => this.tools.approvalPass,
+		gateSignal: () => this.tools.gateSignal,
 		erasure: () => this.erasure,
 		newId: (...args) => this.newId(...args),
 		findTool: (...args) => this.findTool(...args),
-		modelGate: () => this.modelGate,
+		modelGate: () => this.tools.modelGate,
 		emit: (...args) => this.emit(...args),
 		reservations: () => this.reservations,
 		problem: (...args) => this.problem(...args),
@@ -344,7 +368,7 @@ export class Harness {
 		newId: (...args) => this.newId(...args),
 		reserveJob: (...args) => this.reserveJob(...args),
 		commit: (...args) => this.commit(...args),
-		toolWork: () => this.toolWork,
+		toolWork: () => this.tools.toolWork,
 		emit: (...args) => this.emit(...args),
 		problem: (...args) => this.problem(...args),
 		admit: (...args) => this.admit(...args),
@@ -384,14 +408,11 @@ export class Harness {
 		commitNow: (...args) => this.commitNow(...args),
 		interfaces: () => this.questions.interfaces(),
 		emitAnswer: (...args) => this.questions.emitAnswer(...args),
-		toolDisposition: (...args) => this.toolDisposition(...args),
+		toolDisposition: (...args) => this.tools.toolDisposition(...args),
 		maybeContinueOpenCalls: (...args) => this.maybeContinueOpenCalls(...args),
 		problem: (...args) => this.problem(...args),
 		intersectRights,
 	});
-	private readonly approvalPass = new AsyncLocalStorage<ApprovalPass>();
-	private readonly modelGate = new AsyncLocalStorage<{ response: HistoryEntry; actorId: string; turnId: string; callId: string }>();
-	private readonly dispatchAllowances = new WeakMap<TurnState, Map<string, DispatchAllowance>>();
 	private readonly settingsDuringTurn?: "nextTurn" | "refused";
 	private readonly jobReportsStartTurns: boolean;
 	private readonly rejectUnknownModel: boolean;
@@ -399,8 +420,6 @@ export class Harness {
 	private newId: () => string;
 	private refusedTools = new Set<string>();
 	private turnAuthority = new AsyncLocalStorage<{ sessionId: string; actors: Set<string>; jobs: Set<string>; state?: Pick<TurnState, "connectionRights" | "startingRights"> }>();
-	private toolWork = new AsyncLocalStorage<ToolCall>();
-	private gateSignal = new AsyncLocalStorage<AbortSignal | undefined>();
 	readonly problems: { plugin: string; where: string; error: string }[] = [];
 
 	constructor(options: HarnessOptions) {
@@ -620,7 +639,7 @@ export class Harness {
 			transaction: (sessionId, fn) => this.transaction(this.session(sessionId), pluginName, fn),
 			erase: (sessionId, ids, actorId) => this.erasure.erase(this.session(sessionId), ids, actorId, pluginName),
 			tools: (sessionId) => this.toolDefinitions(sessionId ? this.session(sessionId) : undefined),
-			callTool: (sessionId, call) => this.callTool(this.session(sessionId), { ...call, id: call.id ?? this.newId() }),
+			callTool: (sessionId, call) => this.tools.callTool(this.session(sessionId), { ...call, id: call.id ?? this.newId() }),
 			ask: (sessionId, request) => this.questions.ask(this.session(sessionId), request, pluginName),
 			deferTool: (id, turnId, question) => this.questions.deferTool(this.session(id), turnId, question, pluginName),
 			refreshApprovals: id => this.approvals.reconcileApprovals(this.session(id)),
@@ -1167,7 +1186,7 @@ export class Harness {
 		s.followUps.push(...admissions.filter(q => !handBack(q)));
 		await this.handBack(s, s.recoveredInput, "restart");
 		await this.hooks.observe("session.start", { sessionId: s.id, resumed: true });
-		await this.recoverNestedCalls(s);
+		await this.tools.recoverNestedCalls(s);
 		await this.interfaceTools.recoverInterfaceCalls(s);
 		await this.approvals.reconcileApprovals(s, true);
 		await this.recoverInterruptedTurn(s);
@@ -2530,20 +2549,20 @@ export class Harness {
 							part.id === call.id && part.name === call.name && isDeepStrictEqual(part.arguments, call.input))) return refused("Interface tool was not offered for this call");
 					state.interfaceAllowances.set(call.id, null);
 					const approval = s.settings.approval;
-					const gate = await withAuthority(() => this.toolGate({ ...scope, definition: registration.definition }, s.running?.abort.signal));
+					const gate = await withAuthority(() => this.tools.toolGate({ ...scope, definition: registration.definition }, s.running?.abort.signal));
 					if (gate.pending !== undefined) return refused("An Interface handoff cannot wait on a question");
 					if (gate.refused === undefined) state.interfaceAllowances.set(call.id, { call: structuredClone(gate.value.call), approval });
 					return gate;
 				}
 				if (name === "tool.after") {
-					const { result, error } = await withAuthority(() => this.toolAfter(s, scope));
+					const { result, error } = await withAuthority(() => this.tools.toolAfter(s, scope));
 					if (error) state.toolResultError ??= error.message;
 					return { ...scope, result };
 				}
 				if (name === "turn.result") scope.shape = resultShape;
 				const violation = name === "turn.result" && resultShape ? shapeViolation(resultShape, scope.result?.value) : undefined;
 				const result = violation ? { value: scope, refused: violation } : name === "tool.before" && payload.call
-					? await withAuthority(() => this.modelApprovalGate(s, state, turnId, scope))
+					? await withAuthority(() => this.tools.modelApprovalGate(s, state, turnId, scope))
 					: await withAuthority(() => this.hooks.run(name, scope));
 				if (name === "turn.result" && typeof result?.refused === "string") {
 					await this.commit(s, [{ kind: "resultFeedback", writer: "harness", turnId, modelVisible: true, data: { reason: result.refused } }]);
@@ -2552,10 +2571,10 @@ export class Harness {
 					const provider = this.providerFor(s, state.model);
 					if (provider?.supports.keepsState === true) await provider.discardState?.(s.id);
 				}
-				if (name === "tool.before" && result?.pending && payload.call && !waitingApprovals(s).has(payload.call.id)) this.toolDisposition(payload.call, "pending");
+				if (name === "tool.before" && result?.pending && payload.call && !waitingApprovals(s).has(payload.call.id)) this.tools.toolDisposition(payload.call, "pending");
 				return result;
 			}),
-			runToolCall: (call, signal) => inStep(call.stepId, () => withAuthority(() => this.executeTool(s, call, signal, turnId, state))),
+			runToolCall: (call, signal) => inStep(call.stepId, () => withAuthority(() => this.tools.executeTool(s, call, signal, turnId, state))),
 			definition: async (name) => this.findTool(s, name)?.definition,
 			registration: (name) => {
 				const found = this.findTool(s, name);
@@ -2594,7 +2613,7 @@ export class Harness {
 				if (!entry && wait) return waitingApprovals(s).get(draft.toolCallId!)!.result!;
 				if (draft.kind === "toolResult" && draft.toolCallId && !state.dispatched.has(draft.toolCallId) && draft.message?.role === "toolResult") {
 					const status = (draft.data as { status?: string } | undefined)?.status;
-					if (status) this.toolDisposition({ id: draft.toolCallId, name: draft.message.toolName, startedBy: "model" }, status);
+					if (status) this.tools.toolDisposition({ id: draft.toolCallId, name: draft.message.toolName, startedBy: "model" }, status);
 				}
 				return entry;
 			}),
@@ -2840,8 +2859,6 @@ export class Harness {
 		return this.interfaceTools.connectInterfaceTools(sessionId, options);
 	}
 
-	// ---------- tools ----------
-
 	private findTool(s: Session | undefined, name: string): { plugin: string; source: ToolSource; definition: ToolDefinition } | undefined {
 		for (const { plugin, impl } of this.caps.get("tool-source") ?? []) {
 			if (this.interfaceTools.interfaceSources.has(name) && plugin !== INTERFACE_SOURCE) continue;
@@ -2876,270 +2893,6 @@ export class Harness {
 		return out;
 	}
 
-	/** Run one tool call. Hook points are applied by whoever owns the operation. */
-	private async executeTool(s: Session, call: ToolCall, signal: AbortSignal, turnId?: string, state?: TurnState,
-		nested?: NestedDispatch, directAllowance?: DispatchAllowance): Promise<ToolResult | (ToolPending & { callId: string })> {
-		const wait = waitingApprovals(s).get(call.id);
-		const allowance = directAllowance ?? (state && this.dispatchAllowances.get(state)?.get(call.id));
-		if (state) this.dispatchAllowances.get(state)?.delete(call.id);
-		const denied = (): ToolResult => ({ callId: call.id, status: wait && wait.request.deadlineAt! <= this.now() ? "notStarted" : "refused", content: [text("Consent no longer authorizes dispatch")] });
-		const needsGate = !nested && state && !this.interfaceTools.interfaceSources.has(call.name) && (this.coversNested() || this.approvals.maximum && s.settings.approvalWait === "untilDeadline" &&
-			!s.branch().some(e => e.kind === "toolStarted" && e.toolCallId === call.id));
-		if (!this.intactInheritedCall(s, turnId, call) || needsGate && !allowance || wait && (!allowance || wait.start || wait.result || !this.approvals.validWait(s, wait))) return denied();
-		const found = this.findTool(s, call.name);
-		if (s.erasing) return { callId: call.id, status: "refused", content: [text("Erasure is in progress")] };
-		if (!found && wait) return denied();
-		if (!found) return { callId: call.id, status: "failed", content: [text(`Unknown tool: ${call.name}`)] };
-		const violation = shapeViolation(found.definition.parameters, call.input);
-		if (violation && wait) return denied();
-		if (violation) return { callId: call.id, status: "failed", content: [text(`Invalid input: ${violation}`)] };
-		if (signal.aborted) return { callId: call.id, status: "notStarted", content: [text("Cancelled before it ran")] };
-		if (nested && !sameRegistration(found, nested.registration)) return { callId: call.id, status: "refused", content: [text("Registration changed before dispatch")] };
-		if (!nested && state && !state.tools.some((t) => t.name === call.name)) return { callId: call.id, status: "refused", content: [text("Tool was not offered to this turn")] };
-		// The "tools" right: every actor the work belongs to must let tools run for it (docs/bindings/data.md#actors).
-		const owners = state ? [...state.actors] : call.actorId ? [call.actorId] : [];
-		call = { ...call, actorId: call.actorId ?? owners[0] ?? this.actorForJob(s, state?.jobs) };
-		const allowed = () => (!state || owners.length > 0 || state.jobs.size > 0) && this.workRights(s, owners, state?.jobs).includes("tools");
-		const refused = () => ({ callId: call.id, status: "refused" as const, content: [text(`No "tools" right: ${owners.join(", ")}`)] });
-		if (!allowed()) return refused();
-		if (found.plugin === INTERFACE_SOURCE) {
-			const registration = this.interfaceTools.interfaceSources.get(call.name);
-			const connection = state?.interfaceOffer?.get(call.name);
-			const allowance = state?.interfaceAllowances?.get(call.id);
-			if (!allowance || !isDeepStrictEqual({ ...allowance.call, actorId: call.actorId }, call) ||
-				call.actorId !== (owners[0] ?? this.actorForJob(s, state?.jobs))) return refused();
-			state?.interfaceAllowances?.set(call.id, null);
-			if (!registration || !connection || !turnId || !call.stepId || !state || nested || call.startedBy !== "model" || !call.actorId) return refused();
-			return this.interfaceTools.handoffInterfaceCall(s, registration, connection, call, turnId, state, signal, allowed, allowance.approval);
-		}
-		const env = await this.environmentFor(s);
-		const safeToRepeat = found.definition.hints?.safeToRepeat === true && env?.containment === "strong";
-		const point = !nested && !turnId && env?.save && (env.keepsPoints?.(this.projectOf(s)) ?? env.points) ? await env.save() : undefined;
-		const eligible = (current: ReturnType<Harness["findTool"]>) => allowed() && !s.erasing && !s.suspended &&
-			(!allowance || sameJson(allowance.call, call) && (wait || allowance.policy === s.settings.approval) && current &&
-				current.plugin === allowance.binding.source.plugin && current.source.id === allowance.binding.source.toolSource && sameJson(current.definition, allowance.binding.definition)) &&
-			sameRegistration(current, found) && (!nested || nested.approval === s.settings.approval);
-		if (!eligible(this.findTool(s, call.name))) return refused();
-		if (signal.aborted) return { callId: call.id, status: "notStarted", content: [text("Cancelled before it ran")] };
-		this.checkWriter(s);
-		const consent = (afterStart?: HistoryEntry) => {
-			if (!wait) return true;
-			const w = waitingApprovals(s).get(call.id);
-			return !!w && w.start === afterStart && w.entry === wait.entry && w.decision === wait.decision && !w.result &&
-				sameJson(call, allowance?.call) && this.approvals.matchesApproval(w, call, s) && this.approvals.approvalPrincipalsAllow(s, w) &&
-				this.workRights(s, owners, state?.jobs).includes("tools") && !signal.aborted && !s.erasing && !s.suspended;
-		};
-		if (wait && (!consent() || !await this.approvals.approverStillAllows(s, wait) || !consent())) return denied();
-		const [start] = await this.commit(s, [{ kind: "toolStarted", writer: "harness", modelVisible: false, turnId, actorId: call.actorId ?? owners[0] ?? this.actorForJob(s, state?.jobs), toolCallId: call.id, stepId: call.stepId,
-			sources: wait ? [wait.entry.id, wait.decision!.id] : nested ? s.branch().filter(e => e.kind === "modular-agent.nestedCall" && e.toolCallId === call.id).map(e => e.id) : undefined,
-			data: { call: { ...call, actorId: call.actorId ?? owners[0] ?? this.actorForJob(s, state?.jobs) }, source: { plugin: found.plugin, toolSource: found.source.id }, definition: found.definition, safeToRepeat, point, openWorld: found.definition.hints?.openWorld ?? true,
-				...(nested?.inherited ? { approvalCoveredBy: { toolCallId: nested.inherited.toolCallId, requestId: nested.inherited.requestId } } : {}),
-				authorizers: owners.map((actorId) => ({ sessionId: s.id, actorId })), rights: this.workRights(s, owners, state?.jobs) } }], false, wait ? () => consent() : undefined);
-		if (wait && (!start || !consent(start))) return denied();
-		const current = this.findTool(s, call.name);
-		if (!eligible(current)) return refused();
-		this.checkWriter(s);
-		if (signal.aborted) return { callId: call.id, status: "notStarted", content: [text("Cancelled before it ran")] };
-		if (wait && !await this.approvals.approverStillAllows(s, wait)) return denied();
-		await this.erasure.admitHistory(s);
-		this.checkWriter(s);
-		if (wait && !consent(start)) return denied();
-		if (signal.aborted || !eligible(this.findTool(s, call.name))) return refused();
-		const name = safeName(found.definition.name);
-		const span = startOperation(name ? `execute_tool ${name}` : "execute_tool", {
-			...conversation(s.id), "modular_agent.turn.id": turnId, "modular_agent.step.id": call.stepId,
-			...toolAttributes(call), "gen_ai.agent.name": this.agentName,
-		});
-		state?.dispatched.add(call.id);
-		return span.run(async () => {
-			try {
-				const result = await this.invokeTool(s, found, call, signal, turnId, state, nested?.depth ?? 0, nested?.inherited ?? allowance?.cover, owners, allowed, env, start);
-				const status = isPending(result) ? "pending" : result.status;
-				span.set("modular_agent.tool.status", status);
-				if (status === "failed" || status === "outcomeUnknown") span.fail(status);
-				return result;
-			} finally { span.end(); }
-		});
-	}
-
-	private async invokeTool(s: Session, found: NonNullable<ReturnType<Harness["findTool"]>>, call: ToolCall, signal: AbortSignal, turnId: string | undefined, state: TurnState | undefined,
-		depth: number, cover: CoveringAllow | undefined, owners: string[], allowed: () => boolean, env: WorkingEnvironment | undefined, start: HistoryEntry): Promise<ToolResult | (ToolPending & { callId: string })> {
-		this.emit(s, "tool.started", { call }, found.source.id, { turnId, toolCallId: call.id, stepId: call.stepId });
-		const toolSpan = activeOperation();
-		let asked = 0;
-		const pendingQuestions: string[] = [];
-		const children = new Set<Promise<ToolResult>>();
-		const lifetime = new AbortController();
-		let live = true;
-		const check = () => {
-			if (!live) throw Object.assign(new Error("There is no live parent"), { code: "invalid_request" });
-			this.erasure.checkPending(s);
-			if (signal.aborted) throw Object.assign(new Error("The parent was cancelled"), { code: "cancelled" });
-			if (!allowed() || s.erasing || s.suspended) throw Object.assign(new Error("The parent cannot run tools"), { code: "invalid_request" });
-			this.checkWriter(s);
-		};
-		const drain = async () => {
-			live = false;
-			lifetime.abort();
-			await Promise.allSettled(children);
-		};
-		try {
-			const result = await this.toolWork.run(call, () => found.source.run(call, {
-				sessionId: s.id,
-				signal,
-				call,
-				jobs: { start: async (kind, detail, key) => {
-					check();
-					const job = this.jobWork.startJob(s, { kind, detail, key, actors: owners, toolCallId: call.id }, found.plugin);
-					await job.ready;
-					return job;
-				} },
-				progress: (content) => {
-					try { check(); } catch { return; }
-					this.emit(s, "tool.progress", { content }, found.source.id, { turnId, toolCallId: call.id });
-				},
-				environment: env && this.scopedEnvironment(env, check),
-				tools: this.runtime()?.supports.nestedToolCalls === true ? {
-					list: async () => {
-						check();
-						return structuredClone(this.toolDefinitions(s).filter(t => !t.callers || t.callers.includes("plugin")));
-					},
-					call: async (name, input, askingSignal) => {
-						check();
-						if (typeof name !== "string" || !name || !input || typeof input !== "object" || Array.isArray(input)) {
-							throw Object.assign(new Error("A tool name and input object are required"), { code: "invalid_request" });
-						}
-						const childSignal = AbortSignal.any([signal, lifetime.signal, ...(askingSignal ? [askingSignal] : [])]);
-						if (childSignal.aborted) throw Object.assign(new Error("The callback was cancelled"), { code: "cancelled" });
-						const invoke = () => this.callNested(s, call, name, structuredClone(input), childSignal, depth + 1, turnId, state, start.id, cover);
-						const work = toolSpan ? toolSpan.run(invoke) : invoke();
-						children.add(work);
-						try { return await work; } finally { children.delete(work); }
-					},
-				} : undefined,
-				ask: (request, askingSignal) => {
-					check();
-					const n = ++asked;
-					return this.questions.ask(s, { ...request, toolCallId: call.id, key: request.key ?? `call:${call.id}:${n}` }, found.source.id, askingSignal ? AbortSignal.any([signal, askingSignal]) : signal)
-						.then((answer) => { if (answer.pending) pendingQuestions.push(answer.requestId); return answer; });
-				},
-			}));
-			await drain();
-			if (isPending(result)) {
-				if (depth) return { callId: call.id, status: "refused", content: [text("A nested call cannot be left open")] };
-				if (!turnId || !pendingQuestions.length) return { callId: call.id, status: "failed", content: [text("No qualifying question for a pending result")] };
-				await this.commit(s, [{ kind: "toolPending", writer: "harness", modelVisible: false, turnId, stepId: call.stepId, toolCallId: call.id, data: { requestIds: [...new Set(pendingQuestions)], toolStartedId: start.id } }]);
-				this.emit(s, "tool.ended", { status: "open", reason: result.pending }, found.source.id, { turnId, toolCallId: call.id });
-				return { callId: call.id, pending: result.pending };
-			}
-			const out: ToolResult = { ...result, callId: call.id };
-			this.emit(s, "tool.ended", { status: out.status }, found.source.id, { turnId, toolCallId: call.id });
-			return out;
-		} catch (error) {
-			await drain();
-			const status = (error as { code?: string })?.code === "lost" ? "outcomeUnknown" : signal.aborted ? "cancelled" : "failed";
-			const message = error instanceof Error ? error.message : String(error);
-			this.emit(s, "tool.ended", { status }, found.source.id, { turnId, toolCallId: call.id });
-			return { callId: call.id, status, content: [text(status === "cancelled" ? "Cancelled" : `Tool failed: ${message}`)] };
-		}
-	}
-
-	/** Nested calls never use a model offer and are settled by the Harness, not the Runtime. */
-	private async callNested(s: Session, parent: ToolCall, name: string, input: Record<string, unknown>,
-		signal: AbortSignal, depth: number, turnId: string | undefined, state: TurnState | undefined, parentStart: string, inherited?: CoveringAllow): Promise<ToolResult> {
-		const call: ToolCall = { id: this.newId(), name, input, startedBy: "tool", parentCallId: parent.id, actorId: parent.actorId, stepId: parent.stepId };
-		const scope = { turnId, stepId: call.stepId, actorId: call.actorId, toolCallId: call.id };
-		if (resourceBytes(call) + 2048 > this.reservations.limits.entryBytes || !this.reserveCall(s, call.id)) {
-			throw failure("busy", "No capacity for nested call");
-		}
-		const [intent] = await this.commit(s, [{ ...scope, kind: "modular-agent.nestedCall", writer: "harness", modelVisible: false, sources: [parentStart], data: { call } }]);
-		const stop = (status: ToolResult["status"], reason: string): ToolResult => ({ callId: call.id, status, content: [text(reason)] });
-		let registration = this.findTool(s, name);
-		let executed = call;
-		let result: ToolResult;
-		let processingError: unknown;
-		try {
-			if (signal.aborted) result = stop("notStarted", "Cancelled before it ran");
-			else if (depth > 8) result = stop("refused", "Nested tool call depth exceeds 8");
-			else {
-				// A replacement while a gate waits invalidates its answer. Limit churn so the child always settles.
-				for (let pass = 0; ; pass++) {
-					if (!registration || (registration.definition.callers && !registration.definition.callers.includes("plugin"))) {
-						result = stop("refused", `Tool ${name} is not registered for plugin callers`); break;
-					}
-					const approval = s.settings.approval;
-					const coverage = this.newApprovalPass(call, inherited);
-					const gate = await this.toolGate({ sessionId: s.id, turnId, call, definition: registration.definition }, signal, coverage);
-					if (signal.aborted) { result = stop("notStarted", "Cancelled before it ran"); break; }
-					if (gate.pending !== undefined) { result = stop("refused", "A nested call cannot be left open"); break; }
-					const current = this.findTool(s, name);
-					if (!sameRegistration(current, registration) || approval !== s.settings.approval) {
-						if (pass >= 7) { result = stop("refused", "Registration kept changing"); break; }
-						registration = current;
-						continue;
-					}
-					if (gate.refused !== undefined) { result = stop("refused", gate.refused); break; }
-					executed = gate.value.call;
-					const ran = await this.executeTool(s, executed, signal, turnId, state, { depth, registration, approval, inherited });
-					result = isPending(ran) ? stop("refused", "A nested call cannot be left open") : ran;
-					break;
-				}
-			}
-		} catch (error) {
-			processingError = error;
-			result = stop(signal.aborted ? "notStarted" : "failed", "Could not process the nested call");
-		}
-		if (!state?.dispatched.has(call.id) && (result.status === "refused" || result.status === "notStarted")) this.toolDisposition(call, result.status);
-		await this.closeNestedQuestions(s, call.id);
-		const after = await this.toolAfter(s, { sessionId: s.id, call: executed, result });
-		result = after.result;
-		processingError ??= after.error;
-		await this.recordNestedResult(s, executed, turnId, result, intent?.id);
-		if (processingError !== undefined) {
-			this.problem("harness", "nested tool result", processingError);
-			throw processingError;
-		}
-		return result;
-	}
-
-	private toolDisposition(call: Pick<ToolCall, "id" | "name" | "startedBy" | "parentCallId">, status: string): void {
-		telemetryEvent("modular_agent.tool.disposition", { ...toolAttributes(call), "modular_agent.tool.status": status });
-	}
-
-	private async recordNestedResult(s: Session, call: ToolCall, turnId: string | undefined, result: ToolResult, intent?: string): Promise<void> {
-		await this.commit(s, [{ kind: "toolResult", writer: "harness", modelVisible: false, turnId, stepId: call.stepId,
-			actorId: call.actorId, toolCallId: call.id, sources: intent ? [intent] : undefined,
-			message: { role: "toolResult", toolCallId: call.id, toolName: call.name, content: result.content, isError: result.status !== "completed" },
-			data: { status: result.status, value: result.value, call } }]);
-	}
-
-	private async closeNestedQuestions(s: Session, callId: string): Promise<void> {
-		for (const request of this.questions.recordedOpenRequests(s).filter(r => r.toolCallId === callId)) {
-			if (s.lateAnswers.has(request.id)) continue;
-			const answer = { requestId: request.id, actorId: "harness", declined: true, reason: "noLongerAnswerable" };
-			await this.questions.recordAnswer(s, request, answer, s.order.map(id => s.entries.get(id)!).find(e => e.kind === "inputRequest" && e.requestId === request.id)?.stepId);
-			s.waiting.delete(request.id);
-			for (const viewer of this.questions.viewersFor(s, request)) viewer.onInputRequestClosed?.(request.id);
-			this.emit(s, "input.request.closed", answer, "harness", { turnId: request.turnId, toolCallId: callId });
-		}
-	}
-
-	private async recoverNestedCalls(s: Session): Promise<void> {
-		const entries = s.branch();
-		const terminal = new Set(entries.filter(e => e.kind === "toolResult").map(e => e.toolCallId));
-		const started = new Set(entries.filter(e => e.kind === "toolStarted").map(e => e.toolCallId));
-		for (const e of entries.slice().reverse()) {
-			if ((e.kind !== "modular-agent.nestedCall" && e.kind !== "toolStarted") || terminal.has(e.toolCallId)) continue;
-			const call = (e.data as { call?: ToolCall } | undefined)?.call;
-			if (!call || call.startedBy !== "tool" || !call.parentCallId) continue;
-			terminal.add(call.id);
-			await this.closeNestedQuestions(s, call.id);
-			const dispatched = started.has(call.id);
-			await this.recordNestedResult(s, call, e.turnId, { callId: call.id,
-				status: dispatched ? "outcomeUnknown" : "notStarted", content: [text(interruptedNote(dispatched))] }, e.id);
-		}
-	}
-
 	/** A continuation inherits only calls with an intact question checkpoint. In
 	 * particular, losing the waiting marker and its proof cannot buy live approval. */
 	private intactInheritedCall(s: Session, turnId: string | undefined, call: ToolCall) {
@@ -3170,46 +2923,6 @@ export class Harness {
 		return scope.findLast(e => e.kind === "inputAnswer" && !!e.requestId && ids.includes(e.requestId));
 	}
 
-	private async modelApprovalGate<T extends { call: ToolCall }>(s: Session, state: TurnState, turnId: string, payload: T): Promise<GateResult<T>> {
-		const call = payload.call;
-		const wait = waitingApprovals(s).get(call.id);
-		const signal = s.running?.abort.signal;
-		if (!this.intactInheritedCall(s, turnId, call)) return { value: payload, refused: "Missing continuation checkpoint" };
-		this.dispatchAllowances.get(state)?.delete(call.id);
-		const branch = s.branch();
-		const parkable = this.approvals.maximum && s.settings.approvalWait === "untilDeadline" && call.startedBy === "model" && !call.parentCallId &&
-			!branch.some(e => e.kind === "toolStarted" && e.toolCallId === call.id);
-		if (!wait && !parkable && !this.coversNested()) return this.toolGate(payload, signal);
-		const actorId = state.actors.values().next().value ?? this.actorForJob(s, state.jobs);
-		// A continuation can also repeat a tool that left a non-approval question open.
-		const currentStep = branch.some(e => e.kind === "response" && e.turnId === turnId && e.stepId === call.stepId);
-		const origin = wait?.entry.turnId ?? (!currentStep && branch.find(e => e.kind === "turnStart" && e.turnId === turnId)?.continuesTurnId || turnId);
-		const response = branch.find(e => e.kind === "response" && !e.erased && !s.copied.has(e.id) && e.turnId === origin && e.stepId === call.stepId &&
-			e.message?.role === "assistant" && e.message.content.some(p => isToolCall(p) && p.id === call.id && p.name === call.name && sameJson(p.arguments, call.input)));
-		const offered = branch.some(e => e.kind === "modelRequest" && !e.erased && e.turnId === origin && e.stepId === call.stepId && (e.data as { tools?: string[] })?.tools?.includes(call.name));
-		const refuse = () => ({ value: payload, refused: "The waiting approval cannot authorize this call" });
-		if (!actorId || !response || !offered || call.startedBy !== "model" || call.parentCallId || call.actorId && call.actorId !== actorId || !this.workRights(s, state.actors, state.jobs).includes("tools")) return refuse();
-		if (wait && (!wait.end || !wait.proof || wait.start || wait.result || !this.approvals.validWait(s, wait) ||
-			!branch.some(e => e.kind === "turnStart" && !e.erased && e.turnId === turnId && e.continuesTurnId === origin))) return refuse();
-		const found = this.findTool(s, call.name);
-		if (!found || found.definition.callers && !found.definition.callers.includes("model")) return refuse();
-		const policy = s.settings.approval;
-		const registration = structuredClone({ source: { plugin: found.plugin, toolSource: found.source.id }, definition: found.definition });
-		const coverage = this.newApprovalPass(call);
-		const run = () => this.toolGate({ ...payload, definition: found.definition }, signal, coverage);
-		const result = wait || parkable ? await this.modelGate.run({ response, turnId, actorId, callId: call.id }, run) : await run();
-		if (result.refused === undefined && !result.pending) {
-			const final = { ...result.value.call, actorId };
-			if (wait && (!this.approvals.matchesApproval(wait, final, s) || !await this.approvals.approverStillAllows(s, wait))) return refuse();
-			const allowances = this.dispatchAllowances.get(state) ?? new Map();
-			this.dispatchAllowances.set(state, allowances);
-			const cover = wait ? this.coversNested() && wait.request.coversNested === true
-				? { toolCallId: call.id, requestId: wait.request.id, actorId: wait.decision!.actorId! } : undefined : coverage?.allow;
-			allowances.set(call.id, { call: structuredClone(final), binding: { ...registration, call: structuredClone(final) }, policy, cover });
-		}
-		return result;
-	}
-
 	private originalWorkAllows(s: Session, w: WaitingApproval) {
 		const origin = w.entry.turnId!;
 		const branch = s.branch();
@@ -3226,121 +2939,6 @@ export class Harness {
 			}
 			return this.workRights(s, this.recordedTurnActors(branch, origin), this.recordedTurnJobs(branch, origin)).includes("tools");
 		}));
-	}
-
-	private coversNested() { return this.approvalCoversNested && this.plugins().includes("approval"); }
-
-	private newApprovalPass(call: ToolCall, inherited?: CoveringAllow): ApprovalPass | undefined {
-		return this.coversNested() ? { callId: call.id, attempt: this.newId(), inherited } : undefined;
-	}
-
-	private async toolGate<T extends { call: ToolCall }>(payload: T, signal?: AbortSignal, coverage = this.newApprovalPass(payload.call)): Promise<GateResult<T>> {
-		const { call } = payload;
-		let changed = false;
-		const pass = (p: T, second: boolean) => this.hooks.gate("tool.before", p, {
-			invoke: (value, handler) => this.gateSignal.run(signal, () => this.toolWork.run(value.call, () => coverage ? this.approvalPass.run(coverage, handler) : handler())),
-			change: (before, after) => {
-				const candidate = after?.call;
-				if (!candidate || !isDeepStrictEqual({ ...call, input: {} }, { ...candidate, input: {} }) ||
-					!candidate.input || typeof candidate.input !== "object" || Array.isArray(candidate.input)) {
-					throw new Error("Tool gate changed the call identity or gave invalid input");
-				}
-				if (!isDeepStrictEqual(before.call.input, candidate.input)) {
-					if (second) throw new Error("Tool gate changed the call again");
-					changed = true;
-				}
-				return { ...before, call: { ...before.call, input: candidate.input } };
-			},
-		});
-		const first = await pass(payload, false);
-		if (!changed || first.refused !== undefined || first.pending !== undefined) return first;
-		if (coverage) coverage.allow = undefined;
-		return pass(first.value, true);
-	}
-
-	/** A tool call a UI or plugin starts. The same checks apply. */
-	private async callTool(s: Session, call: ToolCall): Promise<ToolResult> {
-		await this.erasure.reconcilePending(s);
-		if (s.provisional) throw failure("invalid_request", "Session has not admitted its first input");
-		if (s.closed) throw failure("not_open", "Session is closed");
-		if (s.suspended) throw failure("lost", "Session has lost its writer");
-		if (s.moving || s.closing || s.erasing) throw failure("busy", "Session cannot run tools right now");
-		if (resourceBytes(call) + 2048 > this.reservations.limits.entryBytes || !this.reserveCall(s, call.id)) {
-			throw failure("busy", "No capacity for tool call");
-		}
-		return untilAborted(s.interruption.signal, async () => {
-			s.outsideTools++;
-			try { return await this.callOutsideTurn(s, call); }
-			finally {
-				if (!s.interruption.signal.aborted) this.reservations.release(s, `call:${call.id}`);
-				s.outsideTools--;
-			}
-		});
-	}
-
-	private async callOutsideTurn(s: Session, call: ToolCall): Promise<ToolResult> {
-		const found = this.findTool(s, call.name);
-		const definition = found?.definition;
-		const coverage = this.newApprovalPass(call);
-		const policy = s.settings.approval;
-		const registration = found && structuredClone({ source: { plugin: found.plugin, toolSource: found.source.id }, definition: found.definition });
-		const gate = call.actorId && !this.rightsOf(s, call.actorId).includes("tools")
-			? { refused: "No tools right", value: { call } }
-			: definition?.callers && call.startedBy !== "tool" && !definition.callers.includes(call.startedBy as "ui" | "plugin")
-			? { refused: `${call.name} can't be called by a ${call.startedBy}`, value: { call } }
-			: await this.toolGate({ sessionId: s.id, call, definition }, undefined, coverage);
-		let result: ToolResult;
-		if (gate.refused) {
-			result = { callId: call.id, status: "refused", content: [text(gate.refused)] };
-			this.toolDisposition(call, result.status);
-		}
-		else {
-			const final = gate.value.call;
-			const allowance = coverage && registration ? { call: final, binding: { ...registration, call: final }, policy, cover: coverage.allow } : undefined;
-			const ran = await this.executeTool(s, final, s.interruption.signal, undefined, undefined, undefined, allowance);
-			// Only a turn can carry an open call forward, so outside a turn it fails instead.
-			result = isPending(ran) ? { callId: call.id, status: "failed", content: [text(`${call.name} can't wait for an answer outside a turn`)] } : ran;
-		}
-		const after = await this.toolAfter(s, { sessionId: s.id, call, result });
-		result = after.result;
-		await this.commit(s, [{ kind: "toolResult", writer: "harness", modelVisible: false, toolCallId: call.id, actorId: call.actorId, message: { role: "toolResult", toolCallId: call.id, toolName: call.name, content: result.content, isError: result.status !== "completed" }, data: { status: result.status, value: result.value, call } }]);
-		if (after.error) throw after.error;
-		return result;
-	}
-
-	private async toolAfter(s: Session, payload: { sessionId: string; call: ToolCall; result: ToolResult }, fromInterface = false) {
-		const { sessionId, call, result } = payload;
-		try {
-			const after = (await this.hooks.transform("tool.after", structuredClone({ sessionId, call, result }), (before, answer) => {
-				const next = answer.value;
-				const fixedFields = ({ result: { content: _content, value: _value, ...result }, ...rest }: typeof next) =>
-					JSON.parse(JSON.stringify({ ...rest, result }));
-				if (answer.stop || !Array.isArray(next?.result?.content) || !isDeepStrictEqual(fixedFields(before), fixedFields(next))) {
-					throw new Error("tool.after may change only result content and value");
-				}
-			})).value.result;
-			if (fromInterface && (!validReportContent(after.content) || after.value !== undefined && !isJson(after.value))) {
-				throw new Error("Invalid Interface tool output");
-			}
-			const startId = s.order.findLast(id => {
-				const e = s.entries.get(id)!;
-				return e.kind === "toolStarted" && e.toolCallId === call.id;
-			});
-			const start = startId && s.entries.get(startId);
-			const shape = ((start || undefined)?.data as { definition?: ToolDefinition } | undefined)?.definition?.returns;
-			const violation = after.status === "completed" && shape ? shapeViolation(shape, after.value) : undefined;
-			if (violation) throw new Error(`Invalid tool output: ${violation}`);
-			if (resourceBytes(after) + 2048 > this.reservations.limits.settlementBytes) {
-				const error = failure("result_too_large", "Tool result exceeds reserved capacity");
-				return { error, result: { callId: after.callId, status: after.status === "completed" && shape ? "failed" as const : after.status,
-					content: [text("result_too_large")] } };
-			}
-			return { result: after };
-		} catch (cause) {
-			const error = cause instanceof Error ? cause : new Error(String(cause));
-			this.problem("harness", "tool result", error);
-			return { error, result: { callId: result.callId, status: fromInterface ? "failed" as const : result.status, content: [text("Tool result could not be processed")] } };
-		}
 	}
 
 	/** Attach a connection without adding a persistent plugin registration. */
@@ -3425,7 +3023,7 @@ export class Harness {
 			const actor = s.order.map((id) => s.entries.get(id)!).find((e) => e.kind === "jobStarted" && e.jobId === id)?.actorId;
 			return actor ? [actor] : [];
 		})])];
-		const actorId = this.toolWork.getStore()?.actorId;
+		const actorId = this.tools.toolWork.getStore()?.actorId;
 		return actorId ? [actorId] : [];
 	}
 
@@ -3478,7 +3076,7 @@ export class Harness {
 			erasureDuringTurn: "refused",
 			questionsOutlastTurns: this.questionsOutlastTurns,
 			...(this.approvals.maximum === undefined ? {} : { approvalsOutlastTurns: true, lateAnswersStartTurns: true }),
-			...(this.coversNested() ? { approvalCoversNested: true } : {}),
+			...(this.tools.coversNested() ? { approvalCoversNested: true } : {}),
 			queuedInputAfterRestart: recovery.input,
 			...(recovery.jobs !== recovery.input ? { queuedJobReportsAfterRestart: recovery.jobs } : {}),
 			movingWithUnfinishedWork: "refused",
@@ -3608,11 +3206,6 @@ function intersectRights(...ceilings: readonly Authority[][]): Authority[] {
 
 function inputActors(q: QueuedInput): string[] {
 	return [q.startedBy.kind === "job" ? undefined : q.actorId, q.releasedBy, q.delegatedBy, ...(q.authorityActors ?? [])].filter((id): id is string => id !== undefined);
-}
-
-function sameRegistration(a: { plugin: string; source: ToolSource; definition: ToolDefinition } | undefined,
-	b: { plugin: string; source: ToolSource; definition: ToolDefinition }): boolean {
-	return !!a && a.plugin === b.plugin && a.source === b.source && isDeepStrictEqual(a.definition, b.definition);
 }
 
 export type { GateResult };
