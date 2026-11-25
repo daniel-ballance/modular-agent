@@ -89,7 +89,7 @@ const portablePair = portableChecks || then >= 0;
 const portableActor = "kit-portable-writer";
 const otherActor = "kit-portable-reopener";
 const home = mkdtempSync(join(tmpdir(), "ma-conf-home-"));
-const env = Object.fromEntries(["PATH", "MODULAR_AGENT_HISTORY_URL", "MODULAR_AGENT_HISTORY_TOKEN_FILE", "MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS"].filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
+const env = Object.fromEntries(["PATH", "TMPDIR", "MODULAR_AGENT_HISTORY_URL", "MODULAR_AGENT_HISTORY_TOKEN_FILE", "MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS"].filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
 let store, observer;
 if (env.MODULAR_AGENT_HISTORY_URL || env.MODULAR_AGENT_HISTORY_TOKEN_FILE || portableChecks || then >= 0 || group === "erasure") {
 	try { store = historyService(env.MODULAR_AGENT_HISTORY_URL, env.MODULAR_AGENT_HISTORY_TOKEN_FILE); }
