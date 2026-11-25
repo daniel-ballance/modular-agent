@@ -1,4 +1,6 @@
-use super::{Harness, OpenSession, authority::admitted_authority, bytes, make_entry};
+use super::{
+    Harness, OpenSession, authority::admitted_authority, bytes, history_commit::make_entry,
+};
 use agent_api::telemetry::{self, Operation};
 use agent_api::*;
 use std::collections::VecDeque;

@@ -1217,7 +1217,7 @@ pub(super) fn same_authority_record(a: &SessionData, b: &SessionData, scope: &Sc
 }
 
 fn push(data: &mut SessionData, scope: &Scope, draft: Draft) -> Entry {
-    let entry = make_entry(data, scope, "harness", draft);
+    let entry = super::history_commit::make_entry(data, scope, "harness", draft);
     data.position = Some(entry.id.clone());
     data.entries.push(entry.clone());
     entry
