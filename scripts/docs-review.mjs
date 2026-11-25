@@ -24,16 +24,16 @@ const link = /\[([^\]\n]+)\]\(<?([^\s)>]+)>?(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^
 const adrName = /\bADR[ -]?(\d{4})\b/g;
 const heading = /^ {0,3}#{1,6}(?:[ \t]|$)/;
 const blockStart = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|\||[-*+]\s|\d+[.)]\s|>)/;
-const git = (...args) => execFileSync("git", ["-c", "core.quotePath=false", ...args], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+const git = (...args) => execFileSync("git", ["-c", "core.quotePath=false", ...args], { cwd: root, encoding: "utf8", maxBuffer: 1 << 30, stdio: ["ignore", "pipe", "pipe"] });
+// A name Git stores in bytes that are not UTF-8 cannot be passed back to Git exactly; say so rather than skip it.
+const names = (output) => output.split("\0").filter(Boolean).map((name) => {
+  if (name.includes("\uFFFD")) throw new Error(`Cannot read the file name ${JSON.stringify(name)} as UTF-8. Rename it to review it`);
+  return name;
+});
 const linesOf = (text) => text.split(/\r?\n/);
 // The review reads the committed head, the same snapshot the diff compares, not the working tree.
-const read = (file) => {
-  try {
-    return git("show", `HEAD:${file}`);
-  } catch {
-    return "";
-  }
-};
+// Every file read is in HEAD, so a failed read is an error, never an empty file.
+const read = (file) => git("show", `HEAD:${file}`);
 
 // Copied from check-docs-state.mjs rather than shared: the two scripts stay
 // standalone files that their tests copy into a scratch repository.
@@ -144,8 +144,8 @@ function changedLines(base) {
   // -z names each file exactly; patch headers quote or pad some paths, such as one with a space.
   // A file at least 90% like a deleted one is a rename, diffed against its old path so only its
   // edited lines count. Below that every line counts: a loose pairing could hide new lines.
-  const status = git("diff", "--name-status", "-z", "-M90%", "--diff-filter=d", merge, "HEAD", "--", "*.md").split("\0");
-  for (let i = 0; i < status.length - 1;) {
+  const status = names(git("diff", "--name-status", "-z", "-M90%", "--diff-filter=d", merge, "HEAD", "--", "*.md"));
+  for (let i = 0; i < status.length;) {
     const kind = status[i++];
     const from = kind.startsWith("R") || kind.startsWith("C") ? status[i++] : undefined;
     const file = status[i++];
@@ -153,7 +153,7 @@ function changedLines(base) {
     const lines = new Set();
     // Literal pathspecs: a file name such as ":(glob)x.md" is a name, not pathspec magic.
     const paths = from && kind.startsWith("R") ? [from, file] : [file];
-    for (const line of git("--literal-pathspecs", "diff", "--unified=0", "--no-color", "--no-ext-diff", "-M90%", merge, "HEAD", "--", ...paths).split("\n")) {
+    for (const line of git("--literal-pathspecs", "diff", "--unified=0", "--no-color", "--no-ext-diff", "--text", "--no-textconv", "-M90%", merge, "HEAD", "--", ...paths).split("\n")) {
       const hunk = line.match(/^@@ -\S+ \+(\d+)(?:,(\d+))? @@/);
       if (!hunk) continue;
       const count = hunk[2] === undefined ? 1 : Number(hunk[2]);
@@ -180,7 +180,7 @@ function parse(args) {
 
 try {
   const options = parse(process.argv.slice(2));
-  const markdown = git("ls-tree", "-r", "-z", "--name-only", "HEAD").split("\0").filter((file) => file.endsWith(".md"));
+  const markdown = names(git("ls-tree", "-r", "-z", "--name-only", "HEAD")).filter((file) => file.endsWith(".md"));
   const adrs = new Map(markdown.filter((file) => adrFile.test(file)).map((file) => [file.match(adrFile)[1], adrStatus(read(file))]));
   const base = options.all ? undefined : options.base ?? defaultBase();
   const scope = options.all ? new Map(markdown.map((file) => [file, undefined])) : changedLines(base);

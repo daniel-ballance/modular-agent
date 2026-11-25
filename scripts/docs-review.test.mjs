@@ -216,6 +216,33 @@ test("file names that look like pathspec magic are read literally, and a rename 
   assert.deepEqual(repo.run().at, [":(glob)magic.md:1", "docs/new.md:23"]);
 });
 
+test("diff attributes and large files never hide a changed line", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", "Start.\n");
+  repo.track("no-diff.md", "Start.\n");
+  repo.track("large.md", "Start.\n");
+  repo.track(".gitattributes", "no-diff.md -diff\n");
+  repo.commit("Start");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  repo.track("no-diff.md", "Support is planned.\n");
+  repo.track("large.md", "Support is planned.\n" + "A stable line of filler text.\n".repeat(40000));
+  repo.commit("Docs");
+  assert.deepEqual(repo.run().at, ["large.md:1", "no-diff.md:1"]);
+});
+
+test("a changed file name that is not UTF-8 is an error, not a clean review", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", "Start.\n");
+  repo.commit("Start");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const top = repo.git("rev-parse", "--show-toplevel").toString().trim();
+  writeFileSync(Buffer.concat([Buffer.from(`${top}/bad-`), Buffer.from([0xff]), Buffer.from(".md")]), "Support is planned.\n");
+  repo.commit("Docs");
+  const result = repo.run();
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /Cannot read the file name .* as UTF-8/);
+});
+
 test("--base picks another merge base, and main is used without origin/main", (t) => {
   const repo = checkout(t);
   repo.track("README.md", "First gap.\n");
