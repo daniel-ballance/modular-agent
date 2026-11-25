@@ -94,10 +94,12 @@ function adrStatus(text) {
 }
 
 function checkAdrIndex(lines, statuses) {
+  const indexed = new Set();
   for (const [i, line] of lines.entries()) {
-    const row = line.match(/^ {0,3}\|\s*\[\d{4}\]\(([^)]+)\)\s*\|[^|]*\|([^|]*)\|/);
+    const row = line.match(/^ {0,3}\|?\s*\[\d{4}\]\(([^)]+)\)\s*\|[^|]*\|([^|]*)(?:\||$)/);
     if (!row) continue;
     const file = posix.join("docs/adr", row[1]);
+    indexed.add(file);
     const status = statuses.get(file);
     const cell = row[2].trim().toLowerCase().replace(link, "$1");
     // Historical describes applicability, not a change to the original accepted decision.
@@ -106,6 +108,9 @@ function checkAdrIndex(lines, statuses) {
     else if (!cell.startsWith(status) || /^[\w-]/.test(cell.slice(status.length))) {
       fail(adrIndex, i + 1, `Index status does not match ${file}`, `Start the status cell with "${status}"`);
     }
+  }
+  for (const file of statuses.keys()) {
+    if (!indexed.has(file)) fail(adrIndex, 1, `No index row for ${file}`, "Add a row whose first cell links the record");
   }
 }
 

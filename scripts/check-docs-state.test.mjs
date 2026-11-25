@@ -132,6 +132,16 @@ test("ADR index rejects a wrong status or superseding record number", (t) => {
   ]);
 });
 
+test("every ADR needs an index row, with or without a leading pipe", (t) => {
+  const repo = checkout(t);
+  record(repo, accepted, "accepted");
+  record(repo, proposed, "accepted");
+  repo.track(adrIndex, [row(accepted, "Accepted").slice(1), row(proposed, "Proposed").replace(/^\| /, "")].join("\n"));
+  repo.check(["docs/adr/README.md:2: Index status does not match"]);
+  repo.track(adrIndex, row(accepted, "Accepted"));
+  repo.check(["docs/adr/README.md:1: No index row for docs/adr/0034-approvals-that-wait.md"]);
+});
+
 test("ADR index allows annotations and calls accepted experiments historical", (t) => {
   const repo = checkout(t);
   const experiment = "docs/adr/0014-experiment.md";
