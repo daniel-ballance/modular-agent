@@ -109,6 +109,7 @@ export class InputRequests {
 		return this.recordedOpenQuestionEntries(s, s.branch()).map(readRequest);
 	}
 
+	/** A recorded answer to the question with this key, if it can still be used. */
 	private recordedAnswer(s: Session, draft: BoundRequest, approval?: ApprovalBinding): { request: InputRequest; answer?: Answer } | undefined {
 		const branch = s.branch();
 		const entry = [...branch].reverse().find((e) => e.kind === "inputRequest" && !e.erased && readRequest(e).key === draft.key);
@@ -353,12 +354,14 @@ export class InputRequests {
 		return this.interfaces().filter((i) => i.present?.(s.id, request) !== false && (this.operations.actorRights(s, i.actorId).includes("watch") || this.mayAnswer(s, request, i.actorId)));
 	}
 
+	/** Questions on the current branch that were left open past their turn and have no answer yet. */
 	waitingRequests(s: Session): InputRequest[] {
 		const calls = new Set(this.operations.openCalls(s).map((c) => c.id));
 		return this.recordedOpenRequests(s).filter((r) => (s.waiting.has(r.id) || calls.has(r.toolCallId ?? "") || r.turnId !== s.running?.turnId)
 			&& !s.requests.has(r.id) && !s.lateAnswers.has(r.id) && (r.approvalWait !== "untilDeadline" || !!waitingApprovals(s).get(r.toolCallId!)?.end));
 	}
 
+	/** Answer a question left open past its turn. The answer is recorded, then the open calls carry on if they can. */
 	private async answerLate(s: Session, answer: Answer): Promise<{ accepted: boolean; reason?: string }> {
 		const request = this.waitingRequests(s).find((r) => r.id === answer.requestId);
 		if (!request || request.approvalWait) return { accepted: false, reason: "The request is closed or can no longer be answered" };

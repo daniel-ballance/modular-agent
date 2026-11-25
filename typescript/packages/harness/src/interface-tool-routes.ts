@@ -62,6 +62,7 @@ export class InterfaceToolRoutes {
 	constructor(private readonly operations: InterfaceToolRoutesOperations) {}
 
 	// The offer follows its input through the queue, even if another Interface becomes present.
+	// An embedded connection has no offer scope, so the Harness offers its tools to any turn without one.
 	readonly offerScope = new AsyncLocalStorage<symbol>();
 
 	queuedOffers = new WeakMap<QueuedInput, symbol>();
