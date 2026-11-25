@@ -62,7 +62,8 @@ function checkGaps(file, lines) {
     if (heading && !heading.tracked) fail(file, heading.line, "Gap or finding has no issue", "Link an issue below the heading, before the next heading");
   };
   for (const [i, line] of lines.entries()) {
-    const title = line.match(/^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$/)?.[1];
+    const setext = /^ {0,3}(?:=+|-+)[ \t]*$/.test(lines[i + 1] ?? "") && /\S/.test(line) && !/^ {0,3}(?:[-*+>]|\d+[.)]|\|)/.test(line);
+    const title = line.match(/^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$/)?.[1] ?? (setext ? line.trim() : undefined);
     if (title) {
       finish();
       heading = gapHeading.test(title) ? { line: i + 1, tracked: false } : undefined;
@@ -107,29 +108,58 @@ function localTarget(file, target) {
   return target.startsWith("#") ? file + target : posix.join(posix.dirname(file), target);
 }
 
-const sentenceBreak = /[.!?][)\]"'*_]*(?=\s)|\n[ \t]*(?=\n)|\n(?=[ \t]*(?:[-*+][ \t]|\d+[.)][ \t]|#|\|))|\|/g;
-// "Proposed" names something new when a noun such as "change" follows it, not the status of a decision.
-const statusWord = /\bproposed\b(?![*_]*[ \t\n]+(?:changes?|edits?|checks?|text|fix(?:es)?|replacements?|wording|additions?|amendments?)\b)/i;
+const sentenceBreak = /[.!?][)\]"'*_]*(?=\s)|\n[ \t]*(?=\n)|\n(?=[ \t]*(?:[-*+][ \t]|\d+[.)][ \t]|\|))|\|/g;
+const headingLine = /^ {0,3}#{1,6}(?:[ \t][^\n]*)?$/gm;
+const abbreviation = /\b(?:e\.g|i\.e|etc|vs|cf|nos?|secs?|figs?|ch|approx|incl)\./gi;
+const referenceLink = /\[([^\]\n]+)\]\[([^\]\n]*)\]/g;
+const definition = /^ {0,3}\[([^\]\n]+)\]:[ \t]*<?([^\s>]+)>?/gm;
+const exception = /<!--\s*docs-state-ok:\s*[^\s-][^]*?-->/;
+// "Proposed" names something new when a noun such as "change" follows it within two words, not the status of a decision.
+const statusWord = /\bproposed\b(?![*_]*(?:[ \t\n]+[\w-]+){0,2}[ \t\n]+(?:changes?|edits?|checks?|text|fix(?:es)?|replacements?|wording|additions?|amendments?)\b)/i;
+const blank = (span) => span.replace(/[^\n]/g, "x");
 
-function checkAdrProse(file, lines, statuses, rules) {
+function linksIn(prose) {
+  const defined = new Map([...prose.matchAll(definition)].map((m) => [m[1].trim().toLowerCase(), m[2]]));
+  const found = [...prose.matchAll(link)].map((m) => ({ span: m[0], target: m[2], index: m.index }));
+  for (const m of prose.matchAll(referenceLink)) {
+    const target = defined.get((m[2] || m[1]).trim().toLowerCase());
+    if (target) found.push({ span: m[0], target, index: m.index });
+  }
+  return found;
+}
+
+function sentenceBreaks(prose, links) {
+  let masked = prose.replace(abbreviation, (word) => word.replace(/\./g, " "));
+  for (const { span, index } of links) masked = masked.slice(0, index) + blank(span) + masked.slice(index + span.length);
+  const breaks = [0, prose.length, ...[...masked.matchAll(sentenceBreak)].map((m) => m.index + m[0].length)];
+  for (const m of masked.matchAll(headingLine)) breaks.push(m.index, m.index + m[0].length);
+  return [...new Set(breaks)].sort((a, b) => a - b);
+}
+
+function checkAdrProse(file, raw, lines, statuses, rules) {
   const text = lines.join("\n");
   if (!/\bproposed\b/i.test(text)) return;
   const prose = text.replace(/(`+)[^\n]*?\1/g, (code) => " ".repeat(code.length));
-  const breaks = [0, ...[...prose.matchAll(sentenceBreak)].map((m) => m.index + m[0].length), prose.length];
+  const links = linksIn(prose);
+  const breaks = sentenceBreaks(prose, links);
+  const rawLines = linesOf(raw);
   const reported = new Set();
-  for (const { 0: span, 2: target, index } of prose.matchAll(link)) {
+  for (const { span, target, index } of links) {
     const local = localTarget(file, target);
     if (!local) continue;
     const direct = local.split("#")[0];
-    const adr = adrFile.test(direct) ? direct : rules.get(local);
+    const adr = adrFile.test(direct) ? direct : rules.get(local) ?? rules.get(direct);
     if (statuses.get(adr) !== "accepted") continue;
     const start = breaks.findLast((b) => b <= index);
     const end = breaks.find((b) => b >= index + span.length);
     const hit = prose.slice(start, end).match(statusWord);
     if (!hit || reported.has(start)) continue;
     reported.add(start);
+    const first = linesOf(text.slice(0, start)).length;
+    const last = linesOf(text.slice(0, end)).length;
+    if (exception.test(rawLines.slice(first - 1, last).join("\n"))) continue;
     const line = linesOf(text.slice(0, start + hit.index)).length;
-    fail(file, line, `Prose calls an accepted decision in ${adr} proposed`, "Describe the accepted rule instead");
+    fail(file, line, `Prose calls an accepted decision in ${adr} proposed`, "Describe the accepted rule instead, or add <!-- docs-state-ok: reason --> to the sentence");
   }
 }
 
@@ -247,7 +277,7 @@ try {
   for (const file of markdown) {
     const lines = markdownLines(read(file));
     if (!historicalGaps.test(file)) checkGaps(file, lines);
-    if (!file.startsWith("docs/adr/")) checkAdrProse(file, lines, statuses, rules);
+    if (!file.startsWith("docs/adr/")) checkAdrProse(file, read(file), lines, statuses, rules);
   }
   checkVersions(files);
   console.log(`${markdown.length} tracked Markdown files and ${files.length - markdown.length} package manifests checked. Failures: ${bad}.`);
