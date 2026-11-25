@@ -10,12 +10,13 @@ Every change starts from a GitHub issue. An issue is a bug, a change, or a findi
 - **Project.** The "Modular Agent" GitHub Project shows each issue's status (Todo, In progress, In review, Done) and priority. Whoever works on an issue moves it to In progress when its branch exists and to In review when its pull request is open. The commands are below.
 - **Decisions.** A decision that outlives your session goes where the next reader looks: a comment on the issue, an ADR when it meets the test under [Writing](#writing), or the document it changes. Chat and an agent's own notes end with the session.
 - **One change, every place.** When you change a rule, a status word or a user-facing string, search for every other place that states it with `git grep -n`, which also reads `.github/`. Look in the documents, the READMEs, help text, tests and all four languages. Change them in the same pull request. A language you cannot change there gets an issue with its `lang:` label ([ADR 0036](docs/adr/0036-four-languages-in-lockstep.md)).
-- **Branch and pull request.** Work on one branch per issue. The pull request says `Closes #N` and lists the checks run, with their counts. Its sections are those in [the template](.github/pull_request_template.md).
-- **Review.** Every pull request gets a verdict from a reviewer who did not write it. The reviewer posts the verdict on the pull request and names the commit it reviewed. A push after the verdict needs a new verdict at the new head.
+- **Branch and pull request.** Work on one branch per issue. The pull request says `Closes #N` and lists the checks run, with their counts. Its sections are those in [the template](.github/pull_request_template.md). `Closes #N` goes only in the pull request body. A squash merge copies every commit message into `main`, and GitHub closes an issue that a keyword there names, which is how #44 closed #13.
+- **Review.** Every pull request gets a verdict from a reviewer who did not write it, from another model family when one is available. The reviewer posts the verdict on the pull request and names the head SHA it reviewed. A push after the verdict needs a new verdict at the new head. The one exception is a push that only removes or rewords lines the verdict already covered; the author says so on the pull request and names both SHAs.
+- **Review findings.** The author fixes a reviewer's one-line finding in place. A larger finding goes to a fresh owner, a new agent or a new issue, together with the finding. After two failed review rounds on the same premise, test the premise and record the decision on the issue instead of patching again. #27 needed eleven rounds and ended by replacing its line readers with parsers.
 - **Agent check.** Before the verdict, the reviewer runs `node scripts/docs-review.mjs` at the head; a stacked pull request adds `--base BRANCH`. It prints candidates: changed lines with a status word, with status wording beside a named or linked ADR, or naming open work that no issue in the section tracks, each with the ADRs its paragraph links and their status. It reads the committed head, so commit before running it. It picks lines by keyword. Candidates never fail the command; a usage or Git error exits 2. The reviewer judges each candidate for the two problems below and reports each problem as a blocking finding with its `file:line` and the fix. A candidate judged fine needs no comment. The verdict says that the agent check ran and how many candidates it judged.
   - **Stale status.** The line calls a decision proposed, draft or planned when its ADR is accepted, or calls something done or accepted that is not.
   - **Untracked open work.** The line names a gap, finding, TODO or follow-up that no issue tracks.
-- **Landing.** The operator lands a pull request once it has a verdict at its current head. GitHub then deletes the remote branch. Remove your worktree and local branch with `git worktree remove PATH` and `git branch -D BRANCH`.
+- **Landing.** The operator lands a pull request once it has a verdict at its current head, with `gh pr merge N --squash --match-head-commit SHA`. SHA is the head the verdict covers, so a push after the verdict cannot land. If `main` moved after the verdict and changed files the pull request also changes, merge `origin/main` into a scratch copy of the head and run the checks those files touch before landing. GitHub then deletes the remote branch. Remove your worktree and local branch with `git worktree remove PATH` and `git branch -D BRANCH`. A parent of a stacked pull request keeps its local branch until the child is restacked ([Working in parallel](#working-in-parallel)).
 
 To move an issue on the Project, look up the IDs, then set the Status field:
 
@@ -29,6 +30,27 @@ gh project field-list 1 --owner daniel-ballance --format json \
 gh project item-edit --project-id PROJECT_ID --id ITEM_ID \
   --field-id FIELD_ID --single-select-option-id OPTION_ID
 ```
+
+### Working in parallel
+
+Several agents work at once, each on its own issue.
+
+- **One owner.** An issue has one owner, one branch in its own worktree and one pull request. Create the worktree with `git worktree add ../BRANCH -b BRANCH origin/main`.
+- **Disjoint files.** Work runs at once only when it changes different files. Before you start, compare your files with those of the open pull requests (`gh pr diff N --name-only`). If they overlap, wait for that pull request to land, or stack on it.
+- **Stacking.** Branch from the parent's branch, open the pull request with `gh pr create --base PARENT_BRANCH` and write "Stacked on #N" in its body. The reviewer runs the agent check with `--base PARENT_BRANCH`.
+- **Restacking.** After the parent squash-merges, move the child onto `main`. OLD_PARENT_HEAD is the parent's head that the child is built on.
+
+  ```sh
+  git fetch origin
+  git diff OLD_PARENT_HEAD HEAD | git patch-id --stable    # before
+  git rebase --onto origin/main OLD_PARENT_HEAD
+  git diff origin/main HEAD | git patch-id --stable        # after
+  git push --force-with-lease
+  gh pr edit N --base main
+  ```
+
+  If the two patch IDs match, the change is the same and its verdict stands; post both SHAs and the ID on the pull request. If they differ, the new head needs a new verdict.
+- **Machine load.** `scripts/check.sh` and `scripts/stress.sh` wait for a free check slot on the machine by themselves. Start a long run as a systemd user unit. [Checking a change](#checking-a-change) has both.
 
 ### Releases
 
@@ -81,7 +103,7 @@ Keep tracked source files at 1,000 lines or fewer. The docs lane runs `scripts/c
 
 The docs lane runs `scripts/check-docs-state.mjs`, which checks three things. The setup step installs its parsers with `npm ci --silent --prefix scripts`. First, in tracked Markdown outside `docs/adr/`, `docs/research/`, `docs/pressure-test/` and `*/docs/clean-room/`, a heading that starts with Known gaps, Gaps, Findings or Remaining (alone, or ending in work or gaps), ends in gaps or findings, starts with Proposed and names text, or reads "Proposed, not yet written" must reference an issue before the next heading. The check follows CommonMark for both `#` and underlined (Setext) headings. Indented code blocks do not count as issue references. Other headings that list open work are not checked, but their work still belongs in an issue. Second, every record in `docs/adr/` must have a row in `docs/adr/README.md`, and each row must start its status with its record's status; a row for an accepted record may instead start with Historical. Third, the release at the top of `CHANGELOG.md` must match the versions in every tracked `Cargo.toml`, in each `typescript/packages/*/package.json` with its `@modular-agent/` pins, in each `pyproject.toml` under `python/` with its pins on other packages there, and in the Go `ImplementationVersion`. Its major.minor must match the SDK specification status. Lock files and the Node and Python manifests under `demos/` are not checked; the release checklist covers them. Stale status prose and untracked open work are left to the reviewer's [agent check](#how-work-is-tracked).
 
-Do not merge a commit into `main` if its subject starts with `WIP`, regardless of case.
+Do not merge a commit into `main` if its subject starts with `WIP`, regardless of case, or if its message has a closing keyword such as `Fixes #12` ([Branch and pull request](#how-work-is-tracked)). `scripts/check-maintainability.mjs` fails on either in the commits after the merge base with `main`. It reads GitHub's keywords (close, closes, closed, fix, fixes, fixed, resolve, resolves, resolved, in any case) followed by `#N`, `OWNER/REPO#N` or an issue URL; "fixed in #12" does not close an issue and passes.
 
 Follow the split issues for the four Harness modules over the limit: [TypeScript #8](https://github.com/daniel-ballance/modular-agent/issues/8), [Rust #9](https://github.com/daniel-ballance/modular-agent/issues/9), [Python #10](https://github.com/daniel-ballance/modular-agent/issues/10) and [Go #11](https://github.com/daniel-ballance/modular-agent/issues/11).
 
@@ -94,12 +116,14 @@ scripts/check.sh --quick      # builds, lint, SDK tests and cross-language check
 scripts/check.sh              # every suite and the binding kits
 scripts/check.sh go python    # only the Go and Python lanes
 scripts/check.sh --serial     # one step at a time, in the original order
-scripts/stress.sh 3           # three independent full checks at once
+scripts/stress.sh 3           # three independent full checks at once, on three check slots
 ```
 
 Each selected language runs in its own lane. A failing step does not stop that lane or the others. The shared scenarios, reference checks, demo, telemetry peer placements and erasure matrix wait for all four lanes. They are skipped if you select fewer than four languages. The erasure pairings also run together unless you pass `--serial`.
 
 The script prints each finished step with its lane and elapsed time. It prints the wall time and log folder in the final summary. These times are from the reference machine (32 logical CPUs) at 0.3.0, on 2026-11-25. The quick run took about 16 minutes (954 s) in a fresh worktree with cold builds; the Go build alone took 330 s. The full run took about 37 minutes (2,198 s). It started later in the same worktree, so its builds were warm, and other agents' work shared the machine. The erasure matrix took 2 minutes of it. The quick run passed all 20 steps; the full run passed 60 of 61 ([#43](https://github.com/daniel-ballance/modular-agent/issues/43)). Other work on the machine makes either run slower.
+
+Several agents share one machine, so the check scripts limit how many check runs go at once. `scripts/check.sh` takes one check slot before its first step and holds it until it ends. `scripts/stress.sh N` takes N slots at once, because its runs must overlap, and refuses an N above the limit. A run that finds too few free slots prints `check-slot: waiting for ...`, then `check-slot: took slot ...` when it starts. The slots are lock files in `~/.cache/ma-std-tmp/slots/`, shared by every worktree, and a run's slot comes free when it exits, however it ends. `MA_CHECK_SLOTS` sets the number of slots (default 3); `MA_CHECK_SLOTS=0` turns the limit off, for a machine with one user. A check started inside a run that holds a slot (`MA_CHECK_SLOT_HELD` is set) uses that slot. One suite run on its own, such as `cargo test -p NAME`, takes no slot.
 
 Use `scripts/stress.sh N [check.sh options]` to reproduce failures under load. It copies the tracked files as they are on disk, including uncommitted changes to tracked files. Each check builds from scratch and writes to its own scratch directory. Allow disk space for all the builds. The final table counts how many runs failed each step and lists their log paths. The script keeps the logs and removes the build trees. A check that fails intermittently is a bug to fix, not to retry until it passes.
 
@@ -140,4 +164,4 @@ To look at traces while working on [telemetry](docs/telemetry.md), run `scripts/
 
 ## Commits
 
-Commit in small steps, each one passing the checks it touches. Write the message for a reader who was not there: what changed and why, and the checks you ran with their counts.
+Commit in small steps, each one passing the checks it touches. Write the message for a reader who was not there: what changed and why, and the checks you ran with their counts. A check's own exit code decides whether it passed. A pipe reports its last command's status, so `node --test FILE | tail` exits 0 when the tests fail; run the check without a pipe, or with `set -o pipefail`.
