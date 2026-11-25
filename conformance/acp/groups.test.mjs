@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,6 +13,16 @@ const runWith = (env, ...args) => exec(process.execPath, [fileURLToPath(new URL(
   env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, ...env },
 });
 const run = (...args) => runWith({}, ...args);
+
+test('a stdio agent receives the kit TMPDIR', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'acp-tmpdir-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const observed = join(dir, 'observed');
+  const agent = `require('node:fs').writeFileSync(process.argv[1], process.env.TMPDIR ?? ''); process.exit(45)`;
+  await assert.rejects(runWith({ TMPDIR: dir }, '--group', 'covered', '--', process.execPath, '-e', agent, observed),
+    e => e.code === 1);
+  assert.equal(readFileSync(observed, 'utf8'), dir);
+});
 
 test('a selected erasure group needs an HTTP service before launching an agent', async () => {
   await assert.rejects(run('--group', 'erasure', '--', process.execPath, '-e', 'process.exit(45)'),
