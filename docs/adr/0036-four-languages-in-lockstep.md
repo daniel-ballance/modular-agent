@@ -1,7 +1,9 @@
 ---
-status: accepted
+status: superseded by 0037
 date: 2026-11-25
 ---
+
+> **Superseded** on 2026-11-25 by [ADR 0037](0037-two-languages.md): the project keeps two languages, Rust and TypeScript, in lockstep. Go and Python will be kept at the tag `four-languages` when they leave `main`.
 
 # Four languages in lockstep
 

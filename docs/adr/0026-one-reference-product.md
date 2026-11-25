@@ -3,6 +3,8 @@ status: accepted
 date: 2026-11-19
 ---
 
+**Current rule:** [ADR 0037](0037-two-languages.md) keeps two languages, Rust and TypeScript. Where this record says four SDKs or four `ma` builds, read two. Go and Python will be kept at the tag `four-languages` when they leave `main`.
+
 # One reference product, implemented in all four languages
 
 [ADR 0024](0024-five-layers.md) gave each of the four languages a reference implementation. Each could have been a different kind of agent that plays to its language: a notebook agent in Python, a service in Go, an editor agent in TypeScript. Instead all four are the same product, the [standard configuration](../reference/standard-configuration.md): `ma`, a coding agent with Pi's feature set, written in each language on that language's SDK from one description.

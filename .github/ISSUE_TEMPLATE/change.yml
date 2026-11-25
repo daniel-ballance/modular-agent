@@ -10,7 +10,7 @@ body:
       options:
         - "1 spec: docs/, the binding kits"
         - "2 SDK spec: docs/sdk/, the shared scenarios"
-        - "3 SDK: the four SDKs"
+        - "3 SDK: the SDKs"
         - "4 reference: ma, the standard configuration, the reference checks"
         - "5 demo: demonstrative implementations in demos/"
     validations:
@@ -19,7 +19,7 @@ body:
     id: languages
     attributes:
       label: Languages
-      description: The languages whose code changes. A change to one language is a change to all four, or a recorded gap in the others. Leave all unticked for a change to the documents only.
+      description: The languages whose code changes. A change to one language is a change to both Rust and TypeScript, or a recorded gap in the other. Go and Python take no new work (ADR 0037); tick them only for work already in flight until they are removed. Leave all unticked for a change to the documents only.
       options:
         - label: Rust
         - label: TypeScript
