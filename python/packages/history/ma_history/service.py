@@ -187,12 +187,11 @@ class Store:
     def request(self, method, route, sid, generation, q, body, *, revision=None):
         if route == "renew" and self.renew(sid, generation):
             return {"ttlMs": self.ttl_ms}
+        lease = (body or {}).get("lease") if method == "POST" and route in WRITES else None
         with self.lock, self.db:
-            result = self.route(method, route, sid, generation, q, body, revision=revision)
-            lease = (body or {}).get("lease") if method == "POST" and route in WRITES else None
-            if lease is not None and not self.holds(sid, lease):
-                raise Refusal(409, "lost")
-            return result
+            return self.route(
+                method, route, sid, generation, q, body, revision=revision, lease=lease
+            )
 
     def renew(self, sid, lease):
         """A current lease proves its session exists, so renewal reads no record."""
@@ -208,16 +207,25 @@ class Store:
             current = self.leases.get(sid)
             return current is not None and current[1] == lease and current[2] > time.monotonic()
 
-    def route(self, method, route, sid, generation, q, body, *, revision=None):
+    def route(self, method, route, sid, generation, q, body, *, revision=None, lease=None):
         if route == "version":
             return {"binding": "modular-agent-history/1", "ttlMs": self.ttl_ms, "pendingErasure": 1}
         changes = self.db.total_changes
         try:
             result = self.apply(method, route, sid, generation, q, body, revision)
+            # Check before advancing so a common lost write never touches the witness,
+            # then check again immediately before commit and restore on late loss.
+            if lease is not None and not self.holds(sid, lease):
+                raise Refusal(409, "lost")
             if self.db.total_changes != changes:
                 self.registry.advance()
+                previous = None
                 if self.witness is not None:
-                    freshness.advance(self.db, self.witness)
+                    previous = freshness.advance(self.db, self.witness)
+                if lease is not None and not self.holds(sid, lease):
+                    if previous is not None:
+                        freshness.restore(self.witness, previous)
+                    raise Refusal(409, "lost")
             return result
         except (Unavailable, sqlite3.Error, AgentError, OSError) as exc:
             # No commit has been attempted. The request transaction rolls back.
