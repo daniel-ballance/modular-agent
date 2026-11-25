@@ -3,6 +3,11 @@ import { execFileSync } from "node:child_process";
 import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const { adrStatus, linesOf, parseMarkdown, walk, withoutFrontMatter } = await import("./markdown.mjs").catch((error) => {
+  if (error.code !== "ERR_MODULE_NOT_FOUND") throw error;
+  console.error("scripts/docs-review.mjs: Missing parser dependencies. Run npm ci --prefix scripts.");
+  process.exit(2);
+});
 const root = fileURLToPath(new URL("..", import.meta.url));
 const usage = "Use node scripts/docs-review.mjs [--all | --base REF]";
 const adrFile = /^docs\/adr\/(\d{4})-[^/]+\.md$/;
@@ -22,8 +27,6 @@ const issueUrl = /https?:\/\/[^\s<>()[\]]+\/issues\/[1-9]\d*\b/;
 const issueNumber = /(?:^|[\s(\[]|[\w.-]+\/[\w.-]+)#\d*[1-9]\d*\b/;
 const link = /\[([^\]\n]+)\]\(<?([^\s)>]+)>?(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?[ \t]*\)/g;
 const adrName = /\bADR[ -]?(\d{4})\b/g;
-const heading = /^ {0,3}#{1,6}(?:[ \t]|$)/;
-const blockStart = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|\||[-*+]\s|\d+[.)]\s|>)/;
 const git = (...args) => execFileSync("git", ["-c", "core.quotePath=false", ...args], { cwd: root, encoding: "utf8", maxBuffer: 1 << 30, stdio: ["ignore", "pipe", "pipe"] });
 const gitBytes = (...args) => execFileSync("git", args, { cwd: root, maxBuffer: 1 << 30, stdio: ["ignore", "pipe", "pipe"] });
 // ignoreBOM keeps a leading U+FEFF, which is part of a valid name.
@@ -68,46 +71,58 @@ function decodable(bytes) {
     return undefined;
   }
 }
-const linesOf = (text) => text.split(/\r?\n/);
 // The review reads the committed head, the same snapshot the diff compares, not the working tree.
 // Every file read is in HEAD, so a failed read is an error, never an empty file.
 const read = (file) => git("show", `HEAD:${file}`);
 
-// Copied from check-docs-state.mjs rather than shared: the two scripts stay
-// standalone files that their tests copy into a scratch repository.
-function markdownLines(text) {
-  let fence;
-  let comment = false;
-  return linesOf(text).map((line) => {
-    const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-    if (fence) {
-      if (marker?.[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = undefined;
-      return "";
+const unread = ["code", "inlineCode", "html"];
+const blocks = ["heading", "paragraph", "tableRow"];
+const destinations = ["link", "image", "definition"];
+// Text reads as one string across links and emphasis, so [C](u)#5 shows C#5 and #**5** shows #5.
+// Code, HTML, images and line breaks show as a space; table cells are separated by one.
+function shownText(node) {
+  if (node.type === "text") return node.value;
+  if (!node.children) return " ";
+  return node.children.map(shownText).join(node.type === "tableRow" ? " " : "");
+}
+// A link, autolink, image or definition names an issue by its destination, never its title; a block by what it shows.
+const namesIssue = (node) => (destinations.includes(node.type) ? issueUrl.test(node.url) : blocks.includes(node.type) && (issueUrl.test(shownText(node)) || issueNumber.test(shownText(node))));
+
+// Code, inline code, HTML and front matter are blanked in place, not removed, so each line keeps its number.
+function markdown(source) {
+  const text = withoutFrontMatter(source);
+  let shown = "";
+  let at = 0;
+  const headings = [];
+  const issues = [];
+  const blockOf = new Map();
+  for (const node of walk(parseMarkdown(text))) {
+    const { start, end } = node.position;
+    if (namesIssue(node)) issues.push(start.line - 1);
+    if (unread.includes(node.type)) {
+      shown += text.slice(at, start.offset) + text.slice(start.offset, end.offset).replace(/[^\r\n]/g, " ");
+      at = end.offset;
     }
-    if (marker && !comment) {
-      fence = marker[1];
-      return "";
-    }
-    const code = line.replace(/(`+)[^`]*?\1/g, (span) => " ".repeat(span.length));
-    let out = "";
-    let at = 0;
-    while (at < line.length) {
-      const next = comment ? line.indexOf("-->", at) : code.indexOf("<!--", at);
-      if (next === -1) {
-        out += comment ? " ".repeat(line.length - at) : line.slice(at);
-        break;
-      }
-      const end = comment ? next + 3 : next + 4;
-      out += comment ? " ".repeat(end - at) : line.slice(at, next) + "    ";
-      at = end;
-      comment = !comment;
-    }
-    return out;
-  });
+    if (node.type === "heading") headings.push(start.line - 1);
+    if (blocks.includes(node.type)) for (let i = start.line - 1; i < end.line; i++) blockOf.set(i, [start.line - 1, end.line]);
+  }
+  const lines = linesOf(shown + text.slice(at));
+  return {
+    lines,
+    paragraph: (i) => lines.slice(...(blockOf.get(i) ?? [i, i + 1])).join("\n"),
+    tracked: (i) => {
+      const from = headings.findLast((line) => line <= i) ?? 0;
+      const to = headings.find((line) => line > i) ?? lines.length;
+      return issues.some((line) => line >= from && line < to);
+    },
+  };
 }
 
-function adrStatus(text) {
-  return text.match(/^---\r?\n(.*?)\r?\n---(?:\r?\n|$)/s)?.[1].match(/^status:[ \t]*([^\r\n]+)/m)?.[1].trim().toLowerCase();
+// Git's hunks count LF-ended lines; the parser also ends a line at a lone CR.
+function gitLines(source) {
+  const numbers = [1];
+  for (const end of source.match(/\r\n|\r|\n/g) ?? []) numbers.push(numbers.at(-1) + (end === "\r" ? 0 : 1));
+  return numbers;
 }
 
 function adrsIn(file, text, adrs) {
@@ -121,50 +136,29 @@ function adrsIn(file, text, adrs) {
   return found;
 }
 
-// A paragraph is the run of lines around a line up to a blank line. A heading,
-// table row, list item or quote starts a new one, so one table or list does not
-// lend every row's links to every other row.
-function paragraph(lines, i) {
-  let start = i;
-  while (start > 0 && lines[start - 1].trim() && !blockStart.test(lines[start])) start--;
-  let end = i + 1;
-  while (end < lines.length && lines[end].trim() && !blockStart.test(lines[end])) end++;
-  return lines.slice(start, end).join("\n");
-}
-
-function section(lines, i) {
-  let start = i;
-  while (start > 0 && !heading.test(lines[start])) start--;
-  let end = i + 1;
-  while (end < lines.length && !heading.test(lines[end])) end++;
-  return lines.slice(start, end).join("\n");
-}
-
 function words(text, pattern) {
   return [...new Set([...text.matchAll(pattern)].map((match) => match[0].toLowerCase()))];
 }
 
-const prose = (text) => text.replace(/(`+).*?\1|<[^>\n]*>/g, (span) => " ".repeat(span.length));
-const tracked = (text) => issueUrl.test(prose(text)) || issueNumber.test(prose(text).replace(link, "$1"));
-
 function candidates(file, wanted, adrs) {
   const source = read(file);
   const raw = linesOf(source);
-  const lines = markdownLines(source);
+  const { lines, paragraph, tracked } = markdown(source);
+  const lineInGit = gitLines(source);
   const found = [];
   for (const [i, line] of lines.entries()) {
-    if (wanted && !wanted.has(i + 1)) continue;
-    const text = prose(line).replace(link, "$1");
+    if (wanted && !wanted.has(lineInGit[i])) continue;
+    const text = line.replace(link, "$1");
     const reasons = [];
-    const named = adrsIn(file, prose(line), adrs).size > 0;
+    const named = adrsIn(file, line, adrs).size > 0;
     const status = [...new Set([...words(text, statusWords), ...words(text, todo), ...(named ? words(text, adrStatusWords) : [])])];
     if (status.length) reasons.push(`status ${status.map((word) => `"${word}"`).join(", ")}`);
     const open = [...words(text, openWords), ...(normative.test(text) ? [] : words(text, absentWords))];
-    if (open.length && !tracked(section(lines, i))) {
+    if (open.length && !tracked(i)) {
       reasons.push(`open work ${open.map((word) => `"${word}"`).join(", ")} with no issue in its section`);
     }
     if (!reasons.length) continue;
-    const linked = [...adrsIn(file, paragraph(lines, i), adrs)].sort().map((number) => `ADR ${number} ${adrs.get(number) ?? "has no status"}`);
+    const linked = [...adrsIn(file, paragraph(i), adrs)].sort().map((number) => `ADR ${number} ${adrs.get(number) ?? "has no status"}`);
     found.push(`${file}:${i + 1}: ${reasons.join("; ")}${linked.length ? `. Links ${linked.join(", ")}` : ""}.\n    ${raw[i].trim()}`);
   }
   return found;
@@ -188,9 +182,13 @@ function changedLines(base, committed) {
     const target = status[i++];
     if (!isMarkdown(target) || !committed.has(key(target)) || historical.test(key(target))) continue;
     const file = name(target);
-    // A rename source that is not UTF-8 cannot be named to Git; the target is then diffed alone,
-    // so all its lines count: more candidates, never a hidden one.
-    const from = source && kind.startsWith("R") ? decodable(source) : undefined;
+    // Only a rename scored R090 to R099 from a file the review reads keeps its unedited lines out.
+    // R100 is a similarity score, not proof the file is unchanged: Git gives it to any identical
+    // add and delete, and to some edits, such as reordered lines. A file moved out of a historical
+    // folder was never reviewed; a source that is not UTF-8 cannot be named to Git. Each counts
+    // every line: more candidates, never a hidden one.
+    const moved = source && kind.startsWith("R") && kind !== "R100" && !historical.test(key(source));
+    const from = moved ? decodable(source) : undefined;
     const lines = new Set();
     // Literal pathspecs: a file name such as ":(glob)x.md" is a name, not pathspec magic.
     const paths = from ? [from, file] : [file];

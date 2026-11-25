@@ -4,19 +4,12 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const parsers = await Promise.all([
-  import("mdast-util-from-markdown"),
-  import("mdast-util-gfm-table"),
-  import("micromark-extension-gfm-table"),
-  import("smol-toml"),
-]).catch((error) => {
+const parsers = await Promise.all([import("./markdown.mjs"), import("smol-toml")]).catch((error) => {
   if (error.code !== "ERR_MODULE_NOT_FOUND") throw error;
   console.error("scripts/check-docs-state.mjs:1: Missing parser dependencies. Run npm ci --prefix scripts.");
   process.exit(1);
 });
-const [{ fromMarkdown }, { gfmTableFromMarkdown }, { gfmTable }, { parse, TomlError }] = parsers;
-const markdownOptions = { extensions: [gfmTable()], mdastExtensions: [gfmTableFromMarkdown()] };
-const parseMarkdown = (source) => fromMarkdown(source, markdownOptions);
+const [{ adrStatus, parseMarkdown, walk }, { parse, TomlError }] = parsers;
 
 const args = process.argv.slice(2);
 if (args.length && (args.length !== 2 || args[0] !== "--root" || !args[1])) {
@@ -48,12 +41,6 @@ let bad = 0;
 function fail(file, line, problem, fix) {
   console.error(`${file}:${line}: ${problem}. ${fix}.`);
   bad++;
-}
-
-function* walk(node, stopAt = []) {
-  yield node;
-  if (stopAt.includes(node.type)) return;
-  for (const child of node.children ?? []) yield* walk(child, stopAt);
 }
 
 function inlineText(node, includeCode = false) {
@@ -95,10 +82,6 @@ function checkGaps(file, tree) {
     }
   }
   finish();
-}
-
-function adrStatus(text) {
-  return text.match(/^---\r?\n(.*?)\r?\n---(?:\r?\n|$)/s)?.[1].match(/^status:[ \t]*([^\r\n]+)/m)?.[1].trim().toLowerCase();
 }
 
 const adrBase = new URL("https://repository.invalid/docs/adr/");
@@ -214,6 +197,57 @@ function checkCargo(file, manifest, version) {
   }
 }
 
+// JSON.parse has no positions, so one pass over the text it accepted records the line of each
+// wanted key: a top-level key, or a key directly inside a dependency group. Keys it reads are decoded
+// with JSON.parse, so "\/" and "\u002f" match "/", and the last of duplicate keys wins, as in
+// JSON.parse. The pass keeps a depth count and the state of the top two levels only. A JSON string
+// spends at most six characters per decoded one, so a key longer than that bound for every wanted
+// name and group is skipped undecoded. A key within the bound may be decoded and serialized for a
+// moment before it is rejected, so the pass copies at most one bounded key at a time.
+const nodeGroups = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
+
+function keyLines(text, paths) {
+  const wanted = new Set(paths.map((path) => JSON.stringify(path)));
+  let longest = 0;
+  for (const name of [...nodeGroups, ...paths.flat()]) longest = Math.max(longest, name.length);
+  const limit = 6 * longest + 2;
+  const lines = new Map();
+  const isObject = [false, false, false];
+  let depth = 0;
+  let topKey = null;
+  let group = null;
+  let line = 1;
+  let expectKey = false;
+  for (let at = 0; at < text.length; at++) {
+    const char = text[at];
+    if (char === "\n") line++;
+    else if (char === "{" || char === "[") {
+      depth++;
+      if (depth <= 2) isObject[depth] = char === "{";
+      if (depth === 2) group = topKey;
+      expectKey = depth <= 2 && char === "{";
+    } else if (char === "}" || char === "]") {
+      depth--;
+      expectKey = false;
+    } else if (char === ",") expectKey = depth <= 2 && isObject[depth];
+    else if (char === '"') {
+      let end = at + 1;
+      while (text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
+      if (expectKey && end + 1 - at > limit) {
+        if (depth === 1) topKey = null;
+      } else if (expectKey && (depth === 1 || nodeGroups.includes(group))) {
+        const key = JSON.parse(text.slice(at, end + 1));
+        if (depth === 1) topKey = key;
+        const path = JSON.stringify(depth === 1 ? [key] : [group, key]);
+        if (wanted.has(path)) lines.set(path, line);
+      }
+      expectKey = false;
+      at = end;
+    }
+  }
+  return lines;
+}
+
 function checkNodePackage(file, text, version) {
   let pkg;
   try {
@@ -222,18 +256,22 @@ function checkNodePackage(file, text, version) {
     fail(file, 1, "Invalid package JSON", "Restore a valid package manifest");
     return;
   }
-  const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const check = (key, value) => {
-    const entry = new RegExp(`${escape(JSON.stringify(key))}\\s*:\\s*${escape(JSON.stringify(value) ?? "")}`);
-    const index = value === undefined ? 0 : text.search(entry);
-    const line = linesOf(text.slice(0, Math.max(index, 0))).length;
-    checkVersion(file, { line, value }, version, key === "version" ? "Package version" : `Dependency ${key}`);
+  const stale = [];
+  const check = (path, value) => {
+    if (value !== version) stale.push({ path, value });
   };
-  check("version", pkg?.version);
-  for (const group of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
+  check(["version"], pkg?.version);
+  for (const group of nodeGroups) {
     for (const [name, pin] of Object.entries(pkg?.[group] ?? {})) {
-      if (name.startsWith("@modular-agent/")) check(name, pin);
+      if (name.startsWith("@modular-agent/")) check([group, name], pin);
     }
+  }
+  // A missing value is reported at line 1, so only present values need the scan.
+  const located = stale.filter(({ value }) => value !== undefined);
+  const lines = located.length === 0 ? new Map() : keyLines(text, located.map(({ path }) => path));
+  for (const { path, value } of stale) {
+    const field = path.length === 1 ? "Package version" : `Dependency ${path[1]}`;
+    checkVersion(file, { line: value === undefined ? 1 : lines.get(JSON.stringify(path)) ?? 1, value }, version, field);
   }
 }
 
@@ -277,7 +315,7 @@ function checkVersions(files) {
   const changelog = read("CHANGELOG.md");
   const releaseLine = /^ {0,3}##\s+(\[?v?\d+[^\s]*)/;
   const lines = linesOf(changelog);
-  const heading = fromMarkdown(changelog).children.find((node) => node.type === "heading" && node.depth === 2 && releaseLine.test(lines[node.position.start.line - 1]));
+  const heading = parseMarkdown(changelog).children.find((node) => node.type === "heading" && node.depth === 2 && releaseLine.test(lines[node.position.start.line - 1]));
   const line = heading?.position.start.line ?? 1;
   const version = lines[line - 1].match(releaseLine)?.[1].replace(/^\[([^\]]+)\]$/, "$1").match(release)?.[1];
   if (!heading || !version) {

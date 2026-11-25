@@ -47,8 +47,8 @@ function checkout(t) {
     index(...rows) {
       this.track(adrIndex, ["| ADR | Decision | Status | Rule |", "| --- | --- | --- | --- |", ...rows].join("\n"));
     },
-    check(failures = []) {
-      const result = spawnSync(process.execPath, [checker, "--root", cwd], { cwd, encoding: "utf8" });
+    check(failures = [], { timeout = 0, nodeArgs = [] } = {}) {
+      const result = spawnSync(process.execPath, [...nodeArgs, checker, "--root", cwd], { cwd, encoding: "utf8", timeout });
       const diagnostics = result.stderr.trim().split("\n").filter(Boolean);
       assert.equal(result.status, Number(failures.length > 0), result.stderr);
       assert.match(result.stdout, new RegExp(`Failures: ${failures.length}\\.$`, "m"));
@@ -63,9 +63,8 @@ function checkout(t) {
 test("missing parser dependencies give a one-line install instruction", (t) => {
   const cwd = mkdtempSync(join(tmpdir(), "docs-state-no-deps-"));
   t.after(() => rmSync(cwd, { force: true, recursive: true }));
-  const copy = join(cwd, "check-docs-state.mjs");
-  copyFileSync(checker, copy);
-  const result = spawnSync(process.execPath, [copy], { cwd, encoding: "utf8" });
+  for (const module of ["check-docs-state.mjs", "markdown.mjs"]) copyFileSync(new URL(module, import.meta.url), join(cwd, module));
+  const result = spawnSync(process.execPath, [join(cwd, "check-docs-state.mjs")], { cwd, encoding: "utf8" });
   assert.equal(result.status, 1);
   assert.equal(result.stdout, "");
   assert.equal(result.stderr, "scripts/check-docs-state.mjs:1: Missing parser dependencies. Run npm ci --prefix scripts.\n");
@@ -177,6 +176,12 @@ test("Setext gap headings start a section and any heading ends it", (t) => {
   repo.check(["README.md:1: Gap or finding has no issue"]);
 });
 
+test("front matter is not read as a heading, and the lines after it keep their numbers", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", "---\ntitle: Known gaps\n---\n\n## Findings\n\nNo issue yet.\n");
+  repo.check(["README.md:5: Gap or finding has no issue"]);
+});
+
 test("an indented code block does not supply an issue", (t) => {
   const repo = checkout(t);
   repo.track("README.md", "## Findings\n\n    Tracked in #31.\n");
@@ -274,6 +279,106 @@ test("each release version source reports drift with a line and fix", (t) => {
     `${pythonPackage}:4: Dependency modular-agent`,
     `${python}:6: Dependency demo-sdk`,
   ]);
+});
+
+test("one Node pin in two dependency groups is reported at each group's line", (t) => {
+  const repo = checkout(t);
+  repo.write(node, '{\n  "version": "0.3.2",\n  "devDependencies": { "@modular-agent/demo": "0.2.0" },\n  "dependencies": { "@modular-agent/demo": "0.2.0" }\n}\n');
+  repo.check([`${node}:3: Dependency @modular-agent/demo`, `${node}:4: Dependency @modular-agent/demo`]);
+});
+
+test("a Node pin with an escaped key or value is reported at its own group's line", (t) => {
+  const repo = checkout(t);
+  repo.write(node, [
+    "{",
+    '  "version": "0.3.2",',
+    '  "dependencies": { "@modular-agent\\/demo": "\\u0030.2.0" },',
+    '  "devDependencies": { "@modular-agent/demo": "0.2.0" },',
+    '  "peerDependencies": { "@modular-agent\\u002fdemo": "0.2.0" }',
+    "}",
+    "",
+  ].join("\n"));
+  repo.check([`${node}:3: Dependency @modular-agent/demo`, `${node}:4: Dependency @modular-agent/demo`, `${node}:5: Dependency @modular-agent/demo`]);
+});
+
+test("a Node pin written twice in one group is reported at the effective, last key", (t) => {
+  const repo = checkout(t);
+  repo.write(node, [
+    "{",
+    '  "version": "0.3.2",',
+    '  "dependencies": {',
+    '    "@modular-agent/demo": "0.3.2",',
+    '    "@modular-agent/demo": "0.2.0"',
+    "  }",
+    "}",
+    "",
+  ].join("\n"));
+  repo.check([`${node}:5: Dependency @modular-agent/demo`]);
+});
+
+test("a key that decodes to the probe marker does not move a Node pin's line", (t) => {
+  const repo = checkout(t);
+  repo.write(node, [
+    "{",
+    '  "version": "0.2.0",',
+    '  "\\u005fdocs_state_probe_version": "metadata",',
+    '  "description": "demo"',
+    "}",
+    "",
+  ].join("\n"));
+  repo.check([`${node}:2: Package version`]);
+});
+
+test("a deeply nested package.json value does not stop the Node pin check", (t) => {
+  const repo = checkout(t);
+  const deep = "[".repeat(10000) + "0" + "]".repeat(10000);
+  repo.write(node, `{\n  "version": "0.2.0",\n  "metadata": ${deep}\n}\n`);
+  repo.check([`${node}:2: Package version`]);
+});
+
+test("deeply nested objects after a stale Node version are read in one pass", (t) => {
+  const repo = checkout(t);
+  const deep = '{"k": '.repeat(20000) + "0" + "}".repeat(20000);
+  repo.write(node, `{\n  "version": "0.2.0",\n  "metadata": ${deep}\n}\n`);
+  repo.check([`${node}:2: Package version`], { timeout: 10_000 });
+});
+
+test("a long key with many children outside the pin groups costs no more than its text", (t) => {
+  const repo = checkout(t);
+  const children = Array.from({ length: 20000 }, (_, i) => `"k${i}": 0`).join(", ");
+  repo.write(node, `{\n  "version": "0.2.0",\n  "${"x".repeat(8192)}": { ${children} }\n}\n`);
+  repo.check([`${node}:2: Package version`], { timeout: 10_000, nodeArgs: ["--max-old-space-size=128"] });
+});
+
+test("many unrelated top-level keys and superseded dependency groups are not kept in memory", (t) => {
+  const repo = checkout(t);
+  const keys = Array.from({ length: 750000 }, (_, i) => `"k${i}": 0`).join(", ");
+  repo.write(node, `{\n  "version": "0.2.0",\n  ${keys}\n}\n`);
+  repo.check([`${node}:2: Package version`], { timeout: 20_000, nodeArgs: ["--max-old-space-size=128"] });
+  const pins = (group) => Array.from({ length: 10000 }, (_, i) => `"@modular-agent/p${group}-${i}": "0.2.0"`).join(", ");
+  const groups = Array.from({ length: 128 }, (_, group) => `  "dependencies": { ${pins(group)} },`).join("\n");
+  repo.write(node, `{\n  "version": "0.3.2",\n${groups}\n  "dependencies": { "@modular-agent/demo": "0.2.0" }\n}\n`);
+  repo.check([`${node}:131: Dependency @modular-agent/demo`], { timeout: 20_000, nodeArgs: ["--max-old-space-size=128"] });
+});
+
+test("a manifest nested two million levels deep is checked within a small heap", (t) => {
+  const repo = checkout(t);
+  const deep = "[".repeat(2_000_000) + "0" + "]".repeat(2_000_000);
+  const cap = { timeout: 30_000, nodeArgs: ["--max-old-space-size=128"] };
+  repo.write(node, `{"metadata": ${deep}}\n`);
+  repo.check([`${node}:1: Package version`], cap);
+  repo.write(node, `{\n  "version": "0.2.0",\n  "metadata": ${deep}\n}\n`);
+  repo.check([`${node}:2: Package version`], cap);
+});
+
+test("a huge unrelated key or group name is skipped without being copied", (t) => {
+  const repo = checkout(t);
+  const cap = { timeout: 30_000, nodeArgs: ["--max-old-space-size=128"] };
+  const huge = "x".repeat(45 * 1024 * 1024);
+  repo.write(node, `{\n  "version": "0.2.0",\n  "${huge}": 0\n}\n`);
+  repo.check([`${node}:2: Package version`], cap);
+  repo.write(node, `{\n  "version": "0.3.2",\n  "${huge}": { "@modular-agent/demo": "0.1.0" },\n  "dependencies": { "@modular-agent/demo": "0.2.0" }\n}\n`);
+  repo.check([`${node}:4: Dependency @modular-agent/demo`], cap);
 });
 
 test("Python pins are read from dependency arrays, not from other project strings", (t) => {

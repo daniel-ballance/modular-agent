@@ -1,15 +1,23 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 const script = "scripts/docs-review.mjs";
+const modules = ["docs-review.mjs", "markdown.mjs"];
+// A submodule's commit lives in its own repository, so this one has no object to read for it.
+const submodule = "5".repeat(40);
 
 function checkout(t, branch = "main") {
-  const cwd = mkdtempSync(join(tmpdir(), "docs-review-"));
-  t.after(() => rmSync(cwd, { force: true, recursive: true }));
+  const outside = mkdtempSync(join(tmpdir(), "docs-review-"));
+  t.after(() => rmSync(outside, { force: true, recursive: true }));
+  // The parsers resolve from above the repository, so no fixture commit includes them.
+  symlinkSync(fileURLToPath(new URL("node_modules", import.meta.url)), join(outside, "node_modules"));
+  const cwd = join(outside, "repo");
+  mkdirSync(cwd);
   const git = (...args) => execFileSync("git", [
     "-c", "user.name=Test", "-c", "user.email=test@example.com",
     "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", ...args,
@@ -20,7 +28,7 @@ function checkout(t, branch = "main") {
   };
   git("init", "-q", "-b", branch);
   mkdirSync(join(cwd, "scripts"));
-  copyFileSync(new URL("docs-review.mjs", import.meta.url), join(cwd, script));
+  for (const module of modules) copyFileSync(new URL(module, import.meta.url), join(cwd, "scripts", module));
   write("docs/adr/0007-accepted.md", "---\nstatus: accepted\n---\n\n# Accepted\n");
   write("docs/adr/0008-proposed.md", "---\nstatus: proposed\n---\n\n# Proposed\n");
   git("add", "-f", "--", "docs/adr");
@@ -95,6 +103,102 @@ test("fenced code, HTML comments, inline code, link targets and tags are not rea
   assert.deepEqual(result.at, ["README.md:14"]);
 });
 
+test("the parser decides what is prose: indented code, HTML blocks and code spans across lines are not; text after an escaped comment opener is", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "Intro.", "",
+    "    Support is planned.", "",
+    "<details>", "<summary>Planned work</summary>", "</details>", "",
+    "Use `a", "planned` here.", "",
+    "\\<!-- Resume is planned.", "",
+    "Support is planned.", "",
+  ]);
+  repo.commit("Docs");
+  assert.deepEqual(repo.run("--all").at, ["README.md:12", "README.md:14"]);
+});
+
+test("an underlined (Setext) heading starts a section", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", ["## Known gaps", "", "Tracked in #30.", "", "Other work", "----------", "", "- A gap in Go.", ""]);
+  repo.commit("Docs");
+  assert.deepEqual(repo.run("--all").at, ["README.md:8"]);
+});
+
+test("front matter is not read, and the lines after it keep their numbers", (t) => {
+  const repo = checkout(t);
+  repo.track("docs/guide.md", "---\r\ntitle: Planned gaps\r\nstatus: proposed\r\n---\r\n\r\nSupport is planned.\r\n");
+  repo.commit("Docs");
+  assert.deepEqual(repo.run("--all").found, ['docs/guide.md:6: status "planned".']);
+});
+
+test("empty front matter closes on its second line, and an unclosed block is not front matter", (t) => {
+  const repo = checkout(t);
+  repo.track("docs/empty.md", ["---", "---", "", "Support is planned.", "", "---", "", "Resume is planned. See ADR 0009.", ""]);
+  repo.track("docs/open.md", ["---", "title: Notes", "", "Support is planned.", ""]);
+  repo.track("docs/adr/0009-empty.md", ["---", "---", "", "status: accepted", "", "---", ""]);
+  repo.commit("Docs");
+  const result = repo.run("--all");
+  assert.deepEqual(result.at, ["docs/empty.md:4", "docs/empty.md:8", "docs/open.md:4"]);
+  assert.match(result.stdout, /^docs\/empty\.md:8: status "planned"\. Links ADR 0009 has no status\.$/m);
+});
+
+test("a byte-order mark and lone CR line endings keep every line number", (t) => {
+  const repo = checkout(t);
+  repo.track("docs/bom.md", "\uFEFFSupport is planned<br>.\n\nResume is planned `x`.\n");
+  repo.track("docs/bom-front.md", "\uFEFF---\ntitle: Planned\n---\n\nSupport is planned.\n");
+  repo.track("docs/cr.md", "---\rtitle: Planned\r---\r\rIntro.\r\rSupport is planned.\r");
+  repo.commit("Docs");
+  const result = repo.run("--all");
+  assert.deepEqual(result.at, ["docs/bom-front.md:5", "docs/bom.md:1", "docs/bom.md:3", "docs/cr.md:7"]);
+  assert.match(result.stdout, /^docs\/bom\.md:1: status "planned"\.\n {4}Support is planned<br>\.$/m);
+});
+
+test("only what the parser calls code or HTML is blanked: escaped backticks, a bare < and an autolink are prose", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "# Notes", "",
+    "Type \\` and support is planned \\` here.", "",
+    "If x < 3 the resume is planned > y.", "",
+    "## Known gaps", "",
+    "A gap in Go. See <https://github.com/o/r/issues/5>.", "",
+  ]);
+  repo.commit("Docs");
+  assert.deepEqual(repo.run("--all").at, ["README.md:3", "README.md:5"]);
+});
+
+test("an issue URL tracks a section from a link destination, a definition or visible text, never from a link title", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "## Known gaps", "",
+    'A gap in Go. See [guide](https://example.invalid "<https://github.com/o/r/issues/5>").', "",
+    "## Gaps in Rust", "", '[Issue](https://github.com/o/r/issues/6 "title").', "",
+    "## Gaps in Python", "", "[Issue][python].", "", "[python]: https://github.com/o/r/issues/7", "",
+    "## Gaps in TypeScript", "", "See https://github.com/o/r/issues/8 for it.", "",
+  ]);
+  repo.commit("Docs");
+  assert.deepEqual(repo.run("--all").at, ["README.md:1", "README.md:3"]);
+});
+
+test("an issue number is read from the text a block shows, across links and emphasis", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "## Known gaps", "", "A gap in Go. The expected token is [C](https://example.invalid)#5.", "",
+    "## Gaps in Rust", "", "A gap in Rust, tracked in #**6**.", "",
+  ]);
+  repo.commit("Docs");
+  assert.deepEqual(repo.run("--all").at, ["README.md:1", "README.md:3"]);
+});
+
+test("missing parser dependencies give a one-line install instruction", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "docs-review-no-deps-"));
+  t.after(() => rmSync(cwd, { force: true, recursive: true }));
+  for (const module of modules) copyFileSync(new URL(module, import.meta.url), join(cwd, module));
+  const result = spawnSync(process.execPath, [join(cwd, "docs-review.mjs"), "--all"], { cwd, encoding: "utf8" });
+  assert.equal(result.status, 2);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "scripts/docs-review.mjs: Missing parser dependencies. Run npm ci --prefix scripts.\n");
+});
+
 test("an issue in the same section tracks open work but not a status word", (t) => {
   const repo = checkout(t);
   repo.track("README.md", [
@@ -120,6 +224,8 @@ test("each candidate lists the ADRs its paragraph links or names, with their sta
     "- The proposed rule in ADR 0008.",
     "- The [missing record](adr/0009-gone.md) is proposed.",
     "",
+    "| Record | Status |",
+    "| --- | --- |",
     "| [ADR 0007](adr/0007-accepted.md) | Accepted |",
     "| Planned | Later |",
   ]);
@@ -130,7 +236,7 @@ test("each candidate lists the ADRs its paragraph links or names, with their sta
     'docs/notes.md:4: status "accepted". Links ADR 0007 accepted.',
     'docs/notes.md:5: status "proposed". Links ADR 0008 proposed.',
     'docs/notes.md:6: status "proposed".',
-    'docs/notes.md:9: status "planned".',
+    'docs/notes.md:11: status "planned".',
   ]);
 });
 
@@ -176,6 +282,21 @@ test("the default scope is lines changed since the merge base with origin/main",
   assert.match(result.stdout, /2 candidates in 2 files of Markdown changed since the merge base with origin\/main\./);
 });
 
+test("a changed line in a file with lone CR endings is found by default", (t) => {
+  const repo = checkout(t);
+  repo.track("docs/cr.md", "Intro.\r\rA stable line.\r");
+  repo.track("docs/mixed.md", "Intro.\n\nA stable line.\rMore.\n");
+  repo.commit("Start");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  repo.git("switch", "-q", "-c", "topic");
+  repo.track("docs/cr.md", "Intro.\r\rSupport is planned.\r");
+  repo.track("docs/mixed.md", "Intro.\n\nA stable line.\rSupport is planned.\nResume is planned.\n");
+  repo.commit("Change docs");
+  const result = repo.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.at, ["docs/cr.md:3", "docs/mixed.md:4", "docs/mixed.md:5"]);
+});
+
 test("changed lines are found in a file whose name has a space", (t) => {
   const repo = checkout(t);
   repo.track("README.md", "Start.\n");
@@ -216,6 +337,23 @@ test("file names that look like pathspec magic are read literally, and a rename 
   assert.deepEqual(repo.run().at, [":(glob)magic.md:1", "docs/new.md:23"]);
 });
 
+test("an exact rename, and a file moved out of a historical folder, count every line", (t) => {
+  const repo = checkout(t);
+  const stable = (name) => Array.from({ length: 20 }, (_, i) => `Stable line ${i + 1} of ${name}.`);
+  repo.track("docs/old.md", ["Support is planned.", "", ...stable("the guide"), ""]);
+  repo.track("docs/research/notes.md", ["Resume is planned.", "", ...stable("the notes"), ""]);
+  repo.commit("Start");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  repo.git("mv", "docs/old.md", "docs/moved.md");
+  repo.git("mv", "docs/research/notes.md", "docs/notes.md");
+  repo.track("docs/notes.md", ["Resume is planned.", "", ...stable("the notes"), "Streaming is not implemented.", ""]);
+  repo.commit("Docs");
+  const pairs = repo.git("diff", "--name-status", "-M90%", "origin/main", "HEAD").toString();
+  assert.match(pairs, /^R100\tdocs\/old\.md\tdocs\/moved\.md$/m);
+  assert.match(pairs, /^R09\d\tdocs\/research\/notes\.md\tdocs\/notes\.md$/m);
+  assert.deepEqual(repo.run().at, ["docs/moved.md:1", "docs/notes.md:1", "docs/notes.md:23"]);
+});
+
 test("diff attributes and large files never hide a changed line", (t) => {
   const repo = checkout(t);
   repo.track("README.md", "Start.\n");
@@ -225,7 +363,7 @@ test("diff attributes and large files never hide a changed line", (t) => {
   repo.commit("Start");
   repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
   repo.track("no-diff.md", "Support is planned.\n");
-  repo.track("large.md", "Support is planned.\n\n" + "A stable line of filler text.\n\n".repeat(40000));
+  repo.track("large.md", "Support is planned.\n\n```text\n" + "A stable line of filler text.\n".repeat(40000) + "```\n");
   repo.commit("Docs");
   assert.deepEqual(repo.run().at, ["large.md:1", "no-diff.md:1"]);
 });
@@ -238,8 +376,10 @@ test("a valid name with U+FFFD, an undecodable non-Markdown name and a Markdown 
   const top = repo.git("rev-parse", "--show-toplevel").toString().trim();
   repo.track("valid-\uFFFD.md", "Support is planned.\n");
   writeFileSync(Buffer.concat([Buffer.from(`${top}/notes-`), Buffer.from([0xff]), Buffer.from(".txt")]), "Not Markdown.\n");
-  repo.git("update-index", "--add", "--cacheinfo", `160000,${repo.git("rev-parse", "HEAD").toString().trim()},vendored.md`);
-  repo.commit("Docs");
+  repo.git("add", "-f", "--", ".");
+  repo.git("update-index", "--add", "--cacheinfo", `160000,${submodule},vendored.md`);
+  repo.git("commit", "-q", "-m", "Docs");
+  assert.equal(repo.git("ls-tree", "HEAD", "vendored.md").toString(), `160000 commit ${submodule}\tvendored.md\n`);
   for (const args of [[], ["--all"]]) {
     const result = repo.run(...args);
     assert.equal(result.status, 0, result.stderr);
@@ -277,9 +417,9 @@ test("names that are not UTF-8 stop the review only when it must read them", (t)
   writeFileSync(join(top, "review-renamed.md"), `${filler}\nResume is planned.\n`);
   repo.write("review-control.md", "Support is planned.\n");
   repo.git("add", "-A");
-  const head = repo.git("rev-parse", "HEAD").toString().trim();
-  execFileSync("git", ["update-index", "--index-info"], { cwd: top, input: Buffer.concat([Buffer.from(`160000 commit ${head}\t`), bad("vendored"), Buffer.from("\n")]) });
-  repo.commit("Docs");
+  execFileSync("git", ["update-index", "--index-info"], { cwd: top, input: Buffer.concat([Buffer.from(`160000 commit ${submodule}\t`), bad("vendored"), Buffer.from("\n")]) });
+  repo.git("commit", "-q", "-m", "Docs");
+  assert.ok(repo.git("ls-tree", "-z", "HEAD").includes(Buffer.concat([Buffer.from(`160000 commit ${submodule}\t`), bad("vendored"), Buffer.from([0])])));
   const result = repo.run();
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(result.at, ["review-control.md:1", "review-renamed.md:60"]);
