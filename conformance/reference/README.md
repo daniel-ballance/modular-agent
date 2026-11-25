@@ -20,7 +20,7 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 | `print` | Print mode prints the final answer; the model is offered only `codemode` |
 | `client-identity` | `MA_CLIENT_IDENTITY` is checked at startup: an invalid value stops `ma` with status 1, a valid one is accepted |
 | `approval-covers-script` | Refusal leaves both files untouched. A live allow or an allow after restart runs both writes once, with the parent call and request on each start. |
-| `reopen-approval` | A new default does not replace a recorded approval policy. With the approval feature loaded, a session with no recorded policy reopens with `all`. The check uses `python3` to prepare the saved history. |
+| `reopen-approval` | A new default does not replace a recorded `off` policy. With the approval feature loaded, a session with no recorded policy reopens with `all`, including a session started without `--approval`. The check also uses `python3` to remove a policy from saved history. |
 | `codemode-nested` | Code reads and writes files through `tools`; the nested calls stay out of the model's view |
 | `codemode-tools-values` | `import tools`, a tool function held in a variable, and positional arguments make the same calls |
 | `codemode-positional-order` | Positional arguments: required fields, then the rest in alphabetical order, as the prompt shows |

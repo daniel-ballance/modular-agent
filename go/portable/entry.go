@@ -96,7 +96,11 @@ func applySettings(s *api.Settings, v object) {
 		case "approvalWait":
 			s.ApprovalWait = str(v, k)
 		case "approval":
-			s.Approval = api.ApprovalInternal(str(v, k))
+			policy, _ := x.(string)
+			if policy == "" {
+				policy = "never"
+			}
+			s.Approval = api.ReopenedApproval(policy)
 		case "modelTools":
 			if x == nil {
 				s.ModelTools = nil

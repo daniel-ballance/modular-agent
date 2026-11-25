@@ -239,7 +239,6 @@ class SessionLifecycle:
             ),
             **({"provisional": True} if provisional else {}),
             "settings": {
-                "approval": "off",
                 **({"approvalWait": "live"} if self.max_approval_wait_ms else {}),
                 **settings,
                 **d.get("settings", {}),
@@ -295,6 +294,12 @@ class SessionLifecycle:
             ):
                 await self.call("@harness", "history", "close", {"session": sid})
                 return None
+        policy = s["settings"].get("approval", "ask always")
+        s["settings"]["approval"] = (
+            policy
+            if policy in ("off", "ask unless read-only", "ask always", "never ask, refuse")
+            else "never ask, refuse"
+        )
         self.capacity.restore(s)
         s["plugins"] = list(self.plugins)
         s.setdefault("authority", sorted(self.admin & self.tenant))

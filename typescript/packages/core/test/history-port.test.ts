@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { definePlugin, HistoryServiceError, type HistoryStore } from "@modular-agent/core";
+import { definePlugin, HistoryServiceError, memoryHistory, type HistoryStore } from "@modular-agent/core";
 import { testAgent } from "@modular-agent/core/testing";
+import { memoryStore } from "../src/history.js";
 
 test("the Registrar history port creates without id and resumes reads and lists from their cursors", { timeout: 5000 }, async t => {
   type Page = Awaited<ReturnType<HistoryStore["read"]>>;
@@ -81,6 +82,24 @@ test("the Registrar history port creates without id and resumes reads and lists 
   active.get(first.id)!.abort();
   assert.deepEqual((await pending).value?.data, { reason: "writerLost" });
   assert.equal((await follower.next()).done, true);
+});
+
+test("an unrecognized recorded approval value reopens as never", async t => {
+  const history = memoryHistory();
+  const store = memoryStore(history);
+  const id = "foreign-session";
+  await store.create({ id, project: process.cwd(), created: 1 });
+  await store.openForWriting(id);
+  await store.append(id, [{
+    id: "setting", sessionId: id, parentId: null, time: 1, kind: "setting",
+    writer: "foreign-writer", modelVisible: false, data: { key: "approval", value: ["off"] },
+  }]);
+  await store.close(id);
+
+  const agent = await testAgent({ history, approval: "off", script: [] });
+  t.after(() => agent.close());
+  const resumed = await agent.openSession(id);
+  assert.equal(resumed.settings().approval, "never");
 });
 
 // Force continuation at the store boundary, as when a page hits the byte cap.

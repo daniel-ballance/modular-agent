@@ -78,33 +78,48 @@ const checks = [
   {
     name: "reopen-approval",
     about: "A new default does not replace a recorded approval policy or fill in a missing policy on reopen.",
-    files: { "data/settings.json": JSON.stringify({ model_tools: null }), "project/hello.txt": "Hello.\n" },
+    files: {
+      "data/settings.json": JSON.stringify({ model_tools: null }),
+      "unconfigured/settings.json": JSON.stringify({ model_tools: null }),
+      "project/hello.txt": "Hello.\n",
+    },
     script: [{ text: "First." }, approvalRead, { text: "Second." }, approvalRead, { text: "Third." }],
     async run(command, invoke, _skip, t) {
-      const ma = async (...args) => {
-        const result = await invoke(command, { args });
+      const cli = (env) => async (...args) => {
+        const result = await invoke(command, { args, env });
         assert.equal(result.exit, 0, `ma ${args.join(" ")}: ${result.stderr}`);
         return result.stdout.trim();
       };
-      const lastTurn = async () => {
+      const lastTurn = async (ma) => {
         const history = JSON.parse(await ma("-c", "--history"));
         const entries = Array.isArray(history) ? history : history.entries;
         const start = entries.findLast(e => e.kind === "turnStart");
         assert.ok(start, "history contains a turn");
         return entries.filter(e => e.turnId === start.turnId);
       };
+      const ma = cli();
       assert.equal(await ma("--approval", "off", "-p", "first"), "First.");
       assert.equal(await ma("--approval", "never", "-c", "-p", "second"), "Second.");
-      const recorded = await lastTurn();
+      const recorded = await lastTurn(ma);
       assert.ok(recorded.some(e => e.kind === "toolStarted"), "the recorded off policy lets the call start");
       assert.ok(!recorded.some(e => e.kind === "inputRequest"), "the recorded off policy does not ask");
 
       const omit = spawnSync("python3", [join(here, "omit-saved-approval.py"), join(t.data, "state")], { encoding: "utf8" });
       assert.equal(omit.status, 0, omit.stderr || omit.error?.message);
       assert.equal(await ma("--approval", "never", "-c", "-p", "third"), "Third.");
-      const missing = await lastTurn();
-      assert.ok(missing.some(e => e.kind === "inputRequest" && e.data.request.kind === "approval"), "all asks even for a read-only call");
-      assert.ok(!missing.some(e => e.kind === "toolStarted"), "no call starts without approval");
+      const assertAsked = (turn, scenario) => {
+        assert.ok(turn.some(e => e.kind === "inputRequest" && e.data.request.kind === "approval"), `${scenario}: all asks even for a read-only call`);
+        assert.ok(!turn.some(e => e.kind === "toolStarted"), `${scenario}: no call starts without approval`);
+      };
+      assertAsked(await lastTurn(ma), "policy removed from saved history");
+
+      const unconfigured = cli({
+        MODULAR_AGENT_DATA_DIR: join(t.dir, "unconfigured"),
+        MODULAR_AGENT_SCRIPT_LOG: join(t.dir, "unconfigured/requests.jsonl"),
+      });
+      assert.equal(await unconfigured("-p", "start without approval"), "First.");
+      assert.equal(await unconfigured("--approval", "never", "-c", "-p", "reopen with approval"), "Second.");
+      assertAsked(await lastTurn(unconfigured), "started without --approval");
     },
   },
   {

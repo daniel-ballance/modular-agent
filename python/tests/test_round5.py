@@ -73,26 +73,35 @@ async def test_rewind_restores_ui_effect_and_refuses_a_lost_point(tmp_path, runt
         await h.stop()
 
 
-async def test_portable_records_and_approval_fails_closed_after_reopen(tmp_path, runtime_type):
+@pytest.mark.parametrize(
+    "recorded, expected", [("off", "ask always"), ("future", "never ask, refuse")]
+)
+async def test_portable_records_and_approval_fails_closed_after_reopen(
+    tmp_path, runtime_type, recorded, expected
+):
     from ma_fake import call
 
     fake = Fake([reply(calls=[call("write", path="absent", text="no")]), reply("finished")])
     h = await build(tmp_path / "state", fake, runtime=runtime_type(), project=tmp_path)
     try:
         a = h.api()
-        sid = (await a.session("create", project=str(tmp_path), settings={"model": "fake"}))["id"]
+        sid = (
+            await a.session(
+                "create", project=str(tmp_path), settings={"model": "fake", "approval": recorded}
+            )
+        )["id"]
         scope = {"session": sid}
-        # Simulate an earlier writer that left approval unrecorded.
         await a.session("append", **scope, kind="marker")
-        setup = next(
-            e
-            for e in (await a.session("get", **scope))["entries"]
-            if e["kind"] == "setting" and "approval" in e["data"]
-        )
-        await a.session("erase", **scope, entries=[setup["id"]])
+        if recorded == "off":
+            setup = next(
+                e
+                for e in (await a.session("get", **scope))["entries"]
+                if e["kind"] == "setting" and "approval" in e["data"]
+            )
+            await a.session("erase", **scope, entries=[setup["id"]])
         await a.session("close", **scope)
         opened = await a.session("open", **scope)
-        assert opened["settings"]["approval"] == "ask always"
+        assert opened["settings"]["approval"] == expected
         receipt = await a.call(
             "runtime", "submit", {**scope, "content": content("work"), "key": "k"}
         )
@@ -105,7 +114,8 @@ async def test_portable_records_and_approval_fails_closed_after_reopen(tmp_path,
         assert len([e for e in es if e["kind"] == "plugins"]) == 1
         attempt = next(e for e in es if e["kind"] == "modelRequest")["data"]
         assert "request" in attempt or not attempt["safeToRepeat"]
-        assert next(e for e in es if e["kind"] == "inputAnswer")["data"]["reason"] == "refused"
+        answers = [e["data"]["reason"] for e in es if e["kind"] == "inputAnswer"]
+        assert answers == (["refused"] if recorded == "off" else [])
         result = next(e for e in es if e["kind"] == "toolResult")
         assert result["data"]["status"] == "refused"
         await a.session("erase", **scope, entries=[result["id"]])

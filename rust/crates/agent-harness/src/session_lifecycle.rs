@@ -1,7 +1,7 @@
 use super::{
     ActiveTurn, Harness, OpenSession,
     history_commit::{make_entry, push_setup},
-    tenants, waiting_approvals,
+    tenants,
 };
 use agent_api::telemetry::{KeyValue, Operation, SpanKind};
 use agent_api::*;
@@ -215,18 +215,14 @@ impl Harness {
             if let Some(tenant) = tenants::name(&data) {
                 self.check_tenant(tenant)?;
             }
-            if !matches!(
-                data.settings["approval"].as_str(),
-                Some("off" | "ask_unless_read_only" | "ask_always" | "never_ask")
-            ) {
-                data.settings["approval"] = if data.settings["approval"].is_string()
-                    && (self.max_approval_wait_ms().is_some()
-                        || waiting_approvals::outstanding(&data))
-                {
-                    json!("never_ask")
-                } else {
-                    json!("ask_always")
-                };
+            match data.settings.get("approval") {
+                None => data.settings["approval"] = json!("ask_always"),
+                Some(value)
+                    if matches!(
+                        value.as_str(),
+                        Some("off" | "ask_unless_read_only" | "ask_always" | "never_ask")
+                    ) => {}
+                Some(_) => data.settings["approval"] = json!("never_ask"),
             }
             data.project = data.project.canonicalize()?;
             let previous_plugins = data.plugins.clone();

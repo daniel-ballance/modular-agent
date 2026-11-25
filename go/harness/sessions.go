@@ -153,9 +153,6 @@ func (c *client) newSession(ctx context.Context, project, tenant string, limit *
 		return "", api.ErrAuthority
 	}
 	id := api.ID()
-	if settings.Approval == "" {
-		settings.Approval = "off"
-	}
 	s := c.newSessionState(id, project)
 	s.tenant = tenant
 	s.data = api.Session{Version: 1, ID: id, Project: project, Settings: settings, Actor: c.h.localActor, Tenant: tenant, Limit: limit}

@@ -22,8 +22,12 @@ export function lowerReasoning(value: unknown, model?: ModelInfo): string | unde
 	return thinkingLevels(model).findLast((level) => REASONING_LEVELS.findIndex((known) => known === level) <= index);
 }
 
+export function recordedApproval(value: unknown): "off" | "ask" | "all" | "never" {
+	return value === "off" || value === "ask" || value === "all" ? value : "never";
+}
+
 export function normalizeSetting({ key, value }: { key: string; value: unknown }): { key: string; value: unknown } {
-	if (key === "approvalPolicy" || key === "approval") return { key: "approval", value: ["off", "ask", "all", "never"].includes(String(value)) ? value : "never" };
+	if (key === "approvalPolicy" || key === "approval") return { key: "approval", value: recordedApproval(value) };
 	if (key === "thinking") return { key: "reasoning", value };
 	if (key === "model") return { key, value: parseModel(value) ?? null };
 	if (key === "settings" && value && typeof value === "object") {

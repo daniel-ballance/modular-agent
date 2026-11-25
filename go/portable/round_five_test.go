@@ -48,6 +48,18 @@ func TestRoundFivePortableShapes(t *testing.T) {
 	}
 }
 
+func TestPresentInvalidApprovalIsNotAnAbsentPolicy(t *testing.T) {
+	for _, value := range []string{`""`, `null`, `["off"]`} {
+		t.Run(value, func(t *testing.T) {
+			e := readPortable(t, `{"id":"setting","kind":"setting","data":{"key":"approval","value":`+value+`}}`)
+			s := portable.Session(api.Session{ID: "foreign", Entries: []api.Entry{e}})
+			if got := api.ReopenedApproval(s.Settings.Approval); got != "never" {
+				t.Fatalf("reopened approval = %q, want never", got)
+			}
+		})
+	}
+}
+
 func TestPrivateKindsDoNotBecomeWork(t *testing.T) {
 	for _, kind := range []string{"input.accepted", "input.returned", "plugins.set", "turn.start"} {
 		e := readPortable(t, `{"id":"private","kind":"`+kind+`","data":{"ID":"not-work"}}`)
