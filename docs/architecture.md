@@ -96,7 +96,7 @@ Containment describes which processes stop. Only strong containment covers all d
 
 ### History store
 
-Keeps a session's record beyond the process. Without it the session is ephemeral. A store can apply retention or support erasure. Writer access prevents two writers from updating the same session at once. See [History store interactions](contracts.md#harness-and-history-store), [Recovery](contracts.md#recovery-and-repeating-work) and [Erasure](contracts.md#erasure).
+Keeps a session's record beyond the process. A session whose store keeps its history only in memory, or that has no store, is ephemeral. A store can apply retention or support erasure. Writer access prevents two writers from updating the same session at once. See [History store interactions](contracts.md#harness-and-history-store), [Recovery](contracts.md#recovery-and-repeating-work) and [Erasure](contracts.md#erasure).
 
 ### Credential store
 

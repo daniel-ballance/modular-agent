@@ -90,7 +90,7 @@ A history and its associated work, including any turns and jobs. Owned by the Ha
 _Avoid_: Conversation, thread, context
 
 **Ephemeral session**:
-A session with no history store. Its history is gone when the process stops.
+A session with no persistent history store. Its history is kept in memory and is gone when the process stops.
 
 **Portable session**:
 A session stored in the [shared format](docs/bindings/data.md#portable-sessions) that another supporting agent can reopen and continue. Portability describes the record, not permission to use it.
