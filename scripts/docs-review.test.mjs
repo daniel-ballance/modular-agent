@@ -131,6 +131,17 @@ test("front matter is not read, and the lines after it keep their numbers", (t) 
   assert.deepEqual(repo.run("--all").found, ['docs/guide.md:6: status "planned".']);
 });
 
+test("empty front matter closes on its second line, and an unclosed block is not front matter", (t) => {
+  const repo = checkout(t);
+  repo.track("docs/empty.md", ["---", "---", "", "Support is planned.", "", "---", "", "Resume is planned. See ADR 0009.", ""]);
+  repo.track("docs/open.md", ["---", "title: Notes", "", "Support is planned.", ""]);
+  repo.track("docs/adr/0009-empty.md", ["---", "---", "", "status: accepted", "", "---", ""]);
+  repo.commit("Docs");
+  const result = repo.run("--all");
+  assert.deepEqual(result.at, ["docs/empty.md:4", "docs/empty.md:8", "docs/open.md:4"]);
+  assert.match(result.stdout, /^docs\/empty\.md:8: status "planned"\. Links ADR 0009 has no status\.$/m);
+});
+
 test("missing parser dependencies give a one-line install instruction", (t) => {
   const cwd = mkdtempSync(join(tmpdir(), "docs-review-no-deps-"));
   t.after(() => rmSync(cwd, { force: true, recursive: true }));
