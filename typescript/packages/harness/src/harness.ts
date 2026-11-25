@@ -1,3 +1,4 @@
+import { Declarations } from "./declaration.js";
 import type { Command, FollowOptions, ListingViewer, Plugin, PluginApi, SessionPrepare, SessionStartOptions } from "./plugin-api.js";
 import { Commands } from "./commands.js";
 import { SessionAuthority, readTenants, intersectRights, type TenantInfo } from "./authority.js";
@@ -96,6 +97,23 @@ export interface Tenant { rights: Authority[]; tokens?: number }
  * It runs no turns, calls no models and runs no tools itself.
  */
 export class Harness {
+	private readonly declarations: Declarations = new Declarations({
+		runtime: (...args) => this.runtime(...args),
+		use: (...args) => this.use(...args),
+		providerFor: (...args) => this.providerFor(...args),
+		interfaceTools: () => this.interfaceTools,
+		projectOf: (...args) => this.projectOf(...args),
+		project: () => this.project,
+		hooks: () => this.hooks,
+		jobReportsStartTurns: () => this.jobReportsStartTurns,
+		erasure: () => this.erasure,
+		reservations: () => this.reservations,
+		questionsOutlastTurns: () => this.questionsOutlastTurns,
+		approvals: () => this.approvals,
+		tools: () => this.tools,
+		settingsDuringTurn: () => this.settingsDuringTurn,
+	});
+
 	private readonly commandWork: Commands = new Commands({
 		lifecycle: () => this.lifecycle,
 		erasure: () => this.erasure,
@@ -170,7 +188,7 @@ export class Harness {
 		hooks: () => this.hooks,
 		emit: (...args) => this.emit(...args),
 		questions: () => this.questions,
-		recoveryPolicy: (...args) => this.recoveryPolicy(...args),
+		recoveryPolicy: (...args) => this.declarations.recoveryPolicy(...args),
 		admission: () => this.admission,
 		tools: () => this.tools,
 		interfaceTools: () => this.interfaceTools,
@@ -686,7 +704,7 @@ export class Harness {
 				if (overflow && type === "reply") throw failure("result_too_large", "Reply exceeds the gate limit");
 				return out;
 			},
-			declaration: (sessionId) => this.declaration(sessionId ? this.lifecycle.session(sessionId) : undefined),
+			declaration: (sessionId) => this.declarations.declaration(sessionId ? this.lifecycle.session(sessionId) : undefined),
 			gatedHistory: async (sessionId, options) => {
 				const s = this.lifecycle.session(sessionId);
 				await this.erasure.reconcilePending(s);
@@ -1021,15 +1039,6 @@ export class Harness {
 		return this.questions.connectInterface(part);
 	}
 
-	// ---------- declarations ----------
-
-	private recoveryPolicy() {
-		const supports = this.runtime()?.supports;
-		const input = supports?.queuedInputAfterRestart === "run" ? "run" : "handedBack";
-		const jobs = supports?.queuedJobReportsAfterRestart ?? (supports?.queuedInputAfterRestart ? input : "run");
-		return { input, jobs: jobs === "handedBack" ? "handedBack" : "run" };
-	}
-
 	enableWaitingApprovals(maximum: number): void {
 		if (!Number.isSafeInteger(maximum) || maximum <= 0 || !this.questionsOutlastTurns || !this.plugins().includes("approval") ||
 			this.runtime()?.supports.interfaceTools !== true) throw failure("invalid_composition", "Waiting approvals need a positive Duration and a Runtime that continues settled calls");
@@ -1037,47 +1046,7 @@ export class Harness {
 	}
 
 	declaration(s?: Session): Declaration {
-		const runtime = this.runtime();
-		const store = this.use<HistoryStore>("history-store");
-		const provider = s ? this.providerFor(s) : undefined;
-		const env = this.use<WorkingEnvironment>("working-environment");
-		const recovery = this.recoveryPolicy();
-		return {
-			inputDuringTurn: runtime?.supports.inputDuringTurn === true,
-			...(this.interfaceTools.interfaceSources.size > 0 && runtime?.supports.interfaceTools === true ? { interfaceTools: true } : {}),
-			waitingThroughRestart: runtime?.supports.waitingThroughRestart === true && !!store && !s?.ephemeral,
-			continuesAfterRestart: runtime?.supports.continuesAfterRestart === true,
-			rewinding: env?.keepsPoints?.(s ? this.projectOf(s) : this.project) ?? env?.points === true,
-			forking: !!store,
-			keepsStateAtProvider: provider?.supports.keepsState === true,
-			runsToolsAtProvider: provider?.supports.runsTools === true,
-			liveSessions: provider?.supports.liveSessions === true,
-			severalActors: true,
-			sessionLimits: true,
-			tenants: true,
-			holdsOutput: this.hooks.raw("output").some(handler => handler.stream),
-			outputBypassesAgent: false,
-			startsTurnsUnasked: this.jobReportsStartTurns ? "when a job reports back" : "never",
-			cancellingTurnCancelsJobs: false,
-			pluginsDuringSession: false,
-			erasure: (!!this.erasure.pendingRegistry() || !!this.erasure.httpErasure()) && (!store || !!store.erase),
-			inputKeys: true,
-			resourceReservations: this.reservations.declaration(),
-			telemetry: 1,
-			portableSessions: true,
-			nestedToolCalls: runtime?.supports.nestedToolCalls === true,
-			mixedActorInput: "shared",
-			erasureDuringTurn: "refused",
-			questionsOutlastTurns: this.questionsOutlastTurns,
-			...(this.approvals.maximum === undefined ? {} : { approvalsOutlastTurns: true, lateAnswersStartTurns: true }),
-			...(this.tools.coversNested() ? { approvalCoversNested: true } : {}),
-			queuedInputAfterRestart: recovery.input,
-			...(recovery.jobs !== recovery.input ? { queuedJobReportsAfterRestart: recovery.jobs } : {}),
-			movingWithUnfinishedWork: "refused",
-			commandContainment: env?.containment ?? "none",
-			confinesFiles: env?.confinesFiles === true,
-			settingsDuringTurn: this.settingsDuringTurn ?? "nextTurn",
-		};
+		return this.declarations.declaration(s);
 	}
 }
 
