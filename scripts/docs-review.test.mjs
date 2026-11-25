@@ -37,8 +37,8 @@ function checkout(t, branch = "main") {
     },
     run(...args) {
       const result = spawnSync(process.execPath, [script, ...args], { cwd, encoding: "utf8" });
-      const found = result.stdout.split("\n").filter((line) => /^\S+:\d+: /.test(line));
-      return { ...result, found, at: found.map((line) => line.split(": ")[0]) };
+      const found = result.stdout.split("\n").filter((line) => /^\S.*?:\d+: /.test(line));
+      return { ...result, found, at: found.map((line) => line.match(/^(.*?:\d+): /)[1]) };
     },
   };
 }
@@ -127,6 +127,7 @@ test("each candidate lists the ADRs its paragraph links or names, with their sta
   const result = repo.run("--all");
   assert.deepEqual(result.found, [
     'docs/notes.md:2: status "proposed". Links ADR 0008 proposed.',
+    'docs/notes.md:4: status "accepted". Links ADR 0007 accepted.',
     'docs/notes.md:5: status "proposed". Links ADR 0008 proposed.',
     'docs/notes.md:6: status "proposed".',
     'docs/notes.md:9: status "planned".',
@@ -173,6 +174,32 @@ test("the default scope is lines changed since the merge base with origin/main",
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(result.at, ["README.md:4", "docs/new.md:1"]);
   assert.match(result.stdout, /2 candidates in 2 files of Markdown changed since the merge base with origin\/main\./);
+});
+
+test("changed lines are found in a file whose name has a space", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", "Start.\n");
+  repo.commit("Start");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  repo.track("docs/review space.md", "Support is planned.\n");
+  repo.track("docs/review-control.md", "Support is planned.\n");
+  repo.commit("Docs");
+  assert.deepEqual(repo.run().at, ["docs/review space.md:1", "docs/review-control.md:1"]);
+});
+
+test("completion wording beside a named ADR is a candidate", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "[ADR 0008](docs/adr/0008-proposed.md) is accepted.", "",
+    "The work in ADR 0008 is done.", "",
+    "ADR 0008 is now implemented in Go.", "",
+    "The migration is done.", "",
+  ]);
+  repo.commit("Docs");
+  const result = repo.run("--all");
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.at, ["README.md:1", "README.md:3", "README.md:5"]);
+  assert.match(result.stdout, /^README\.md:1: status "accepted"\. Links ADR 0008 proposed\.$/m);
 });
 
 test("--base picks another merge base, and main is used without origin/main", (t) => {

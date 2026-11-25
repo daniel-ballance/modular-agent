@@ -14,8 +14,8 @@ const historical = /^(?:docs\/(?:adr|research|pressure-test)\/)|\/docs\/clean-ro
 const statusWords = /\b(?:proposed(?! input)|planned|not yet|will be|drafts?(?= \d)|(?<=\b(?:is|are|still|in) )drafts?|pending(?= (?:review|decision|implementation)\b))\b/gi;
 const todo = /\bTODO\b|(?<=\b(?:[Ss]till|[Ll]eft|[Yy]et) )to do\b/g;
 const openWords = /\b(?:(?:limits?|gaps?)(?: still)? remains?|gaps?|findings?|not implemented|follow-ups?(?= (?:issues?|work|changes?|fix|pull request|PR)\b)|(?<=\bas a )follow-up)\b/gi;
-// Beside a named or linked ADR, these state the decision's status.
-const adrStatusWords = /\b(?:propos(?:es?|ing)|drafts?|(?<=\bstill )open)\b/gi;
+// Beside a named or linked ADR, these state the decision's status, in either direction.
+const adrStatusWords = /\b(?:propos(?:es?|ing)|drafts?|(?<=\bstill )open|(?<=\b(?:is|are|was|were|been|now) )(?:accepted|done|complete(?:d)?|implemented|shipped))\b/gi;
 const absentWords = /(?<=\b(?:is|are|still|remains?) )(?:missing|unsupported)\b/gi;
 const normative = /\b(?:MUST|SHOULD|MAY)\b/;
 const issueUrl = /https?:\/\/[^\s<>()[\]]+\/issues\/[1-9]\d*\b/;
@@ -141,18 +141,17 @@ function changedLines(base) {
     throw new Error(`Cannot find a merge base with ${base}. Fetch it, or pass --base REF`);
   }
   const changed = new Map();
-  let lines;
-  for (const line of git("diff", "--unified=0", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", merge, "HEAD", "--", "*.md").split("\n")) {
-    if (line.startsWith("+++ ")) {
-      const file = line.slice(4);
-      lines = file.startsWith("b/") ? new Set() : undefined;
-      if (lines) changed.set(file.slice(2), lines);
-    }
-    const hunk = line.match(/^@@ -\S+ \+(\d+)(?:,(\d+))? @@/);
-    if (hunk && lines) {
+  // -z names each file exactly; patch headers quote or pad some paths, such as one with a space.
+  const files = git("diff", "--name-only", "-z", "--diff-filter=d", merge, "HEAD", "--", "*.md").split("\0").filter(Boolean);
+  for (const file of files) {
+    const lines = new Set();
+    for (const line of git("diff", "--unified=0", "--no-color", "--no-ext-diff", merge, "HEAD", "--", file).split("\n")) {
+      const hunk = line.match(/^@@ -\S+ \+(\d+)(?:,(\d+))? @@/);
+      if (!hunk) continue;
       const count = hunk[2] === undefined ? 1 : Number(hunk[2]);
       for (let n = Number(hunk[1]); n < Number(hunk[1]) + count; n++) lines.add(n);
     }
+    changed.set(file, lines);
   }
   return changed;
 }
