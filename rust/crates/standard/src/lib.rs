@@ -84,6 +84,7 @@ impl Standard {
             claude: false,
             client_identity,
             scripted: std::env::var_os("MODULAR_AGENT_SCRIPT")
+                .filter(|file| !file.is_empty())
                 .map(|file| -> Result<_> {
                     let responses = serde_json::from_slice(&std::fs::read(file)?)?;
                     Ok(script::Script::new(
@@ -238,7 +239,8 @@ pub fn builder(
     if let Some(scripted) = &standard.scripted {
         b = b
             .provider(scripted.provider())
-            .model(modular_agent::testing::SCRIPTED_MODEL);
+            .model(modular_agent::testing::SCRIPTED_MODEL)
+            .plugin(script::test_tools_plugin());
     } else if standard.conformance {
         b = modular_agent::testing::acp_conformance(b);
     } else {

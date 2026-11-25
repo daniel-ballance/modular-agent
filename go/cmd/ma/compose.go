@@ -123,7 +123,7 @@ func (d layout) compose(ctx context.Context, o options, settings modular.Setting
 			return nil, err
 		}
 		settings["model"] = modulartest.ScriptedModel
-		opts = append(opts, modular.WithProvider(p))
+		opts = append(opts, modular.WithProvider(p), modular.WithTool(testAskSecretTool()))
 	} else {
 		overrides, err := d.modelOverrides()
 		if err != nil {
@@ -234,4 +234,22 @@ func scripted(path, log string) (modular.Provider, error) {
 		return request(ctx, m, r, c)
 	}
 	return p, nil
+}
+
+func testAskSecretTool() modular.Tool {
+	type input struct {
+		Question   string `json:"question"`
+		Credential string `json:"credential"`
+	}
+	schema := json.RawMessage(`{"type":"object","properties":{"question":{"type":"string"},"credential":{"type":"string"}},"required":["question","credential"],"additionalProperties":false}`)
+	return modular.NewSchemaTool("test_ask_secret", "Ask a secret question for scripted testing.", schema, func(ctx context.Context, in input, tc *modular.ToolContext) (string, error) {
+		a, err := tc.Ask(ctx, modular.Question{Kind: "secret", Question: in.Question, Credential: in.Credential})
+		if err != nil {
+			return "", err
+		}
+		if a.Declined {
+			return "declined", nil
+		}
+		return "stored", nil
+	})
 }
