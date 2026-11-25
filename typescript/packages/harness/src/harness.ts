@@ -1,3 +1,4 @@
+import { InputAdmission } from "./input-admission.js";
 import { TurnExecution, recordedSnapshot, tokenCount, inputActors } from "./turn-execution.js";
 import { TurnModelAccess } from "./model-access.js";
 import { ToolDispatch } from "./tool-dispatch.js";
@@ -256,6 +257,34 @@ interface TenantInfo { tenant: string | null; rights: Authority[] | null; tokens
  * It runs no turns, calls no models and runs no tools itself.
  */
 export class Harness {
+	private readonly admission: InputAdmission = new InputAdmission({
+		intersectRights,
+		session: (...args) => this.session(...args),
+		erasure: () => this.erasure,
+		checkWriter: (...args) => this.checkWriter(...args),
+		checkScopedWork: (...args) => this.checkScopedWork(...args),
+		requireAuthority: (...args) => this.requireAuthority(...args),
+		commandTable: () => this.commandTable,
+		runCommand: (...args) => this.runCommand(...args),
+		newId: (...args) => this.newId(...args),
+		hooks: () => this.hooks,
+		receiptOperation: () => this.receiptOperation,
+		commit: (...args) => this.commit(...args),
+		rightsOf: (...args) => this.rightsOf(...args),
+		rejectUnknownModel: () => this.rejectUnknownModel,
+		providerFor: (...args) => this.providerFor(...args),
+		modelAccess: (...args) => this.modelAccess(...args),
+		workRights: (...args) => this.workRights(...args),
+		runtime: (...args) => this.runtime(...args),
+		reserveInput: (...args) => this.reserveInput(...args),
+		reservations: () => this.reservations,
+		interfaceTools: () => this.interfaceTools,
+		turns: () => this.turns,
+		emit: (...args) => this.emit(...args),
+		problem: (...args) => this.problem(...args),
+		approvals: () => this.approvals,
+	});
+
 	private readonly turns: TurnExecution = new TurnExecution({
 		intersectRights,
 		commit: (...args) => this.commit(...args),
@@ -280,7 +309,7 @@ export class Harness {
 		now: (...args) => this.now(...args),
 		approvals: () => this.approvals,
 		questions: () => this.questions,
-		admit: (...args) => this.admit(...args),
+		admit: (...args) => this.admission.admit(...args),
 		findTool: (...args) => this.findTool(...args),
 		workRights: (...args) => this.workRights(...args),
 		actorForJob: (...args) => this.actorForJob(...args),
@@ -350,7 +379,7 @@ export class Harness {
 		problem: (...args) => this.problem(...args),
 		findTool: (...args) => this.findTool(...args),
 		erasure: () => this.erasure,
-		admit: (...args) => this.admit(...args),
+		admit: (...args) => this.admission.admit(...args),
 		checkWriter: (...args) => this.checkWriter(...args),
 		newId: (...args) => this.newId(...args),
 		commit: (...args) => this.commit(...args),
@@ -402,10 +431,10 @@ export class Harness {
 		toolWork: () => this.tools.toolWork,
 		emit: (...args) => this.emit(...args),
 		problem: (...args) => this.problem(...args),
-		admit: (...args) => this.admit(...args),
+		admit: (...args) => this.admission.admit(...args),
 		jobReportsStartTurns: () => this.jobReportsStartTurns,
 		startQueued: (...args) => this.turns.startQueued(...args),
-		acceptInput: (...args) => this.acceptInput(...args),
+		acceptInput: (...args) => this.admission.acceptInput(...args),
 	});
 
 	readonly receipts: RunReceipts;
@@ -640,18 +669,18 @@ export class Harness {
 				const s = this.session(id);
 				return { id: s.id, project: s.meta.project, tenant: s.tenant, settings: { ...s.settings }, position: s.position, busy: s.isBusy(), actors: [...s.actors.values()].map((a) => ({ ...a, authority: this.rightsOf(s, a.id) })), ephemeral: s.ephemeral };
 			},
-			input: (sessionId, options) => this.input(sessionId, options),
-			withdraw: (sessionId, inputId) => this.withdraw(sessionId, inputId),
+			input: (sessionId, options) => this.admission.input(sessionId, options),
+			withdraw: (sessionId, inputId) => this.admission.withdraw(sessionId, inputId),
 			proposals: (id, actorId) => {
 				const s = this.session(id);
 				this.requireAuthority(s, actorId, "watch");
 				return [...s.proposals.values()].map((q) => ({ inputId: q.id, actorId: q.actorId, content: q.content, time: q.time! }));
 			},
-			withdrawProposal: (id, inputId, actorId, delegatedBy) => this.withdrawProposal(this.session(id), inputId, actorId, delegatedBy),
-			cancel: (sessionId) => this.cancel(sessionId),
-			releaseInput: (id, inputId, when, actorId, declined) => this.releaseInput(this.session(id), inputId, when, actorId, declined),
+			withdrawProposal: (id, inputId, actorId, delegatedBy) => this.admission.withdrawProposal(this.session(id), inputId, actorId, delegatedBy),
+			cancel: (sessionId) => this.admission.cancel(sessionId),
+			releaseInput: (id, inputId, when, actorId, declined) => this.admission.releaseInput(this.session(id), inputId, when, actorId, declined),
 			recoveredInput: (id) => this.session(id).recoveredInput,
-			waitForIdle: (sessionId) => this.waitForIdle(sessionId),
+			waitForIdle: (sessionId) => this.admission.waitForIdle(sessionId),
 			moveTo: (sessionId, entryId, options) => this.moveTo(sessionId, entryId, options ?? {}, pluginName),
 			setSetting: (sessionId, key, value, actorId) => this.setSetting(this.session(sessionId), key, value, pluginName, actorId),
 			setLimit: (id, rights, actorId) => this.setLimit(this.session(id), rights, actorId, pluginName),
@@ -1215,7 +1244,7 @@ export class Harness {
 		const handBack = (q: QueuedInput) => (q.startedBy.kind === "job" ? recovery.jobs : recovery.input) === "handedBack";
 		s.recoveredInput = admissions.filter(handBack);
 		s.followUps.push(...admissions.filter(q => !handBack(q)));
-		await this.handBack(s, s.recoveredInput, "restart");
+		await this.admission.handBack(s, s.recoveredInput, "restart");
 		await this.hooks.observe("session.start", { sessionId: s.id, resumed: true });
 		await this.tools.recoverNestedCalls(s);
 		await this.interfaceTools.recoverInterfaceCalls(s);
@@ -1462,7 +1491,7 @@ export class Harness {
 	private async closeSessionWithin(id: string, actorId?: string, delegatedBy?: string, authority?: readonly Authority[]): Promise<void> {
 		const s = this.sessions.get(id);
 		if (!s) return;
-		await this.admit(s, async () => {
+		await this.admission.admit(s, async () => {
 			if (s.closing || s.reopening) throw Object.assign(new Error("Session is busy"), { code: "busy" });
 			const needsCancel = !!s.running || this.jobWork.runningJobs(s).length > 0 || this.interfaceTools.unsettledHandoffs(s).length > 0;
 			if ((needsCancel && authority && !authority.includes("cancel")) || [actorId, delegatedBy].some(id => id !== undefined &&
@@ -1472,7 +1501,7 @@ export class Harness {
 			s.closing = true;
 		});
 		if (!s.interruption.signal.aborted) {
-			await this.cancel(id);
+			await this.admission.cancel(id);
 			for (const { job } of this.jobWork.runningJobs(s)) await this.jobWork.cancelJob(s, job.id);
 		}
 		for (const r of s.requests.values()) r.resolve({ requestId: r.request.id, declined: true, actorId: "harness", reason: "session closed" });
@@ -1678,7 +1707,7 @@ export class Harness {
 		});
 		// Nothing is kept unless the callback finished; then the entries are kept together.
 		if (drafts.length) await this.commit(s, drafts, true);
-		for (const o of inputs) await this.input(s.id, o);
+		for (const o of inputs) await this.admission.input(s.id, o);
 	}
 
 	private async setSetting(s: Session, key: string, value: unknown, writer: string, actorId?: string): Promise<void> {
@@ -1691,7 +1720,7 @@ export class Harness {
 
 	private async moveTo(sessionId: string, entryId: string, options: { rewind?: boolean; actorId?: string }, writer: string): Promise<{ outOfReach?: string[] }> {
 		const s = this.session(sessionId);
-		return this.admit(s, async () => {
+		return this.admission.admit(s, async () => {
 			if (options.actorId) this.requireAuthority(s, options.actorId, "settings");
 			if (s.provisional) throw failure("invalid_request", "Session has not admitted its first input");
 			if (s.isBusy() || s.outsideTools || s.erasing || s.settling || s.requests.size || this.questions.waitingRequests(s).length || this.turns.openCalls(s).length || this.interfaceTools.unsettledHandoffs(s).length || this.jobWork.runningJobs(s).length) {
@@ -1867,7 +1896,7 @@ export class Harness {
 	}
 
 	private setLimit(s: Session, rights: Authority[] | null, actorId: string, writer: string): Promise<void> {
-		return this.admit(s, async () => {
+		return this.admission.admit(s, async () => {
 			this.requireAuthority(s, actorId, "administer");
 			const effective = (s.actors.get(actorId)?.authority ?? []).filter((r) => s.tenant === undefined || this.tenants.get(s.tenant)?.rights.includes(r));
 			if ((rights ?? ALL_AUTHORITY).some((right) => !effective.includes(right))) throw Object.assign(new Error("A limit cannot give a right the administrator lacks"), { code: "forbidden" });
@@ -1910,224 +1939,6 @@ export class Harness {
 		if (s.tenant === undefined || this.tenants.get(s.tenant)?.tokens === undefined) return false;
 		const { tokens } = await this.tenantInfo(s);
 		return !!tokens && tokens.used >= tokens.budget;
-	}
-
-	// ---------- input and turns ----------
-
-	private async input(sessionId: string, options: InputOptions): Promise<InputReceipt & { handled?: boolean; output?: string }> {
-		const span = startOperation("modular_agent.input.admit", conversation(sessionId));
-		try {
-			const receipt = await span.run(() => this.inputWithin(sessionId, options));
-			span.set("modular_agent.input.id", receipt.inputId);
-			return receipt;
-		} catch (error) {
-			if ((error as { code?: string }).code === "busy") span.event("modular_agent.capacity.refused", {});
-			throw error;
-		} finally { span.end(); }
-	}
-
-	private async inputWithin(sessionId: string, options: InputOptions): Promise<InputReceipt & { handled?: boolean; output?: string }> {
-		const s = this.session(sessionId);
-		await this.erasure.reconcilePending(s);
-		this.checkWriter(s);
-		if (s.erasing) throw failure("busy", "Erasure is in progress");
-		const right = options.when === "propose" ? "propose" : "input";
-		this.checkScopedWork(s, right);
-		if (options.startedBy?.kind !== "job") {
-			this.requireAuthority(s, options.actorId, right);
-			if (options.delegatedBy) this.requireAuthority(s, options.delegatedBy, right);
-		}
-		const scoped = options.key && inputKeyScope(options.key, options.actorId, options.delegatedBy);
-		if (scoped) {
-			if (s.erasedKeys.has(scoped)) return { duplicate: true, erased: true } as InputReceipt;
-			const earlier = s.keys.get(scoped);
-			if (earlier) return { ...earlier, duplicate: true };
-		}
-		let content = typeof options.content === "string" ? [text(options.content)] : options.content;
-		const typed = textOf(content).trimStart();
-		if (options.when !== "propose" && !options.delegatedBy && options.startedBy?.kind !== "job" && typed.startsWith("/") && this.commandTable.has(/^\/(\S+)/.exec(typed)?.[1] ?? "")) {
-			const output = await this.runCommand(sessionId, typed, options.actorId);
-			const receipt = { inputId: this.newId(), taken: "now" as const, handled: true, output: output ?? undefined };
-			if (scoped) s.keys.set(scoped, receipt);
-			return receipt;
-		}
-		const transformed = await this.hooks.transform("input", { sessionId, content, actorId: options.actorId, when: options.when ?? "now" },
-			(before, after) => {
-				if (!Array.isArray(after.value?.content) || after.value.sessionId !== before.sessionId || after.value.when !== before.when || after.value.actorId !== before.actorId) {
-					throw new Error("An input hook may change only content");
-				}
-			});
-		if (s.erasing) throw failure("busy", "Erasure is in progress");
-		if (transformed.stopped) {
-			const inputId = this.newId();
-			if (this.receiptOperation.getStore()) {
-				await this.commit(s, [
-					{kind:"inputAccepted", writer:"harness", modelVisible:false, inputId, actorId:options.actorId,
-						data:{key:options.key, when:"now", taken:"now", content}},
-					{kind:"inputHandedBack", writer:"harness", modelVisible:false, inputId, data:{reason:"handled"}},
-				]);
-			}
-			let output: string | void = undefined;
-			const command = transformed.command;
-			if (command !== undefined) {
-				if (right !== "input") throw Object.assign(new Error("A proposal cannot run a command"), { code: "forbidden" });
-				if (options.delegatedBy) this.requireAuthority(s, options.delegatedBy, "input");
-				output = await this.runCommand(sessionId, command, options.actorId);
-			}
-			const receipt = { inputId, taken: "now" as const, handled: true, ...(output === undefined ? {} : { output }) };
-			if (scoped) s.keys.set(scoped, receipt);
-			return receipt;
-		}
-		content = transformed.value.content;
-		const queued: QueuedInput = {
-			id: this.newId(), content, actorId: options.actorId, when: options.when ?? "now", key: options.key,
-			resultShape: options.resultShape,
-			connectionRights: connectionRights.getStore(),
-			startedBy: options.startedBy ?? { kind: "actor", id: options.actorId }, kind: options.kind ?? "input", sources: options.sources, delegatedBy: options.delegatedBy,
-		};
-		return this.admit(s, async () => {
-			if (queued.startedBy.kind !== "job") {
-				this.requireAuthority(s, queued.actorId, right);
-				if (queued.delegatedBy) this.requireAuthority(s, queued.delegatedBy, right);
-			}
-			if (scoped && s.erasedKeys.has(scoped)) return { duplicate: true, erased: true } as InputReceipt;
-			const earlier = scoped && s.keys.get(scoped);
-			if (earlier) return { ...earlier, duplicate: true };
-			if (queued.startedBy.kind !== "job") queued.connectionRights = Object.fromEntries(inputActors(queued).map(id => [id, this.rightsOf(s, id)]));
-			return this.acceptInput(s, queued);
-		});
-	}
-
-	/** Serialize receipts, release and cancellation for a session. */
-	private admit<T>(s: Session, work: () => Promise<T>): Promise<T> {
-		const wait = s.admissionsInFlight++ > 0 ? startOperation("modular_agent.capacity.wait", {
-			...conversation(s.id), "modular_agent.capacity.scope": "session",
-		}) : undefined;
-		const run = s.admitting.then(() => { wait?.end(); return work(); }).finally(() => { s.admissionsInFlight--; });
-		s.admitting = run.catch(() => undefined);
-		return run;
-	}
-
-	private async acceptInput(s: Session, q: QueuedInput): Promise<InputReceipt> {
-		if (s.closed) throw failure("not_open", "Session is closed");
-		if (s.suspended) throw failure("lost", "Session has lost its writer");
-		if (s.closing || s.erasing || s.moving) throw failure("busy", "Session cannot take input right now");
-		if (this.rejectUnknownModel && q.startedBy.kind === "actor" && q.when !== "propose" && s.settings.model != null) {
-			await this.providerFor(s)?.refreshModels?.();
-			if (!this.modelAccess(s)) throw Object.assign(new Error("The selected model is not offered"), { code: "invalid_request" });
-		}
-		await this.erasure.admitHistory(s);
-		if (q.startedBy.kind !== "job" && !q.releasedBy) {
-			const right = q.when === "propose" ? "propose" : "input";
-			for (const actor of inputActors(q)) this.requireAuthority(s, actor, right);
-		}
-		const authorizers = inputActors(q);
-		q.startingRights ??= this.workRights(s, authorizers, q.startedBy.kind === "job" ? [q.startedBy.id] : []);
-		const steer = q.when === "steer" && this.runtime()?.supports.inputDuringTurn === true && !s.running?.steeringClosed;
-		const taken = q.when === "propose" ? "proposed" : !s.isBusy() && !s.reopening && !s.followUps.length ? "now" : steer && !s.reopening ? "inTurn" : "after";
-		// A selected turn already owns this input; only input still waiting for
-		// disposition takes a slot in the pending queue.
-		this.reserveInput(s, q, false, taken === "now");
-		try { await this.commit(s, [{
-			kind: "inputAccepted", writer: "harness", modelVisible: false, actorId: q.actorId, inputId: q.id, sources: q.sources,
-			jobId: q.startedBy.kind === "job" ? q.startedBy.id : undefined,
-			data: { key: q.key, when: q.when, ...(q.startedBy.kind === "job" && !q.releasedBy ? { parked: q.when === "propose" } : {}), content: q.content, releasedBy: q.releasedBy, submittedBy: q.delegatedBy, taken, connectionRights: q.connectionRights, rights: q.startingRights,
-				authorizers: authorizers.map(actorId => ({ sessionId: s.id, actorId })) },
-		}]); }
-		catch (error) {
-			if (!s.interruption.signal.aborted) this.reservations.release(s, `input:${q.id}`);
-			throw error;
-		}
-		q.trace ??= currentSpan();
-		const offerScope = this.interfaceTools.offerScope.getStore();
-		if (offerScope) this.interfaceTools.queuedOffers.set(q, offerScope);
-		const receipt: InputReceipt = { inputId: q.id, taken };
-		if (q.when !== "propose") {
-			if (taken === "now") this.turns.startTurn(s, q);
-			else (taken === "inTurn" ? s.steering : s.followUps).push(q);
-		}
-		this.emit(s, "input.accepted", { inputId: q.id, taken }, "harness", { actorId: q.actorId });
-		return receipt;
-	}
-
-	private releaseInput(s: Session, inputId: string, when: Exclude<InputTiming, "propose">, actorId: string, declined?: boolean): Promise<InputReceipt> {
-		return this.admit(s, async () => {
-			this.requireAuthority(s, actorId, "input");
-			const q = s.proposals.get(inputId);
-			if (!q) throw Object.assign(new Error(`No open proposal ${inputId}`), { code: "conflict" });
-			const receipt = declined
-				? (await this.handBack(s, [q], "declined"), { inputId, taken: "handedBack" as const })
-				: await this.acceptInput(s, { ...q, when, releasedBy: actorId,
-					connectionRights: intersectConnectionRights(q.connectionRights, { [actorId]: this.rightsOf(s, actorId) }),
-					startingRights: intersectRights(q.startingRights ?? [], this.rightsOf(s, actorId)) });
-			s.proposals.delete(inputId);
-			return receipt;
-		});
-	}
-
-	private withdrawProposal(s: Session, id: string, actorId: string, delegatedBy?: string): Promise<void> {
-		return this.admit(s, async () => {
-			const q = s.proposals.get(id);
-			if (!q) throw Object.assign(new Error(`No open proposal ${id}`), { code: "conflict" });
-			if (!s.actors.has(actorId) || (delegatedBy && !s.actors.has(delegatedBy))) throw new Error("Actor is not part of this session");
-			if (q.actorId !== actorId) {
-				this.requireAuthority(s, actorId, "input");
-				if (delegatedBy) this.requireAuthority(s, delegatedBy, "input");
-			}
-			await this.handBack(s, [q], "withdrawn");
-		});
-	}
-
-	private async handBack(s: Session, queued: QueuedInput[], reason: string): Promise<void> {
-		const inputIds = queued.filter((q) => s.admissions.has(q.id)).map((q) => q.id);
-		if (inputIds.length) await this.commit(s, inputIds.map((inputId) => ({ kind: "inputHandedBack", writer: "harness", modelVisible: false, inputId, data: { reason } })));
-		for (const q of queued) this.emit(s, reason === "withdrawn" ? "input.withdrawn" : "input.handedBack",
-			{ inputId: q.id, content: q.content, reason }, "harness");
-	}
-
-	private withdraw(sessionId: string, inputId: string): QueuedInput | undefined {
-		const s = this.session(sessionId);
-		for (const queue of [s.steering, s.followUps]) {
-			const i = queue.findIndex((q) => q.id === inputId);
-			if (i >= 0) {
-				const [q] = queue.splice(i, 1);
-				void this.handBack(s, [q], "withdrawn").catch((e) => this.problem("harness", "withdraw input", e));
-				return q;
-			}
-		}
-		return undefined;
-	}
-
-	/** Cancel the running turn. Its jobs keep running. Queued input is handed back. */
-	private async cancel(sessionId: string): Promise<QueuedInput[]> {
-		const s = this.session(sessionId);
-		const { handedBack, running } = await this.admit(s, async () => {
-			const handedBack = [...s.steering, ...s.followUps].filter(q => !q.continueTurnId);
-			s.steering = [];
-			s.followUps = [];
-			const running = s.running;
-			running?.abort.abort();
-			const recorded = this.handBack(s, handedBack, "cancelled");
-			for (const w of waitingApprovals(s).values()) if (!w.result && !w.start && !s.closing) await this.approvals.closeWaiting(s, w, "cancelled", "notStarted");
-			for (const handoff of this.interfaceTools.unsettledHandoffs(s)) await this.interfaceTools.settleInterfaceCall(s, handoff);
-			for (const r of [...s.requests.values()]) r.resolve({ requestId: r.request.id, declined: true, actorId: "harness", reason: "cancelled" });
-			await recorded;
-			return { handedBack, running };
-		});
-		await running?.done;
-		if (this.interfaceTools.interfaceSources.size || s.hasWaitingApprovals) this.turns.maybeContinueOpenCalls(s);
-		return handedBack;
-	}
-
-	private async waitForIdle(sessionId: string): Promise<void> {
-		const s = this.session(sessionId);
-		if (s.hasWaitingApprovals) await this.approvals.reconcileApprovals(s);
-		await untilAborted(s.interruption.signal, async () => {
-			while (!s.suspended && (s.running || s.settling)) {
-				if (s.settling) await s.settling;
-				if (s.running && !s.suspended) await s.running.done;
-			}
-		});
 	}
 
 	private runtime(): Runtime | undefined {
