@@ -1,6 +1,6 @@
 # Modular Agent in Go
 
-The [Go SDK](modular/README.md) builds agents, sessions, tools, Providers and plugins from [SDK draft 0.1](../docs/sdk/README.md). Import `github.com/daniel-ballance/modular-agent/go/modular`. Tests can use `modular/modulartest` without a real model. The SDK README has the shared scenario and cross-language checks, implementation status and specification findings.
+The [Go SDK](modular/README.md) builds agents, sessions, tools, Providers and plugins from the [SDK specification](../docs/sdk/README.md). Import `github.com/daniel-ballance/modular-agent/go/modular`. Tests can use `modular/modulartest` without a real model. The SDK README has the shared scenario and cross-language checks, implementation status and specification findings.
 
 [`ma`](cmd/ma/README.md) is the Go reference implementation of the standard configuration. It uses only the Go SDK and its official plugins.
 
