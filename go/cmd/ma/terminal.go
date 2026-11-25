@@ -249,6 +249,57 @@ func lineMode(ctx context.Context, s *modular.Session, o options, in io.Reader, 
 	var question *ask
 	var questionDone <-chan struct{}
 	var waiting chan error
+	hidden := hiddenInput(in)
+	// restore is set while a secret is read with echo off.
+	var restore func()
+	var secretFor string
+	defer func() {
+		if restore != nil {
+			restore()
+		}
+	}()
+	endSecret := func() string {
+		id := secretFor
+		restore()
+		restore, secretFor = nil, ""
+		fmt.Fprintln(stderr)
+		return id
+	}
+	reply := func(id string, a modular.Answer) bool {
+		if question == nil || question.q.ID != id {
+			return false
+		}
+		question.reply <- a
+		question, questionDone = nil, nil
+		return true
+	}
+	answerLine := func(args string) {
+		id, value, given := strings.Cut(args, " ")
+		if question == nil || question.q.ID != id {
+			fmt.Fprintln(stderr, "no question named "+id)
+			return
+		}
+		secret := question.q.Kind == "secret"
+		switch {
+		case given && value == "decline":
+			reply(id, modular.Decline("declined"))
+		case secret && given:
+			fmt.Fprintln(stderr, "Do not put the secret on the command line; use /answer REQUEST_ID")
+		case secret:
+			off, err := hidden.echoOff()
+			if err != nil {
+				reply(id, modular.Decline("no secret was read"))
+				fmt.Fprintln(stderr, err)
+				return
+			}
+			restore, secretFor = off, id
+			fmt.Fprint(stderr, "Secret: ")
+		case !given:
+			fmt.Fprintln(stderr, "use /answer REQUEST_ID VALUE")
+		default:
+			reply(id, modular.Answer{Value: value})
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -266,19 +317,34 @@ func lineMode(ctx context.Context, s *modular.Session, o options, in io.Reader, 
 				q.reply <- modular.Decline("end of input")
 				continue
 			}
+			if q.q.Kind == "secret" && hidden == nil {
+				q.reply <- modular.Decline("a secret needs a terminal to hide it")
+				continue
+			}
 			if question != nil {
 				q.reply <- modular.Decline("another question is open")
 				continue
 			}
 			question = &q
 			questionDone = q.done
-			fmt.Fprintln(stderr, q.q.Question)
 			if q.q.Kind == "approval" {
+				fmt.Fprintln(stderr, q.q.Question)
 				fmt.Fprintln(stderr, "Allow? (y/n)")
-			} else if len(q.q.Options) > 0 {
-				fmt.Fprintln(stderr, strings.Join(q.q.Options, " / "))
+			} else {
+				options, usage := "", "VALUE"
+				if len(q.q.Options) > 0 {
+					raw, _ := json.Marshal(q.q.Options)
+					options = " " + string(raw)
+				}
+				if q.q.Kind == "secret" {
+					usage = "(hidden input)"
+				}
+				fmt.Fprintf(stderr, "Question %s: %s%s\nUse /answer REQUEST_ID %s\n", q.q.ID, q.q.Question, options, usage)
 			}
 		case <-interrupts:
+			if restore != nil {
+				reply(endSecret(), modular.Decline("no secret was read"))
+			}
 			busy, e := s.Busy()
 			if e != nil {
 				return e
@@ -305,6 +371,9 @@ func lineMode(ctx context.Context, s *modular.Session, o options, in io.Reader, 
 		case text, ok := <-lines:
 			if !ok {
 				lines = nil
+				if restore != nil {
+					endSecret()
+				}
 				if e := <-readErr; e != nil {
 					return e
 				}
@@ -314,6 +383,12 @@ func lineMode(ctx context.Context, s *modular.Session, o options, in io.Reader, 
 				}
 				waiting = make(chan error, 1)
 				go func() { waiting <- s.WaitIdle(ctx) }()
+				continue
+			}
+			if restore != nil {
+				if !reply(endSecret(), modular.Secret(text)) {
+					fmt.Fprintln(stderr, "question is no longer answerable")
+				}
 				continue
 			}
 			text = strings.TrimSpace(text)
@@ -327,23 +402,19 @@ func lineMode(ctx context.Context, s *modular.Session, o options, in io.Reader, 
 				}
 				continue
 			}
-			if question != nil {
-				answer := modular.Answer{Value: text}
-				if question.q.Kind == "approval" {
-					switch text {
-					case "y":
-						answer = modular.Allow()
-					case "n":
-						answer = modular.Decline("declined")
-					default:
-						fmt.Fprintln(stderr, "Answer y or n.")
-						continue
-					}
-				} else if text == "/decline" {
-					answer = modular.Decline("declined")
+			if question != nil && question.q.Kind == "approval" {
+				switch text {
+				case "y":
+					reply(question.q.ID, modular.Allow())
+				case "n":
+					reply(question.q.ID, modular.Decline("declined"))
+				default:
+					fmt.Fprintln(stderr, "Answer y or n.")
 				}
-				question.reply <- answer
-				question, questionDone = nil, nil
+				continue
+			}
+			if args, ok := strings.CutPrefix(text, "/answer "); ok {
+				answerLine(args)
 				continue
 			}
 			if body, after := strings.CutPrefix(text, "/after "); after {

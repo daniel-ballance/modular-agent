@@ -1,4 +1,5 @@
 import { createInterface } from "node:readline";
+import { Writable } from "node:stream";
 import type { Agent, Answer, Event, Session, ToolCall, ToolStatus } from "@modular-agent/core";
 
 function sink(json: boolean, verbose: boolean, stream: boolean) {
@@ -52,28 +53,38 @@ export async function print(session: Session, prompt: string, json: boolean, ver
   }
   return complete ? 0 : 1;
 }
-export async function line(agent: Agent, session: Session, json: boolean, verbose: boolean) {
-  const io = createInterface({ input: process.stdin, output: process.stderr, terminal: !!process.stdin.isTTY });
+/** Readline echoes what is typed through its output, so muting the output hides a secret. */
+function mutable() {
+  let muted = false;
+  const output = new Writable({ write(chunk, encoding, done) { if (muted) done(); else process.stderr.write(chunk, encoding, done); } });
+  Object.defineProperty(output, "columns", { get: () => process.stderr.columns });
+  return { output, mute(on: boolean) { muted = on; } };
+}
+export async function line(agent: Agent, session: Session, json: boolean, verbose: boolean, input: NodeJS.ReadableStream & { isTTY?: boolean } = process.stdin) {
+  const tty = !!input.isTTY, echo = mutable();
+  const io = createInterface({ input, output: echo.output, terminal: tty });
+  let secretFor: string | undefined;
+  io.on("history", (history: string[]) => { if (secretFor !== undefined) history.shift(); });
   const out = sink(json, verbose, true);
-  const waiting = new Map<string, (answer: Answer) => void>();
+  const waiting = new Map<string, { kind: string; answer(answer: Answer): void }>();
   const approvals = new Map<string, { display: string; answer(a: Answer): void }>();
   const firstApproval = () => approvals.values().next().value;
   if (!json) console.error(`Session ${session.id}`);
   const watch = (async () => {
     try { for await (const e of session.events((await session.history()).at(-1)?.id)) {
       out.event(e);
-      if (e.type === "turnEnded" && !json && process.stdin.isTTY) io.prompt();
+      if (e.type === "turnEnded" && !json && tty) io.prompt();
     } } catch (error) { out.show((error as Error).message); }
   })();
   let eof = false;
   session.onQuestion((q, ctx) => new Promise(resolve => {
-    if (eof) { resolve("decline"); return; }
+    if (eof || (q.kind === "secret" && !tty)) { resolve("decline"); return; }
     const answer = (a: Answer) => {
       const first = firstApproval();
       waiting.delete(q.id); approvals.delete(q.id); resolve(a);
       if (!eof && first?.answer === answer && firstApproval()) out.show(firstApproval()!.display);
     };
-    waiting.set(q.id, answer);
+    waiting.set(q.id, { kind: q.kind, answer });
     ctx.cancelled.addEventListener("abort", () => answer("decline"), { once: true });
     if (q.kind === "approval" && q.call) {
       const display = `${q.question}\n${q.call.name} ${JSON.stringify(q.call.input, null, 2)}\nAllow? (y/n)`;
@@ -81,16 +92,31 @@ export async function line(agent: Agent, session: Session, json: boolean, verbos
       if (approvals.size === 1) out.show(display);
       return;
     }
-    out.show(`Question ${q.id}: ${q.question}${q.options ? " " + JSON.stringify(q.options) : ""}\nUse /answer REQUEST_ID VALUE`);
+    out.show(`Question ${q.id}: ${q.question}${q.options?.length ? " " + JSON.stringify(q.options) : ""}\nUse /answer REQUEST_ID ${q.kind === "secret" ? "(hidden input)" : "VALUE"}`);
   }));
-  const cancel = () => { void session.cancel().catch(error => out.show((error as Error).message)); };
+  const endSecret = () => { secretFor = undefined; echo.mute(false); process.stderr.write("\n"); };
+  const cancel = () => {
+    if (secretFor !== undefined) {
+      waiting.get(secretFor)?.answer("decline");
+      io.write(null, { ctrl: true, name: "e" }); io.write(null, { ctrl: true, name: "u" });
+      endSecret();
+    }
+    void session.cancel().catch(error => out.show((error as Error).message));
+  };
   io.on("SIGINT", cancel);
   process.on("SIGINT", cancel);
   const models = () => agent.models().map(m => `${m.provider}/${m.id}`);
   const say = (text?: string | void) => { if (text) console.log(text); };
   try {
-    if (!json && process.stdin.isTTY) io.prompt();
+    if (!json && tty) io.prompt();
     for await (const input of io) {
+      if (secretFor !== undefined) {
+        const question = waiting.get(secretFor);
+        endSecret();
+        if (question) question.answer({ value: input });
+        else out.show("question is no longer answerable");
+        continue;
+      }
       if (!input.trim()) continue;
       const [word, value = ""] = /^([\S]+)(?:\s+(.*))?$/.exec(input.trim())?.slice(1) ?? [];
       try {
@@ -103,10 +129,17 @@ export async function line(agent: Agent, session: Session, json: boolean, verbos
         else if (word === "/after") { if (value) await session.send(value, "after"); }
         else if (word === "/answer") {
           const split = value.indexOf(" ");
-          const id = split < 0 ? value : value.slice(0, split);
-          const answer = waiting.get(id);
-          if (!answer) throw new Error(`no question named ${id}`);
-          answer(split < 0 ? "decline" : { value: value.slice(split + 1) });
+          const id = split < 0 ? value : value.slice(0, split), given = split < 0 ? undefined : value.slice(split + 1);
+          const question = waiting.get(id);
+          if (!question) throw new Error(`no question named ${id}`);
+          if (given === "decline") question.answer("decline");
+          else if (question.kind === "secret") {
+            if (given !== undefined) throw new Error("Do not put the secret on the command line; use /answer REQUEST_ID");
+            secretFor = id;
+            process.stderr.write("Secret: ");
+            echo.mute(true);
+          } else if (given === undefined) throw new Error("use /answer REQUEST_ID VALUE");
+          else question.answer({ value: given });
         } else if (word === "/commands") {
           say(["/commands", "/model [PROVIDER/ID]", "/thinking [LEVEL]", "/after TEXT", "/cancel", "/skill:NAME", ...session.commands().map(c => `/${c.name}  ${c.description}`)].join("\n"));
         } else if (word === "/model") {
@@ -120,9 +153,10 @@ export async function line(agent: Agent, session: Session, json: boolean, verbos
       } catch (err) { out.show((err as Error).message); }
     }
     eof = true;
-    for (const answer of waiting.values()) answer("decline");
+    for (const { answer } of waiting.values()) answer("decline");
     await session.waitIdle();
   } finally {
+    echo.mute(false);
     process.off("SIGINT", cancel);
     io.close();
     await session.close();

@@ -146,11 +146,22 @@ impl Sink {
                 }
             }
             "questionOpened" if content["kind"] != "approval" || !content["call"].is_object() => {
+                let secret = content["kind"] == "secret";
+                // Without a terminal the question handler declines a secret at once.
+                if secret && !io::stdin().is_terminal() {
+                    return;
+                }
+                let options = match &content["options"] {
+                    Value::Array(options) if !options.is_empty() => {
+                        format!(" {}", content["options"])
+                    }
+                    _ => String::new(),
+                };
                 eprintln!(
-                    "Question {}: {} {}\nUse /answer REQUEST_ID VALUE",
+                    "Question {}: {}{options}\nUse /answer REQUEST_ID {}",
                     content["id"].as_str().unwrap_or(""),
                     content["question"].as_str().unwrap_or(""),
-                    content["options"]
+                    if secret { "(hidden input)" } else { "VALUE" },
                 )
             }
             "command.result" => match content {

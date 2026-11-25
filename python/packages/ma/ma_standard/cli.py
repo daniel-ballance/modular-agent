@@ -252,8 +252,9 @@ async def _line(session: Session, args: argparse.Namespace) -> int:
             if q.kind == "secret"
             else "/answer REQUEST_ID VALUE"
         )
+        options = f" {json.dumps(list(q.options))}" if q.options else ""
         print(
-            f"Question {q.id}: {q.question} {q.options}\nUse {usage}",
+            f"Question {q.id}: {q.question}{options}\nUse {usage}",
             file=sys.stderr,
             flush=True,
         )
@@ -310,7 +311,7 @@ async def _line(session: Session, args: argparse.Namespace) -> int:
                 id, _, value = line.removeprefix("/answer ").partition(" ")
                 item = pending.get(id)
                 if item is None or item[1].done():
-                    print("Use /answer REQUEST_ID VALUE for an open question", file=sys.stderr)
+                    print(f"no question named {id}", file=sys.stderr)
                     continue
                 q, reply = item
                 if value == "decline":
@@ -332,6 +333,8 @@ async def _line(session: Session, args: argparse.Namespace) -> int:
                         reply.set_result(Answer("value", secret))
                 elif value:
                     reply.set_result(Answer("value", value))
+                else:
+                    print("use /answer REQUEST_ID VALUE", file=sys.stderr)
             elif line.startswith("/after "):
                 await session.send(line.removeprefix("/after "), "after")
             elif line.startswith("/") and not line.startswith("/skill:"):

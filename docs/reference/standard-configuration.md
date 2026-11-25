@@ -55,6 +55,14 @@ With no `--model` and none in settings, `ma` uses the first Provider that is sig
 
 **Interactive mode** is line-based. While the agent works, a line typed steers the running turn; `/after TEXT` queues a new turn; `/cancel` or Ctrl-C stops the turn. Commands: `/commands`, `/model`, `/thinking`, `/compact`, `/skills`, `/skill:NAME`. Model text streams to stdout; calls and diagnostics go to stderr.
 
+**Questions** in interactive mode go to stderr. Each shows `Question REQUEST_ID: QUESTION`, its options if it has any, and how to answer it. An approval of a tool call takes `y` or `n` ([Approval](#approval)). Any other question takes `/answer REQUEST_ID VALUE`, and `/answer REQUEST_ID decline` declines it. End of input declines every open question.
+
+**Secret answers** are never typed on the visible line:
+
+- For a secret question the terminal says `Use /answer REQUEST_ID (hidden input)`. `/answer REQUEST_ID` with no value then shows `Secret: ` and reads the next line with echo off. It turns echo back on once it has the line. The value goes to the credential store, as for any [secret answer](../contracts.md#secrets).
+- `ma` refuses a secret given as `/answer REQUEST_ID VALUE`. It says `Do not put the secret on the command line; use /answer REQUEST_ID`, does not use the value, and leaves the question open. No option or setting supplies a secret answer.
+- When standard input is not a terminal, `ma` cannot hide what is typed, so it declines a secret question as soon as it opens. It also declines the question when it cannot turn echo off, or when input ends before the line.
+
 **Print mode** (`-p`) runs one prompt and prints the final answer's text to stdout, followed by a newline. Exit status is 0 for a completed turn and 1 otherwise. Without [approval](#approval) configured, print mode never waits for a person. With it, print mode has no one to answer, so a call that needs approval is refused, as the [approval policy](../contracts.md#approval-policy) requires.
 
 ## Files
