@@ -8,9 +8,10 @@ import math
 import re
 import secrets
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager, nullcontext
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -22,6 +23,7 @@ from .registry import Registry, Unavailable
 PAGE = 4 * 1024 * 1024
 BODY = 64 * 1024 * 1024
 LEASE = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
+WRITES = {"append", "erase", "registry", "complete"}
 
 
 class Refusal(Exception):
@@ -145,6 +147,9 @@ class Store:
     def __init__(self, db, ttl_ms, witness=None, *, previously_profiled=False):
         self.db, self.ttl_ms = db, ttl_ms
         self.witness = witness
+        # The storage lock covers every use of db. The lease lock covers leases
+        # and is never held across I/O, so renewal never waits for storage.
+        self.lock, self.lease_lock = threading.Lock(), threading.Lock()
         self.leases = {}
         version = db.execute("PRAGMA user_version").fetchone()[0]
         if version != 1 and (
@@ -178,6 +183,30 @@ class Store:
             self.db.execute(
                 "INSERT INTO bound VALUES (?)", (max(ttl_ms, prior[0]) if prior else ttl_ms,)
             )
+
+    def request(self, method, route, sid, generation, q, body, *, revision=None):
+        if route == "renew" and self.renew(sid, generation):
+            return {"ttlMs": self.ttl_ms}
+        with self.lock, self.db:
+            result = self.route(method, route, sid, generation, q, body, revision=revision)
+            lease = (body or {}).get("lease") if method == "POST" and route in WRITES else None
+            if lease is not None and not self.holds(sid, lease):
+                raise Refusal(409, "lost")
+            return result
+
+    def renew(self, sid, lease):
+        """A current lease proves its session exists, so renewal reads no record."""
+        with self.lease_lock:
+            current, clock = self.leases.get(sid), time.monotonic()
+            if current is None or current[1] != lease or current[2] <= clock:
+                return False
+            self.leases[sid] = (current[0], current[1], clock + self.ttl_ms / 1000)
+            return True
+
+    def holds(self, sid, lease):
+        with self.lease_lock:
+            current = self.leases.get(sid)
+            return current is not None and current[1] == lease and current[2] > time.monotonic()
 
     def route(self, method, route, sid, generation, q, body, *, revision=None):
         if route == "version":
@@ -258,36 +287,39 @@ class Store:
                 )
             ]
             return page({"session": meta}, "entries", rows, q, "unknown_entry")
-        clock = time.monotonic()
-        current = self.leases.get(sid)
-        if current and current[2] <= clock:
-            self.leases.pop(sid, None)
-            current = None
-        if route == "acquire" or (route == "erase" and "lease" not in body):
-            expires = max(self.hold, current[2] if current else 0)
-            if expires > clock and (route == "erase" or not current or current[0] != body["owner"]):
-                raise Refusal(
-                    409, "held", retryAfterMs=max(1, math.ceil((expires - time.monotonic()) * 1000))
-                )
-            if route == "acquire":
-                if not current:
-                    current = self.leases[sid] = (
-                        body["owner"],
-                        secrets.token_urlsafe(24),
-                        clock + self.ttl_ms / 1000,
-                    )
-                return {"lease": current[1], "ttlMs": self.ttl_ms}
-        supplied = body.get("lease", generation) if body is not None else generation
-        valid = current is not None and supplied == current[1]
-        if route == "release":
-            if valid:
-                self.leases.pop(sid)
-            return {}
-        if (route != "erase" or supplied is not None) and not valid:
-            raise Refusal(409, "lost")
-        if route == "renew":
-            self.leases[sid] = (current[0], current[1], clock + self.ttl_ms / 1000)
-            return {"ttlMs": self.ttl_ms}
+        fresh = secrets.token_urlsafe(24) if route == "acquire" else None
+        with self.lease_lock:
+            clock = time.monotonic()
+            current = self.leases.get(sid)
+            if current and current[2] <= clock:
+                self.leases.pop(sid, None)
+                current = None
+            if route == "acquire" or (route == "erase" and "lease" not in body):
+                expires = max(self.hold, current[2] if current else 0)
+                if expires > clock and (
+                    route == "erase" or not current or current[0] != body["owner"]
+                ):
+                    wait = math.ceil((expires - time.monotonic()) * 1000)
+                    raise Refusal(409, "held", retryAfterMs=max(1, wait))
+                if route == "acquire":
+                    if not current:
+                        current = self.leases[sid] = (
+                            body["owner"],
+                            fresh,
+                            clock + self.ttl_ms / 1000,
+                        )
+                    return {"lease": current[1], "ttlMs": self.ttl_ms}
+            supplied = body.get("lease", generation) if body is not None else generation
+            valid = current is not None and supplied == current[1]
+            if route == "release":
+                if valid:
+                    self.leases.pop(sid)
+                return {}
+            if (route != "erase" or supplied is not None) and not valid:
+                raise Refusal(409, "lost")
+            if route == "renew":
+                self.leases[sid] = (current[0], current[1], clock + self.ttl_ms / 1000)
+                return {"ttlMs": self.ttl_ms}
         self.db.execute("BEGIN IMMEDIATE")
         current_revision = self.current_revision()
         if route == "registry":
@@ -494,11 +526,9 @@ def sqlite_store(directory, ttl_ms, *, check_same_thread=True, witness=None):
     # instance may serve the same records until the prior instance loses its lock.
     with (root / "service.lock").open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        from contextlib import closing
-
-        with closing(
-            sqlite3.connect(root / "records.db", check_same_thread=check_same_thread)
-        ) as db:
+        db = sqlite3.connect(root / "records.db", check_same_thread=check_same_thread)
+        store = None
+        try:
             lock.seek(0)
             previously_profiled = bool(lock.read())
             store = Store(db, ttl_ms, witness, previously_profiled=previously_profiled)
@@ -509,6 +539,14 @@ def sqlite_store(directory, ttl_ms, *, check_same_thread=True, witness=None):
                 lock.flush()
                 os.fsync(lock.fileno())
             yield store
+        finally:
+            # A request thread can outlive the server. Close between transactions
+            # and revoke the leases so such a thread can neither commit nor renew.
+            with store.lock if store else nullcontext():
+                if store:
+                    with store.lease_lock:
+                        store.leases = {}
+                db.close()
 
 
 def serve(
@@ -540,11 +578,7 @@ def serve(
 
         def handle_method(self):
             try:
-                if store is None:
-                    result = self.route()
-                else:
-                    with store.db:
-                        result = self.route()
+                result = self.route()
                 status = 200
                 headers = {"Cache-Control": "no-store"} if "plans" in result else {}
             except Refusal as exc:
@@ -665,18 +699,23 @@ def serve(
             elif size:
                 invalid()
             if store is not None:
-                return store.route(method, route, sid, generation, q, body, revision=revision)
+                return store.request(method, route, sid, generation, q, body, revision=revision)
             return custom_route(method, route, sid, generation, q, body)
 
     with (
-        sqlite_store(directory, ttl_ms, witness=witness)
+        sqlite_store(directory, ttl_ms, check_same_thread=False, witness=witness)
         if custom_route is None
         else nullcontext() as store
     ):
         import socket
 
-        class Server(HTTPServer):
+        # A custom port's callbacks run on the service thread, as the SDK documents.
+        # The built-in store serves each request on its own thread so that renewal
+        # never waits for another request's storage work.
+        class Server(HTTPServer if store is None else ThreadingHTTPServer):
             address_family = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+            # A request stalled on a client must not delay shutdown.
+            daemon_threads = True
             # The default backlog of 5 overflows when several writers connect at once;
             # macOS answers an overflow with a reset instead of dropping the SYN.
             request_queue_size = socket.SOMAXCONN
