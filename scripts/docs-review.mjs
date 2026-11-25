@@ -111,6 +111,13 @@ function markdown(source) {
   };
 }
 
+// Git's hunks count LF-ended lines; the parser also ends a line at a lone CR.
+function gitLines(source) {
+  const numbers = [1];
+  for (const end of source.match(/\r\n|\r|\n/g) ?? []) numbers.push(numbers.at(-1) + (end === "\r" ? 0 : 1));
+  return numbers;
+}
+
 function adrsIn(file, text, adrs) {
   const found = new Set();
   for (const [, , target] of text.matchAll(link)) {
@@ -130,9 +137,10 @@ function candidates(file, wanted, adrs) {
   const source = read(file);
   const raw = linesOf(source);
   const { lines, paragraph, tracked } = markdown(source);
+  const lineInGit = gitLines(source);
   const found = [];
   for (const [i, line] of lines.entries()) {
-    if (wanted && !wanted.has(i + 1)) continue;
+    if (wanted && !wanted.has(lineInGit[i])) continue;
     const text = line.replace(link, "$1");
     const reasons = [];
     const named = adrsIn(file, line, adrs).size > 0;

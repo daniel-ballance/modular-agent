@@ -272,6 +272,21 @@ test("the default scope is lines changed since the merge base with origin/main",
   assert.match(result.stdout, /2 candidates in 2 files of Markdown changed since the merge base with origin\/main\./);
 });
 
+test("a changed line in a file with lone CR endings is found by default", (t) => {
+  const repo = checkout(t);
+  repo.track("docs/cr.md", "Intro.\r\rA stable line.\r");
+  repo.track("docs/mixed.md", "Intro.\n\nA stable line.\rMore.\n");
+  repo.commit("Start");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  repo.git("switch", "-q", "-c", "topic");
+  repo.track("docs/cr.md", "Intro.\r\rSupport is planned.\r");
+  repo.track("docs/mixed.md", "Intro.\n\nA stable line.\rSupport is planned.\nResume is planned.\n");
+  repo.commit("Change docs");
+  const result = repo.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.at, ["docs/cr.md:3", "docs/mixed.md:4", "docs/mixed.md:5"]);
+});
+
 test("changed lines are found in a file whose name has a space", (t) => {
   const repo = checkout(t);
   repo.track("README.md", "Start.\n");
