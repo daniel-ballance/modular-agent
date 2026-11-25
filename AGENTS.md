@@ -36,6 +36,6 @@ scripts/check.sh
 scripts/check.sh go python
 ```
 
-Read each command's own exit code; a pipe hides it. A suite run on its own in a fresh worktree first needs the setup steps `scripts/check.sh` runs, such as `npm ci` in `conformance/acp`, `conformance/tools` and `conformance/telemetry`.
+`--quick` runs only part of each language's tests; a change outside them runs the full lane for that language, as `CONTRIBUTING.md` ("Checking a change") says. Read each command's own exit code; a pipe hides it. A suite run on its own in a fresh worktree first needs the setup steps `scripts/check.sh` runs, such as `npm ci` in `conformance/acp`, `conformance/tools` and `conformance/telemetry`.
 
 Leave `TMPDIR` and `CARGO_INCREMENTAL` unset. No suite needs an on-disk temp directory. The check scripts choose their own scratch directory. A suite run on its own uses the system temp directory.
