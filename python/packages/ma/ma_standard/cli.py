@@ -599,24 +599,19 @@ async def _run(args: argparse.Namespace) -> int:
     if args.command == "sessions" or args.resume or args.session:
         async with await _agent(paths, project, args, history_only=True) as preflight:
             if args.session is None:
-                sessions = await preflight.sessions()
+                # Most recently active first, then by ID: the top line is what -c reopens.
+                sessions = sorted(
+                    await preflight.sessions(),
+                    key=lambda s: (-int(cast(int | str, s.get("lastActivity", 0))), str(s["id"])),
+                )
                 matching = [s for s in sessions if s["project"] == str(project)]
                 if args.command == "sessions":
-                    listed = sorted(
-                        sessions if args.all else matching,
-                        key=lambda s: (
-                            -int(cast(int | str, s.get("lastActivity", 0))),
-                            str(s["id"]),
-                        ),
-                    )
-                    for saved_session in listed:
+                    for saved_session in sessions if args.all else matching:
                         print(f"{saved_session['id']}  {saved_session['project']}")
                     return 0
                 if not matching:
                     raise ValueError("this folder has no saved session to continue")
-                args.session = max(
-                    reversed(matching), key=lambda s: int(cast(int | str, s.get("lastActivity", 0)))
-                )["id"]
+                args.session = matching[0]["id"]
             saved = await preflight.session_info(args.session)
             project = Path(cast(str, saved["project"]))
             old = cast(JsonObject, saved["settings"]).get("model")

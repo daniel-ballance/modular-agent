@@ -201,6 +201,36 @@ fn login_accepts_only_subscription_names_and_keeps_device_mode() {
     assert!(login_options(["xai".into()].into_iter()).is_err());
 }
 
+/// Most recently active first, then by ascending ID. `ma sessions` prints
+/// this order and `-c` reopens its first session.
+fn newest_first(mut sessions: Vec<modular_agent::SessionInfo>) -> Vec<modular_agent::SessionInfo> {
+    sessions.sort_by(|a, b| {
+        b.last_active
+            .cmp(&a.last_active)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    sessions
+}
+
+#[cfg(test)]
+#[test]
+fn newest_first_breaks_ties_by_ascending_id() {
+    let info = |id: &str, last_active| modular_agent::SessionInfo {
+        id: id.into(),
+        project: "/p".into(),
+        settings: json!({}),
+        model: None,
+        title: None,
+        created_at: 1,
+        last_active,
+        unfinished_turn: false,
+        tenant: None,
+    };
+    let order = newest_first(vec![info("b", 5), info("c", 9), info("a", 5), info("d", 0)]);
+    let ids: Vec<_> = order.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(ids, ["c", "a", "b", "d"]);
+}
+
 async fn login(standard: &Standard, args: impl Iterator<Item = String>) -> Result<()> {
     let (provider, device) = login_options(args)?;
     if provider == "claude" {
@@ -572,14 +602,11 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
     }
     if terminal.list {
         let project = project.canonicalize()?;
-        let mut sessions = standard
-            .history()?
-            .sessions((!terminal.all_projects).then_some(project.as_path()))?;
-        sessions.sort_by(|a, b| {
-            b.last_active
-                .cmp(&a.last_active)
-                .then_with(|| a.id.cmp(&b.id))
-        });
+        let sessions = newest_first(
+            standard
+                .history()?
+                .sessions((!terminal.all_projects).then_some(project.as_path()))?,
+        );
         for session in sessions {
             println!("{}  {}", session.id, session.project.display());
         }
@@ -587,11 +614,9 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
     }
     if resume && terminal.session.is_none() {
         let canonical = project.canonicalize()?;
-        terminal.session = standard
-            .history()?
-            .sessions(Some(&canonical))?
+        terminal.session = newest_first(standard.history()?.sessions(Some(&canonical))?)
             .into_iter()
-            .max_by_key(|s| s.last_active)
+            .next()
             .map(|s| s.id);
         ensure!(
             terminal.session.is_some(),

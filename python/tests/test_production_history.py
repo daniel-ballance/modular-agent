@@ -51,15 +51,28 @@ async def test_history_list_paginates_with_original_filter(tmp_path, monkeypatch
     async def exchange(method, path, body=None):
         assert method == "GET"
         paths.append(path)
-        if len(paths) == 1:
-            return {"sessions": [{"id": "a b"}], "next": "a b"}
-        return {"sessions": [{"id": "c"}]}
+        if path.startswith("/v1/sessions?"):
+            if len(paths) == 1:
+                return {"sessions": [{"id": "a b"}], "next": "a b"}
+            return {"sessions": [{"id": "c"}]}
+        # The list response has no last activity, so the client reads each session.
+        entries = {
+            "/v1/sessions/a%20b": [{"id": "1", "time": 9}, {"id": "2", "time": 5}],
+            "/v1/sessions/c": [],
+        }[path]
+        return {"session": {"id": "x"}, "entries": entries}
 
     monkeypatch.setattr(history, "request", exchange)
-    assert await history.list({"project": "/demo project"}, None) == [{"id": "a b"}, {"id": "c"}]
+    # Last activity is the last entry's time in append order, not the largest; 0 with none.
+    assert await history.list({"project": "/demo project"}, None) == [
+        {"id": "a b", "lastActivity": 5},
+        {"id": "c", "lastActivity": 0},
+    ]
     assert paths == [
         "/v1/sessions?project=%2Fdemo%20project",
         "/v1/sessions?project=%2Fdemo%20project&after=a%20b",
+        "/v1/sessions/a%20b",
+        "/v1/sessions/c",
     ]
 
 

@@ -29,7 +29,8 @@ type SessionInfo struct {
 	ID, Project, Model, Title, Tenant string
 	UnfinishedTurn                    bool // committed start without an end; a writer may still hold it
 	Settings                          Settings
-	CreatedAt, LastActivity           time.Time
+	CreatedAt                         time.Time
+	LastActivity                      time.Time // the last entry's, in append order; zero with no entries
 }
 
 // Sessions lists saved sessions. An empty project selects every project.
@@ -131,9 +132,11 @@ func sessionInfos(snaps []api.Session) []SessionInfo {
 			if info.CreatedAt.IsZero() || e.Time.Before(info.CreatedAt) {
 				info.CreatedAt = e.Time
 			}
-			if e.Time.After(info.LastActivity) {
-				info.LastActivity = e.Time
-			}
+		}
+		// Last activity is the last entry in append order, the one a reopen
+		// continues from, even when clock skew gave an earlier entry a later time.
+		if n := len(snap.Entries); n > 0 {
+			info.LastActivity = snap.Entries[n-1].Time
 		}
 		sessions = append(sessions, info)
 	}

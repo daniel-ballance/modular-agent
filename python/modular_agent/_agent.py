@@ -640,8 +640,8 @@ class Agent:
             "project": state["project"],
             "settings": settings_out(state["settings"]),
             "created": state["created"],
-            "lastActivity": max(
-                (entry["time"] for entry in state["entries"]), default=state["created"]
+            "lastActivity": (
+                state["entries"][-1]["time"] if state["entries"] else state["created"]
             ),
         }
 
