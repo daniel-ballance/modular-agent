@@ -213,13 +213,19 @@ class Store:
         changes = self.db.total_changes
         try:
             result = self.apply(method, route, sid, generation, q, body, revision)
-            # The witness advances before commit, so a write refused here must not reach it.
+            # Check before advancing so a common lost write never touches the witness,
+            # then check again immediately before commit and restore on late loss.
             if lease is not None and not self.holds(sid, lease):
                 raise Refusal(409, "lost")
             if self.db.total_changes != changes:
                 self.registry.advance()
+                previous = None
                 if self.witness is not None:
-                    freshness.advance(self.db, self.witness)
+                    previous = freshness.advance(self.db, self.witness)
+                if lease is not None and not self.holds(sid, lease):
+                    if previous is not None:
+                        freshness.restore(self.witness, previous)
+                    raise Refusal(409, "lost")
             return result
         except (Unavailable, sqlite3.Error, AgentError, OSError) as exc:
             # No commit has been attempted. The request transaction rolls back.

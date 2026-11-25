@@ -9,15 +9,18 @@ from ma_core import AgentError
 
 
 def _read(path):
-    return Path(path).read_text(encoding="ascii").strip()
+    try:
+        return Path(path).read_text(encoding="ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise AgentError("History freshness witness does not match", "unavailable") from exc
 
 
-def _write(path, value):
+def _replace(path, data):
     path = Path(path)
     with NamedTemporaryFile(dir=path.parent, delete=False) as tmp:
         name = tmp.name
         try:
-            tmp.write((value + "\n").encode("ascii"))
+            tmp.write(data)
             tmp.flush()
             os.fsync(tmp.fileno())
             os.replace(name, path)
@@ -28,6 +31,15 @@ def _write(path, value):
                 os.close(directory)
         finally:
             Path(name).unlink(missing_ok=True)
+
+
+def _write(path, value):
+    _replace(path, (value + "\n").encode("ascii"))
+
+
+def restore(path, data):
+    """Durably restore previous witness bytes before rolling back an uncommitted write."""
+    _replace(path, data)
 
 
 def provision(db, path):
@@ -47,9 +59,20 @@ def check(db, path):
 
 
 def advance(db, path):
+    row = db.execute("SELECT stamp FROM erase_freshness").fetchone()
+    previous = None
+    if row is not None:
+        previous = Path(path).read_bytes()
+        try:
+            current = previous.decode("ascii").strip()
+        except UnicodeDecodeError as exc:
+            raise AgentError("History freshness witness does not match", "unavailable") from exc
+        if current != row[0]:
+            raise AgentError("History freshness witness does not match", "unavailable")
     stamp = secrets.token_hex(32)
     db.execute("DELETE FROM erase_freshness")
     db.execute("INSERT INTO erase_freshness VALUES (?)", (stamp,))
     # Witness first: a crash before the DB commit must fail closed. A restored
     # older database cannot roll the witness back with its records.
     _write(path, stamp)
+    return previous
