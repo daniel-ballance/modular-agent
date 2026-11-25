@@ -70,7 +70,7 @@ function checkSizes(sizes, baseline) {
 // GitHub's closing keywords, which also act in a squash merge's commit message.
 const closingKeyword = new RegExp(
   String.raw`\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?[ \t]+` +
-    String.raw`(?:(?:[\w.-]+/[\w.-]+)?#\d+|https?://github\.com/[\w.-]+/[\w.-]+/issues/\d+)`,
+    String.raw`(?:(?:[\w.-]+/[\w.-]+)?#\d+|https?://github\.com/[\w.-]+/[\w.-]+/issues/\d+)\b`,
   "i",
 );
 
@@ -79,21 +79,22 @@ function checkCommits() {
   const main = ["refs/remotes/origin/main", "refs/heads/main"].find((ref) => refs.includes(ref));
   if (!main) return 0;
 
-  let base;
   try {
-    base = git("merge-base", main, "HEAD").trim();
+    git("merge-base", main, "HEAD");
   } catch {
     throw new Error(`Cannot find a merge base with ${main}. Fetch the shared history and retry.`);
   }
   let bad = 0;
-  for (const record of git("log", "--format=%h %s%x1f%B%x1e", `${base}..HEAD`).split("\x1e")) {
-    const [commit, message] = record.trim().split("\x1f");
-    if (!message) continue;
-    if (/^\S+ WIP\b/i.test(commit)) {
+  // A commit message cannot hold a NUL byte, so -z separates the records exactly.
+  for (const record of git("log", "-z", "--format=%h%n%B", `${main}..HEAD`).split("\0")) {
+    if (!record) continue;
+    const [hash, ...lines] = record.split("\n");
+    const commit = `${hash} ${lines[0]}`;
+    if (/^WIP\b/i.test(lines[0])) {
       console.error(`${commit}: Rewrite the commit subject before merging into main.`);
       bad++;
     }
-    const keyword = message.match(closingKeyword);
+    const keyword = lines.join("\n").match(closingKeyword);
     if (keyword) {
       console.error(`${commit}: "${keyword[0]}". Put Closes #N in the pull request body, not the commit message.`);
       bad++;

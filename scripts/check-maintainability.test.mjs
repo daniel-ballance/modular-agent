@@ -173,6 +173,32 @@ test("a keyword not followed by an issue reference passes", (t) => {
   repo.git("switch", "-q", "-c", "topic");
   repo.commit("Part of #12\n\nThe flake was fixed in #12 already.\nA prefix #3, an unfixed #4, closes the gap in #5.");
   repo.commit("Closes the file before #6 opens it");
+  repo.commit("Link the tracker\n\nfixed https://github.com/owner/repo/issues/12abc and fix #7x");
+  const result = repo.check();
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("a control character in a commit message does not hide a later keyword", (t) => {
+  const repo = checkout(t);
+  repo.commit("Start");
+  repo.git("switch", "-q", "-c", "topic");
+  repo.commit("Quote the log\n\nunit\x1fsep record\x1esep\nFixes #12");
+  const result = repo.check();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Quote the log: "Fixes #12"/);
+});
+
+test("after a criss-cross merge only commits missing from main are checked", (t) => {
+  const repo = checkout(t);
+  repo.commit("Start");
+  repo.git("switch", "-q", "-c", "topic");
+  repo.commit("Fixes #1 on the branch, landed through main");
+  repo.git("switch", "-q", "main");
+  repo.commit("Fixes #2 on main");
+  repo.git("merge", "-q", "--no-edit", "--no-ff", "topic~0");
+  repo.git("switch", "-q", "topic");
+  repo.git("merge", "-q", "--no-edit", "--no-ff", "main~1");
+  assert.equal(repo.git("merge-base", "--all", "main", "HEAD").toString().trim().split("\n").length, 2);
   const result = repo.check();
   assert.equal(result.status, 0, result.stderr);
 });
