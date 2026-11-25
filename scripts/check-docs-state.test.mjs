@@ -99,6 +99,19 @@ test("ATX headings follow CommonMark: an empty heading ends a section, and # onl
   repo.check(["README.md:1: Gap or finding has no issue"]);
 });
 
+test("code spans, fences and comments follow CommonMark around gap headings", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "## Known gaps", "Use ``a ``` b ` #31 only as an example``.",
+    "```js`example", "## Known gaps",
+    "~~~", "``` \u00a0", "## Known gaps", "~~~",
+    "```", "``` \u00a0", "## Known gaps", "```",
+    "##<!-- note --> Known gaps",
+    "## Known gaps <!-- note -->", "Tracked in #33.",
+  ].join("\n"));
+  repo.check([1, 4].map((line) => `README.md:${line}: Gap or finding has no issue`));
+});
+
 test("issue numbers and URLs satisfy gap headings; history and untracked files are skipped", (t) => {
   const repo = checkout(t);
   repo.track("README.md", [

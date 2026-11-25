@@ -32,32 +32,40 @@ function fail(file, line, problem, fix) {
   bad++;
 }
 
-// Blank fenced code and HTML comments, keeping line numbers. A fence or inline
-// code can hold a literal "<!--"; it does not open a comment.
+// CommonMark code span: a backtick run closed by a run of the same length.
+const codeSpan = /(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)/g;
+// CommonMark fences: a backtick opener's info string has no backtick; a closer has only spaces or tabs after it.
+const fenceOpen = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
+const fenceClose = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+
+// Blank fenced code and mask HTML comments with NUL, keeping line numbers.
+// NUL is not a space, so a masked comment cannot complete an ATX opener.
+// A fence or a code span can hold a literal "<!--"; it does not open a comment.
 function markdownLines(text) {
   let fence;
   let comment = false;
   return linesOf(text).map((line) => {
-    const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
     if (fence) {
-      if (marker?.[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = undefined;
+      const close = line.match(fenceClose)?.[1];
+      if (close?.[0] === fence[0] && close.length >= fence.length) fence = undefined;
       return "";
     }
-    if (marker && !comment) {
-      fence = marker[1];
+    const open = !comment && line.match(fenceOpen)?.[1];
+    if (open) {
+      fence = open;
       return "";
     }
-    const code = line.replace(/(`+)[^`]*?\1/g, (span) => " ".repeat(span.length));
+    const code = line.replace(codeSpan, (span) => " ".repeat(span.length));
     let out = "";
     let at = 0;
     while (at < line.length) {
       const next = comment ? line.indexOf("-->", at) : code.indexOf("<!--", at);
       if (next === -1) {
-        out += comment ? " ".repeat(line.length - at) : line.slice(at);
+        out += comment ? "\0".repeat(line.length - at) : line.slice(at);
         break;
       }
       const end = comment ? next + 3 : next + 4;
-      out += comment ? " ".repeat(end - at) : line.slice(at, next) + "    ";
+      out += comment ? "\0".repeat(end - at) : line.slice(at, next) + "\0\0\0\0";
       at = end;
       comment = !comment;
     }
@@ -68,7 +76,7 @@ function markdownLines(text) {
 // CommonMark ATX heading: a closing run of # counts only after a space, and an empty heading is still a heading.
 function atxTitle(line) {
   const match = line.match(/^ {0,3}#{1,6}(?:[ \t]+(.*?))?[ \t]*$/);
-  return match ? (match[1] ?? "").replace(/(?:^|[ \t]+)#+$/, "").trim() : undefined;
+  return match ? (match[1] ?? "").replace(/\0/g, "").replace(/(?:^|[ \t]+)#+$/, "").trim() : undefined;
 }
 
 function checkGaps(file, lines) {
@@ -82,7 +90,7 @@ function checkGaps(file, lines) {
       finish();
       heading = gapHeading.test(title) ? { line: i + 1, tracked: false } : undefined;
     } else if (heading) {
-      const prose = line.replace(/(`+).*?\1/g, "");
+      const prose = line.replace(codeSpan, "");
       heading.tracked ||= issueUrl.test(prose) || issueNumber.test(prose.replace(link, "$1"));
     }
   }
@@ -101,7 +109,7 @@ function checkAdrIndex(lines, statuses) {
     const file = posix.join("docs/adr", row[1]);
     indexed.add(file);
     const status = statuses.get(file);
-    const cell = row[2].trim().toLowerCase().replace(link, "$1");
+    const cell = row[2].replace(/\0/g, "").trim().toLowerCase().replace(link, "$1");
     // Historical describes applicability, not a change to the original accepted decision.
     if (status === "accepted" && /^historical\b/.test(cell)) continue;
     if (!status) fail(adrIndex, i + 1, `No front matter status for ${file}`, "Restore the record and its status");
