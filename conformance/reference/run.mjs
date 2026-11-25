@@ -42,6 +42,13 @@ const approvalRead = { toolCalls: [{ name: "read", input: { path: "hello.txt" } 
 
 const checks = [
   {
+    name: "interactive-commands",
+    about: "/commands lists /compact without asking the model.",
+    script: [{ text: "Unexpected model request." }],
+    runs: [{ args: [], input: "/commands\n", expect: { exit: 0, stdoutMatches: /^\/compact(?: .*)?$/m, stderrLacks: "command is not registered" } }],
+    log: (log, ok) => ok(log.length === 0, "no model request", log.length),
+  },
+  {
     name: "print",
     about: "Print mode prints the final answer and offers the model only codemode.",
     script: [{ text: "Hello." }],
@@ -442,8 +449,12 @@ function environment(t) {
 function runOnce(command, t, run) {
   const env = { ...environment(t), ...run.env };
   return new Promise((done) => {
-    const child = spawn(command[0], [...command.slice(1), ...run.args], { cwd: t.project, env, stdio: ["ignore", "pipe", "pipe"], detached: true });
-    let stdout = "", stderr = "", killed = false, timer, poll;
+    const child = spawn(command[0], [...command.slice(1), ...run.args], { cwd: t.project, env, stdio: [run.input === undefined ? "ignore" : "pipe", "pipe", "pipe"], detached: true });
+    let stdinError, stdout = "", stderr = "", killed = false, timer, poll;
+    if (child.stdin) {
+      child.stdin.on("error", (err) => { stdinError = err.message; });
+      child.stdin.end(run.input);
+    }
     const started = performance.now();
     const elapsed = () => Math.round(performance.now() - started);
     const lifecycle = {};
@@ -479,7 +490,7 @@ function runOnce(command, t, run) {
       clearTimeout(timer); clearInterval(poll);
       // Wait for the whole group to be gone before the next run reopens the session.
       for (let i = 0; i < 250; i++) { try { process.kill(-child.pid, 0); } catch { break; } spawnSync("sleep", ["0.02"]); }
-      done({ exit: code, stdout, stderr, killed, timeoutDetail });
+      done({ exit: code, stdout, stderr, killed, timeoutDetail, stdinError });
     });
   });
 }
@@ -504,6 +515,7 @@ async function runCheck(command, check, skip) {
     const r = await runOnce(command, t, run);
     const where = `run ${i + 1} (ma ${run.args.join(" ")})`;
     ok(!r.timeoutDetail, `${where}: timed out after 60 s`, r.timeoutDetail);
+    ok(!r.stdinError, `${where}: could not write stdin`, r.stdinError);
     if (run.crashWhenFile) { ok(r.killed, `${where}: was killed once ${run.crashWhenFile} appeared`, r.stderr.slice(-500)); continue; }
     const e = run.expect ?? {};
     const out = r.stdout.replace(/\n$/, "");
