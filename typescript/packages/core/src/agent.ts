@@ -650,11 +650,12 @@ export class Agent {
       if (!Array.isArray(items) || !Array.from(items).every(valid)) throw new AgentError("invalid_composition", `Invalid ACP ${name}`);
       return [...items];
     };
-    const makeScope = async (actor: Actor, config: Pick<ServeAcpOptions, "tenants" | "projects" | "represents" | "traceTrusted">, ceiling: boolean) => {
+    const makeScope = async (actor: Actor, config: Pick<ServeAcpOptions, "tenants" | "projects" | "represents" | "traceTrusted">, ceiling: boolean, limit?: readonly Right[]) => {
       if (!actor || !isId(actor.id) || !["host", "user", "agent", "program"].includes(actor.kind) || !actor.rights) {
         throw new AgentError("invalid_composition", "Invalid ACP actor");
       }
-      const rights = list(actor.rights, r => ALL_AUTHORITY.includes(r), "rights")!;
+      const actorRights = list(actor.rights, r => ALL_AUTHORITY.includes(r), "rights")!;
+      const rights = limit === undefined ? actorRights : actorRights.filter(right => limit.includes(right));
       const tenants = new Set(list(config.tenants, t => t === null || isId(t), "tenants") ?? [null]);
       const represents = new Set(list(config.represents, isId, "representation"));
       const paths = list(config.projects, p => isId(p) && isAbsolute(p), "projects");
@@ -820,12 +821,14 @@ export class Agent {
     let serving = false;
     try {
       if (options.listen === undefined) {
-        if (options.actor !== undefined && (options.actorId !== undefined || options.rights !== undefined)) {
-          throw new AgentError("invalid_composition", "ACP actor cannot be combined with actorId or rights");
+        if (options.actor !== undefined && options.actorId !== undefined) {
+          throw new AgentError("invalid_composition", "ACP actor cannot be combined with actorId");
         }
+        const limit = list(options.rights, r => ALL_AUTHORITY.includes(r), "rights");
         const localActor = options.actor ?? { ...defaultAcpActor(), id: options.actorId ?? process.env.MODULAR_AGENT_ACTOR ?? "acp-user",
-          rights: list(options.rights, r => ALL_AUTHORITY.includes(r), "rights") ?? [...ALL_AUTHORITY] };
-        const scope = await makeScope(localActor, options, options.actor !== undefined || options.rights !== undefined);
+          rights: limit ?? [...ALL_AUTHORITY] };
+        const scope = await makeScope(localActor, options, options.actor !== undefined || limit !== undefined,
+          options.actor === undefined ? undefined : limit);
         await installMcp(this);
         installRoutes(scope);
         await resumeOpen(scope);

@@ -41,6 +41,12 @@ With `--connect`, these checks require `--service-command`. For the test policy 
 
 `--group covered` checks one live and one waiting covered approval on each ACP binding. Run a kept, approval-enabled composition (`ma --acp --approval off`); the kit provides the operator maximum. It checks the permission and poll, then verifies the child start names the parent and request, including in the continuation. It fails if coverage, waiting approvals or nested tools are missing. Do not use this maximum for core Runtime probes.
 
+## Stdio SDK rights checks
+
+Run `scripts/acp-kit.sh LANGUAGE stdio-rights` after building the SDK fixture. The check uses real stdio connections and a kept history store. It checks the grant recorded on creation and the grant left after a narrower connection reopens the session and is denied input.
+
+The fixture command takes `acp-stdio-rights`. It serves the working directory as the project and uses `MODULAR_AGENT_DATA_DIR` for history. It supplies the same SDK actor in each launch: `rights-fixture`, kind `host`, with `watch`, `input` and `settings`. When set, `MA_ACP_STDIO_RIGHTS` contains a JSON array for the separate SDK rights list. The fixture passes both lists to the SDK. It does not intersect the lists or use the `ma` policy file.
+
 ## Waiting approval checks
 
 Pass `--group waiting` to the managed fixture launcher. For ACP /1 and /2 each case checks its own declaration and session options. The fixture starts in live mode; the client selects `untilDeadline` over ACP. Do not run these cases on a deployed listener. WebSocket launch requires `--service-command`. A portable `--then` pairing requires a disposable shared store.

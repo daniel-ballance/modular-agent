@@ -794,7 +794,7 @@ type ServeACPOptions struct {
 	// Stdio-only scope. Empty project or tenant lists deny that scope.
 	Projects, Tenants  []string
 	Rights, Represents []string
-	// StdioActor replaces the environment-derived principal and sets its ceiling.
+	// StdioActor replaces the environment-derived principal. Rights can narrow its ceiling.
 	StdioActor *Actor
 	// StdioTrustTrace defaults to true for the launching peer.
 	StdioTrustTrace *bool
@@ -834,19 +834,23 @@ func (a *Agent) ServeACP(ctx context.Context, options ...ServeACPOptions) error 
 		return err
 	}
 	declared, projects := a.acpResources(opt)
-	rights := opt.Rights
-	if opt.StdioActor != nil {
-		if opt.Rights != nil || !validACPActor(*opt.StdioActor) || opt.StdioActor.Rights == nil {
-			return &Error{Code: InvalidComposition, Message: "invalid stdio ACP actor or conflicting rights"}
-		}
-		rights = opt.StdioActor.Rights
-	}
-	policy, err := acpPolicy(opt.Projects, opt.Tenants, rights, opt.Represents)
+	policy, err := acpPolicy(opt.Projects, opt.Tenants, opt.Rights, opt.Represents)
 	if err != nil {
 		return err
 	}
-	if opt.StdioActor != nil {
-		policy.Actor.ID, policy.Actor.Kind = opt.StdioActor.ID, opt.StdioActor.Kind
+	if actor := opt.StdioActor; actor != nil {
+		if !validACPActor(*actor) || actor.Rights == nil {
+			return &Error{Code: InvalidComposition, Message: "invalid stdio ACP actor"}
+		}
+		if !validACPRights(actor.Rights) {
+			return &Error{Code: InvalidComposition, Message: "unknown ACP connection right"}
+		}
+		policy.Actor.ID, policy.Actor.Kind = actor.ID, actor.Kind
+		if policy.Actor.Rights == nil {
+			policy.Actor.Rights = slices.Clone(actor.Rights)
+		} else {
+			policy.Actor.Rights = *api.IntersectConnectionRights(&actor.Rights, &policy.Actor.Rights)
+		}
 	}
 	policy.TrustTrace = opt.StdioTrustTrace == nil || *opt.StdioTrustTrace
 	return appError(iface.ServeStdio(ctx, opt.Input, opt.Output, declared, projects, policy), Lost)

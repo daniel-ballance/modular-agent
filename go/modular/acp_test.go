@@ -3,8 +3,10 @@ package modular
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -204,6 +206,83 @@ func TestServeACPComposesProjects(t *testing.T) {
 	list, err := conn.ListSessions(t.Context(), acp.ListSessionsRequest{})
 	if err != nil || len(list.Sessions) != 2 {
 		t.Fatalf("list: %#v (%v)", list, err)
+	}
+}
+
+func TestServeACPIntersectsStdioRights(t *testing.T) {
+	t.Setenv("MODULAR_AGENT_PLUGINS", "")
+	for _, tc := range []struct {
+		name          string
+		ceiling, want []string
+	}{
+		{"overlap", []string{"watch", "settings"}, []string{"watch"}},
+		{"disjoint", []string{"settings"}, []string{}},
+		{"empty ceiling", []string{}, []string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			project := t.TempDir()
+			a, err := New(ctx, WithProject(project), WithPluginHost(true))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close(t.Context())
+			actor := Actor{ID: "operator", Kind: "host", Rights: []string{"watch", "input"}}
+			server, peer := net.Pipe()
+			done := make(chan error, 1)
+			go func() {
+				defer server.Close()
+				done <- a.ServeACP(ctx, ServeACPOptions{Input: server, Output: server, StdioActor: &actor, Rights: tc.ceiling})
+			}()
+			conn := acp.NewClientSideConnection(&testACPClient{}, peer, peer)
+			defer func() {
+				_ = conn.Close()
+				if err := <-done; err != nil {
+					t.Error(err)
+				}
+			}()
+			init, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var meta struct{ Actor Actor }
+			if err := json.Unmarshal(init.Meta["modular-agent"], &meta); err != nil {
+				t.Fatal(err)
+			}
+			if meta.Actor.ID != actor.ID || meta.Actor.Kind != actor.Kind || meta.Actor.Rights == nil || !slices.Equal(meta.Actor.Rights, tc.want) {
+				t.Fatalf("advertised actor = %#v, want %s (%s) with %v", meta.Actor, actor.ID, actor.Kind, tc.want)
+			}
+			_, err = conn.NewSession(ctx, acp.NewSessionRequest{Cwd: project, McpServers: []acp.McpServer{}})
+			if err == nil || !strings.Contains(err.Error(), "forbidden") {
+				t.Fatalf("creation without input right: %v", err)
+			}
+		})
+	}
+}
+
+func TestServeACPRejectsMalformedStdioRights(t *testing.T) {
+	t.Setenv("MODULAR_AGENT_PLUGINS", "")
+	a, err := New(t.Context(), WithProject(t.TempDir()), WithPluginHost(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close(t.Context())
+	for _, tc := range []struct {
+		name    string
+		actor   Actor
+		ceiling []string
+	}{
+		{"missing actor rights", Actor{ID: "operator", Kind: "host"}, []string{"watch"}},
+		{"unknown actor right", Actor{ID: "operator", Kind: "host", Rights: []string{"unknown"}}, []string{"watch"}},
+		{"unknown ceiling right", Actor{ID: "operator", Kind: "host", Rights: []string{"watch"}}, []string{"unknown"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := a.ServeACP(t.Context(), ServeACPOptions{Input: io.NopCloser(strings.NewReader("")), Output: io.Discard, StdioActor: &tc.actor, Rights: tc.ceiling})
+			if e, ok := err.(*Error); !ok || e.Code != InvalidComposition {
+				t.Fatalf("malformed rights: %v", err)
+			}
+		})
 	}
 }
 

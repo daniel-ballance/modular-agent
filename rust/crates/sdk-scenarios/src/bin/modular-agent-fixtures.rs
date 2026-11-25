@@ -3,7 +3,10 @@
 #[path = "acp_waiting/mod.rs"]
 mod acp_waiting;
 
-use modular_agent::{ServeOptions, serve, serve_websocket, testing::fixtures::fixture};
+use modular_agent::{
+    AcpOptions, Actor, Agent, Durability, ServeOptions, serve, serve_websocket,
+    testing::fixtures::fixture,
+};
 use sdk_scenarios::telemetry;
 use std::io::Write;
 
@@ -13,6 +16,13 @@ async fn main() {
     if args == ["acp-waiting"] {
         if let Err(error) = acp_waiting::serve().await {
             eprintln!("ACP waiting fixture: {error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args == ["acp-stdio-rights"] {
+        if let Err(error) = serve_stdio_rights().await {
+            eprintln!("ACP stdio rights fixture: {error:#}");
             std::process::exit(1);
         }
         return;
@@ -69,4 +79,39 @@ async fn main() {
         eprintln!("{e}");
         std::process::exit(1);
     }
+}
+
+async fn serve_stdio_rights() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::env::var("MODULAR_AGENT_DATA_DIR")?;
+    if std::env::var("MODULAR_AGENT_CONFORMANCE").as_deref() != Ok("1") || dir.is_empty() {
+        return Err("acp-stdio-rights requires a disposable conformance directory".into());
+    }
+    let rights = match std::env::var("MA_ACP_STDIO_RIGHTS") {
+        Ok(raw) => Some(serde_json::from_str(&raw)?),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(error.into()),
+    };
+    let agent = Agent::builder()
+        .plugin_host(true)
+        .data_dir(dir)
+        .durability(Durability::Kept)
+        .provider(modular_agent::testing::scripted_provider(
+            serde_json::json!([{"text": "First turn."}, {"text": "Second turn."}]),
+        ))
+        .build()
+        .await?;
+    let actor = Actor {
+        id: "rights-fixture".into(),
+        kind: "host".into(),
+        rights: modular_agent::Rights::only(&["watch", "input", "settings"]),
+    };
+    agent
+        .serve_acp(AcpOptions {
+            actor: Some(actor),
+            rights,
+            ..Default::default()
+        })
+        .await?;
+    agent.close().await?;
+    Ok(())
 }
