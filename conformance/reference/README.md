@@ -1,6 +1,6 @@
 # Reference checks
 
-The 29 checks test whether an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs, its ACP and AG-UI responses and the telemetry it exports. So one set of checks covers all four implementations.
+The 32 checks test whether an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs, its ACP and AG-UI responses and the telemetry it exports. So one set of checks covers all four implementations.
 
 Install the shared OTLP receiver's dependencies from this directory: `npm ci --prefix ../telemetry`.
 
@@ -17,6 +17,7 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 
 | Check | What it shows |
 |---|---|
+| `interactive-commands` | `/commands` lists `/compact` without asking the model |
 | `print` | Print mode prints the final answer; the model is offered only `codemode` |
 | `client-identity` | `MA_CLIENT_IDENTITY` is checked at startup: an invalid value stops `ma` with status 1, a valid one is accepted |
 | `approval-covers-script` | Refusal leaves both files untouched. A live allow or an allow after restart runs both writes once, with the parent call and request on each start. |
@@ -43,6 +44,8 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 | `prompt-tail` | The prompt ends with `<cwd>` and then `<date>` |
 | `json-events` | `--json` prints SDK-shaped events, ending with `turnEnded` |
 | `models` | `ma models` lists the scripted model |
+| `sessions` | `ma sessions` prints nothing with no sessions, then one `ID  PROJECT` line per session of this project, most recently active first, also after an older session is reopened; `--all` adds the other projects' sessions; `--project b/alias/..` with `b/alias` linked to `a/sub` lists the sessions of `a` |
+| `sessions-service` | Over the TypeScript build's history service: the same listing for sessions `ma` made, then for copies written with chosen times. A session whose newest entry has an earlier time than an older entry sorts by the newest entry. Two sessions with the same last time follow in ID order, and `ma -c` reopens the first. Without the TypeScript build it is reported as skipped, not passed, and it fails for a language that `MODULAR_AGENT_REF_REQUIRE` requires |
 | `telemetry-export` | Export is off without an endpoint. With one, invocation and inference spans carry metadata only. Disabling the SDK stops export but leaves `telemetry: 1` in the declaration. |
 | `trace-trust` | An AG-UI or ACP work request continues the supplied trace only for an opted-in network token. The single-token shorthand starts a new trace. Stdio trusts the launcher unless disabled. A non-boolean policy value fails startup. |
 | `version` | `ma --version` names the implementation's language |

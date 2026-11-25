@@ -125,7 +125,7 @@ class _MemoryHistory(_NativePlugin):  # type: ignore[misc]  # Untyped base adapt
             {
                 **{k: s[k] for k in ("id", "project", "position")},
                 "model": s["settings"].get("model"),
-                "lastActivity": max((e["time"] for e in s["entries"]), default=s["created"]),
+                "lastActivity": s["entries"][-1]["time"] if s["entries"] else 0,
             }
             for s in self._sessions.values()
             if not d.get("project") or s["project"] == d["project"]

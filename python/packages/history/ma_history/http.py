@@ -369,6 +369,12 @@ class HTTPHistory(PendingErasure, Plugin):
     async def list(self, d, emit):
         query = {"project": str(Path(d["project"]).resolve())} if d.get("project") else {}
         _, sessions = await self.pages("/v1/sessions", "sessions", **query)
+        # The list response has no last activity. Read it from the stored entries, as the
+        # file store does: the time of the last entry in append order, or 0 with none.
+        for session in sessions:
+            if "lastActivity" not in session:
+                _, entries = await self.pages(self.path(session["id"]), "entries")
+                session["lastActivity"] = entries[-1].get("time", 0) if entries else 0
         return sessions
 
     async def keep(self, d, emit):

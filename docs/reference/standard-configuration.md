@@ -53,6 +53,14 @@ ACP project scope, tenant reach and any narrower rights come from operator confi
 
 With no `--model` and none in settings, `ma` uses the first Provider that is signed in, in the order `chatgpt`, `grok`, `claude`. With none signed in it exits with status 1 and says how to sign in.
 
+**Listing sessions.** `ma sessions` prints one line for each saved session of the project (the current folder, or `--project DIR`): the session ID, two spaces, and the project's canonical folder. `ma` resolves the folder as the operating system follows the path, each symlink before a `..` that comes after it, so `b/alias/..` is `a` when `b/alias` links to `a/sub`. The most recently active session comes first. A session's last activity is the time of its last entry in the order the entries were stored, the entry a reopen continues from, even when an earlier entry has a later time. A session with no entries comes after every session that has one. Sessions with the same last activity follow in ascending ID order, so the first line for a project is the session `-c` reopens there. The order is the same whether history is kept in the state folder or on a [history service](../bindings/history-http.md). `--all` lists the saved sessions of every project, in the same form and order. With no sessions to list, `ma sessions` prints nothing. It exits with status 0 in both cases.
+
+```
+$ ma sessions --all
+0b6f1c2e9d4a47c1a5e3b8f2d7c90e14  /home/me/code/app
+5d2e8a7b1c3f4e6d9a0b2c4e6f8a1b3d  /home/me/code/site
+```
+
 **Interactive mode** is line-based. While the agent works, a line typed steers the running turn; `/after TEXT` queues a new turn; `/cancel` or Ctrl-C stops the turn. Commands: `/commands`, `/model`, `/thinking`, `/compact`, `/skills`, `/skill:NAME`. Model text streams to stdout; calls and diagnostics go to stderr.
 
 **Questions** in interactive mode go to stderr. An approval of a tool call takes `y` or `n` ([Approval](#approval)). The terminal shows one approval at a time. For other questions, the terminal shows `Question REQUEST_ID: QUESTION`, any options, and how to answer. The terminal registers a question before it shows it, so an `/answer` it reads after the line appears finds that question. More than one question can be open. `/answer REQUEST_ID VALUE` answers the named question, and `/answer REQUEST_ID decline` declines it. End of input declines every open question.

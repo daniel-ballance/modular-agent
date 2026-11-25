@@ -8,7 +8,7 @@
 //   node run.mjs [--only ...] --all                (every built agent; MODULAR_AGENT_REF_REQUIRE as for fixtures)
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -418,6 +418,53 @@ const checks = [
     runs: [{ args: ["models"], expect: { exit: 0, stdoutContains: "scripted/script" } }],
   },
   {
+    name: "sessions",
+    about: "ma sessions prints ID and canonical project per line, most recently active first; --all adds other projects; none prints nothing; --project follows a symlink before '..'.",
+    script: [{ text: "one" }, { text: "two" }, { text: "three" }, { text: "four" }, { text: "five" }],
+    async run(command, invoke, skip, t) {
+      const other = join(t.dir, "other");
+      mkdirSync(other);
+      const listing = async (args, want) => {
+        const r = await invoke(command, { args });
+        assert.equal(r.exit, 0, `ma ${args.join(" ")}: exit status 0; stderr: ${r.stderr.slice(-300)}`);
+        if (r.stdout !== want) throw new Error(`ma ${args.join(" ")}: stdout ${JSON.stringify(want)}: got ${JSON.stringify(r.stdout)}`);
+      };
+      const session = async (args) => {
+        const r = await invoke(command, { args: ["--json", ...args] });
+        assert.equal(r.exit, 0, `ma --json ${args.join(" ")}: exit status 0; stderr: ${r.stderr.slice(-300)}`);
+        const id = r.stdout.split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((e) => e.sessionId)?.sessionId;
+        assert.ok(id, `ma --json ${args.join(" ")}: an event names the session`);
+        return id;
+      };
+      await listing(["sessions"], "");
+      await listing(["sessions", "--all"], "");
+      const first = await session(["-p", "first"]);
+      const elsewhere = await session(["--project", other, "-p", "second"]);
+      const third = await session(["-p", "third"]);
+      const project = realpathSync(t.project), otherProject = realpathSync(other);
+      await listing(["sessions"], `${third}  ${project}\n${first}  ${project}\n`);
+      await listing(["sessions", "--all"], `${third}  ${project}\n${elsewhere}  ${otherProject}\n${first}  ${project}\n`);
+      assert.equal(await session(["--session", first, "-p", "fourth"]), first, "--session reopens the first session");
+      await listing(["sessions"], `${first}  ${project}\n${third}  ${project}\n`);
+      await listing(["sessions", "--all"], `${first}  ${project}\n${third}  ${project}\n${elsewhere}  ${otherProject}\n`);
+      // b/alias is a symlink to a/sub, so the operating system takes b/alias/.. to a, not b.
+      mkdirSync(join(t.project, "a", "sub"), { recursive: true });
+      mkdirSync(join(t.project, "b"));
+      symlinkSync(join(t.project, "a", "sub"), join(t.project, "b", "alias"));
+      const inA = await session(["--project", "a", "-p", "fifth"]);
+      await listing(["sessions", "--project", "b/alias/.."], `${inA}  ${realpathSync(join(t.project, "a"))}\n`);
+    },
+  },
+  {
+    name: "sessions-service",
+    about: "Over the history service, ma sessions orders by the last stored entry's time, even when an older entry has a later time, then by ID; ma -c reopens the top session.",
+    script: [{ text: "one" }, { text: "two" }, { text: "three" }, { text: "four" }, { text: "five" }],
+    async run(command, invoke, skip, t) {
+      const { checkSessionsService } = await import("./sessions-service.mjs");
+      await checkSessionsService(command, invoke, skip, t);
+    },
+  },
+  {
     name: "telemetry-export",
     about: "Telemetry is off by default, exports metadata to a configured endpoint, and can be disabled again.",
     script: [{ text: telemetryReply }],
@@ -558,14 +605,21 @@ async function runCheck(command, check, skip) {
   return failures.map((f) => `${f}${failures.length ? `  [kept ${dir}]` : ""}`);
 }
 
-async function runAgent(name, command, only) {
-  let failed = 0, passed = 0;
+async function runAgent(name, command, only, strict) {
+  let failed = 0, passed = 0, skipped = 0;
   for (const check of checks.filter((c) => !only || only.includes(c.name))) {
-    const failures = await runCheck(command, check, reason => console.log(`SKIP ${name} ${check.name}: ${reason}`));
+    let whole;
+    const skip = (reason, scope) => {
+      if (scope === "check") whole = reason;
+      else console.log(`SKIP ${name} ${check.name}: ${reason}`);
+    };
+    const failures = await runCheck(command, check, skip);
     if (failures.length) { failed++; console.log(`FAIL ${name} ${check.name}: ${check.about}`); for (const f of failures) console.log(`     ${f}`); }
+    else if (whole !== undefined && strict) { failed++; console.log(`FAIL ${name} ${check.name}: skipped where every check must run: ${whole}`); }
+    else if (whole !== undefined) { skipped++; console.log(`SKIP ${name} ${check.name}: ${whole}`); }
     else { passed++; console.log(`PASS ${name} ${check.name}`); }
   }
-  console.log(`${name}: ${passed} passed, ${failed} failed`);
+  console.log(`${name}: ${passed} passed, ${failed} failed${skipped ? `, ${skipped} skipped` : ""}`);
   return failed;
 }
 
@@ -595,7 +649,7 @@ if (dash >= 0) {
       if (pick || require.includes("all") || require.includes(a.language)) { console.log(`FAIL ${why}`); failed++; } else console.log(`SKIP ${why}`);
       continue;
     }
-    failed += await runAgent(a.language, a.command, only);
+    failed += await runAgent(a.language, a.command, only, require.includes("all") || require.includes(a.language));
   }
 } else {
   console.error("usage: node run.mjs [--only NAMES] (-- <ma command...> | --agent LANGUAGE | --all)");

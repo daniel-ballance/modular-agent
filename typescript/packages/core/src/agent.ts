@@ -548,8 +548,9 @@ export class Agent {
     return checked(async () => {
       const stored = await this.#api.listSessions(filter?.project ? await realpath(filter.project) : null);
       return Promise.all(stored.map(async ({ id }) => {
-        const { project, settings, updated } = await this.sessionInfo(id);
-        return { id, project, updated, model: parseModel(settings.model), title: typeof settings.title === "string" ? settings.title : undefined };
+        const { project, settings, lastEntry } = await this.#savedSession(id);
+        // Last activity is the last entry's time in append order; a session with no entries has none.
+        return { id, project, updated: lastEntry ?? 0, model: parseModel(settings.model), title: typeof settings.title === "string" ? settings.title : undefined };
       }));
     });
   }
@@ -565,16 +566,20 @@ export class Agent {
     this.#check();
     if (!/^[\w-]+$/.test(id)) throw new AgentError("invalid_params", "Invalid session id");
     return checked(async () => {
-      const store = this.#h.use<HistoryStore>("history-store")!;
-      const { meta, entries } = await store.load(id);
-      const settings: Settings = {};
-      for (const entry of entries) if (!entry.erased && entry.kind === "setting") {
-        const change = entry.data as { key: string; value: unknown };
-        settings[change.key] = change.value;
-      }
-      const tenant = (entries.find(e => e.kind === "tenant" && !e.erased)?.data as { tenant?: string } | undefined)?.tenant;
-      return { ...meta, updated: entries.at(-1)?.time ?? meta.created, settings, ...(tenant === undefined ? {} : { tenant }) };
+      const { lastEntry, ...info } = await this.#savedSession(id);
+      return { ...info, updated: lastEntry ?? info.created };
     });
+  }
+  async #savedSession(id: string): Promise<Omit<SessionInfo, "updated"> & { lastEntry?: number }> {
+    const store = this.#h.use<HistoryStore>("history-store")!;
+    const { meta, entries } = await store.load(id);
+    const settings: Settings = {};
+    for (const entry of entries) if (!entry.erased && entry.kind === "setting") {
+      const change = entry.data as { key: string; value: unknown };
+      settings[change.key] = change.value;
+    }
+    const tenant = (entries.find(e => e.kind === "tenant" && !e.erased)?.data as { tenant?: string } | undefined)?.tenant;
+    return { ...meta, lastEntry: entries.at(-1)?.time, settings, ...(tenant === undefined ? {} : { tenant }) };
   }
   /** Refresh served catalogs; /1 has a query, not a catalog-change notification. */
   async refreshModels(): Promise<ModelInfo[]> {
