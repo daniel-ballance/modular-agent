@@ -121,6 +121,8 @@ plan() {
   step go "go: vet and gofmt" bash -c 'cd go && mise exec -- go vet ./... && test -z "$(mise exec -- gofmt -l .)"'
   step python "python: ruff and strict mypy" bash -c "cd python && uv run --offline ruff check . && uv run --offline ruff format --check . && uv run --offline mypy"
   step docs "docs: relative links resolve" node scripts/check-links.mjs
+  step docs "docs: maintainability" node scripts/check-maintainability.mjs
+  step docs "docs: maintainability tests" node --test scripts/check-maintainability.test.mjs
 
   if $quick; then
     step rust "rust: SDK tests" bash -c "cd rust && mise exec -- cargo test -q -p modular-agent -p standard -- --test-threads=1"
