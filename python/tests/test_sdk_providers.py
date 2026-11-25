@@ -76,7 +76,7 @@ def test_shipped_catalog_is_byte_identical():
         ("anthropic", "unlisted", 200, {"reasoning": "high"}, {}),
     ],
 )
-async def test_loopback_provider(vendor, model, status, settings, fields, monkeypatch):
+async def test_loopback_provider(vendor, model, status, settings, fields, monkeypatch, git_project):
     provider, events = (openai, OPENAI) if vendor == "openai" else (anthropic, ANTHROPIC)
     received = []
     monkeypatch.setenv("OPENAI_API_KEY", "loopback-placeholder")
@@ -102,6 +102,7 @@ async def test_loopback_provider(vendor, model, status, settings, fields, monkey
     async with await asyncio.start_server(respond, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
         async with create_agent(
+            project=git_project,
             providers=[
                 provider(
                     models=[model] if model == "unlisted" else None,

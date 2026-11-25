@@ -39,6 +39,21 @@ logs="$(mktemp -d "$TMPDIR/check-XXXXXX")" || exit 1
 printf 'Step logs: %s\n' "$logs"
 start_run=$SECONDS
 
+point_refs() {
+  git for-each-ref --format='%(refname)' refs/modular-agent/ | LC_ALL=C sort
+}
+point_refs >"$logs/refs-before" || exit 1
+
+check_test_refs() {
+  point_refs >"$logs/refs-after" || return
+  LC_ALL=C comm -13 "$logs/refs-before" "$logs/refs-after" >"$logs/refs-added" || return
+  if [ -s "$logs/refs-added" ]; then
+    printf 'Tests added %s refs under refs/modular-agent/ to the enclosing repository. See %s\n' \
+      "$(wc -l <"$logs/refs-added")" "$logs/refs-added" >&2
+    return 1
+  fi
+}
+
 step_limit=${MA_CHECK_STEP_LIMIT:-1800}
 kill_tree() { # pid: stop it and every process below it, deepest first
   local child
@@ -211,6 +226,7 @@ else
   done
   plan shared
 fi
+selection=serial step shared "tests: no environment refs in the enclosing repository" check_test_refs
 if ! $all; then
   echo "(cross-language steps skipped: they need all four languages)"
 fi

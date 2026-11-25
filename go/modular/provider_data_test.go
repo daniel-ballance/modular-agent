@@ -21,7 +21,12 @@ func TestProviderDataBoundToProducingProvider(t *testing.T) {
 			return modular.AssistantMessage{Stop: "finished", ProviderData: []byte(`"` + opaque + `"`), Content: append(modular.Text("answer"), modular.Part{Type: "reasoning", Text: "readable", Fields: map[string]json.RawMessage{"providerData": []byte(`"` + opaque + `"`)}})}, nil
 		}}
 	}
-	a, err := modular.New(t.Context(), modular.WithModel("first/model"), modular.WithProvider(provider("first")), modular.WithProvider(provider("second")))
+	a, err := modular.New(t.Context(),
+		modular.WithProject(gitProject(t)),
+		modular.WithModel("first/model"),
+		modular.WithProvider(provider("first")),
+		modular.WithProvider(provider("second")),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

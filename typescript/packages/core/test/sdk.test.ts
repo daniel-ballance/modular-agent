@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createAgent, definePlugin, serve, tool, type ToolContext, type Plugin } from "@modular-agent/core";
 import { overWire, scriptedProvider, testAgent } from "@modular-agent/core/testing";
+import { gitProject } from "./fixtures/git-project.js";
 
 const request = (name: string, input: Record<string, unknown> = {}) =>
   [{ toolCalls: [{ name, input }] }, { text: "Done." }];
@@ -89,7 +90,7 @@ test("plain JSON Schema validates changed inputs; hints stay as set", async t =>
     input: { type: "object", properties: { text: { type: "string", minLength: 2 } }, required: ["text"] },
     readOnly: true, destructive: true, openWorld: false, run: ({ text }) => text.toUpperCase() });
   const base = scriptedProvider(request("typed", { text: "x" }));
-  const a = await createAgent({ tools: [typed], providers: [{ ...base, request(model, req, cx) {
+  const a = await createAgent({ project: await gitProject(t), tools: [typed], providers: [{ ...base, request(model, req, cx) {
     assert.equal(req.tools[0].parameters.$schema, "https://json-schema.org/draft/2020-12/schema");
     assert.deepEqual(req.tools[0].hints, { readOnly: true, destructive: true, openWorld: false, safeToRepeat: false });
     return base.request(model, req, cx);

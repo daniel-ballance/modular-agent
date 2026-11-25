@@ -9,6 +9,10 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+#[path = "fixtures/git_project.rs"]
+mod git_project;
+use git_project::git_project;
+
 struct Beacon;
 
 #[modular_agent::async_trait]
@@ -161,6 +165,7 @@ async fn beacon_streams_and_records_failures() -> Result<()> {
         (true, "offline-key"),
         (true, "rejected"),
     ] {
+        let project = git_project();
         let agent = if served {
             modular_agent::testing::test_agent()
                 .model("beacon/demo")
@@ -170,6 +175,7 @@ async fn beacon_streams_and_records_failures() -> Result<()> {
                 .await?
         } else {
             Agent::builder()
+                .project(project.path())
                 .credentials(TestKey(key))
                 .provider(Beacon)
                 .build()

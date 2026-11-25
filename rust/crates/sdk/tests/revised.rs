@@ -6,6 +6,10 @@ use modular_agent::{
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
+#[path = "fixtures/git_project.rs"]
+mod git_project;
+use git_project::git_project;
+
 struct OpaqueProvider(&'static str, Arc<Mutex<Vec<Value>>>);
 
 #[modular_agent::async_trait]
@@ -46,8 +50,10 @@ async fn stored_sessions_and_provider_data_survive_reopen_but_stay_scoped() -> R
     let data = tempfile::tempdir()?;
     let a = Arc::new(Mutex::new(vec![]));
     let b = Arc::new(Mutex::new(vec![]));
+    let project = git_project();
     let build = || {
         Agent::builder()
+            .project(project.path())
             .data_dir(data.path())
             .durability(Durability::Durable)
             .provider(OpaqueProvider("first", a.clone()))

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createAgent, environmentCredentials, ModelFailure, type Provider } from "@modular-agent/core";
+import { gitProject } from "./fixtures/git-project.js";
 
 const beacon: Provider = {
   id: "beacon",
@@ -23,8 +24,9 @@ const beacon: Provider = {
 
 test("beacon streams and records failures", async t => {
   for (const key of ["offline-key", "rejected"]) {
-    await t.test(key, async () => {
+    await t.test(key, async subtest => {
       const agent = await createAgent({
+        project: await gitProject(subtest),
         providers: [beacon],
         credentials: { ...environmentCredentials(), read: async name => name === "beacon" ? key : undefined },
       });
@@ -54,7 +56,7 @@ test("beacon streams and records failures", async t => {
   }
 });
 
-test("loads a Provider from another process", async () => {
+test("loads a Provider from another process", async t => {
   const program = `
     import { definePlugin, serve } from ${JSON.stringify(import.meta.resolve("@modular-agent/core"))};
     import { scriptedProvider } from ${JSON.stringify(import.meta.resolve("@modular-agent/core/testing"))};
@@ -63,6 +65,7 @@ test("loads a Provider from another process", async () => {
     }}));
   `;
   const agent = await createAgent({
+    project: await gitProject(t),
     processPlugins: [{ command: [process.execPath, "--input-type=module", "--eval", program] }],
     model: "scripted/script",
   });

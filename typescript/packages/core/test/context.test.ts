@@ -9,6 +9,7 @@ import {
   type AgentOptions, type Plugin, type Provider, type ProviderContext, type Session, type ToolContext,
 } from "@modular-agent/core";
 import { overWire, scriptedProvider } from "@modular-agent/core/testing";
+import { gitProject } from "./fixtures/git-project.js";
 
 async function followTurn(session: Session, type: string) {
   const events: unknown[] = [];
@@ -71,7 +72,7 @@ if (!process.env.CONTEXT_PLUGIN) {
         if (payload.events.some(e => e.type === "inspect.ready")) return { redact: payload.events.map(e =>
           e.type === "inspect.ready" ? { ...e, data: { entry: "redacted" } } : e) };
       } } });
-      const agent = await createAgent({ providers: [scriptedProvider([
+      const agent = await createAgent({ project: await gitProject(t), providers: [scriptedProvider([
         { toolCalls: [{ name: "inspect", input: {} }] }, { text: "done" },
       ])], ...placementOptions,
         plugins: [gate, ...(placementOptions.plugins ?? [])],
@@ -90,7 +91,7 @@ if (!process.env.CONTEXT_PLUGIN) {
     });
   }
 
-  test("named tool credentials are local and remain scoped to the call", async () => {
+  test("named tool credentials are local and remain scoped to the call", async t => {
     let retained: ToolContext | undefined;
     const reads: string[] = [];
     const local = tool({ name: "local", description: "Read a named credential", input, inProcessOnly: true, async run(_, cx) {
@@ -100,7 +101,7 @@ if (!process.env.CONTEXT_PLUGIN) {
       return "checked";
     } });
     const plugin = definePlugin({ name: "local", tools: [local] });
-    const agent = await createAgent({ tools: [local], credentials: credentials(reads) });
+    const agent = await createAgent({ project: await gitProject(t), tools: [local], credentials: credentials(reads) });
     try {
       assert.equal((await (await agent.session()).callTool("local", {})).text(), "checked");
       await assert.rejects(retained!.credential("named"), { code: "invalid_request" });
@@ -109,21 +110,21 @@ if (!process.env.CONTEXT_PLUGIN) {
     await assert.rejects(serve(plugin), { code: "not_supported" });
   });
 
-  test("an unflagged served tool cannot read a named credential", async () => {
+  test("an unflagged served tool cannot read a named credential", async t => {
     const reads: string[] = [];
     const probe = tool({ name: "probe", description: "Check credential placement", input, async run(_, cx) {
       await assert.rejects(cx.credential("beacon"), AgentError);
       await assert.rejects(cx.credential("beacon"), { code: "not_supported" });
       return "denied";
     } });
-    const agent = await createAgent({ plugins: [overWire(definePlugin({ name: "probe", tools: [probe] }))], credentials: credentials(reads) });
+    const agent = await createAgent({ project: await gitProject(t), plugins: [overWire(definePlugin({ name: "probe", tools: [probe] }))], credentials: credentials(reads) });
     try {
       assert.equal((await (await agent.session()).callTool("probe", {})).text(), "denied");
       assert.deepEqual(reads, []);
     } finally { await agent.close(); }
   });
 
-  for (const local of [true, false]) test(`Provider credential context (${local ? "local" : "served"})`, async () => {
+  for (const local of [true, false]) test(`Provider credential context (${local ? "local" : "served"})`, async t => {
     let retained: ProviderContext | undefined;
     let availability: Pick<ProviderContext, "credential"> | undefined;
     const reads: string[] = [];
@@ -150,7 +151,7 @@ if (!process.env.CONTEXT_PLUGIN) {
       },
     };
     const plugin = definePlugin({ name: "beacon", setup(r) { r.provider(provider); } });
-    const agent = await createAgent({ plugins: [local ? plugin : overWire(plugin)], credentials: credentials(reads) });
+    const agent = await createAgent({ project: await gitProject(t), plugins: [local ? plugin : overWire(plugin)], credentials: credentials(reads) });
     try {
       const session = await agent.session();
       const [events, result] = await Promise.all([followTurn(session, "beacon.ready"), session.prompt("beacon")]);

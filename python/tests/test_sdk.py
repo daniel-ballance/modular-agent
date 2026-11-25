@@ -249,8 +249,8 @@ run(main())
     assert proc.returncode == 0
 
 
-async def test_no_model_is_a_failed_turn():
-    async with create_agent() as agent:
+async def test_no_model_is_a_failed_turn(git_project):
+    async with create_agent(project=git_project) as agent:
         result = await (await agent.session()).prompt("Hello")
         assert result.outcome.kind == "failed"
         assert "No model selected" in str(result.outcome.error)

@@ -7,7 +7,7 @@ from modular_agent.testing import over_wire, scripted_provider
 
 
 @pytest.mark.parametrize("served", [False, True])
-async def test_provider_hook_transforms_committed_request(served):
+async def test_provider_hook_transforms_committed_request(served, git_project):
     seen = []
 
     def setup(registrar):
@@ -16,7 +16,9 @@ async def test_provider_hook_transforms_committed_request(served):
         registrar.on("provider.response", lambda payload: seen.append(payload["message"]["stop"]))
 
     plugin = Plugin("extra-hooks", setup=setup)
-    async with create_agent(plugins=[over_wire(plugin) if served else plugin]) as agent:
+    async with create_agent(
+        project=git_project, plugins=[over_wire(plugin) if served else plugin]
+    ) as agent:
         session = await agent.session()
         assert (await session.prompt("Say hello.")).text == "Hello."
         [kept] = [entry for entry in await session.history() if entry["kind"] == "modelRequest"]
@@ -25,7 +27,7 @@ async def test_provider_hook_transforms_committed_request(served):
 
 
 @pytest.mark.parametrize("served", [False, True])
-async def test_tool_history_is_scoped_and_keeps_wire_names(served):
+async def test_tool_history_is_scoped_and_keeps_wire_names(served, git_project):
     @tool
     async def inspect(cx: ToolContext) -> str:
         """Read this call's history page."""
@@ -37,6 +39,7 @@ async def test_tool_history_is_scoped_and_keeps_wire_names(served):
 
     plugin = Plugin("inspect-history", tools=[inspect])
     async with create_agent(
+        project=git_project,
         providers=[
             scripted_provider(
                 [{"toolCalls": [{"name": "inspect", "input": {}}]}, {"text": "Done."}]

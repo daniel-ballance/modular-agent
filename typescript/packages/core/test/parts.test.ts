@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { definePlugin, durableRuntime, localEnvironment, tool, transientRuntime } from "../src/index.js";
 import { overWire, restart, testAgent } from "../src/testing.js";
+import { gitProject } from "./fixtures/git-project.js";
 
 const input = { type: "object" } as const;
 
@@ -76,6 +79,8 @@ test("a lagging event reader disconnects with its last visible entry, which can 
 test("SDK part constructors and registration replace defaults; non-servable parts fail setup", async t => {
   assert.equal(durableRuntime().supports.continuesAfterRestart, true);
   await assert.rejects(testAgent({ script: [], runtime: durableRuntime() }), { code: "invalid_composition" });
+  const project = await gitProject(t);
+  await writeFile(join(project, "package.json"), "{}");
   const env = localEnvironment();
   const fixture = tool({ name: "list", description: "Read the working directory", input,
     async run(_, cx) { return (await cx.environment.list(".")).find(e => e.name === "package.json")?.kind ?? "missing"; } });
@@ -84,7 +89,7 @@ test("SDK part constructors and registration replace defaults; non-servable part
     r.runtime(transientRuntime());
     r.tools({ id: "list-tools", tools: () => [fixture] });
   } });
-  const agent = await testAgent({ plugins: [overWire(plugin)], script: [{ toolCalls: [{ name: "list", input: {} }] }, { text: "Done" }] });
+  const agent = await testAgent({ project, plugins: [overWire(plugin)], script: [{ toolCalls: [{ name: "list", input: {} }] }, { text: "Done" }] });
   t.after(() => agent.close());
   const result = await (await agent.session()).prompt("List");
   assert.equal(result.toolResults()[0].text(), "file");
