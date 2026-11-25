@@ -1,7 +1,6 @@
 package harness
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -525,52 +524,6 @@ func (c *client) Snapshot(id string) (api.Session, error) {
 	}
 	return snap, nil
 }
-func (c *client) View(ctx context.Context, id string) (api.Session, error) {
-	return c.view(ctx, id, true)
-}
-
-// ViewForOutput applies the native view policy before the Interface shapes
-// the entries or reply that the remote gate will see.
-func (c *client) ViewForOutput(ctx context.Context, id string) (api.Session, error) {
-	return c.view(ctx, id, false)
-}
-
-func (c *client) view(ctx context.Context, id string, gateRemote bool) (api.Session, error) {
-	if !api.ConnectionAllows(ctx, "watch") || !c.Authorize(id, api.Acting(ctx), "watch") {
-		return api.Session{}, errors.New("watch refused")
-	}
-	epoch, err := c.ErasureEpoch(id)
-	if err != nil {
-		return api.Session{}, err
-	}
-	snap, err := c.Snapshot(id)
-	if err != nil {
-		return snap, err
-	}
-	for i, entry := range snap.Entries {
-		snap.Entries[i] = portable.PublicEntry(entry)
-	}
-	event := api.Event{Kind: "history.view", Session: id, Data: api.JSON(snap)}
-	if gateRemote {
-		out, err := c.OutputValue(ctx, event)
-		if err != nil {
-			return api.Session{}, err
-		}
-		if got, err := c.ErasureEpoch(id); err != nil || got != epoch {
-			return api.Session{}, api.ErrErasureUnavailable
-		}
-		return api.Decode[api.Session](out.Data), nil
-	}
-	out, err := c.output(ctx, event)
-	if err != nil || out.Hold {
-		return api.Session{}, api.ErrOutputWithheld
-	}
-	if got, err := c.ErasureEpoch(id); err != nil || got != epoch {
-		return api.Session{}, api.ErrErasureUnavailable
-	}
-	return api.Decode[api.Session](out.Event.Data), nil
-}
-
 func (c *client) Move(ctx context.Context, id, target string, rewind bool) error {
 	_, err := c.MoveDetails(ctx, id, target, rewind)
 	return err
@@ -1425,30 +1378,6 @@ func (c *client) stopSessionAs(ctx context.Context, id string, closing bool, who
 	}
 	return err
 }
-func (c *client) Emit(ctx context.Context, e api.Event) {
-	// A listener cannot change execution.
-	defer func() { _ = recover() }()
-	if epoch, err := c.ErasureEpoch(e.Session); err != nil {
-		return
-	} else {
-		e.ErasureEpoch = epoch
-	}
-	e.Time = time.Now().UTC()
-	boundary := e
-	out, err := c.output(ctx, e)
-	if err == nil && !out.Hold {
-		if strings.HasPrefix(e.Kind, "plugin.") && !bytes.Equal(e.Data, out.Event.Data) {
-			out.Event.OutputChanged = true
-		}
-		out.Event.ErasureEpoch = e.ErasureEpoch
-		e = out.Event
-	}
-	events, release, deliver := c.streamOutput(boundary, e, err != nil || out.Hold)
-	defer release()
-	if deliver {
-		c.deliverOutput(ctx, boundary, events)
-	}
-}
 
 type turnPorts struct {
 	c         *client
@@ -1657,12 +1586,6 @@ func (p *turnPorts) Snapshot() (api.Session, error) {
 		return api.Session{}, err
 	}
 	return snap, nil
-}
-func (p *turnPorts) Emit(ctx context.Context, e api.Event) {
-	e.Session = p.s.id
-	e.Turn = p.id
-	e.Actor = p.actor
-	p.c.Emit(ctx, e)
 }
 func (p *turnPorts) TakeSteering(ctx context.Context) (bool, error) {
 	entries, err := p.TakeSteeringEntries(ctx)
