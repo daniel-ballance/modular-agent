@@ -73,7 +73,7 @@ export interface ListingViewer {
 	present?: readonly string[];
 }
 
-/** Everything a plugin can do. A plugin can do nothing else. */
+/** What a plugin can ask of the agent. It does not confine trusted plugin code. */
 export interface PluginApi {
 	readonly name: string;
 	readonly project: string;

@@ -33,7 +33,7 @@ export class SessionEnvironment {
 		});
 	}
 
-	/** The working environment, in the session's project when it has its own. */
+	/** The working environment, moved to the session's project when it is elsewhere and supports at(). */
 	async environmentFor(s: Session): Promise<WorkingEnvironment | undefined> {
 		const base = this.operations.use<WorkingEnvironment>("working-environment");
 		const env = await base?.forSession?.(s.id) ?? base;

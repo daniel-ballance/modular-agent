@@ -7,7 +7,7 @@ import { historyForPeer } from "./telemetry.js";
 import type { AgentEvent, HistoryEntry, ModelRequest, OutputAnswer } from "./types.js";
 import { withoutProviderData } from "./view.js";
 
-/** One recipient following a session, through the output gate. */
+/** One recipient of agent events through the output gate, such as a session follower or a plugin's event subscription. */
 export class Follower {
 	private pending = 0;
 	private bytes = 0;
@@ -65,7 +65,7 @@ export class Follower {
 		});
 	}
 
-	/** Resolves once everything pushed so far has been delivered or blocked. */
+	/** Resolves once each event pushed so far has been delivered, blocked, or kept in a stream buffer until its stream ends. */
 	idle(): Promise<void> {
 		return this.chain;
 	}
