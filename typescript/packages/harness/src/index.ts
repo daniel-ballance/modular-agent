@@ -13,3 +13,4 @@ export * from "./secret-staging.js";
 export type { Plugin, CommandContext, Command, SessionStartOptions, SessionPrepare, InputOptions, ErasureReport, JobHandle, Transaction, FollowOptions, WaitingSummary, SessionSummary, ListingViewer, PluginApi } from "./plugin-api.js";
 export { REASONING_LEVELS, lowerReasoning, normalizeSetting, parseModel, thinkingLevels } from "./settings.js";
 export { untilAborted } from "./session-lifecycle.js";
+export { ALL_AUTHORITY } from "./authority.js";

@@ -1,4 +1,4 @@
-import { ALL_AUTHORITY, type Tenant } from "./harness.js";
+import type { Tenant } from "./harness.js";
 import { HistoryCommit } from "./history-commit.js";
 import { actorJoined } from "./session-lifecycle.js";
 import { InputAdmission } from "./input-admission.js";
@@ -15,6 +15,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { HookRegistry } from "./hooks.js";
 import { Session } from "./session.js";
 import { type Actor, type AgentEvent, type Authority, type HistoryEntry, type HistoryStore, type Usage } from "./types.js";
+
+export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"];
 
 export interface TenantInfo { tenant: string | null; rights: Authority[] | null; tokens: { budget: number; used: number } | null }
 

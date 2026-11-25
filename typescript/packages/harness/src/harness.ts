@@ -34,7 +34,6 @@ import {
 	type Configuration,
 	type Declaration,
 	type EntryDraft,
-	type GateResult,
 	type HistoryEntry,
 	type HistoryStore,
 	type HookRule,
@@ -48,8 +47,6 @@ import {
 } from "./types.js";
 
 export interface HarnessOptions { receiptDir?:string; approvalCoversNested?: boolean; agentName?: string; project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn" | "refused"; jobReportsStartTurns?: boolean; rejectUnknownModel?: boolean; resourceReservations?: ReservationOptions; tenants?: Record<string, Tenant> | null }
-
-export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"];
 
 export interface Tenant { rights: Authority[]; tokens?: number }
 /**
@@ -970,7 +967,3 @@ export class Harness {
 		return this.declarations.declaration(s);
 	}
 }
-
-/** One recipient following a session, through the output gate. */
-
-export type { GateResult };

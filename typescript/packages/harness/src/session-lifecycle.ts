@@ -1,4 +1,5 @@
-import { ALL_AUTHORITY, type Tenant } from "./harness.js";
+import type { Tenant } from "./harness.js";
+import { ALL_AUTHORITY } from "./authority.js";
 import { normalizeSetting, type parseModel } from "./settings.js";
 import type { ListingViewer, SessionStartOptions, SessionPrepare, SessionSummary } from "./plugin-api.js";
 import { InputAdmission } from "./input-admission.js";
