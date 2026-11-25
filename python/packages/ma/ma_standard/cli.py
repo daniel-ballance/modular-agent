@@ -98,7 +98,7 @@ def _parser() -> argparse.ArgumentParser:
         "-V",
         "--version",
         action="version",
-        version=f"ma {_package_version('modular-agent-standard')} (Python)",
+        version=f"ma {_package_version('modular-agent-standard')} (python)",
     )
     parser.add_argument("--model", metavar="PROVIDER/ID")
     parser.add_argument(

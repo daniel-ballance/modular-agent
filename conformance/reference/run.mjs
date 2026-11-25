@@ -383,7 +383,7 @@ const checks = [
     name: "version",
     about: "ma --version names the implementation's language.",
     script: [],
-    runs: [{ args: ["--version"], expect: { exit: 0, stdoutMatches: /\b(rust|typescript|go|python)\b/i } }],
+    runs: [{ args: ["--version"], expect: { exit: 0, stdoutMatches: /^ma \d+\.\d+\.\d+ \((rust|typescript|go|python)\)\n?$/ } }],
   },
 ];
 

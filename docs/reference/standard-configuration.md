@@ -47,7 +47,7 @@ ma sessions [--all]          list saved sessions
 | `--approval POLICY` | load the approval feature with this default policy: `off`, `ask`, `all` or `never`. Overrides the setting `approval`. See [Approval](#approval). |
 | `--token-file FILE` | with `--listen`, shorthand for one token acting as the local user. Do not combine with a policy `actors` list. |
 | `--policy FILE` | read this operator policy instead of `policy.json` in the configuration folder. |
-| `-h`, `--help`; `-V`, `--version` | help; the version, which names the implementation's language |
+| `-h`, `--help`; `-V`, `--version` | help; the version, as `ma VERSION (LANGUAGE)` with the language in lowercase |
 
 ACP project scope, tenant reach and any narrower rights come from operator configuration, never from project files. `ma` MUST enforce an operator restriction before reading project settings or composing that project. Its single-user profile does not enable configured representation. The unrestricted local shorthand is for a trusted launcher, not an untrusted stdio proxy. See [ACP starting](../bindings/acp.md#starting) and [ACP authorization](../bindings/acp.md#authorization).
 
