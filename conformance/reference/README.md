@@ -43,7 +43,7 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 | `prompt-tail` | The prompt ends with `<cwd>` and then `<date>` |
 | `json-events` | `--json` prints SDK-shaped events, ending with `turnEnded` |
 | `models` | `ma models` lists the scripted model |
-| `sessions` | `ma sessions` prints nothing with no sessions, then one `ID  PROJECT` line per session of this project, newest first; `--all` adds the other projects' sessions |
+| `sessions` | `ma sessions` prints nothing with no sessions, then one `ID  PROJECT` line per session of this project, most recently active first, also after an older session is reopened; `--all` adds the other projects' sessions |
 | `telemetry-export` | Export is off without an endpoint. With one, invocation and inference spans carry metadata only. Disabling the SDK stops export but leaves `telemetry: 1` in the declaration. |
 | `trace-trust` | An AG-UI or ACP work request continues the supplied trace only for an opted-in network token. The single-token shorthand starts a new trace. Stdio trusts the launcher unless disabled. A non-boolean policy value fails startup. |
 | `version` | `ma --version` names the implementation's language |

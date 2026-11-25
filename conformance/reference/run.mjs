@@ -404,8 +404,8 @@ const checks = [
   },
   {
     name: "sessions",
-    about: "ma sessions prints ID and canonical project per line, newest first; --all adds other projects; none prints nothing.",
-    script: [{ text: "one" }, { text: "two" }, { text: "three" }],
+    about: "ma sessions prints ID and canonical project per line, most recently active first; --all adds other projects; none prints nothing.",
+    script: [{ text: "one" }, { text: "two" }, { text: "three" }, { text: "four" }],
     async run(command, invoke, skip, t) {
       const other = join(t.dir, "other");
       mkdirSync(other);
@@ -425,10 +425,13 @@ const checks = [
       await listing(["sessions", "--all"], "");
       const first = await session(["-p", "first"]);
       const elsewhere = await session(["--project", other, "-p", "second"]);
-      const latest = await session(["-p", "third"]);
+      const third = await session(["-p", "third"]);
       const project = realpathSync(t.project), otherProject = realpathSync(other);
-      await listing(["sessions"], `${latest}  ${project}\n${first}  ${project}\n`);
-      await listing(["sessions", "--all"], `${latest}  ${project}\n${elsewhere}  ${otherProject}\n${first}  ${project}\n`);
+      await listing(["sessions"], `${third}  ${project}\n${first}  ${project}\n`);
+      await listing(["sessions", "--all"], `${third}  ${project}\n${elsewhere}  ${otherProject}\n${first}  ${project}\n`);
+      assert.equal(await session(["--session", first, "-p", "fourth"]), first, "--session reopens the first session");
+      await listing(["sessions"], `${first}  ${project}\n${third}  ${project}\n`);
+      await listing(["sessions", "--all"], `${first}  ${project}\n${third}  ${project}\n${elsewhere}  ${otherProject}\n`);
     },
   },
   {
