@@ -12,6 +12,61 @@ import (
 
 var errRewindUnresolved = errors.New("project has an unresolved rewind; reopen the rewinding session to recover")
 
+func (c *client) Move(ctx context.Context, id, target string, rewind bool) error {
+	_, err := c.MoveDetails(ctx, id, target, rewind)
+	return err
+}
+
+func (c *client) MoveDetails(ctx context.Context, id, target string, rewind bool) ([]string, error) {
+	if rewind {
+		c.h.projectGate.Lock()
+		defer c.h.projectGate.Unlock()
+	}
+	s, err := c.find(id)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !c.authorizedBy(s.data, ctx, "settings") {
+		return nil, errors.New("move refused")
+	}
+	if s.pendingStore != nil {
+		return nil, errProvisionalSession
+	}
+	if s.rewindBlocked {
+		return nil, errRewindUnresolved
+	}
+	if err := s.checkWriterLocked(); err != nil {
+		return nil, err
+	}
+	if s.running || s.opening || s.closing || len(s.queue) > 0 || unfinished(s.data) {
+		return nil, api.ErrUnfinishedWork
+	}
+	branch := s.data.Branch()
+	i := slices.IndexFunc(branch, func(e api.Entry) bool { return e.ID == target })
+	if i == -1 || (branch[i].Turn != "" && branch[i].Kind != "turn.end" && branch[i].OriginalKind != "turn.end") {
+		return nil, api.ErrMoveConflict
+	}
+	candidate := clone(s.data)
+	candidate.Position = target
+	if unfinished(candidate) {
+		return nil, api.ErrMoveConflict
+	}
+	if pending, _ := recovery(candidate); pending != nil {
+		return nil, api.ErrMoveConflict
+	}
+	if rewind {
+		var outside []string
+		err := c.rewindLocked(ctx, s, target, branch[i+1:], &outside)
+		return outside, err
+	}
+	if err := c.resetMoveProviders(ctx, s.id); err != nil {
+		return nil, err
+	}
+	return nil, c.movePosition(s, target, nil)
+}
+
 func (c *client) environmentPoints(project string) (api.EnvironmentPoints, bool) {
 	env, err := c.Get("working-environment")
 	if err != nil {
