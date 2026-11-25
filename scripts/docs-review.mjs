@@ -13,7 +13,7 @@ const historical = /^(?:docs\/(?:adr|research|pressure-test)\/)|\/docs\/clean-ro
 // line saying what happens when something is missing states a rule, not a gap.
 const statusWords = /\b(?:proposed(?! input)|planned|not yet|will be|drafts?(?= \d)|(?<=\b(?:is|are|still|in) )drafts?|pending(?= (?:review|decision|implementation)\b))\b/gi;
 const todo = /\bTODO\b|(?<=\b(?:[Ss]till|[Ll]eft|[Yy]et) )to do\b/g;
-const openWords = /\b(?:gaps?|findings?|not implemented|follow-ups?(?= (?:issues?|work|changes?|fix|pull request|PR)\b)|(?<=\bas a )follow-up)\b/gi;
+const openWords = /\b(?:(?:limits?|gaps?)(?: still)? remains?|gaps?|findings?|not implemented|follow-ups?(?= (?:issues?|work|changes?|fix|pull request|PR)\b)|(?<=\bas a )follow-up)\b/gi;
 // Beside a named or linked ADR, these state the decision's status.
 const adrStatusWords = /\b(?:propos(?:es?|ing)|drafts?|(?<=\bstill )open)\b/gi;
 const absentWords = /(?<=\b(?:is|are|still|remains?) )(?:missing|unsupported)\b/gi;

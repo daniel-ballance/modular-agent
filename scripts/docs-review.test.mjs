@@ -149,6 +149,15 @@ test("status wording beside a named or linked ADR is a candidate", (t) => {
   assert.match(result.stdout, /^README\.md:1: status "proposes"\. Links ADR 0007 accepted\.$/m);
 });
 
+test("a statement that limits remain is open work", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", ["The desk drove three agents. These limits remain.", "", "Two limits still remain in Go.", "", "The call remains open until its deadline.", ""]);
+  repo.commit("Docs");
+  const result = repo.run("--all");
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.at, ["README.md:1", "README.md:3"]);
+});
+
 test("the default scope is lines changed since the merge base with origin/main", (t) => {
   const repo = checkout(t);
   repo.track("README.md", ["Support is planned.", "", "A stable line.", ""]);
