@@ -1,6 +1,6 @@
 {
   "name": "@modular-agent/tools-files",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "MIT",
   "type": "module",
   "main": "dist/src/index.js",
@@ -16,8 +16,8 @@
     }
   },
   "dependencies": {
-    "@modular-agent/harness": "0.2.0",
-    "@modular-agent/core": "0.2.0",
+    "@modular-agent/harness": "0.3.0",
+    "@modular-agent/core": "0.3.0",
     "ignore": "7.0.16",
     "minimatch": "11.0.9"
   }

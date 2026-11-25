@@ -12,7 +12,7 @@ import (
 )
 
 // ImplementationVersion is the project release, not the binding version.
-const ImplementationVersion = "0.2.0"
+const ImplementationVersion = "0.3.0"
 
 // ErrUnknownOutcome means execution may have had effects but no reliable result.
 var ErrUnknownOutcome = errors.New("call outcome unknown")

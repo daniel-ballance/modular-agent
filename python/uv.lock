@@ -452,7 +452,7 @@ wheels = [
 
 [[package]]
 name = "ma-acp"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/acp" }
 dependencies = [
     { name = "agent-client-protocol" },
@@ -467,7 +467,7 @@ requires-dist = [
 
 [[package]]
 name = "ma-approval"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/approval" }
 dependencies = [
     { name = "ma-core" },
@@ -478,7 +478,7 @@ requires-dist = [{ name = "ma-core", editable = "packages/core" }]
 
 [[package]]
 name = "ma-claude"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/claude" }
 dependencies = [
     { name = "claude-agent-sdk" },
@@ -495,7 +495,7 @@ requires-dist = [
 
 [[package]]
 name = "ma-commands"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/commands" }
 dependencies = [
     { name = "ma-core" },
@@ -506,7 +506,7 @@ requires-dist = [{ name = "ma-core", editable = "packages/core" }]
 
 [[package]]
 name = "ma-config"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/config" }
 dependencies = [
     { name = "ma-core" },
@@ -517,7 +517,7 @@ requires-dist = [{ name = "ma-core", editable = "packages/core" }]
 
 [[package]]
 name = "ma-context"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/context" }
 dependencies = [
     { name = "ma-core" },
@@ -528,7 +528,7 @@ requires-dist = [{ name = "ma-core", editable = "packages/core" }]
 
 [[package]]
 name = "ma-core"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "opentelemetry-api" },
@@ -539,7 +539,7 @@ requires-dist = [{ name = "opentelemetry-api", specifier = ">=1.45.2" }]
 
 [[package]]
 name = "ma-credentials"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/credentials" }
 dependencies = [
     { name = "ma-core" },
@@ -550,7 +550,7 @@ requires-dist = [{ name = "ma-core", editable = "packages/core" }]
 
 [[package]]
 name = "ma-durable"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/durable" }
 dependencies = [
     { name = "ma-runtime" },
@@ -561,7 +561,7 @@ requires-dist = [{ name = "ma-runtime", editable = "packages/runtime" }]
 
 [[package]]
 name = "ma-durable-subagents"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/durable_subagents" }
 dependencies = [
     { name = "ma-subagents" },
@@ -572,7 +572,7 @@ requires-dist = [{ name = "ma-subagents", editable = "packages/subagents" }]
 
 [[package]]
 name = "ma-fake"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/fake" }
 dependencies = [
     { name = "ma-core" },
@@ -583,7 +583,7 @@ requires-dist = [{ name = "ma-core", editable = "packages/core" }]
 
 [[package]]
 name = "ma-guardrail"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/guardrail" }
 dependencies = [
     { name = "ma-core" },
@@ -594,7 +594,7 @@ requires-dist = [{ name = "ma-core", editable = "packages/core" }]
 
 [[package]]
 name = "ma-harness"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/harness" }
 dependencies = [
     { name = "ma-core" },
@@ -609,7 +609,7 @@ requires-dist = [
 
 [[package]]
 name = "ma-history"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/history" }
 dependencies = [
     { name = "ma-core" },
@@ -620,7 +620,7 @@ requires-dist = [{ name = "ma-core", editable = "packages/core" }]
 
 [[package]]
 name = "ma-jobs"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/jobs" }
 dependencies = [
     { name = "ma-core" },
@@ -631,7 +631,7 @@ requires-dist = [{ name = "ma-core", editable = "packages/core" }]
 
 [[package]]
 name = "ma-local"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/local" }
 dependencies = [
     { name = "ma-core" },
@@ -642,7 +642,7 @@ requires-dist = [{ name = "ma-core", editable = "packages/core" }]
 
 [[package]]
 name = "ma-mcp"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/mcp" }
 dependencies = [
     { name = "ma-core" },
@@ -657,7 +657,7 @@ requires-dist = [
 
 [[package]]
 name = "ma-plugin"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/plugin" }
 dependencies = [
     { name = "ma-acp" },
@@ -682,7 +682,7 @@ requires-dist = [
 
 [[package]]
 name = "ma-process"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/process" }
 dependencies = [
     { name = "cloudpickle" },
@@ -697,7 +697,7 @@ requires-dist = [
 
 [[package]]
 name = "ma-prompt"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/prompt" }
 dependencies = [
     { name = "ma-core" },
@@ -708,7 +708,7 @@ requires-dist = [{ name = "ma-core", editable = "packages/core" }]
 
 [[package]]
 name = "ma-questions"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/questions" }
 dependencies = [
     { name = "ma-core" },
@@ -719,7 +719,7 @@ requires-dist = [{ name = "ma-core", editable = "packages/core" }]
 
 [[package]]
 name = "ma-runtime"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/runtime" }
 dependencies = [
     { name = "ma-core" },
@@ -730,7 +730,7 @@ requires-dist = [{ name = "ma-core", editable = "packages/core" }]
 
 [[package]]
 name = "ma-selection"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/selection" }
 dependencies = [
     { name = "ma-core" },
@@ -741,7 +741,7 @@ requires-dist = [{ name = "ma-core", editable = "packages/core" }]
 
 [[package]]
 name = "ma-subagents"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/subagents" }
 dependencies = [
     { name = "ma-core" },
@@ -752,7 +752,7 @@ requires-dist = [{ name = "ma-core", editable = "packages/core" }]
 
 [[package]]
 name = "ma-terminal"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/terminal" }
 dependencies = [
     { name = "ma-core" },
@@ -763,7 +763,7 @@ requires-dist = [{ name = "ma-core", editable = "packages/core" }]
 
 [[package]]
 name = "ma-tools"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/tools" }
 dependencies = [
     { name = "jsonschema" },
@@ -816,7 +816,7 @@ wheels = [
 
 [[package]]
 name = "modular-agent"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx2" },
@@ -905,7 +905,7 @@ dev = [
 
 [[package]]
 name = "modular-agent-standard"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/ma" }
 dependencies = [
     { name = "modular-agent" },

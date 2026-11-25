@@ -1,6 +1,6 @@
 {
   "name": "@modular-agent/plugin-wire",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "MIT",
   "type": "module",
   "main": "dist/src/index.js",
@@ -15,10 +15,10 @@
     "ma-plugin": "dist/src/serve-cli.js"
   },
   "dependencies": {
-    "@modular-agent/env-local": "0.2.0",
-    "@modular-agent/harness": "0.2.0",
-    "@modular-agent/runtime-durable": "0.2.0",
-    "@modular-agent/runtime-transient": "0.2.0",
+    "@modular-agent/env-local": "0.3.0",
+    "@modular-agent/harness": "0.3.0",
+    "@modular-agent/runtime-durable": "0.3.0",
+    "@modular-agent/runtime-transient": "0.3.0",
     "ws": "^8.23.0"
   },
   "devDependencies": {

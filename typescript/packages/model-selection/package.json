@@ -1,6 +1,6 @@
 {
   "name": "@modular-agent/model-selection",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "MIT",
   "type": "module",
   "main": "dist/src/index.js",
@@ -12,6 +12,6 @@
     }
   },
   "dependencies": {
-    "@modular-agent/harness": "0.2.0"
+    "@modular-agent/harness": "0.3.0"
   }
 }

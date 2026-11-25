@@ -1,6 +1,6 @@
 [project]
 name = "modular-agent"
-version = "0.2.0"
+version = "0.3.0"
 license = "MIT"
 requires-python = ">=3.13,<3.14"
 dependencies = [
@@ -78,7 +78,7 @@ ma-acp = { workspace = true }
 modular-agent-standard = { workspace = true }
 
 [dependency-groups]
-dev = ["mypy>=1.17", "pytest>=9.2.0", "pytest-asyncio>=1.5.0", "ruff>=0.17.5", "opentelemetry-sdk==1.45.2", "modular-agent-standard==0.2.0"]
+dev = ["mypy>=1.17", "pytest>=9.2.0", "pytest-asyncio>=1.5.0", "ruff>=0.17.5", "opentelemetry-sdk==1.45.2", "modular-agent-standard==0.3.0"]
 
 [tool.mypy]
 strict = true

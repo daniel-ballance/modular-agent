@@ -24,7 +24,7 @@ See [Terminology](../GLOSSARY.md#the-system) under Settled.
 
 ### Waiting for an answer
 
-**Choice: question deadlines.** Use finite deadlines for unattended work. Today an approval needs a present answerer and cannot outlast the turn, even if [AG-UI](bindings/agui.md#interrupts-and-frontend-tools) closes the exchange. For 0.2.0, [ADR 0034](adr/0034-approvals-that-wait.md#owner-decisions) proposes an opt-in: leave the unstarted call open until an operator-bounded deadline, then check a late allow in a continuation. Live-only remains the default. See [Question lifecycle](contracts.md#questions).
+**Choice: question deadlines.** Use finite deadlines for unattended work. An approval needs a present answerer unless the session opts in to [approvals that wait](contracts.md#approvals-that-wait) ([ADR 0034](adr/0034-approvals-that-wait.md)): the unstarted call stays open until an operator-bounded deadline, and a continuation checks a late allow. Live-only is the default. See [Question lifecycle](contracts.md#questions).
 
 ### Input during a turn
 

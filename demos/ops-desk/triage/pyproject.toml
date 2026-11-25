@@ -1,6 +1,6 @@
 [project]
 name = "ops-desk-triage"
-version = "0.2.0"
+version = "0.3.0"
 requires-python = ">=3.13,<3.14"
 dependencies = ["modular-agent", "opentelemetry-sdk==1.45.2", "opentelemetry-exporter-otlp-proto-http==1.45.2"]
 

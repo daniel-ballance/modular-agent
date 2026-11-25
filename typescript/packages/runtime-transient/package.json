@@ -1,10 +1,10 @@
 {
   "name": "@modular-agent/runtime-transient",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "MIT",
   "type": "module",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
   "exports": { ".": { "types": "./dist/src/index.d.ts", "import": "./dist/src/index.js" } },
-  "dependencies": { "@modular-agent/harness": "0.2.0" }
+  "dependencies": { "@modular-agent/harness": "0.3.0" }
 }
