@@ -186,7 +186,7 @@ test("a handed-over MA_CHECK_SLOT_FD must name an open descriptor", (t) => {
   }
 });
 
-test("a handed-over MA_CHECK_SLOT_FD must hold the lock on its slot file", (t) => {
+test("a handed-over MA_CHECK_SLOT_FD is accepted only while some process holds its slot file's lock", (t) => {
   const box = machine(t, 1);
   const open = String.raw`dir="$HOME/.cache/ma-std-tmp/slots"; mkdir -p "$dir"; exec 7>"$dir/slot-2.lock"`;
   const unlocked = box.run(`${open}; take_check_slots 1`, { MA_CHECK_SLOT_HELD: "1", MA_CHECK_SLOT_FD: "7" });
@@ -194,6 +194,9 @@ test("a handed-over MA_CHECK_SLOT_FD must hold the lock on its slot file", (t) =
   assert.match(unlocked.stderr, /MA_CHECK_SLOT_FD 7 is open on .*slot-2\.lock, but no process holds its lock/);
   const locked = box.run(`${open}; flock -n 7 || exit 9; take_check_slots 1`, { MA_CHECK_SLOT_HELD: "1", MA_CHECK_SLOT_FD: "7" });
   assert.equal(locked.status, 0, locked.stderr);
+  const broken = box.run(`${open}; flock() { echo "flock: command not found" >&2; return 127; }; take_check_slots 1`, { MA_CHECK_SLOT_HELD: "1", MA_CHECK_SLOT_FD: "7" });
+  assert.equal(broken.status, 2, broken.stderr);
+  assert.match(broken.stderr, /but no process holds its lock/);
 });
 
 test("check.sh waits for a slot before its first step", async (t) => {

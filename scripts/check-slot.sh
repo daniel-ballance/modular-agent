@@ -20,14 +20,14 @@ check_slot_file() { # fd count dir: print the slot file among the first count th
   return 1
 }
 
-check_slot_locked() { # file: succeed if some process holds the lock on file
-  local probe
+check_slot_locked() { # file: succeed only if flock reports that some process holds the lock on file
+  local probe status
   exec {probe}<"$1" || return 1
-  if flock -n "$probe"; then
-    exec {probe}<&-
-    return 1
-  fi
+  flock -n -E 75 "$probe"
+  status=$?
   exec {probe}<&-
+  # 75 is flock's answer for a held lock; 0 took the lock, and anything else is an error, not a holder.
+  (( status == 75 ))
 }
 
 take_check_slots() { # count: wait until this many slots are free, then hold them
