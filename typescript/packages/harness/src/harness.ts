@@ -77,6 +77,7 @@ export class Harness {
 	});
 
 	private readonly commandWork: Commands = new Commands({
+		session: id => this.session(id),
 		lifecycle: () => this.lifecycle,
 		erasure: () => this.erasure,
 		authority: () => this.authority,
@@ -97,7 +98,7 @@ export class Harness {
 
 	private readonly authority: SessionAuthority = new SessionAuthority({
 		tenants: () => this.tenants,
-		historyCommit: () => this.historyCommit,
+		commit: (...args) => this.commit(...args),
 		hooks: () => this.hooks,
 		emit: (...args) => this.emit(...args),
 		questions: () => this.questions,
@@ -118,6 +119,7 @@ export class Harness {
 	});
 
 	private readonly historyCommit: HistoryCommit = new HistoryCommit({
+		commit: (...args) => this.commit(...args),
 		erasure: () => this.erasure,
 		receiptOperation: () => this.receiptOperation,
 		receipts: () => this.receipts,
@@ -134,7 +136,10 @@ export class Harness {
 
 	private readonly lifecycle: SessionLifecycle = new SessionLifecycle({
 		sessions: () => this.sessions,
-		rebuildReservations: (...args) => this.workReservations.rebuildReservations(...args),
+		rebuildReservations: () => this.rebuildReservations(),
+		session: id => this.session(id),
+		startSession: options => this.startSession(options),
+		canDiscoverSession: (...args) => this.canDiscoverSession(...args),
 		use: (...args) => this.use(...args),
 		erasure: () => this.erasure,
 		tenants: () => this.tenants,
@@ -146,7 +151,7 @@ export class Harness {
 		workRights: (...args) => this.authority.workRights(...args),
 		activePlugins: (...args) => this.activePlugins(...args),
 		observeCommit: (...args) => this.historyCommit.observeCommit(...args),
-		commit: (...args) => this.historyCommit.commit(...args),
+		commit: (...args) => this.commit(...args),
 		hooks: () => this.hooks,
 		emit: (...args) => this.emit(...args),
 		questions: () => this.questions,
@@ -170,7 +175,7 @@ export class Harness {
 
 	private readonly admission: InputAdmission = new InputAdmission({
 		intersectRights,
-		session: (...args) => this.lifecycle.session(...args),
+		session: (...args) => this.session(...args),
 		erasure: () => this.erasure,
 		checkWriter: (...args) => this.lifecycle.checkWriter(...args),
 		checkScopedWork: (...args) => this.authority.checkScopedWork(...args),
@@ -180,7 +185,7 @@ export class Harness {
 		newId: (...args) => this.newId(...args),
 		hooks: () => this.hooks,
 		receiptOperation: () => this.receiptOperation,
-		commit: (...args) => this.historyCommit.commit(...args),
+		commit: (...args) => this.commit(...args),
 		rightsOf: (...args) => this.authority.rightsOf(...args),
 		rejectUnknownModel: () => this.rejectUnknownModel,
 		providerFor: (...args) => this.providerFor(...args),
@@ -198,7 +203,7 @@ export class Harness {
 
 	private readonly turns: TurnExecution = new TurnExecution({
 		intersectRights,
-		commit: (...args) => this.historyCommit.commit(...args),
+		commit: (...args) => this.commit(...args),
 		newId: (...args) => this.newId(...args),
 		problem: (...args) => this.problem(...args),
 		reservations: () => this.reservations,
@@ -237,7 +242,7 @@ export class Harness {
 		checkScopedWork: (...args) => this.authority.checkScopedWork(...args),
 		checkWriter: (...args) => this.lifecycle.checkWriter(...args),
 		hooks: () => this.hooks,
-		commit: (...args) => this.historyCommit.commit(...args),
+		commit: (...args) => this.commit(...args),
 		emit: (...args) => this.emit(...args),
 		reserveCall: (...args) => this.workReservations.reserveCall(...args),
 		step: (...args) => this.turns.step(...args),
@@ -254,7 +259,7 @@ export class Harness {
 		environmentFor: (...args) => this.environment.environmentFor(...args),
 		projectOf: (...args) => this.projectOf(...args),
 		checkWriter: (...args) => this.lifecycle.checkWriter(...args),
-		commit: (...args) => this.historyCommit.commit(...args),
+		commit: (...args) => this.commit(...args),
 		erasure: () => this.erasure,
 		agentName: () => this.agentName,
 		emit: (...args) => this.emit(...args),
@@ -282,8 +287,8 @@ export class Harness {
 		replacements: () => this.replacements,
 		intersectRights,
 		load: (...args) => this.load(...args),
-		session: (...args) => this.lifecycle.session(...args),
-		withConnectionActor: (...args) => this.authority.withConnectionActor(...args),
+		session: (...args) => this.session(...args),
+		withConnectionActor: (...args) => this.withConnectionActor(...args),
 		actorRights: (...args) => this.authority.actorRights(...args),
 		sessions: () => this.sessions,
 		hooks: () => this.hooks,
@@ -293,7 +298,7 @@ export class Harness {
 		admit: (...args) => this.admission.admit(...args),
 		checkWriter: (...args) => this.lifecycle.checkWriter(...args),
 		newId: (...args) => this.newId(...args),
-		commit: (...args) => this.historyCommit.commit(...args),
+		commit: (...args) => this.commit(...args),
 		workRights: (...args) => this.authority.workRights(...args),
 		agentName: () => this.agentName,
 		maybeContinueOpenCalls: (...args) => this.turns.maybeContinueOpenCalls(...args),
@@ -315,7 +320,7 @@ export class Harness {
 		maybeContinueOpenCalls: (...args) => this.turns.maybeContinueOpenCalls(...args),
 		use: (...args) => this.use(...args),
 		home: () => this.home,
-		commit: (...args) => this.historyCommit.commit(...args),
+		commit: (...args) => this.commit(...args),
 		toolWork: () => this.tools.toolWork,
 		questionsOutlastTurns: () => this.questionsOutlastTurns,
 		approvalPass: () => this.tools.approvalPass,
@@ -338,7 +343,7 @@ export class Harness {
 		reservations: () => this.reservations,
 		newId: (...args) => this.newId(...args),
 		reserveJob: (...args) => this.workReservations.reserveJob(...args),
-		commit: (...args) => this.historyCommit.commit(...args),
+		commit: (...args) => this.commit(...args),
 		toolWork: () => this.tools.toolWork,
 		emit: (...args) => this.emit(...args),
 		problem: (...args) => this.problem(...args),
@@ -373,7 +378,7 @@ export class Harness {
 		originalWorkAllows: (s, approval) => this.authority.originalWorkAllows(s, approval),
 		exitTurn: work => this.authority.turnAuthority.exit(work),
 		exitConnection: work => connectionRights.exit(work),
-		commit: (...args) => this.historyCommit.commit(...args),
+		commit: (...args) => this.commit(...args),
 		commitNow: (...args) => this.historyCommit.commitNow(...args),
 		interfaces: () => this.questions.interfaces(),
 		emitAnswer: (...args) => this.questions.emitAnswer(...args),
@@ -505,7 +510,7 @@ export class Harness {
 			name: pluginName,
 			project: this.project,
 			home: this.home,
-			projectOf: (sessionId) => this.projectOf(this.lifecycle.session(sessionId)),
+			projectOf: (sessionId) => this.projectOf(this.session(sessionId)),
 			provide: (capability, impl) => this.provide(pluginName, capability, impl),
 			use: <T>(capability: string) => this.use<T>(capability),
 			useAll: <T>(capability: string) => this.useAll<T>(capability),
@@ -549,79 +554,79 @@ export class Harness {
 			},
 			commands: () => [...this.commandTable].map(([name, c]) => ({ name, description: c.description, plugin: c.plugin })),
 			runCommand: (sessionId, line, actorId) => this.commandWork.runCommand(sessionId, line, actorId),
-			startSession: (options) => this.lifecycle.startSession(options),
-			openSession: (id, actor, prepare, operation) => this.lifecycle.openSession(id, actor, prepare, operation),
-			join: (sessionId, actor, grantedBy) => this.authority.join(this.lifecycle.session(sessionId), actor, grantedBy, pluginName),
+			startSession: (options) => this.startSession(options),
+			openSession: (id, actor, prepare, operation) => this.openSession(id, actor, prepare, operation),
+			join: (sessionId, actor, grantedBy) => this.authority.join(this.session(sessionId), actor, grantedBy, pluginName),
 			leave: async (sessionId, actorId, requestedBy) => {
-				const s = this.lifecycle.session(sessionId);
+				const s = this.session(sessionId);
 				if (requestedBy && requestedBy !== actorId) this.authority.requireAuthority(s, requestedBy, "grant");
 				if (!s.actors.has(actorId)) throw new Error(`Actor ${actorId} is not part of this session`);
-				await this.historyCommit.commit(s, [{ kind: "actorLeft", writer: pluginName, actorId, modelVisible: false, data: { actorId } }]);
+				await this.commit(s, [{ kind: "actorLeft", writer: pluginName, actorId, modelVisible: false, data: { actorId } }]);
 				await this.hooks.observe("session.leave", { sessionId, actorId, requestedBy });
 				this.emit(s, "session.left", { actorId }, pluginName, { actorId });
 				await this.questions.closeRevokedWaits(s);
 				await this.approvals.reconcileApprovals(s);
 			},
-			presentActors: (id) => this.questions.presentActors(this.lifecycle.session(id)),
+			presentActors: (id) => this.questions.presentActors(this.session(id)),
 			presenceChanged: (id) => { const s = this.sessions.get(id); if (s) {
 				this.approvals.presenceChanged(s);
 				void this.questions.closeUnanswerable(s).catch(e => this.problem("harness", "close unanswerable wait", e));
 			} },
 			listSessions: async (project) => (await this.use<HistoryStore>("history-store")?.list(project === null ? undefined : { project: project ?? this.project })) ?? [],
 			sessionSummary: (id, viewer) => this.lifecycle.sessionSummary(id, viewer),
-			forkSession: (sessionId, entryId) => this.lifecycle.forkSession(sessionId, entryId),
-			closeSession: (id, actorId, delegatedBy, authority) => this.lifecycle.closeSession(id, actorId, delegatedBy, authority),
+			forkSession: (sessionId, entryId) => this.forkSession(sessionId, entryId),
+			closeSession: (id, actorId, delegatedBy, authority) => this.closeSession(id, actorId, delegatedBy, authority),
 			session: (id) => {
-				const s = this.lifecycle.session(id);
+				const s = this.session(id);
 				return { id: s.id, project: s.meta.project, tenant: s.tenant, settings: { ...s.settings }, position: s.position, busy: s.isBusy(), actors: [...s.actors.values()].map((a) => ({ ...a, authority: this.authority.rightsOf(s, a.id) })), ephemeral: s.ephemeral };
 			},
 			input: (sessionId, options) => this.admission.input(sessionId, options),
 			withdraw: (sessionId, inputId) => this.admission.withdraw(sessionId, inputId),
 			proposals: (id, actorId) => {
-				const s = this.lifecycle.session(id);
+				const s = this.session(id);
 				this.authority.requireAuthority(s, actorId, "watch");
 				return [...s.proposals.values()].map((q) => ({ inputId: q.id, actorId: q.actorId, content: q.content, time: q.time! }));
 			},
-			withdrawProposal: (id, inputId, actorId, delegatedBy) => this.admission.withdrawProposal(this.lifecycle.session(id), inputId, actorId, delegatedBy),
+			withdrawProposal: (id, inputId, actorId, delegatedBy) => this.admission.withdrawProposal(this.session(id), inputId, actorId, delegatedBy),
 			cancel: (sessionId) => this.admission.cancel(sessionId),
-			releaseInput: (id, inputId, when, actorId, declined) => this.admission.releaseInput(this.lifecycle.session(id), inputId, when, actorId, declined),
-			recoveredInput: (id) => this.lifecycle.session(id).recoveredInput,
+			releaseInput: (id, inputId, when, actorId, declined) => this.admission.releaseInput(this.session(id), inputId, when, actorId, declined),
+			recoveredInput: (id) => this.session(id).recoveredInput,
 			waitForIdle: (sessionId) => this.admission.waitForIdle(sessionId),
 			moveTo: (sessionId, entryId, options) => this.lifecycle.moveTo(sessionId, entryId, options ?? {}, pluginName),
-			setSetting: (sessionId, key, value, actorId) => this.setSetting(this.lifecycle.session(sessionId), key, value, pluginName, actorId),
-			setLimit: (id, rights, actorId) => this.authority.setLimit(this.lifecycle.session(id), rights, actorId, pluginName),
-			tenant: (id) => this.authority.tenantInfo(this.lifecycle.session(id)),
-			checkPending: id => this.erasure.admitHistory(this.lifecycle.session(id)),
+			setSetting: (sessionId, key, value, actorId) => this.setSetting(this.session(sessionId), key, value, pluginName, actorId),
+			setLimit: (id, rights, actorId) => this.authority.setLimit(this.session(id), rights, actorId, pluginName),
+			tenant: (id) => this.authority.tenantInfo(this.session(id)),
+			checkPending: id => this.erasure.admitHistory(this.session(id)),
 			readHistory: (id, options) => this.inspectHistory(id, options ?? {}, entries => entries),
 			inspectHistory: (id, options, inspect) => this.inspectHistory(id, options, inspect),
 			history: (sessionId, options) => {
-				const s = this.lifecycle.session(sessionId);
+				const s = this.session(sessionId);
 				this.authority.checkScopedWork(s, "watch");
 				if (this.erasure.httpErasure() && !s.provisional) throw failure("unavailable", "HTTP history requires asynchronous readHistory");
 				this.erasure.checkPending(s);
 				return options?.all ? s.order.map((id) => s.entries.get(id)!) : s.branch();
 			},
-			append: async (sessionId, draft) => (await this.historyCommit.commit(this.lifecycle.session(sessionId), [{ ...draft, writer: draft.writer ?? pluginName }], true))[0],
-			transaction: (sessionId, fn) => this.historyCommit.transaction(this.lifecycle.session(sessionId), pluginName, fn),
-			erase: (sessionId, ids, actorId) => this.erasure.erase(this.lifecycle.session(sessionId), ids, actorId, pluginName),
-			tools: (sessionId) => this.toolDefinitions(sessionId ? this.lifecycle.session(sessionId) : undefined),
-			callTool: (sessionId, call) => this.tools.callTool(this.lifecycle.session(sessionId), { ...call, id: call.id ?? this.newId() }),
-			ask: (sessionId, request) => this.questions.ask(this.lifecycle.session(sessionId), request, pluginName),
-			deferTool: (id, turnId, question) => this.questions.deferTool(this.lifecycle.session(id), turnId, question, pluginName),
-			refreshApprovals: id => this.approvals.reconcileApprovals(this.lifecycle.session(id)),
+			append: async (sessionId, draft) => (await this.commit(this.session(sessionId), [{ ...draft, writer: draft.writer ?? pluginName }], true))[0],
+			transaction: (sessionId, fn) => this.historyCommit.transaction(this.session(sessionId), pluginName, fn),
+			erase: (sessionId, ids, actorId) => this.erasure.erase(this.session(sessionId), ids, actorId, pluginName),
+			tools: (sessionId) => this.toolDefinitions(sessionId ? this.session(sessionId) : undefined),
+			callTool: (sessionId, call) => this.tools.callTool(this.session(sessionId), { ...call, id: call.id ?? this.newId() }),
+			ask: (sessionId, request) => this.questions.ask(this.session(sessionId), request, pluginName),
+			deferTool: (id, turnId, question) => this.questions.deferTool(this.session(id), turnId, question, pluginName),
+			refreshApprovals: id => this.approvals.reconcileApprovals(this.session(id)),
 			registerApprovalRoute: policy => this.approvals.registerRoute(policy),
-			presentApproval: (id, requestId, delivery) => this.approvals.presentApproval(this.lifecycle.session(id), requestId, delivery),
-			submitAnswer: (sessionId, answer, handle) => this.questions.submitAnswer(this.lifecycle.session(sessionId), answer, handle),
+			presentApproval: (id, requestId, delivery) => this.approvals.presentApproval(this.session(id), requestId, delivery),
+			submitAnswer: (sessionId, answer, handle) => this.questions.submitAnswer(this.session(sessionId), answer, handle),
 			openRequests: (sessionId) => {
-				const s = this.lifecycle.session(sessionId);
+				const s = this.session(sessionId);
 				return [...[...s.requests.values()].map((r) => r.request), ...this.questions.waitingRequests(s)];
 			},
-			startJob: (sessionId, options) => this.jobWork.startJob(this.lifecycle.session(sessionId), options, pluginName),
-			workActors: (id) => this.authority.workActors(this.lifecycle.session(id)),
+			startJob: (sessionId, options) => this.jobWork.startJob(this.session(sessionId), options, pluginName),
+			workActors: (id) => this.authority.workActors(this.session(id)),
 			workJobs: (id) => { const work = this.authority.turnAuthority.getStore(); return work?.sessionId === id ? [...work.jobs] : []; },
-			workMay: (id, right, actors, jobs) => this.authority.workRights(this.lifecycle.session(id), actors, jobs).includes(right),
+			workMay: (id, right, actors, jobs) => this.authority.workRights(this.session(id), actors, jobs).includes(right),
 			jobTrace: (id, jobId) => {
-				const s = this.lifecycle.session(id);
+				const s = this.session(id);
 				return s.jobs.get(jobId)?.job.plugin === pluginName ? this.jobWork.jobSpans.get(s)?.get(jobId) : undefined;
 			},
 			findJob: (jobId) => {
@@ -631,21 +636,21 @@ export class Harness {
 				return undefined;
 			},
 			onJobCancel: (handler) => this.jobWork.jobCancels.set(pluginName, handler),
-			unfinishedJobs: (id) => this.jobWork.runningJobs(this.lifecycle.session(id)).filter(({ job }) => job.plugin === pluginName),
+			unfinishedJobs: (id) => this.jobWork.runningJobs(this.session(id)).filter(({ job }) => job.plugin === pluginName),
 			resumeJob: (id, jobId) => {
-				const s = this.lifecycle.session(id);
+				const s = this.session(id);
 				const found = this.jobWork.runningJobs(s).find((j) => j.job.id === jobId && j.job.plugin === pluginName);
 				if (!found) throw new Error(`No unfinished job ${jobId} of ${pluginName}`);
 				return s.jobs.get(jobId)?.handle ?? this.jobWork.jobHandle(s, found);
 			},
 			jobs: (id) => {
-				const s = this.lifecycle.session(id);
+				const s = this.session(id);
 				const cleanup = new Set(s.order.map((eid) => s.entries.get(eid)!).filter((e) => e.kind === "jobCleanupUnconfirmed").map((e) => e.jobId));
 				return this.jobWork.runningJobs(s).map(({ job }) => ({ ...job, state: cleanup.has(job.id) ? "cleanupUnconfirmed" as const : s.jobs.has(job.id) ? "running" as const : "unfinished" as const }));
 			},
-			cancelJob: (sessionId, jobId) => this.jobWork.cancelJob(this.lifecycle.session(sessionId), jobId),
-			sessionInterruption: id => this.lifecycle.session(id).interruption.signal,
-			follow: (sessionId, options, listener) => this.follow(this.lifecycle.session(sessionId), options, listener),
+			cancelJob: (sessionId, jobId) => this.jobWork.cancelJob(this.session(sessionId), jobId),
+			sessionInterruption: id => this.session(id).interruption.signal,
+			follow: (sessionId, options, listener) => this.follow(this.session(sessionId), options, listener),
 			flushOutput: async (id, recipient) => {
 				const followers = [...(this.sessions.get(id)?.followers ?? [])].filter((f) => f.recipient === recipient);
 				await Promise.all(followers.map((f) => f.idle()));
@@ -664,9 +669,9 @@ export class Harness {
 				if (overflow && type === "reply") throw failure("result_too_large", "Reply exceeds the gate limit");
 				return out;
 			},
-			declaration: (sessionId) => this.declarations.declaration(sessionId ? this.lifecycle.session(sessionId) : undefined),
+			declaration: (sessionId) => this.declaration(sessionId ? this.session(sessionId) : undefined),
 			gatedHistory: async (sessionId, options) => {
-				const s = this.lifecycle.session(sessionId);
+				const s = this.session(sessionId);
 				await this.erasure.reconcilePending(s);
 				const freshness = await this.erasure.admitHistory(s);
 				const entries = options.all ? s.order.map((id) => s.entries.get(id)!) : s.branch();
@@ -680,7 +685,7 @@ export class Harness {
 				if (await this.erasure.admitHistory(s) !== freshness) throw failure("unavailable", "Erasure changed the history view");
 				return out;
 			},
-			modelAccess: (sessionId) => this.modelAccess(this.lifecycle.session(sessionId)),
+			modelAccess: (sessionId) => this.modelAccess(this.session(sessionId)),
 			config: () => this.use<Configuration>("configuration")?.plugin(pluginName) ?? {},
 		};
 	}
@@ -853,13 +858,13 @@ export class Harness {
 	private async setSetting(s: Session, key: string, value: unknown, writer: string, actorId?: string): Promise<void> {
 		if (actorId) this.authority.requireAuthority(s, actorId, "settings");
 		if (this.settingsDuringTurn === "refused" && s.isBusy()) throw Object.assign(new Error("Cannot change settings during a turn"), { code: "busy" });
-		await this.historyCommit.commit(s, [{ kind: "setting", writer, actorId, modelVisible: false, data: { key, value } }]);
+		await this.commit(s, [{ kind: "setting", writer, actorId, modelVisible: false, data: { key, value } }]);
 		if (s.hasWaitingApprovals) await this.approvals.reconcileApprovals(s);
 		this.emit(s, "setting.changed", { key, value, appliesFrom: this.settingsDuringTurn === "nextTurn" ? "next turn" : "next step" }, writer, { actorId });
 	}
 
 	private inspectHistory<T>(id: string, options: { all?: boolean }, inspect: (entries: HistoryEntry[]) => T): T | Promise<T> {
-		const s = this.lifecycle.session(id);
+		const s = this.session(id);
 		const snapshot = () => {
 			this.authority.checkScopedWork(s, "watch");
 			return inspect(options.all ? s.order.map(id => s.entries.get(id)!) : s.branch());

@@ -4,7 +4,6 @@ import { failure, turnLimit } from "./failure.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { activeOperation, conversation, observeInference, type Operation } from "./telemetry.js";
 import { Reservations, resourceBytes } from "./reservations.js";
-import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { modelView, withoutProviderData } from "./view.js";
 import { HookRegistry } from "./hooks.js";

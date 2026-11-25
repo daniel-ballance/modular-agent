@@ -1,5 +1,4 @@
 import type { Tenant } from "./harness.js";
-import { HistoryCommit } from "./history-commit.js";
 import { actorJoined } from "./session-lifecycle.js";
 import { InputAdmission } from "./input-admission.js";
 import { TurnExecution, tokenCount } from "./turn-execution.js";
@@ -14,7 +13,7 @@ import { type WaitingApproval } from "./waiting-approval.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { HookRegistry } from "./hooks.js";
 import { Session } from "./session.js";
-import { type Actor, type AgentEvent, type Authority, type HistoryEntry, type HistoryStore, type Usage } from "./types.js";
+import type { Actor, AgentEvent, Authority, EntryDraft, HistoryEntry, HistoryStore, Usage } from "./types.js";
 
 export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"];
 
@@ -22,7 +21,7 @@ export interface TenantInfo { tenant: string | null; rights: Authority[] | null;
 
 interface SessionAuthorityOperations {
 	tenants(): ReadonlyMap<string, Tenant>;
-	historyCommit(): Pick<HistoryCommit, "commit">;
+	commit(s: Session, drafts: EntryDraft[]): Promise<HistoryEntry[]>;
 	hooks(): HookRegistry;
 	emit(session: string | Session, type: string, data: any, source: string, ids?: Partial<AgentEvent>): void;
 	questions(): Pick<InputRequests, "closeRevokedWaits">;
@@ -49,7 +48,7 @@ export class SessionAuthority {
 		this.requireAuthority(s, grantedBy, "grant");
 		const beyond = actor.authority.filter((a) => !ALL_AUTHORITY.includes(a) || !this.rightsOf(s, grantedBy).includes(a));
 		if (beyond.length) throw Object.assign(new Error(`${grantedBy} can't grant ${beyond.join(", ")}`), { code: "forbidden" });
-		await this.operations.historyCommit().commit(s, [actorJoined(actor, writer, grantedBy)]);
+		await this.operations.commit(s, [actorJoined(actor, writer, grantedBy)]);
 		await this.operations.hooks().observe("session.join", { sessionId: s.id, actorId: actor.id, actor, grantedBy });
 		this.operations.emit(s, "session.joined", { actor }, writer, { actorId: actor.id });
 		await this.operations.questions().closeRevokedWaits(s);
@@ -124,7 +123,7 @@ export class SessionAuthority {
 			this.requireAuthority(s, actorId, "administer");
 			const effective = (s.actors.get(actorId)?.authority ?? []).filter((r) => s.tenant === undefined || this.operations.tenants().get(s.tenant)?.rights.includes(r));
 			if ((rights ?? ALL_AUTHORITY).some((right) => !effective.includes(right))) throw Object.assign(new Error("A limit cannot give a right the administrator lacks"), { code: "forbidden" });
-			await this.operations.historyCommit().commit(s, [{ kind: "limit", writer, actorId, modelVisible: false, data: { rights: rights === null ? null : [...new Set(rights)] } }]);
+			await this.operations.commit(s, [{ kind: "limit", writer, actorId, modelVisible: false, data: { rights: rights === null ? null : [...new Set(rights)] } }]);
 			await this.operations.questions().closeRevokedWaits(s);
 			await this.operations.approvals().reconcileApprovals(s);
 		});

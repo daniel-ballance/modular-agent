@@ -8,7 +8,6 @@ import { waitingApprovals } from "./waiting-approval.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { conversation, currentSpan, safeName, startOperation, toolAttributes, withTrace } from "./telemetry.js";
 import { Follower } from "./output-gate.js";
-import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { HookRegistry } from "./hooks.js";
 import { INTERFACE_HANDOFF, INTERFACE_SOURCE, handoffRecords, isJson, sameDefinition, validReportContent, type HandoffData, type HandoffRecord, type InterfaceToolConnection, type InterfaceToolConnectionOptions, type InterfaceToolHandoff, type InterfaceToolReceipt, type InterfaceToolReport, type InterfaceToolSource } from "./interface-tools.js";
@@ -62,7 +61,8 @@ interface InterfaceToolRoutesOperations {
 export class InterfaceToolRoutes {
 	constructor(private readonly operations: InterfaceToolRoutesOperations) {}
 
-	offerScope = new AsyncLocalStorage<symbol>();
+	// The offer follows its input through the queue, even if another Interface becomes present.
+	readonly offerScope = new AsyncLocalStorage<symbol>();
 
 	queuedOffers = new WeakMap<QueuedInput, symbol>();
 

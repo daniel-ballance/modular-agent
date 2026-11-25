@@ -69,7 +69,6 @@ export class ToolDispatch {
 
 	gateSignal = new AsyncLocalStorage<AbortSignal | undefined>();
 
-	/** Run one tool call. Hook points are applied by whoever owns the operation. */
 	async executeTool(s: Session, call: ToolCall, signal: AbortSignal, turnId?: string, state?: TurnState,
 		nested?: NestedDispatch, directAllowance?: DispatchAllowance): Promise<ToolResult | (ToolPending & { callId: string })> {
 		const wait = waitingApprovals(s).get(call.id);
@@ -403,7 +402,6 @@ export class ToolDispatch {
 		return pass(first.value, true);
 	}
 
-	/** A tool call a UI or plugin starts. The same checks apply. */
 	async callTool(s: Session, call: ToolCall): Promise<ToolResult> {
 		await this.operations.erasure().reconcilePending(s);
 		if (s.provisional) throw failure("invalid_request", "Session has not admitted its first input");

@@ -19,6 +19,7 @@ const PROVISIONAL_SETUP = new Set(["tenant", "actorJoined", "actorLeft", "settin
 const STANDARD_ENTRY_KINDS = new Set("limit tenant actorJoined actorLeft setting inputAccepted inputHandedBack input turnStart modelRequest response toolStarted toolPending modular-agent.interfaceHandoff toolResult inputRequest secretAnswerAccepted inputAnswer resultFeedback modular-agent.stepAfter turnEnd summary position erasure jobStarted jobCleanupUnconfirmed jobEnded plugins".split(" "));
 
 interface HistoryCommitOperations {
+	commit(s: Session, drafts: EntryDraft[], pluginRecord?: boolean): Promise<HistoryEntry[]>;
 	erasure(): Pick<SessionErasure, "pendingRegistry">;
 	receiptOperation(): Pick<AsyncLocalStorage<ReceiptOperation>, "getStore">;
 	receipts(): RunReceipts;
@@ -225,7 +226,7 @@ export class HistoryCommit {
 			input: (o) => inputs.push(o),
 		});
 		// Nothing is kept unless the callback finished; then the entries are kept together.
-		if (drafts.length) await this.commit(s, drafts, true);
+		if (drafts.length) await this.operations.commit(s, drafts, true);
 		for (const o of inputs) await this.operations.admission().input(s.id, o);
 	}
 }

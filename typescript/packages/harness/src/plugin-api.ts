@@ -13,7 +13,6 @@ export interface Plugin {
 	name: string;
 	/** Global plugins load; project plugins load only once the project is trusted. */
 	origin?: "global" | "project";
-	/** A plugin this one deliberately replaces. */
 	replaces?: string;
 	/** How to load this plugin somewhere else, such as in another process: a module, the factory it exports, and options it can take as JSON. */
 	spawn?: { module: string; export: string; options?: unknown };
@@ -42,7 +41,6 @@ export interface JobHandle {
 	id: string;
 	started: boolean;
 	ready: Promise<unknown>;
-	/** The entry that recorded this job starting. */
 	startEntryId?: string;
 	progress(content: ContentPart[] | string): void;
 	/** Finish the job. Its result enters the session as input and may start a turn, unless report is false. */
@@ -73,32 +71,26 @@ export interface ListingViewer {
 	present?: readonly string[];
 }
 
-/** Everything a plugin can do. A plugin can do nothing else. */
 export interface PluginApi {
 	readonly name: string;
 	readonly project: string;
 	readonly home: string;
 	/** The project a session works on: its "cwd" setting, or the Harness's project. */
 	projectOf(sessionId: string): string;
-	// capabilities
 	provide(capability: string, implementation: unknown): void;
 	use<T>(capability: string): T | undefined;
 	useAll<T>(capability: string): T[];
-	// hook points
 	defineHook(name: string, rule: HookRule): void;
 	on(hook: string, handler: (payload: any) => unknown, order?: HandlerOrder, options?: { stream?: boolean }): () => void;
 	/** Run a hook point this plugin owns, by its rule. */
 	runHook<T = any>(hook: string, payload: any): Promise<T>;
 	/** Report a problem that didn't stop this plugin, such as a server it couldn't reach. Hosts and Interfaces see it. */
 	reportProblem(where: string, error: unknown): void;
-	// events
 	onEvent(listener: (event: AgentEvent) => void, options?: { raw?: boolean }): () => void;
 	emit(sessionId: string, type: string, data?: any, ids?: Partial<AgentEvent>): void;
-	// commands
 	registerCommand(name: string, command: Command): void;
 	commands(): { name: string; description: string; plugin: string }[];
 	runCommand(sessionId: string, line: string, actorId: string): Promise<string | void>;
-	// sessions
 	startSession(options?: SessionStartOptions): Promise<string>;
 	openSession(id: string, actor?: Actor, prepare?: SessionPrepare, operation?: "load" | "resume"): Promise<string>;
 	/** Add an actor to a session. Its authority must be within the authority of whoever grants it. */
@@ -113,7 +105,6 @@ export interface PluginApi {
 	closeSession(sessionId: string, actorId?: string, delegatedBy?: string, authority?: readonly Authority[]): Promise<void>;
 	sessionInterruption(sessionId: string): AbortSignal;
 	session(sessionId: string): { id: string; project: string; tenant?: string; settings: Record<string, unknown>; position: string | null; busy: boolean; actors: Actor[]; ephemeral: boolean };
-	// input and turns
 	input(sessionId: string, options: InputOptions): Promise<InputReceipt & { handled?: boolean; output?: string }>;
 	withdraw(sessionId: string, inputId: string): QueuedInput | undefined;
 	proposals(sessionId: string, actorId: string): { inputId: string; actorId: string; content: ContentPart[]; time: number }[];
@@ -126,7 +117,6 @@ export interface PluginApi {
 	setSetting(sessionId: string, key: string, value: unknown, actorId?: string): Promise<void>;
 	setLimit(sessionId: string, rights: Authority[] | null, actorId: string): Promise<void>;
 	tenant(sessionId: string): Promise<TenantInfo>;
-	// history
 	history(sessionId: string, options?: { all?: boolean }): HistoryEntry[];
 	checkPending(sessionId: string): Promise<string>;
 	readHistory(sessionId: string, options?: { all?: boolean }): HistoryEntry[] | Promise<HistoryEntry[]>;
@@ -137,10 +127,8 @@ export interface PluginApi {
 	append(sessionId: string, draft: EntryDraft): Promise<HistoryEntry>;
 	transaction(sessionId: string, fn: (tx: Transaction) => void | Promise<void>): Promise<void>;
 	erase(sessionId: string, entryIds: string[], actorId: string): Promise<ErasureReport>;
-	// tools
 	tools(sessionId?: string): ToolDefinition[];
 	callTool(sessionId: string, call: Omit<ToolCall, "id"> & { id?: string }): Promise<ToolResult>;
-	// actors
 	ask(sessionId: string, request: InputRequestDraft): Promise<Answer>;
 	deferTool(sessionId: string, turnId: string | undefined, question: InputRequestDraft): Promise<{ pending: string } | { refuse: string } | undefined>;
 	refreshApprovals(sessionId: string): Promise<void>;
@@ -148,7 +136,6 @@ export interface PluginApi {
 	presentApproval(sessionId: string, requestId: string, delivery: ApprovalDelivery): Promise<boolean>;
 	submitAnswer(sessionId: string, answer: Answer, handle?: object): Promise<{ accepted: boolean; reason?: string }>;
 	openRequests(sessionId: string): InputRequest[];
-	// jobs
 	/** Start a job. It is recorded in the history, with the plugin's own detail. */
 	startJob(sessionId: string, options: JobStart): JobHandle;
 	workActors(sessionId: string): string[];
@@ -163,13 +150,11 @@ export interface PluginApi {
 	resumeJob(sessionId: string, jobId: string, cancelling?: boolean): JobHandle;
 	jobs(sessionId: string): (Omit<Job, "state"> & { state: "running" | "unfinished" | "cleanupUnconfirmed" })[];
 	cancelJob(sessionId: string, jobId: string): Promise<void>;
-	// following along
 	follow(sessionId: string, options: FollowOptions, listener: (event: AgentEvent) => unknown): (() => void) & { idle(): Promise<void> };
 	flushOutput(sessionId: string, recipient: string): Promise<void>;
 	gateOutput<T>(sessionId: string, recipient: string, type: string, data: T, ids?: Pick<AgentEvent, "turnId" | "stepId" | "toolCallId">): Promise<T | undefined>;
 	declaration(sessionId?: string): Declaration;
 	modelAccess(sessionId: string): ModelAccess | undefined;
-	// settings
 	config(): Record<string, unknown>;
 }
 

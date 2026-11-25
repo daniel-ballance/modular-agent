@@ -28,6 +28,9 @@ import { type Actor, type AgentEvent, type Authority, type Configuration, type E
 interface SessionLifecycleOperations {
 	sessions(): Map<string, Session>;
 	rebuildReservations(): Promise<void>;
+	session(id: string): Session;
+	startSession(options?: SessionStartOptions): Promise<string>;
+	canDiscoverSession(id: string, actor: Actor, severalActors: boolean): Promise<boolean>;
 	use<T>(capability: string): T | undefined;
 	erasure(): Pick<SessionErasure, "admitHistory" | "pendingRegistry" | "loadTombstones" | "reconcilePending">;
 	tenants(): ReadonlyMap<string, Tenant>;
@@ -231,7 +234,7 @@ export class SessionLifecycle {
 			return id;
 		}
 		if (opened) {
-			if (actor && !await this.canDiscoverSession(id, actor, true)) throw failure("forbidden", "Session is inaccessible");
+			if (actor && !await this.operations.canDiscoverSession(id, actor, true)) throw failure("forbidden", "Session is inaccessible");
 			await this.retireSession(opened);
 		}
 		const store = this.operations.use<HistoryStore>("history-store");
@@ -421,7 +424,7 @@ export class SessionLifecycle {
 	}
 
 	async forkSession(sessionId: string, entryId: string): Promise<string> {
-		const s = this.session(sessionId);
+		const s = this.operations.session(sessionId);
 		await this.operations.erasure().admitHistory(s);
 		if (s.erasing) throw failure("busy", "Erasure is in progress");
 		// Forking at unfinished work would copy work that is still running: refused.
@@ -429,7 +432,7 @@ export class SessionLifecycle {
 		const target = s.entries.get(entryId);
 		if (!target) throw Object.assign(new Error("Unknown fork target"), { code: "not_found" });
 		if (target.kind === "position") throw Object.assign(new Error("Cannot fork a position record"), { code: "conflict" });
-		const id = await this.startSession({ forkFrom: { sessionId, entryId }, actor: [...s.actors.values()][0] });
+		const id = await this.operations.startSession({ forkFrom: { sessionId, entryId }, actor: [...s.actors.values()][0] });
 		await this.suspendSession(id);
 		return id;
 	}
@@ -541,7 +544,7 @@ export class SessionLifecycle {
 	}
 
 	async moveTo(sessionId: string, entryId: string, options: { rewind?: boolean; actorId?: string }, writer: string): Promise<{ outOfReach?: string[] }> {
-		const s = this.session(sessionId);
+		const s = this.operations.session(sessionId);
 		return this.operations.admission().admit(s, async () => {
 			if (options.actorId) this.operations.requireAuthority(s, options.actorId, "settings");
 			if (s.provisional) throw failure("invalid_request", "Session has not admitted its first input");

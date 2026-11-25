@@ -68,6 +68,7 @@ export class ApprovalReconciliation {
 		return this.operations.exitConnection(() => this.unchanged(w, route, w.decision!.actorId!));
 	}
 
+	// Only a model gate can park an approval. A tool's own question is live-only.
 	async parkApproval(s: Session, draft: InputRequestDraft & { coversNested?: true }, binding: ApprovalBinding, gate: { response: HistoryEntry; actorId: string; turnId: string }): Promise<Answer> {
 		const call = { ...binding.call, actorId: gate.actorId };
 		const denied = (reason: string): Answer => ({ requestId: "", actorId: "harness", declined: true, reason });

@@ -14,7 +14,8 @@ import { Session } from "./session.js";
 import { type ModelAccess, type Provider, type ToolDefinition, type WorkingEnvironment } from "./types.js";
 
 interface CommandsOperations {
-	lifecycle(): Pick<SessionLifecycle, "session" | "checkWriter">;
+	lifecycle(): Pick<SessionLifecycle, "checkWriter">;
+	session(id: string): Session;
 	erasure(): Pick<SessionErasure, "reconcilePending" | "checkPending">;
 	authority(): Pick<SessionAuthority, "requireAuthority" | "rightsOf" | "turnAuthority">;
 	commandTable(): ReadonlyMap<string, Command & { plugin: string }>;
@@ -38,7 +39,7 @@ export class Commands {
 	async runCommand(sessionId: string, line: string, actorId: string): Promise<string | void> {
 		const match = /^\/(\S+)\s?([\s\S]*)$/.exec(line.trimStart());
 		if (!match) throw failure("invalid_params", "Not a command");
-		const session = this.operations.lifecycle().session(sessionId);
+		const session = this.operations.session(sessionId);
 		await this.operations.erasure().reconcilePending(session);
 		this.operations.authority().requireAuthority(session, actorId, "input");
 		this.operations.lifecycle().checkWriter(session);

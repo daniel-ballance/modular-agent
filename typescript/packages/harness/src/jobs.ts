@@ -4,7 +4,6 @@ import { failure } from "./failure.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { conversation, startOperation, type Operation } from "./telemetry.js";
 import { Reservations, resourceBytes } from "./reservations.js";
-import { resolve } from "node:path";
 import { type QueuedInput, Session } from "./session.js";
 import { type AgentEvent, type Authority, type ContentPart, type EntryDraft, type HistoryEntry, type Job, type JobState, type ToolCall, text, zeroUsage } from "./types.js";
 

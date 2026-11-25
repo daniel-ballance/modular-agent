@@ -1,4 +1,3 @@
-import { resolve } from "node:path";
 import { Session } from "./session.js";
 import { type WorkingEnvironment } from "./types.js";
 
@@ -10,7 +9,6 @@ interface SessionEnvironmentOperations {
 export class SessionEnvironment {
 	constructor(private readonly operations: SessionEnvironmentOperations) {}
 
-	/** The working environment, in the session's project when it has its own. */
 	scopedEnvironment(env: WorkingEnvironment, check: () => void): WorkingEnvironment {
 		return new Proxy(env, {
 			get: (environment, key) => {
