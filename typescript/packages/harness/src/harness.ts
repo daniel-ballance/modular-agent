@@ -1,3 +1,4 @@
+import { HistoryCommit } from "./history-commit.js";
 import { SessionLifecycle, actorJoined } from "./session-lifecycle.js";
 import { InputAdmission } from "./input-admission.js";
 import { TurnExecution, recordedSnapshot, tokenCount, inputActors } from "./turn-execution.js";
@@ -258,6 +259,21 @@ interface TenantInfo { tenant: string | null; rights: Authority[] | null; tokens
  * It runs no turns, calls no models and runs no tools itself.
  */
 export class Harness {
+	private readonly historyCommit: HistoryCommit = new HistoryCommit({
+		erasure: () => this.erasure,
+		receiptOperation: () => this.receiptOperation,
+		receipts: () => this.receipts,
+		newId: (...args) => this.newId(...args),
+		now: (...args) => this.now(...args),
+		approvals: () => this.approvals,
+		reservations: () => this.reservations,
+		lifecycle: () => this.lifecycle,
+		use: (...args) => this.use(...args),
+		questions: () => this.questions,
+		emit: (...args) => this.emit(...args),
+		admission: () => this.admission,
+	});
+
 	private readonly lifecycle: SessionLifecycle = new SessionLifecycle({
 		sessions: () => this.sessions,
 		rebuildReservations: (...args) => this.rebuildReservations(...args),
@@ -271,8 +287,8 @@ export class Harness {
 		turnAuthority: () => this.turnAuthority,
 		workRights: (...args) => this.workRights(...args),
 		activePlugins: (...args) => this.activePlugins(...args),
-		observeCommit: (...args) => this.observeCommit(...args),
-		commit: (...args) => this.commit(...args),
+		observeCommit: (...args) => this.historyCommit.observeCommit(...args),
+		commit: (...args) => this.historyCommit.commit(...args),
 		hooks: () => this.hooks,
 		emit: (...args) => this.emit(...args),
 		questions: () => this.questions,
@@ -306,7 +322,7 @@ export class Harness {
 		newId: (...args) => this.newId(...args),
 		hooks: () => this.hooks,
 		receiptOperation: () => this.receiptOperation,
-		commit: (...args) => this.commit(...args),
+		commit: (...args) => this.historyCommit.commit(...args),
 		rightsOf: (...args) => this.rightsOf(...args),
 		rejectUnknownModel: () => this.rejectUnknownModel,
 		providerFor: (...args) => this.providerFor(...args),
@@ -324,7 +340,7 @@ export class Harness {
 
 	private readonly turns: TurnExecution = new TurnExecution({
 		intersectRights,
-		commit: (...args) => this.commit(...args),
+		commit: (...args) => this.historyCommit.commit(...args),
 		newId: (...args) => this.newId(...args),
 		problem: (...args) => this.problem(...args),
 		reservations: () => this.reservations,
@@ -363,7 +379,7 @@ export class Harness {
 		checkScopedWork: (...args) => this.checkScopedWork(...args),
 		checkWriter: (...args) => this.lifecycle.checkWriter(...args),
 		hooks: () => this.hooks,
-		commit: (...args) => this.commit(...args),
+		commit: (...args) => this.historyCommit.commit(...args),
 		emit: (...args) => this.emit(...args),
 		reserveCall: (...args) => this.reserveCall(...args),
 		step: (...args) => this.turns.step(...args),
@@ -380,7 +396,7 @@ export class Harness {
 		environmentFor: (...args) => this.environmentFor(...args),
 		projectOf: (...args) => this.projectOf(...args),
 		checkWriter: (...args) => this.lifecycle.checkWriter(...args),
-		commit: (...args) => this.commit(...args),
+		commit: (...args) => this.historyCommit.commit(...args),
 		erasure: () => this.erasure,
 		agentName: () => this.agentName,
 		emit: (...args) => this.emit(...args),
@@ -419,7 +435,7 @@ export class Harness {
 		admit: (...args) => this.admission.admit(...args),
 		checkWriter: (...args) => this.lifecycle.checkWriter(...args),
 		newId: (...args) => this.newId(...args),
-		commit: (...args) => this.commit(...args),
+		commit: (...args) => this.historyCommit.commit(...args),
 		workRights: (...args) => this.workRights(...args),
 		agentName: () => this.agentName,
 		maybeContinueOpenCalls: (...args) => this.turns.maybeContinueOpenCalls(...args),
@@ -429,7 +445,7 @@ export class Harness {
 		recordedTurnRights: (...args) => this.turns.recordedTurnRights(...args),
 		turnAuthority: () => this.turnAuthority,
 		toolAfter: (...args) => this.tools.toolAfter(...args),
-		commitNow: (...args) => this.commitNow(...args),
+		commitNow: (...args) => this.historyCommit.commitNow(...args),
 		emit: (...args) => this.emit(...args),
 	});
 
@@ -441,7 +457,7 @@ export class Harness {
 		maybeContinueOpenCalls: (...args) => this.turns.maybeContinueOpenCalls(...args),
 		use: (...args) => this.use(...args),
 		home: () => this.home,
-		commit: (...args) => this.commit(...args),
+		commit: (...args) => this.historyCommit.commit(...args),
 		toolWork: () => this.tools.toolWork,
 		questionsOutlastTurns: () => this.questionsOutlastTurns,
 		approvalPass: () => this.tools.approvalPass,
@@ -464,7 +480,7 @@ export class Harness {
 		reservations: () => this.reservations,
 		newId: (...args) => this.newId(...args),
 		reserveJob: (...args) => this.reserveJob(...args),
-		commit: (...args) => this.commit(...args),
+		commit: (...args) => this.historyCommit.commit(...args),
 		toolWork: () => this.tools.toolWork,
 		emit: (...args) => this.emit(...args),
 		problem: (...args) => this.problem(...args),
@@ -500,8 +516,8 @@ export class Harness {
 		originalWorkAllows: (s, approval) => this.originalWorkAllows(s, approval),
 		exitTurn: work => this.turnAuthority.exit(work),
 		exitConnection: work => connectionRights.exit(work),
-		commit: (...args) => this.commit(...args),
-		commitNow: (...args) => this.commitNow(...args),
+		commit: (...args) => this.historyCommit.commit(...args),
+		commitNow: (...args) => this.historyCommit.commitNow(...args),
 		interfaces: () => this.questions.interfaces(),
 		emitAnswer: (...args) => this.questions.emitAnswer(...args),
 		toolDisposition: (...args) => this.tools.toolDisposition(...args),
@@ -532,7 +548,7 @@ export class Harness {
 			checkWriter: s => this.lifecycle.checkWriter(s),
 			hasUnfinishedJobs: s => this.jobWork.runningJobs(s).length > 0,
 			invalidateErasedHandoffs: (...args) => this.interfaceTools.invalidateErasedHandoffs(...args),
-			commitNow: (...args) => this.commitNow(...args),
+			commitNow: (...args) => this.historyCommit.commitNow(...args),
 			write: (s, write) => this.lifecycle.write(s, write),
 			emit: (...args) => this.emit(...args),
 			loadInto: id => this.lifecycle.loadInto(id),
@@ -686,7 +702,7 @@ export class Harness {
 				const s = this.lifecycle.session(sessionId);
 				if (requestedBy && requestedBy !== actorId) this.requireAuthority(s, requestedBy, "grant");
 				if (!s.actors.has(actorId)) throw new Error(`Actor ${actorId} is not part of this session`);
-				await this.commit(s, [{ kind: "actorLeft", writer: pluginName, actorId, modelVisible: false, data: { actorId } }]);
+				await this.historyCommit.commit(s, [{ kind: "actorLeft", writer: pluginName, actorId, modelVisible: false, data: { actorId } }]);
 				await this.hooks.observe("session.leave", { sessionId, actorId, requestedBy });
 				this.emit(s, "session.left", { actorId }, pluginName, { actorId });
 				await this.questions.closeRevokedWaits(s);
@@ -731,8 +747,8 @@ export class Harness {
 				this.erasure.checkPending(s);
 				return options?.all ? s.order.map((id) => s.entries.get(id)!) : s.branch();
 			},
-			append: async (sessionId, draft) => (await this.commit(this.lifecycle.session(sessionId), [{ ...draft, writer: draft.writer ?? pluginName }], true))[0],
-			transaction: (sessionId, fn) => this.transaction(this.lifecycle.session(sessionId), pluginName, fn),
+			append: async (sessionId, draft) => (await this.historyCommit.commit(this.lifecycle.session(sessionId), [{ ...draft, writer: draft.writer ?? pluginName }], true))[0],
+			transaction: (sessionId, fn) => this.historyCommit.transaction(this.lifecycle.session(sessionId), pluginName, fn),
 			erase: (sessionId, ids, actorId) => this.erasure.erase(this.lifecycle.session(sessionId), ids, actorId, pluginName),
 			tools: (sessionId) => this.toolDefinitions(sessionId ? this.lifecycle.session(sessionId) : undefined),
 			callTool: (sessionId, call) => this.tools.callTool(this.lifecycle.session(sessionId), { ...call, id: call.id ?? this.newId() }),
@@ -1116,202 +1132,13 @@ export class Harness {
 
 	/** Commit drafts to the session. All are kept, or none are. */
 	commit(s: Session, drafts: EntryDraft[], pluginRecord = false, guard?: () => boolean | Promise<boolean>): Promise<HistoryEntry[]> {
-		// A suspended session's process has stopped: nothing more is recorded for it here.
-		const run = s.committing.then(() => {
-			const registry = this.erasure.pendingRegistry();
-			const write = async () => guard && !await guard() ? [] : this.commitNow(s, drafts, pluginRecord);
-			return registry ? registry.exclusive(write) : write();
-		});
-		s.committing = run.catch(() => undefined);
-		return run;
-	}
-
-	private async observeCommit<T>(s: Session, count: number, work: (span: Operation) => Promise<T>): Promise<T> {
-		const span = startOperation("modular_agent.history.commit", { ...conversation(s.id), "modular_agent.history.entry.count": count });
-		try {
-			const result = await span.run(() => work(span));
-			span.set("modular_agent.history.commit.status", s.suspended ? "failed" : "committed");
-			return result;
-		} catch (error) {
-			const status = (error as { code?: string }).code === "lost" ? "uncertain" : "failed";
-			span.set("modular_agent.history.commit.status", status);
-			span.fail(status);
-			throw error;
-		} finally { span.end(); }
-	}
-
-	private commitNow(s: Session, drafts: EntryDraft[], pluginRecord = false): Promise<HistoryEntry[]> {
-		return this.observeCommit(s, drafts.length, span => this.commitBatch(s, drafts, pluginRecord, span));
-	}
-
-	private async commitBatch(s: Session, drafts: EntryDraft[], pluginRecord: boolean, span: Operation): Promise<HistoryEntry[]> {
-		s.interruption.signal.throwIfAborted();
-		if (s.suspended) return [];
-		const op = this.receiptOperation.getStore();
-		const first = !pluginRecord && op && !op.bound && op.thread === s.id && drafts.find(d => d.actorId === op.actor && (
-			d.kind === "inputAccepted" && (d.data as {key?:string})?.key === op.key ||
-			d.kind === "inputAnswer" && op.answers.has(d.requestId!) || d.kind === "toolResult" && op.reports.has(d.toolCallId!)));
-		if (first) {
-			if (s.entries.has(op.id)) throw failure("conflict", "Run already accepted");
-			// Use the operation's own entry as the commit witness, including in a mixed batch.
-			const previous = first.id;
-			first.id = op.id;
-			if (previous) for (const d of drafts) if (d.sources) d.sources = d.sources.map(id => id === previous ? op.id : id);
-			this.receipts.reserve(s.id, op.id);
-		}
-		const firstAdmission = s.provisional && drafts.some(d => d.kind === "inputAccepted");
-		if (s.provisional && !firstAdmission && drafts.some(d => !PROVISIONAL_SETUP.has(d.kind))) {
-			throw failure("invalid_request", "Session has not admitted its first input");
-		}
-		let position = s.position;
-		const entries: HistoryEntry[] = drafts.map((d) => {
-			const entry: HistoryEntry = { ...d, id: d.id ?? this.newId(), parentId: position, sessionId: s.id, time: this.now() };
-			if (entry.kind === "setting") {
-				const setting = normalizeSetting(entry.data as { key: string; value: unknown });
-				const changes = setting.key === "settings" ? setting.value : { [setting.key]: setting.value };
-				if (changes && typeof changes === "object" && "approvalWait" in changes) {
-					if (!this.approvals.maximum) throw failure("not_supported", "Waiting approvals are not enabled");
-					if (changes.approvalWait !== "live" && changes.approvalWait !== "untilDeadline") throw failure("invalid_params", "Invalid approvalWait setting");
-				}
-				entry.data = setting;
-			}
-			if (pluginRecord && (entry.kind === "toolPending" || entry.kind === INTERFACE_HANDOFF)) throw failure("invalid_request", "Only the Harness records pending calls");
-			if (entry.kind === "inputRequest") {
-				const request = (entry.data as { request?: InputRequest })?.request;
-				if (pluginRecord && request?.coversNested !== undefined) throw failure("invalid_request", "Only the approval gate sets coverage");
-				if (request?.approvalWait !== undefined) {
-					if (pluginRecord || request.approvalWait !== "untilDeadline") throw failure("invalid_request", "Only the approval gate can park a call");
-				}
-				if (request?.timeLimitMs !== undefined) {
-					request.deadlineAt = entry.time + request.timeLimitMs;
-					if (!Number.isSafeInteger(request.timeLimitMs) || request.timeLimitMs < 0 || !Number.isSafeInteger(request.deadlineAt)) throw failure("invalid_request", "Unrepresentable question deadline");
-				}
-			}
-			if (pluginRecord && entry.kind === "inputAnswer" && entry.data && typeof entry.data === "object" && "approvalView" in entry.data) throw failure("invalid_request", "Only the Harness can attest to delivery");
-			if (!STANDARD_ENTRY_KINDS.has(entry.kind) && !entry.kind.includes(".")) entry.kind = `${entry.writer}.${entry.kind}`;
-			position = entry.kind === "position" ? (entry.data as { to: string | null }).to : entry.id;
-			return entry;
-		});
-		const bytes = entries.reduce((sum, entry) => sum + resourceBytes(entry), 0);
-		const bounds = this.reservations.limits;
-		if (entries.some(entry => resourceBytes(entry) > bounds.entryBytes) || bytes > bounds.batchBytes) {
-			const error = failure("result_too_large", "History batch or entry exceeds the write size limit");
-			if (entries.some(entry => ["turnEnd", "toolResult", "inputAnswer", "inputHandedBack", "jobEnded", "response"].includes(entry.kind))) {
-				this.lifecycle.interruptSession(s, "commitFailed", error);
-				throw failure("lost", "Required history record did not fit");
-			}
-			throw error;
-		}
-		const inputId = entries.find(e => e.kind === "input" && e.turnId)?.inputId;
-		const allocations = entries.map(entry => {
-			const control = !pluginRecord && ["actorLeft", "limit", "erasure", "jobCleanupUnconfirmed", "inputHandedBack"].includes(entry.kind);
-			const keys: string[] = [];
-			const add = (kind: string, id: string | undefined) => { if (id) keys.push(`${kind}:${id}`); };
-			if (!pluginRecord) switch (entry.kind) {
-				case "input": case "inputAccepted": case "inputHandedBack":
-					add("input", inputIdOf(entry)); add("job", entry.jobId); break;
-				case "turnStart": add("input", inputId); add("turn", entry.turnId); break;
-				case TURN_TRACE: add("turn", entry.turnId); break;
-				case "turnEnd":
-					add("turn", entry.turnId); break;
-				case "modelRequest": case "response":
-					add("model", entry.stepId); break;
-				case "jobStarted": case "jobEnded": case "jobCleanupUnconfirmed":
-					add("job", entry.jobId); break;
-				case "toolStarted": case "toolResult": case "toolPending": case INTERFACE_HANDOFF: case "modular-agent.nestedCall":
-					add("call", entry.toolCallId); break;
-				case "inputRequest": case "inputAnswer": case "secretAnswerAccepted":
-					add("question", entry.requestId); break;
-			}
-			return { bytes: resourceBytes(entry), keys, control };
-		});
-		if (!this.reservations.writeBatch(s, allocations)) {
-			const error = failure("busy", "No history capacity for this write");
-			if (entries.some(e => ["turnEnd", "toolResult", "inputAnswer", "inputHandedBack", "jobEnded", "response"].includes(e.kind))) {
-				this.lifecycle.interruptSession(s, "commitFailed", error);
-				throw failure("lost", "Required history write could not be covered");
-			}
-			throw error;
-		}
-		if (firstAdmission) {
-			const store = this.use<HistoryStore>("history-store")!;
-			const initial = [...s.order.map(id => s.entries.get(id)!), ...entries];
-			span.set("modular_agent.history.entry.count", initial.length);
-			await this.lifecycle.write(s, async () => {
-				await store.create(s.meta);
-				await store.openForWriting(s.id);
-				s.provisional = false;
-				this.lifecycle.watchWriter(s);
-				this.lifecycle.checkWriter(s);
-				await store.append(s.id, initial);
-			});
-		} else if (!s.ephemeral && !s.provisional) {
-			const store = this.use<HistoryStore>("history-store");
-			await this.lifecycle.write(s, () => store?.append(s.id, entries));
-		}
-		if (first) op.bound = true;
-		for (const e of entries) {
-			// Attribute a closure to revocation only when this authority commit
-			// actually removes the last eligible route. Presence changes are not grants.
-			const routes = ["actorJoined","actorLeft","limit"].includes(e.kind)
-				? this.questions.recordedOpenRequests(s).map(r => [r,this.questions.hasQuestionRoute(s,r)] as const) : [];
-			s.apply(e);
-			for (const [r, previouslyEligible] of routes) {
-				if (this.questions.hasQuestionRoute(s,r)) s.revokedQuestions.delete(r.id);
-				else if (previouslyEligible) s.revokedQuestions.add(r.id);
-			}
-			if (e.kind === "inputAnswer") s.revokedQuestions.delete(e.requestId!);
-			const inputId = inputIdOf(e);
-			if (inputId && e.kind === "input" && e.turnId) {
-				const unit = this.reservations.limits.settlementBytes;
-				if (this.reservations.has(s, `turn:${e.turnId}`)) this.reservations.release(s, `input:${inputId}`);
-				else this.reservations.transfer(s, `input:${inputId}`, `turn:${e.turnId}`, { storageBytes: 2 * unit });
-			}
-			if (inputId && e.kind === "inputHandedBack") this.reservations.release(s, `input:${inputId}`);
-			if (e.kind === "turnEnd" && e.turnId) {
-				this.reservations.release(s, `turn:${e.turnId}`);
-				for (const id of s.order) {
-					const kept = s.entries.get(id)!;
-					if (kept.turnId === e.turnId && kept.stepId && kept.kind === "modelRequest") this.reservations.release(s, `model:${kept.stepId}`);
-				}
-			}
-			if (e.kind === "response" && e.stepId) this.reservations.release(s, `model:${e.stepId}`);
-			if (e.kind === "inputAnswer" && e.requestId) this.reservations.release(s, `question:${e.requestId}`);
-			if (e.kind === "toolResult" && e.toolCallId) this.reservations.release(s, `call:${e.toolCallId}`);
-			const ids = { turnId: e.turnId, stepId: e.stepId, toolCallId: e.toolCallId, actorId: e.actorId };
-			this.emit(s, "entry.added", e, e.writer, ids);
-			if (e.kind === "response" && e.turnId && e.modelVisible && e.message?.role === "assistant") {
-				for (const part of e.message.content.filter(isToolCall)) {
-					const call: ToolCall = { id: part.id, name: part.name, input: part.arguments, startedBy: "model", stepId: e.stepId };
-					this.emit(s, "tool.call", { call }, e.writer, { ...ids, toolCallId: part.id });
-				}
-			}
-			if (e.kind === "toolResult" && e.toolCallId && e.message?.role === "toolResult") {
-				const data = e.data as { status?: string; value?: unknown } | undefined;
-				this.emit(s, "tool.result.delivered", { status: data?.status ?? "failed", content: e.message.content,
-					...(data && "value" in data ? { value: data.value } : {}) }, "harness", ids);
-			}
-		}
-		return entries;
-	}
-
-	private async transaction(s: Session, plugin: string, fn: (tx: Transaction) => void | Promise<void>): Promise<void> {
-		const drafts: EntryDraft[] = [];
-		const inputs: InputOptions[] = [];
-		await fn({
-			append: (d) => drafts.push({ ...d, writer: d.writer ?? plugin }),
-			setSetting: (key, value, actorId) => drafts.push({ kind: "setting", writer: plugin, actorId, modelVisible: false, data: { key, value } }),
-			input: (o) => inputs.push(o),
-		});
-		// Nothing is kept unless the callback finished; then the entries are kept together.
-		if (drafts.length) await this.commit(s, drafts, true);
-		for (const o of inputs) await this.admission.input(s.id, o);
+		return this.historyCommit.commit(s, drafts, pluginRecord, guard);
 	}
 
 	private async setSetting(s: Session, key: string, value: unknown, writer: string, actorId?: string): Promise<void> {
 		if (actorId) this.requireAuthority(s, actorId, "settings");
 		if (this.settingsDuringTurn === "refused" && s.isBusy()) throw Object.assign(new Error("Cannot change settings during a turn"), { code: "busy" });
-		await this.commit(s, [{ kind: "setting", writer, actorId, modelVisible: false, data: { key, value } }]);
+		await this.historyCommit.commit(s, [{ kind: "setting", writer, actorId, modelVisible: false, data: { key, value } }]);
 		if (s.hasWaitingApprovals) await this.approvals.reconcileApprovals(s);
 		this.emit(s, "setting.changed", { key, value, appliesFrom: this.settingsDuringTurn === "nextTurn" ? "next turn" : "next step" }, writer, { actorId });
 	}
@@ -1335,7 +1162,7 @@ export class Harness {
 		this.requireAuthority(s, grantedBy, "grant");
 		const beyond = actor.authority.filter((a) => !ALL_AUTHORITY.includes(a) || !this.rightsOf(s, grantedBy).includes(a));
 		if (beyond.length) throw Object.assign(new Error(`${grantedBy} can't grant ${beyond.join(", ")}`), { code: "forbidden" });
-		await this.commit(s, [actorJoined(actor, writer, grantedBy)]);
+		await this.historyCommit.commit(s, [actorJoined(actor, writer, grantedBy)]);
 		await this.hooks.observe("session.join", { sessionId: s.id, actorId: actor.id, actor, grantedBy });
 		this.emit(s, "session.joined", { actor }, writer, { actorId: actor.id });
 		await this.questions.closeRevokedWaits(s);
@@ -1411,7 +1238,7 @@ export class Harness {
 			this.requireAuthority(s, actorId, "administer");
 			const effective = (s.actors.get(actorId)?.authority ?? []).filter((r) => s.tenant === undefined || this.tenants.get(s.tenant)?.rights.includes(r));
 			if ((rights ?? ALL_AUTHORITY).some((right) => !effective.includes(right))) throw Object.assign(new Error("A limit cannot give a right the administrator lacks"), { code: "forbidden" });
-			await this.commit(s, [{ kind: "limit", writer, actorId, modelVisible: false, data: { rights: rights === null ? null : [...new Set(rights)] } }]);
+			await this.historyCommit.commit(s, [{ kind: "limit", writer, actorId, modelVisible: false, data: { rights: rights === null ? null : [...new Set(rights)] } }]);
 			await this.questions.closeRevokedWaits(s);
 			await this.approvals.reconcileApprovals(s);
 		});
@@ -1667,10 +1494,6 @@ export function parseModel(value: unknown): { provider: string; id: string } | u
 	if (value && typeof value === "object" && "provider" in value && "id" in value) return value as { provider: string; id: string };
 	return undefined;
 }
-
-const PROVISIONAL_SETUP = new Set(["tenant", "actorJoined", "actorLeft", "setting", "limit", "plugins", "harness.parentAuthority"]);
-
-const STANDARD_ENTRY_KINDS = new Set("limit tenant actorJoined actorLeft setting inputAccepted inputHandedBack input turnStart modelRequest response toolStarted toolPending modular-agent.interfaceHandoff toolResult inputRequest secretAnswerAccepted inputAnswer resultFeedback modular-agent.stepAfter turnEnd summary position erasure jobStarted jobCleanupUnconfirmed jobEnded plugins".split(" "));
 
 /** Wait for work against one writer generation, independently of event delivery. */
 export async function untilAborted<T>(signal: AbortSignal, work: () => Promise<T>): Promise<T> {
