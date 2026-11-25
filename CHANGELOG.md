@@ -15,6 +15,14 @@ The four SDKs and `ma` share one project version. The [SDK specification](docs/s
   - The AG-UI kit has 48 cases (14 new) and the plugin kit a named-callers transcript.
 - **Fixed:** the ops desk station could hand a `start` the address of an agent process that was still stopping.
 - **Fixed:** in TypeScript, a shell command could start before its cleanup watcher was registered, so a `kill -9` at that moment could leave it running.
+- **AG-UI approval interrupts carry `metadata["modular-agent.approvalCall"]`** (`{ name, input }`, the exact gated call), so a client can show the call without parsing the prompt. Required; the ops desk renders the coder's script from it.
+- **No backward compatibility before 1.0** ([CONTRIBUTING](CONTRIBUTING.md)). Removed, in the spec, kits and all four SDKs and `ma`:
+  - the `openai-codex` and `xai` provider IDs, their login migration and saved-session translation (use `chatgpt` and `grok`);
+  - legacy history associations (only envelope `inputId`, `requestId`, `continuesTurnId`), pre-atomic job-report repair, old replay records, missing-authority defaults, sourceless fork prefixes, the old actor kind and failed-position records;
+  - the plugin trace-context handshake (context rides on each operation) and the plugin binding's separate data selector;
+  - Rust's and Python's pre-binding ACP dispatchers, the TypeScript Claude sidecar wrapper, start-up migrations of erasure registries, fallback credential files, guessed lease intervals, and `MA_HOME`.
+  Old private state is refused, not converted. Kit cases that skipped when a feature was absent now fail; every build's fixtures declare every feature.
+- **Fixed, found by the stricter kits:** TypeScript and Go re-showed a waiting approval that the output gate had hidden; Go placed a late tool result after a newer user message in the model context; Rust answered `invalid_params` instead of `busy` for erase, move and fork during a turn; Rust's conformance model read the turn's history instead of the request; Rust answered `lost` when a plugin call was cancelled while its environment callback was open; Python's history service promoted nested IDs into erasure tombstones.
 
 ## 0.2.0
 
