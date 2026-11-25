@@ -19,7 +19,7 @@ body:
     id: languages
     attributes:
       label: Languages
-      description: The languages whose code changes. A change to one language is a change to both Rust and TypeScript, or a recorded gap in the other. Go and Python take no new work (ADR 0037); tick them only for work already in flight until #157 removes them. Leave all unticked for a change to the documents only.
+      description: The languages whose code changes. A change to one language is a change to both Rust and TypeScript, or a recorded gap in the other. Go and Python take no new work (ADR 0037); tick them only for work already in flight until they are removed. Leave all unticked for a change to the documents only.
       options:
         - label: Rust
         - label: TypeScript
