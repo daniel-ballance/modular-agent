@@ -47,7 +47,7 @@ Options:
   --declaration         print what this agent declares it supports
   --acp                 serve the Agent Client Protocol for an editor or host
   --agui                serve AG-UI using HTTP and SSE (requires --listen)
-  --approval POLICY     set the default approval policy: off, ask, all or never
+  --approval POLICY     set each new session's default approval policy: off, ask, all or never
   --resume-open         reopen interrupted turns in this project before serving ACP or AG-UI
   --listen ADDR [--token-file FILE]
   --policy FILE        read operator policy from FILE
