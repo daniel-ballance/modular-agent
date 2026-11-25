@@ -36,7 +36,7 @@ A release gives the four SDKs and `ma` one new version, named by its milestone. 
    - TypeScript: `version` in each `typescript/packages/*/package.json`, the exact versions those packages pin for each other, and `typescript/package-lock.json`.
    - Python: `version` in `python/pyproject.toml` and each `python/packages/*/pyproject.toml`, the exact versions they pin for each other, and `python/uv.lock`.
    - Go: `ImplementationVersion` in `go/api/api.go`.
-   - The manifests and lock files of the demonstrative implementations in `demos/`, the status line in `README.md`, and the `ma --version` example in `.github/ISSUE_TEMPLATE/bug.yml`.
+   - The manifests and lock files under `demos/`, the status line in `README.md`, and the `ma --version` example in `.github/ISSUE_TEMPLATE/bug.yml`.
 
    Then search the tracked files for the old version with `git grep -n -F OLD`, which also reads `.github/`, and change each place that still gives it as current.
 2. Update the status line at the top of `docs/sdk/README.md`. It gives the SDK specification's revision and what the four SDKs pass.
