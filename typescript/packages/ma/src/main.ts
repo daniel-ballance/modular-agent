@@ -192,13 +192,13 @@ async function main(argv: string[]) {
   if (opts.command === "sessions" || opts.session || opts.resume) {
     const index = await createAgent({ ...base, project });
     try {
-      const sessions = await index.sessions({ project: opts.all ? undefined : project });
+      const sessions = (await index.sessions({ project: opts.all ? undefined : project }))
+        .sort((a, b) => b.updated - a.updated || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       if (opts.command === "sessions") {
         for (const s of sessions) console.log(`${s.id}  ${s.project}`);
         return 0;
       }
       if (opts.resume && !opts.session) {
-        sessions.sort((a, b) => b.updated - a.updated);
         opts.session = sessions[0]?.id;
         if (!opts.session) throw new Error("this folder has no saved session to continue");
       }

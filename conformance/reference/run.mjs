@@ -8,7 +8,7 @@
 //   node run.mjs [--only ...] --all                (every built agent; MODULAR_AGENT_REF_REQUIRE as for fixtures)
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -401,6 +401,35 @@ const checks = [
     about: "ma models lists the scripted model.",
     script: [],
     runs: [{ args: ["models"], expect: { exit: 0, stdoutContains: "scripted/script" } }],
+  },
+  {
+    name: "sessions",
+    about: "ma sessions prints ID and canonical project per line, newest first; --all adds other projects; none prints nothing.",
+    script: [{ text: "one" }, { text: "two" }, { text: "three" }],
+    async run(command, invoke, skip, t) {
+      const other = join(t.dir, "other");
+      mkdirSync(other);
+      const listing = async (args, want) => {
+        const r = await invoke(command, { args });
+        assert.equal(r.exit, 0, `ma ${args.join(" ")}: exit status 0; stderr: ${r.stderr.slice(-300)}`);
+        if (r.stdout !== want) throw new Error(`ma ${args.join(" ")}: stdout ${JSON.stringify(want)}: got ${JSON.stringify(r.stdout)}`);
+      };
+      const session = async (args) => {
+        const r = await invoke(command, { args: ["--json", ...args] });
+        assert.equal(r.exit, 0, `ma --json ${args.join(" ")}: exit status 0; stderr: ${r.stderr.slice(-300)}`);
+        const id = r.stdout.split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((e) => e.sessionId)?.sessionId;
+        assert.ok(id, `ma --json ${args.join(" ")}: an event names the session`);
+        return id;
+      };
+      await listing(["sessions"], "");
+      await listing(["sessions", "--all"], "");
+      const first = await session(["-p", "first"]);
+      const elsewhere = await session(["--project", other, "-p", "second"]);
+      const latest = await session(["-p", "third"]);
+      const project = realpathSync(t.project), otherProject = realpathSync(other);
+      await listing(["sessions"], `${latest}  ${project}\n${first}  ${project}\n`);
+      await listing(["sessions", "--all"], `${latest}  ${project}\n${elsewhere}  ${otherProject}\n${first}  ${project}\n`);
+    },
   },
   {
     name: "telemetry-export",

@@ -572,12 +572,17 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
     }
     if terminal.list {
         let project = project.canonicalize()?;
-        let sessions = standard
+        let mut sessions = standard
             .history()?
             .sessions((!terminal.all_projects).then_some(project.as_path()))?;
-        println!("{}", serde_json::to_string_pretty(&sessions.into_iter().map(|s| {
-            json!({"id":s.id,"project":s.project,"lastActive":s.last_active,"model":s.model.map(|model| model.to_string())})
-        }).collect::<Vec<_>>())?);
+        sessions.sort_by(|a, b| {
+            b.last_active
+                .cmp(&a.last_active)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        for session in sessions {
+            println!("{}  {}", session.id, session.project.display());
+        }
         return Ok(());
     }
     if resume && terminal.session.is_none() {

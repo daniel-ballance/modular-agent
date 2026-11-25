@@ -602,7 +602,14 @@ async def _run(args: argparse.Namespace) -> int:
                 sessions = await preflight.sessions()
                 matching = [s for s in sessions if s["project"] == str(project)]
                 if args.command == "sessions":
-                    for saved_session in sessions if args.all else matching:
+                    listed = sorted(
+                        sessions if args.all else matching,
+                        key=lambda s: (
+                            -int(cast(int | str, s.get("lastActivity", 0))),
+                            str(s["id"]),
+                        ),
+                    )
+                    for saved_session in listed:
                         print(f"{saved_session['id']}  {saved_session['project']}")
                     return 0
                 if not matching:

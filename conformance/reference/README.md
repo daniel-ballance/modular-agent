@@ -1,6 +1,6 @@
 # Reference checks
 
-The 29 checks test whether an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs, its ACP and AG-UI responses and the telemetry it exports. So one set of checks covers all four implementations.
+The 30 checks test whether an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs, its ACP and AG-UI responses and the telemetry it exports. So one set of checks covers all four implementations.
 
 Install the shared OTLP receiver's dependencies from this directory: `npm ci --prefix ../telemetry`.
 
@@ -43,6 +43,7 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 | `prompt-tail` | The prompt ends with `<cwd>` and then `<date>` |
 | `json-events` | `--json` prints SDK-shaped events, ending with `turnEnded` |
 | `models` | `ma models` lists the scripted model |
+| `sessions` | `ma sessions` prints nothing with no sessions, then one `ID  PROJECT` line per session of this project, newest first; `--all` adds the other projects' sessions |
 | `telemetry-export` | Export is off without an endpoint. With one, invocation and inference spans carry metadata only. Disabling the SDK stops export but leaves `telemetry: 1` in the declaration. |
 | `trace-trust` | An AG-UI or ACP work request continues the supplied trace only for an opted-in network token. The single-token shorthand starts a new trace. Stdio trusts the launcher unless disabled. A non-boolean policy value fails startup. |
 | `version` | `ma --version` names the implementation's language |
