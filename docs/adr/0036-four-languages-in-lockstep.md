@@ -17,7 +17,7 @@ A language can fall behind for a time only through an issue with its `lang:` lab
 
 ## Cost
 
-Each rule is written four times. For example, the AG-UI projection of an `approvalCall` is in four files:
+Each rule is written four times. For example, the AG-UI view of an `approvalCall` is built in four files:
 
 - `typescript/packages/core/src/agui-view.ts`
 - `rust/crates/sdk/src/agui/view.rs`
