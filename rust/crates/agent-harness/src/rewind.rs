@@ -1,4 +1,4 @@
-use super::*;
+use super::{history_commit::make_entry, *};
 use std::collections::BTreeSet;
 
 impl OpenSession {

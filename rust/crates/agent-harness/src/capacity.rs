@@ -569,7 +569,7 @@ impl Drop for Reservation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::make_entry;
+    use crate::history_commit::make_entry;
     use agent_api::{Draft, Scope, json};
 
     fn session(id: &str) -> SessionData {

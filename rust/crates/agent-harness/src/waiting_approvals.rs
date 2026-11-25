@@ -1,6 +1,9 @@
 //! Consent for one unstarted model call. Only the writer commits a decision;
 //! delivery is deliberately kept on the open session, never in history.
-use super::*;
+use super::{
+    history_commit::{make_entry, observe_question},
+    *,
+};
 
 pub type Audience = Arc<dyn Fn(&SessionData, &str) -> Option<Authority> + Send + Sync>;
 pub(super) type Audiences = BTreeMap<(String, String), Vec<Audience>>;
