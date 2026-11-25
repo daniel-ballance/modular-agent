@@ -110,9 +110,10 @@ test("a repeated HTTP erasure recovers a destination that expired after publicat
   const token = randomBytes(32).toString("hex"), tokenFile = join(dir, "token");
   await writeFile(tokenFile, token, { mode: 0o600 });
   const retention = 60_000;
-  let now = Date.now();
-  t.mock.method(Date, "now", () => now);
-  const service = await historyService({ dir: join(dir, "store"), token, retention });
+  const wallClock = new BigInt64Array(new SharedArrayBuffer(8));
+  Atomics.store(wallClock, 0, BigInt(Date.now()));
+  t.mock.method(Date, "now", () => Number(Atomics.load(wallClock, 0)));
+  const service = await historyService({ dir: join(dir, "store"), token, retention }, { wallClock });
   cleanup.push(() => new Promise<void>((resolve, reject) => service.server.close(error => error ? reject(error) : resolve())));
   const config = { durability: "kept" as const, history: httpHistory(service.url, tokenFile), script: [{ text: "private answer" }] };
   const first = await testAgent(config);
@@ -122,7 +123,7 @@ test("a repeated HTTP erasure recovers a destination that expired after publicat
   const target = (await source.history()).find(e => e.kind === "input")!.id;
   const dest = await source.fork();
   await dest.close();
-  now += retention / 2;
+  Atomics.add(wallClock, 0, BigInt(retention / 2));
   await source.prompt("keep the source session live");
   const sourcePath = `${service.url}/v1/sessions/${source.id}`;
   const destPath = `${service.url}/v1/sessions/${dest.id}`;
@@ -147,7 +148,7 @@ test("a repeated HTTP erasure recovers a destination that expired after publicat
   const expected = { intentId: publication.intentId, sessionIds: [source.id, dest.id] };
   assert.deepEqual(published, expected);
 
-  now += retention / 2;
+  Atomics.add(wallClock, 0, BigInt(retention / 2));
   const expired = await fetch(destPath, { headers });
   assert.equal(expired.status, 404);
   assert.equal((await expired.json() as { code: string }).code, "unknown_session");
