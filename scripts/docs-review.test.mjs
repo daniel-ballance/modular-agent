@@ -53,6 +53,7 @@ test("status and open-work words are candidates, with the reason they were picke
     "A known gap in Go.", "Findings from the builds.", "Resume is not implemented.", "Streaming is unsupported.", "The cache is missing.",
     "Leave it as a follow-up.", "A follow-up issue covers it.", "",
   ]);
+  repo.commit("Docs");
   const result = repo.run("--all");
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(result.at, Array.from({ length: 9 }, (_, i) => `README.md:${i + 3}`).concat(Array.from({ length: 7 }, (_, i) => `README.md:${i + 15}`)));
@@ -72,6 +73,7 @@ test("words this specification uses for behaviour are not candidates", (t) => {
     "An agent started to do a task.",
     "The Project shows Todo, In progress and Done.",
   ]);
+  repo.commit("Docs");
   const result = repo.run("--all");
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(result.found, []);
@@ -88,6 +90,7 @@ test("fenced code, HTML comments, inline code, link targets and tags are not rea
     "~~~", "```", "A gap.", "~~~",
     "Write `<!--` to start a comment; this gap is open.",
   ]);
+  repo.commit("Docs");
   const result = repo.run("--all");
   assert.deepEqual(result.at, ["README.md:14"]);
 });
@@ -101,6 +104,7 @@ test("an issue in the same section tracks open work but not a status word", (t) 
     "## Examples", "", "- A gap like `#5`, or [an anchor](notes.md#5).",
     "## Later", "Tracked in #40.", "#", "- A gap after an empty heading.",
   ]);
+  repo.commit("Docs");
   const result = repo.run("--all");
   assert.deepEqual(result.at, ["README.md:6", "README.md:13", "README.md:16", "README.md:20"]);
   assert.match(result.stdout, /README\.md:6: status "not yet"\./);
@@ -119,6 +123,7 @@ test("each candidate lists the ADRs its paragraph links or names, with their sta
     "| [ADR 0007](adr/0007-accepted.md) | Accepted |",
     "| Planned | Later |",
   ]);
+  repo.commit("Docs");
   const result = repo.run("--all");
   assert.deepEqual(result.found, [
     'docs/notes.md:2: status "proposed". Links ADR 0008 proposed.',
@@ -126,6 +131,22 @@ test("each candidate lists the ADRs its paragraph links or names, with their sta
     'docs/notes.md:6: status "proposed".',
     'docs/notes.md:9: status "planned".',
   ]);
+});
+
+test("status wording beside a named or linked ADR is a candidate", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "[ADR 0007](docs/adr/0007-accepted.md) proposes `serve(factory)` for a service.", "",
+    "ADR 0007 proposes a separate rule.", "",
+    "Built on the [edition 4 draft](docs/adr/0007-accepted.md).", "",
+    "Its [owner decisions](docs/adr/0007-accepted.md#owner-decisions) are still open.", "",
+    "A draft of the reply is open in the editor.", "",
+  ]);
+  repo.commit("Docs");
+  const result = repo.run("--all");
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.at, ["README.md:1", "README.md:3", "README.md:5", "README.md:7"]);
+  assert.match(result.stdout, /^README\.md:1: status "proposes"\. Links ADR 0007 accepted\.$/m);
 });
 
 test("the default scope is lines changed since the merge base with origin/main", (t) => {
@@ -138,6 +159,7 @@ test("the default scope is lines changed since the merge base with origin/main",
   repo.track("docs/new.md", "This rule is proposed.\n");
   repo.commit("Change docs");
   repo.write("go/README.md", "An untracked gap.\n");
+  repo.write("README.md", ["Support is planned.", "", "A stable line.", "Streaming is not implemented.", "An uncommitted gap.", ""].join("\n"));
   const result = repo.run();
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(result.at, ["README.md:4", "docs/new.md:1"]);
@@ -163,6 +185,7 @@ test("historical folders are skipped", (t) => {
   for (const file of ["docs/adr/README.md", "docs/research/a.md", "docs/pressure-test/b.md", "go/docs/clean-room/c.md", "docs/status.md"]) {
     repo.track(file, "This rule is proposed.\n");
   }
+  repo.commit("Docs");
   assert.deepEqual(repo.run("--all").at, ["docs/status.md:1"]);
 });
 

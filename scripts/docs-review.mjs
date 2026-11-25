@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { join, posix } from "node:path";
+import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -15,6 +14,8 @@ const historical = /^(?:docs\/(?:adr|research|pressure-test)\/)|\/docs\/clean-ro
 const statusWords = /\b(?:proposed(?! input)|planned|not yet|will be|drafts?(?= \d)|(?<=\b(?:is|are|still|in) )drafts?|pending(?= (?:review|decision|implementation)\b))\b/gi;
 const todo = /\bTODO\b|(?<=\b(?:[Ss]till|[Ll]eft|[Yy]et) )to do\b/g;
 const openWords = /\b(?:gaps?|findings?|not implemented|follow-ups?(?= (?:issues?|work|changes?|fix|pull request|PR)\b)|(?<=\bas a )follow-up)\b/gi;
+// Beside a named or linked ADR, these state the decision's status.
+const adrStatusWords = /\b(?:propos(?:es?|ing)|drafts?|(?<=\bstill )open)\b/gi;
 const absentWords = /(?<=\b(?:is|are|still|remains?) )(?:missing|unsupported)\b/gi;
 const normative = /\b(?:MUST|SHOULD|MAY)\b/;
 const issueUrl = /https?:\/\/[^\s<>()[\]]+\/issues\/[1-9]\d*\b/;
@@ -25,11 +26,11 @@ const heading = /^ {0,3}#{1,6}(?:[ \t]|$)/;
 const blockStart = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|\||[-*+]\s|\d+[.)]\s|>)/;
 const git = (...args) => execFileSync("git", ["-c", "core.quotePath=false", ...args], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 const linesOf = (text) => text.split(/\r?\n/);
+// The review reads the committed head, the same snapshot the diff compares, not the working tree.
 const read = (file) => {
   try {
-    return readFileSync(join(root, file), "utf8");
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
+    return git("show", `HEAD:${file}`);
+  } catch {
     return "";
   }
 };
@@ -118,7 +119,8 @@ function candidates(file, wanted, adrs) {
     const text = prose(line).replace(link, "$1");
     const block = paragraph(lines, i);
     const reasons = [];
-    const status = [...words(text, statusWords), ...words(text, todo)];
+    const named = adrsIn(file, prose(line), adrs).size > 0;
+    const status = [...new Set([...words(text, statusWords), ...words(text, todo), ...(named ? words(text, adrStatusWords) : [])])];
     if (status.length) reasons.push(`status ${status.map((word) => `"${word}"`).join(", ")}`);
     const open = [...words(text, openWords), ...(normative.test(text) ? [] : words(text, absentWords))];
     if (open.length && !tracked(section(lines, i))) {
@@ -140,7 +142,7 @@ function changedLines(base) {
   }
   const changed = new Map();
   let lines;
-  for (const line of git("diff", "--unified=0", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", merge, "--", "*.md").split("\n")) {
+  for (const line of git("diff", "--unified=0", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", merge, "HEAD", "--", "*.md").split("\n")) {
     if (line.startsWith("+++ ")) {
       const file = line.slice(4);
       lines = file.startsWith("b/") ? new Set() : undefined;
@@ -171,7 +173,7 @@ function parse(args) {
 
 try {
   const options = parse(process.argv.slice(2));
-  const markdown = git("ls-files", "-z", "--", "*.md").split("\0").filter(Boolean);
+  const markdown = git("ls-tree", "-r", "-z", "--name-only", "HEAD").split("\0").filter((file) => file.endsWith(".md"));
   const adrs = new Map(markdown.filter((file) => adrFile.test(file)).map((file) => [file.match(adrFile)[1], adrStatus(read(file))]));
   const base = options.all ? undefined : options.base ?? defaultBase();
   const scope = options.all ? new Map(markdown.map((file) => [file, undefined])) : changedLines(base);
