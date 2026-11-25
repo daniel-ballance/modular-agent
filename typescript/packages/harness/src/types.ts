@@ -186,7 +186,7 @@ export interface ToolContext {
 		list(): Promise<ToolDefinition[]>;
 		call(name: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult>;
 	};
-	jobs?: { start(kind: string, detail: unknown, key?: string): Promise<import("./harness.js").JobHandle> };
+	jobs?: { start(kind: string, detail: unknown, key?: string): Promise<import("./plugin-api.js").JobHandle> };
 	/** Report progress while the call runs. */
 	progress(content: ContentPart[]): void;
 	/** The session's working environment, if one is provided. */
