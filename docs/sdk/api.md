@@ -243,7 +243,7 @@ A **Plugin** has:
 | Field | |
 |---|---|
 | `name` | unique in the agent; stable, because history records it |
-| `replaces` | items of its own that replace an earlier plugin's, as `runtime`, `working-environment`, `provider:<id>`, `tool:<name>` or `command:<name>` |
+| `replaces` | items of its own that replace an earlier plugin's: `runtime`, `working-environment`, `history`, `credentials`, `configuration`, `provider:<id>`, `tool:<name>` or `command:<name>` |
 | `config` | the plugin's settings when it runs in the agent's process; `{}` if none |
 | `setup(registrar)` | registers what the plugin provides, once, at load |
 | `stop()` | optional; releases what it holds |
@@ -275,8 +275,10 @@ A tool, a Provider or a working environment passed directly to `createAgent` is 
 A plugin replaces an earlier plugin's item by registering its own item of the same kind and name and listing it in `replaces`. If no earlier plugin has that item, the item is simply added. `durableRuntime()` lists `runtime`; a sandbox plugin lists `working-environment`. Following the [registration rules](../bindings/plugin.md#starting-the-handshake), `createAgent` raises `invalid_composition` when:
 
 - a `replaces` entry names an item the plugin does not register itself, or appears twice;
-- two plugins register the same item and the later one does not list it: an unlisted collision, including a second Runtime or working environment;
+- two plugins register the same item and the later one does not list it: an unlisted collision, including a second Runtime, working environment, history store, credential store or Configuration;
 - a process plugin lists an item that another process plugin registered.
+
+The SDK supplies a history store, credential store and Configuration before explicit plugins, using defaults unless given in `createAgent` options. To replace them, register `historyStore`, `credentialStore` or `configuration` and list `history`, `credentials` or `configuration`, respectively. Each is a singleton. A listed replacement changes only that item. These parts and their selectors are in-process only.
 
 ## Contexts
 

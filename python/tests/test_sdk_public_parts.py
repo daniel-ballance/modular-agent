@@ -142,14 +142,23 @@ async def test_configuration_credentials_and_interface(tmp_path):
         )
         r.interface(Interface())
 
+    opts = {
+        "project": tmp_path,
+        "providers": [provider],
+        "credentials": CredentialStore(lambda _: "option-only"),
+    }
     async with create_agent(
-        project=tmp_path, providers=[provider], plugins=[Plugin("parts", setup=setup)]
+        **opts, plugins=[Plugin("parts", setup=setup, replaces=["configuration", "credentials"])]
     ) as agent:
         assert lifecycle == [agent]
         session = await agent.session()
         assert (await session.settings())["example"] == "from config"
         assert (await session.prompt("Hello")).text == "hello"
     assert lifecycle[-1] == "stop"
+    for missing, listed in (("configuration", "credentials"), ("credentials", "configuration")):
+        with pytest.raises(AgentError, match=f"Unlisted {missing} replacement") as denied:
+            await create_agent(**opts, plugins=[Plugin("parts", setup=setup, replaces=[listed])])
+        assert denied.value.code == "invalid_composition"
 
 
 async def test_custom_hook_and_command_question():

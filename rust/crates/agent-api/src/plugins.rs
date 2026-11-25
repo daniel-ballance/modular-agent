@@ -1,5 +1,15 @@
 use crate::*;
-use std::{any::Any, collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
+use std::{
+    any::Any,
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+};
+
+fn in_process_singleton(item: &str) -> bool {
+    matches!(item, "history" | "credentials" | "configuration")
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rule {
@@ -177,7 +187,7 @@ impl Registry {
         *self = next;
         Ok(())
     }
-    /// Item-level wire replacements affect only local registrations, atomically.
+    /// Omit local registrations by item before loading their replacements.
     pub fn omit_local(&mut self, items: &[String], session: &SessionData) -> Result<()> {
         for item in items {
             if item == "runtime" {
@@ -198,6 +208,8 @@ impl Registry {
                     );
                     self.capabilities.remove("environment");
                 }
+            } else if in_process_singleton(item) {
+                self.capabilities.remove(item);
             } else if let Some(id) = item.strip_prefix("provider:") {
                 let key = format!("provider.{id}");
                 if let Some(old) = self.capabilities.get(&key) {
@@ -240,6 +252,19 @@ impl Registry {
             } else {
                 bail!("unknown replacement {item}");
             }
+        }
+        Ok(())
+    }
+    pub fn validate_singleton_replacements(&self, items: &[String], owner: &str) -> Result<()> {
+        let mut seen = BTreeSet::new();
+        for item in items.iter().filter(|item| in_process_singleton(item)) {
+            ensure!(seen.insert(item), "duplicate replacement {item}");
+            ensure!(
+                self.capabilities
+                    .get(item)
+                    .is_some_and(|part| part.owner == owner),
+                "replacement {item} is not provided"
+            );
         }
         Ok(())
     }

@@ -80,7 +80,11 @@ async def test_idle_session_is_interrupted_when_custom_store_reports_revocation(
 
     # A long TTL separates an explicit notice from periodic renewal.
     with sqlite_history_port(tmp_path, ttl_ms=60_000) as backend:
-        plugin = Plugin("revocable-store", setup=lambda r: r.history_store(RevocableStore()))
+        plugin = Plugin(
+            "revocable-store",
+            replaces=["history"],
+            setup=lambda r: r.history_store(RevocableStore()),
+        )
         async with create_agent(
             project=tmp_path, durability="kept", plugins=[plugin], environment=memory_environment()
         ) as agent:
@@ -124,7 +128,7 @@ async def test_waiter_loses_writer_and_follower_can_reopen(tmp_path, reason, pla
 async def _exercise(tmp_path, reason, placement, backend, provider, entered, cancelled):
     async with asyncio.timeout(10):
         store = FaultStore(backend, reason)
-        plugin = Plugin("fault-store", setup=lambda r: r.history_store(store))
+        plugin = Plugin("fault-store", replaces=["history"], setup=lambda r: r.history_store(store))
         async with create_agent(
             project=tmp_path,
             durability="kept",

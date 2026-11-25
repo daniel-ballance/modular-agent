@@ -198,6 +198,7 @@ async fn portable_registrar_store_keeps_only_appends_with_the_current_lease() ->
             .durability(Durability::Kept)
             .plugin(
                 Plugin::new("portable-store")
+                    .replaces("history")
                     .setup(move |r| r.history_store(History::from_portable(store.clone(), true)?)),
             )
             .script(json!([{"text":"First"},{"text":"Second"}]))
@@ -258,6 +259,7 @@ async fn portable_registrar_store_receives_metadata_and_binding_pagination() -> 
         .durability(Durability::Kept)
         .plugin(
             Plugin::new("portable-pages")
+                .replaces("history")
                 .setup(move |r| r.history_store(History::from_portable(part.clone(), true)?)),
         )
         .script(json!([{"text":"Saved"}]))

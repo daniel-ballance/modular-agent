@@ -17,7 +17,7 @@ import { createHash } from "node:crypto";
 import { AguiBinding, type AguiProjectionOptions, type Target } from "./agui.js";
 import { fail, same } from "./agui-wire.js";
 import { AgentError, checked, messageOf } from "./errors.js";
-import { collect, definePlugin, type AgentInterface, type Plugin } from "./plugin.js";
+import { capabilityForItem, collect, definePlugin, type AgentInterface, type Plugin } from "./plugin.js";
 import { type Provider } from "./provider.js";
 import type { Tool } from "./tool.js";
 import { asWorkingEnvironment, MemoryEnvironment } from "./environment.js";
@@ -390,9 +390,9 @@ export class Agent {
       const { items, base, interfaces } = await collect(plugin, plugin.config ?? {});
       const replaces = plugin.replaces ?? [];
       for (const key of items) {
-        if (this.#h.hasItem(key) && !replaces.includes(key)) throw new Error(`${key} is already registered`);
+        if (this.#h.hasItem(capabilityForItem(key)) && !replaces.includes(key)) throw new Error(`${key} is already registered`);
       }
-      for (const key of replaces) this.#h.replacements.set(key, plugin.name);
+      for (const key of replaces) this.#h.replacements.set(capabilityForItem(key), plugin.name);
       await this.#load(base);
       this.#interfaces.push(...interfaces);
       loaded = true;

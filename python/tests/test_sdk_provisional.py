@@ -74,7 +74,9 @@ def composition(root, store, placement, url):
     if store == "custom":
         with sqlite_history_port(root / "store", ttl_ms=60_000) as port:
             wrapped = RecordingStore(port, root / "writes.jsonl")
-            plugin = Plugin("test-store", setup=lambda r: r.history_store(wrapped))
+            plugin = Plugin(
+                "test-store", replaces=["history"], setup=lambda r: r.history_store(wrapped)
+            )
             yield create_agent(**options, plugins=[plugin]), port
     else:
         selection = (

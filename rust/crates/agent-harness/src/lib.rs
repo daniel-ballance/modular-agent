@@ -195,6 +195,7 @@ impl Harness {
         };
         candidate.omit_local(items, &empty)?;
         candidate.load(plugin.as_ref())?;
+        candidate.validate_singleton_replacements(items, plugin.name())?;
         candidate.validate_tools(&empty)?;
         let mut plugins = self.plugins.lock().unwrap();
         ensure!(

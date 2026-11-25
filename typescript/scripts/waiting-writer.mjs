@@ -20,7 +20,7 @@ const history = new class extends JsonlHistoryStore {
 const countPath = join(dir,'count'), latches = new Map(), handles = new Map();
 let agent, session, backing, changeCatalog, input, redacted, secondTurn = false;
 const hold = async name => { const l = latches.get(name); if (l) { l.at.resolve(); await l.go.promise; } };
-const controls = definePlugin({name:'waiting.controls',replaces:['history-store'],setup(r) {
+const controls = definePlugin({name:'waiting.controls',replaces:['history'],setup(r) {
   r.historyStore(history);
   r.on('turn.before', async () => { if (secondTurn) { await hold('afterAnswer'); await hold('beforeGates'); } secondTurn = true; });
   r.on('tool.before', ({call})=> input && call.input.note !== input.note ? {change:input} : undefined, 'first');

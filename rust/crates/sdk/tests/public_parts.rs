@@ -370,6 +370,31 @@ impl Interface for TestInterface {
 }
 
 #[tokio::test]
+async fn singleton_replacement_requires_a_matching_registration_and_selector() {
+    for name in ["history", "configuration", "credentials"] {
+        let plugin = Plugin::new("unlisted").setup(move |r| match name {
+            "history" => r.history_store(modular_agent::memory_history()),
+            "configuration" => r.configuration(Defaults),
+            _ => r.credential_store(modular_agent::environment_credentials()),
+        });
+        for invalid in [
+            plugin.clone(),
+            Plugin::new("unregistered").replaces(name),
+            plugin.replaces(name).replaces(name),
+        ] {
+            let error = Agent::builder()
+                .plugin(invalid)
+                .build()
+                .await
+                .err()
+                .expect(name);
+            assert_eq!(error.code(), Code::InvalidComposition);
+            assert!(error.message().contains(name));
+        }
+    }
+}
+
+#[tokio::test]
 async fn registrar_supplies_history_configuration_environment_and_interface() -> Result<()> {
     let data = tempfile::tempdir()?;
     let history = file_history(data.path().join("store"))?;
@@ -377,9 +402,13 @@ async fn registrar_supplies_history_configuration_environment_and_interface() ->
     let records = seen.clone();
     let plugin = Plugin::new("parts")
         .replaces("working-environment")
+        .replaces("history")
+        .replaces("configuration")
+        .replaces("credentials")
         .setup(move |r| {
             r.history_store(history.clone())?;
             r.configuration(Defaults)?;
+            r.credential_store(modular_agent::environment_credentials())?;
             r.environment(modular_agent::testing::memory_environment())?;
             r.interface(TestInterface(records.clone()));
             Ok(())
@@ -392,9 +421,16 @@ async fn registrar_supplies_history_configuration_environment_and_interface() ->
         .unwrap();
     assert_eq!(rejected.code(), Code::InvalidComposition);
     assert!(rejected.message().contains("kept"));
+    let earlier = file_history(data.path().join("earlier"))?;
     let agent = Agent::builder()
         .durability(Durability::Kept)
+        .history(file_history(data.path().join("unused"))?)
         .several_actors(true)
+        .plugin(
+            Plugin::new("earlier")
+                .replaces("history")
+                .setup(move |r| r.history_store(earlier.clone())),
+        )
         .plugin(plugin)
         .build()
         .await?;

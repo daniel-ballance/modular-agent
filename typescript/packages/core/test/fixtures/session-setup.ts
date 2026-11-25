@@ -43,7 +43,7 @@ export function recordingStore(dir: string) {
 
 export function composition(root: string, selection: Selection, placement: Placement, url: string) {
   const dir = join(root, "history");
-  const plugin = definePlugin({ name: "test-store", replaces: ["history-store"],
+  const plugin = definePlugin({ name: "test-store", replaces: ["history"],
     setup: r => r.historyStore(recordingStore(dir).store) });
   return testAgent({
     project: root, dataDir: join(root, "data"), durability: "kept", severalActors: true, sessionLimits: true,
