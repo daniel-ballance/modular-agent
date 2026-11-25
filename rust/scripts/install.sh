@@ -9,8 +9,7 @@ rust="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 repo="$(dirname "$rust")"
 bin="${HOME}/.local/bin"
 share="${HOME}/.local/share/modular-agent/sidecars"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ma-std-tmp}"
-mkdir -p "$TMPDIR" "$bin" "$share"
+mkdir -p "$bin" "$share"
 
 echo "Building ma (release)..."
 (cd "$rust" && mise exec -- cargo build --release --locked -p standard)

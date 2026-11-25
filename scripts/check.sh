@@ -28,6 +28,7 @@ done
 want() { [[ " ${languages[*]} " == *" $1 "* ]]; }
 all=false; [ ${#languages[@]} -eq 4 ] && all=true
 
+# A check run keeps its logs and its steps' scratch on disk, so a full /tmp cannot fail it.
 export TMPDIR="${TMPDIR:-$HOME/.cache/ma-std-tmp}"
 mkdir -p "$TMPDIR" || exit 1
 TMPDIR="$(cd "$TMPDIR" && pwd -P)"

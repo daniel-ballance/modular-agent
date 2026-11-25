@@ -11,6 +11,7 @@ import {
   statSync,
   writeFileSync
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -30,7 +31,7 @@ function env(root: string): NodeJS.ProcessEnv {
   return {
     HOME: join(root, 'home'),
     PATH: process.env.PATH,
-    TMPDIR: process.env.TMPDIR,
+    TMPDIR: process.env.TMPDIR ?? tmpdir(),
     LANG: 'C.UTF-8',
     GIT_CONFIG_GLOBAL: '/dev/null',
     GIT_CONFIG_NOSYSTEM: '1',

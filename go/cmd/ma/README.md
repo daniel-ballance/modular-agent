@@ -82,16 +82,14 @@ A memory or time limit fails the call. The agent discards and reaps the worker a
 From the repository root:
 
 ```sh
-export TMPDIR="$HOME/.cache/ma-std-tmp"
-mkdir -p "$TMPDIR"
 (cd conformance/acp && npm ci && cd ../tools && npm ci && cd ../telemetry && npm ci)
 (cd go && ./scripts/build-monty.sh && mise exec -- go build -o .bin/ma ./cmd/ma && mise exec -- go build -o .bin/modular ./cmd/modular && mise exec -- go build -o .bin/modular-agent-fixtures ./modular/cmd/fixtures)
 node conformance/reference/run.mjs --agent go
 MODULAR_AGENT_CONFORMANCE=1 node conformance/acp/run.mjs --crash-checks --probe-checks --job-checks -- "$PWD/go/.bin/ma" --acp
 scripts/websocket-kits.sh go
 (cd go && mise exec -- go build ./... && mise exec -- go vet ./... && test -z "$(mise exec -- gofmt -l .)")
-(cd go && mise exec -- go test -count=1 ./... > "$TMPDIR/ma-go-full.log" 2>&1)
-(cd go && mise exec -- go test -race -count=1 ./modular/... ./cmd/ma/... > "$TMPDIR/ma-go-race.log" 2>&1)
+(cd go && mise exec -- go test -count=1 ./...)
+(cd go && mise exec -- go test -race -count=1 ./modular/... ./cmd/ma/...)
 ```
 
 - **Telemetry:** a loopback OTLP receiver checks binary protobuf and `service.name`. No export provider is installed without an endpoint or when `OTEL_SDK_DISABLED=true`. Phoenix received `invoke_agent ma`, `chat script` and `execute_tool codemode` from an offline scripted prompt run with `OTEL_SERVICE_NAME=ma-go`.

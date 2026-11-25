@@ -5,8 +5,6 @@ This Node kit checks the [shared SDK telemetry cases](../../docs/sdk/testing.md#
 It does not need a live Provider or collector.
 
 ```sh
-export TMPDIR="$HOME/.cache/ma-std-tmp"
-mkdir -p "$TMPDIR"
 npm ci
 npm test
 node run.mjs rust --list

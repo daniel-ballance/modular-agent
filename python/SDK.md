@@ -18,7 +18,7 @@ run(main())
 
 ## Run the checks
 
-Set `TMPDIR=$HOME/.cache/ma-std-tmp` and create that directory first. From the repository root:
+From the repository root:
 
 ```sh
 (cd conformance/acp && npm ci)

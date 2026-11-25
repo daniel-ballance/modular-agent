@@ -40,7 +40,7 @@ func (g *fixtureGroups) start(ctx context.Context, r run, sc scenario) ([]modula
 	for _, name := range sc.Agent.Plugins {
 		args := append(slices.Clone(r.placement.Command), name, "--listen", "127.0.0.1:0", "--token-file", file)
 		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "TMPDIR=" + os.Getenv("TMPDIR")}
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "TMPDIR=" + os.TempDir()}
 		cmd.Stderr = os.Stderr
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		output, err := cmd.StdoutPipe()

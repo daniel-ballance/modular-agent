@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export TMPDIR="${TMPDIR:-$HOME/.cache/ma-std-tmp}"
-export CARGO_INCREMENTAL=0
-mkdir -p "$TMPDIR"
 demo="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$demo/../.." && pwd)"
 mkdir -p "$demo/.build"

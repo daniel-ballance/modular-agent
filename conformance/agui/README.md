@@ -7,8 +7,6 @@ The runner lists 49 cases. Fourteen are the ADR 0035 host reads: seven for wait 
 Use Node.js 22.12 or later. The TLS self-test also uses OpenSSL 3 to generate a disposable CA and certificates. Use a disposable agent, tokens and store. Do not point the kit at a production listener.
 
 ```sh
-export TMPDIR="$HOME/.cache/ma-std-tmp"
-mkdir -p "$TMPDIR"
 npm ci
 npm test
 node run.mjs --list

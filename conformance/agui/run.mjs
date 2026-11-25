@@ -4,7 +4,7 @@ import { spawn, execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { constants, createWriteStream } from 'node:fs';
 import { mkdir, mkdtemp, open, rm, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -77,7 +77,7 @@ async function waitGroup(pid) {
 }
 
 async function managed(command, name, scenario) {
-  const folder = await mkdtemp(join(process.env.TMPDIR ?? join(homedir(), '.cache/ma-std-tmp'), 'agui-'));
+  const folder = await mkdtemp(join(process.env.TMPDIR || tmpdir(), 'agui-'));
   const [home, data, project, tmp] = ['home', 'data', 'project', 'tmp'].map(v => join(folder, v));
   await Promise.all([home, data, project, tmp].map(v => mkdir(v)));
   const model = join(folder, 'model.json');
