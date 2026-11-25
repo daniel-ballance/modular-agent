@@ -160,11 +160,11 @@ Tracked in #39.
 
 ## Where the binding had to be read closely or guessed
 
-- **Cancel and the response hook.** Settled by the edition 4 draft as this sidecar had guessed: a cancelled request answers `cancelled` and sends no `provider.response`.
+- **Cancel and the response hook.** Settled by edition 4 as this sidecar had guessed: a cancelled request answers `cancelled` and sends no `provider.response`.
 - **A failed `provider.request` hook.** The binding says the Provider must wait for the successful answer. For an error answer (`cancelled`, `turn_limit`, `internal`, `lost`) the sidecar answers `provider/request` with the same error code and does no inference.
 - **Erasure by a stateless Provider.** `provider/discard` with `erase: true` answers `{ "outOfReach": [...] }` with one descriptive string, following the wording "report those copies out of reach". The binding does not define the strings.
 - **`sessionId` on a stateless Provider.** Accepted when present, never required, and copied into both hook payloads (`null` when absent, per [the hook table](../../../docs/bindings/plugin.md#from-core-hooks-to-wire-hooks)).
-- **A level the model does not list.** Settled by the edition 4 draft: lower it, never raise it. The sidecar now does.
+- **A level the model does not list.** Settled by edition 4: lower it, never raise it. The sidecar now does.
 - **`cost` for a subscription.** [Messages](../../../docs/bindings/data.md#messages) says to use zero for fields missing from a partial meter. Zero is reported.
 - **Opaque reasoning data.** Thinking signatures are not returned as `providerData`, because history is never sent back as native turns and the data would only add bytes.
 - **The request after the hook.** If the hook answers with a request that is not a readable ModelRequest, inference has already been admitted, so the sidecar returns a `failed` message with kind `other` and still calls `provider.response`.

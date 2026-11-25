@@ -11,7 +11,7 @@ const historical = /^(?:docs\/(?:adr|research|pressure-test)\/)|\/docs\/clean-ro
 // call, a model's draft, a missing field, unsupported versions, a follow-up to a
 // child session) count only in the phrases that state a status. A normative
 // line saying what happens when something is missing states a rule, not a gap.
-const statusWords = /\b(?:proposed(?! input)|planned|not yet|will be|drafts?(?= \d)|(?<=\b(?:is|are|still|in) )drafts?|pending(?= (?:review|decision|implementation)\b))\b/gi;
+const statusWords = /\b(?:proposed(?! input)|planned|not yet|will be|drafts?(?= \d)|(?<=\b(?:edition|version|revision) \d+(?:\.\d+)* )drafts?|(?<=\b(?:is|are|still|in) )drafts?|pending(?= (?:review|decision|implementation)\b))\b/gi;
 const todo = /\bTODO\b|(?<=\b(?:[Ss]till|[Ll]eft|[Yy]et) )to do\b/g;
 const openWords = /\b(?:(?:limits?|gaps?)(?: still)? remains?|gaps?|findings?|not implemented|follow-ups?(?= (?:issues?|work|changes?|fix|pull request|PR)\b)|(?<=\bas a )follow-up)\b/gi;
 // Beside a named or linked ADR, these state the decision's status, in either direction.
@@ -25,11 +25,38 @@ const adrName = /\bADR[ -]?(\d{4})\b/g;
 const heading = /^ {0,3}#{1,6}(?:[ \t]|$)/;
 const blockStart = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|\||[-*+]\s|\d+[.)]\s|>)/;
 const git = (...args) => execFileSync("git", ["-c", "core.quotePath=false", ...args], { cwd: root, encoding: "utf8", maxBuffer: 1 << 30, stdio: ["ignore", "pipe", "pipe"] });
-// A name Git stores in bytes that are not UTF-8 cannot be passed back to Git exactly; say so rather than skip it.
-const names = (output) => output.split("\0").filter(Boolean).map((name) => {
-  if (name.includes("\uFFFD")) throw new Error(`Cannot read the file name ${JSON.stringify(name)} as UTF-8. Rename it to review it`);
-  return name;
-});
+const gitBytes = (...args) => execFileSync("git", args, { cwd: root, maxBuffer: 1 << 30, stdio: ["ignore", "pipe", "pipe"] });
+const utf8 = new TextDecoder("utf-8", { fatal: true });
+// Split -z output into names. A name that is not UTF-8 cannot be passed back to Git exactly,
+// so reading one is an error that shows its bytes; callers read only the names they review.
+function fields(output) {
+  const parts = [];
+  for (let at = 0; at < output.length;) {
+    const end = output.indexOf(0, at);
+    const bytes = output.subarray(at, end === -1 ? output.length : end);
+    if (bytes.length) parts.push(bytes);
+    at = end === -1 ? output.length : end + 1;
+  }
+  return parts;
+}
+const isMarkdown = (bytes) => bytes.subarray(-3).toString("latin1") === ".md";
+function name(bytes) {
+  try {
+    return utf8.decode(bytes);
+  } catch {
+    const shown = [...bytes].map((b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : `\\x${b.toString(16).padStart(2, "0")}`)).join("");
+    throw new Error(`Cannot read the file name "${shown}" as UTF-8. Rename it to review it`);
+  }
+}
+// Markdown files committed at HEAD as blobs; a gitlink (submodule) named *.md has no text to read.
+function committedMarkdown() {
+  return fields(gitBytes("ls-tree", "-r", "-z", "HEAD")).flatMap((entry) => {
+    const tab = entry.indexOf(9);
+    const path = entry.subarray(tab + 1);
+    if (!isMarkdown(path) || entry.subarray(0, tab).toString("latin1").split(" ")[1] !== "blob") return [];
+    return [name(path)];
+  });
+}
 const linesOf = (text) => text.split(/\r?\n/);
 // The review reads the committed head, the same snapshot the diff compares, not the working tree.
 // Every file read is in HEAD, so a failed read is an error, never an empty file.
@@ -117,7 +144,6 @@ function candidates(file, wanted, adrs) {
   for (const [i, line] of lines.entries()) {
     if (wanted && !wanted.has(i + 1)) continue;
     const text = prose(line).replace(link, "$1");
-    const block = paragraph(lines, i);
     const reasons = [];
     const named = adrsIn(file, prose(line), adrs).size > 0;
     const status = [...new Set([...words(text, statusWords), ...words(text, todo), ...(named ? words(text, adrStatusWords) : [])])];
@@ -127,13 +153,13 @@ function candidates(file, wanted, adrs) {
       reasons.push(`open work ${open.map((word) => `"${word}"`).join(", ")} with no issue in its section`);
     }
     if (!reasons.length) continue;
-    const linked = [...adrsIn(file, block, adrs)].sort().map((number) => `ADR ${number} ${adrs.get(number) ?? "has no status"}`);
+    const linked = [...adrsIn(file, paragraph(lines, i), adrs)].sort().map((number) => `ADR ${number} ${adrs.get(number) ?? "has no status"}`);
     found.push(`${file}:${i + 1}: ${reasons.join("; ")}${linked.length ? `. Links ${linked.join(", ")}` : ""}.\n    ${raw[i].trim()}`);
   }
   return found;
 }
 
-function changedLines(base) {
+function changedLines(base, committed) {
   let merge;
   try {
     merge = git("merge-base", base, "HEAD").trim();
@@ -144,12 +170,15 @@ function changedLines(base) {
   // -z names each file exactly; patch headers quote or pad some paths, such as one with a space.
   // A file at least 90% like a deleted one is a rename, diffed against its old path so only its
   // edited lines count. Below that every line counts: a loose pairing could hide new lines.
-  const status = names(git("diff", "--name-status", "-z", "-M90%", "--diff-filter=d", merge, "HEAD", "--", "*.md"));
+  const status = fields(gitBytes("diff", "--name-status", "-z", "-M90%", "--diff-filter=d", merge, "HEAD", "--", "*.md"));
   for (let i = 0; i < status.length;) {
-    const kind = status[i++];
-    const from = kind.startsWith("R") || kind.startsWith("C") ? status[i++] : undefined;
-    const file = status[i++];
-    if (!file.endsWith(".md")) continue;
+    const kind = status[i++].toString("latin1");
+    const source = kind.startsWith("R") || kind.startsWith("C") ? status[i++] : undefined;
+    const target = status[i++];
+    if (!isMarkdown(target)) continue;
+    const file = name(target);
+    if (!committed.has(file)) continue;
+    const from = source && name(source);
     const lines = new Set();
     // Literal pathspecs: a file name such as ":(glob)x.md" is a name, not pathspec magic.
     const paths = from && kind.startsWith("R") ? [from, file] : [file];
@@ -180,10 +209,10 @@ function parse(args) {
 
 try {
   const options = parse(process.argv.slice(2));
-  const markdown = names(git("ls-tree", "-r", "-z", "--name-only", "HEAD")).filter((file) => file.endsWith(".md"));
+  const markdown = committedMarkdown();
   const adrs = new Map(markdown.filter((file) => adrFile.test(file)).map((file) => [file.match(adrFile)[1], adrStatus(read(file))]));
   const base = options.all ? undefined : options.base ?? defaultBase();
-  const scope = options.all ? new Map(markdown.map((file) => [file, undefined])) : changedLines(base);
+  const scope = options.all ? new Map(markdown.map((file) => [file, undefined])) : changedLines(base, new Set(markdown));
   const files = [...scope.keys()].filter((file) => !historical.test(file)).sort();
   const found = files.flatMap((file) => candidates(file, scope.get(file), adrs));
   if (found.length) console.log(found.join("\n"));

@@ -225,9 +225,33 @@ test("diff attributes and large files never hide a changed line", (t) => {
   repo.commit("Start");
   repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
   repo.track("no-diff.md", "Support is planned.\n");
-  repo.track("large.md", "Support is planned.\n" + "A stable line of filler text.\n".repeat(40000));
+  repo.track("large.md", "Support is planned.\n\n" + "A stable line of filler text.\n\n".repeat(40000));
   repo.commit("Docs");
   assert.deepEqual(repo.run().at, ["large.md:1", "no-diff.md:1"]);
+});
+
+test("a valid name with U+FFFD, an undecodable non-Markdown name and a Markdown submodule do not stop the review", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", "Start.\n");
+  repo.commit("Start");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const top = repo.git("rev-parse", "--show-toplevel").toString().trim();
+  repo.track("valid-\uFFFD.md", "Support is planned.\n");
+  writeFileSync(Buffer.concat([Buffer.from(`${top}/notes-`), Buffer.from([0xff]), Buffer.from(".txt")]), "Not Markdown.\n");
+  repo.git("update-index", "--add", "--cacheinfo", `160000,${repo.git("rev-parse", "HEAD").toString().trim()},vendored.md`);
+  repo.commit("Docs");
+  for (const args of [[], ["--all"]]) {
+    const result = repo.run(...args);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.at, ["valid-\uFFFD.md:1"]);
+  }
+});
+
+test("a version or edition number before draft is a status word", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", ["It wraps the edition 4 draft's nested calls.", "", "Version 0.1 draft rules apply.", "", "Write the draft reply.", ""]);
+  repo.commit("Docs");
+  assert.deepEqual(repo.run("--all").at, ["README.md:1", "README.md:3"]);
 });
 
 test("a changed file name that is not UTF-8 is an error, not a clean review", (t) => {
