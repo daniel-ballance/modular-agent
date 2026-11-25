@@ -10,6 +10,9 @@ fi
 count=$1; shift
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo"
+# The runs must overlap to load the machine, so all of them wait for their slots together.
+. scripts/check-slot.sh
+take_check_slots "$count" || exit
 export TMPDIR="${TMPDIR:-$HOME/.cache/ma-std-tmp}"
 mkdir -p "$TMPDIR"
 TMPDIR="$(cd "$TMPDIR" && pwd -P)"
@@ -32,6 +35,7 @@ rm "$root/source.tar"
 check() {
   local dir="$1" status=0; shift
   (
+    drop_check_slots
     cd "$dir/src" && export TMPDIR="$dir/tmp" &&
       export MISE_TRUSTED_CONFIG_PATHS="$dir/src${MISE_TRUSTED_CONFIG_PATHS:+:$MISE_TRUSTED_CONFIG_PATHS}" &&
       exec scripts/check.sh "$@"
