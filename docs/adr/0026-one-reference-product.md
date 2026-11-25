@@ -3,7 +3,7 @@ status: accepted
 date: 2026-11-19
 ---
 
-**Current rule:** [ADR 0037](0037-two-languages.md) keeps two languages, Rust and TypeScript. Where this record says four SDKs or four `ma` builds, read two; Go and Python are kept at the tag `four-languages`.
+**Current rule:** [ADR 0037](0037-two-languages.md) keeps two languages, Rust and TypeScript. Where this record says four SDKs or four `ma` builds, read two. Go and Python will be kept at the tag `four-languages` when they leave `main`.
 
 # One reference product, implemented in all four languages
 

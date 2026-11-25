@@ -24,7 +24,7 @@ body:
       options:
         - "1 spec: docs/, the binding kits"
         - "2 SDK spec: docs/sdk/, the shared scenarios"
-        - "3 SDK: the four SDKs"
+        - "3 SDK: the SDKs"
         - "4 reference: ma, the standard configuration, the reference checks"
         - "5 demo: demonstrative implementations in demos/"
         - Not sure
