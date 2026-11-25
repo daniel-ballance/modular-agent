@@ -502,214 +502,210 @@ impl Harness {
     ) -> Result<Option<Vec<Input>>> {
         let op = Operation::internal("modular_agent.session.open", &Scope::session(id));
         op.attr("modular_agent.session.operation", "load");
-        op.run(self.install_recovery_inner(id, select)).await
-    }
-
-    async fn install_recovery_inner(
-        &self,
-        id: &str,
-        select: impl FnOnce(&SessionData) -> Result<bool> + Send + 'static,
-    ) -> Result<Option<Vec<Input>>> {
-        let _erasure = self
-            .erasure
-            .try_read()
-            .map_err(|_| anyhow!("erasure in progress"))?;
-        ensure!(
-            !self.sessions.lock().unwrap().contains_key(id),
-            OperationError::Busy("session already open here".into())
-        );
-        let store = self.store().ok_or_else(|| anyhow!("no history store"))?;
-        let session_id = id.to_owned();
-        let loaded = tokio::task::spawn_blocking(move || -> Result<_> {
-            let lease = store.acquire(&session_id)?;
-            let loaded = store.load(&session_id)?;
-            if !select(&loaded)? {
-                return Ok(None);
-            }
-            let (data, erased) = match store.reconcile_erasure(&session_id)? {
-                Some((data, _)) => (data, true),
-                None => (loaded, false),
-            };
-            store.check_erasure(&data)?;
-            Ok(Some((lease, data, erased)))
-        })
-        .await??;
-        let Some((lease, mut data, erased)) = loaded else {
-            return Ok(None);
-        };
-        if let Some(remove) = self.private_erasure.get() {
-            remove(&data)?;
-        }
-        if erased {
-            self.invalidate_providers(id)?;
-        }
-        if let Some(tenant) = tenants::name(&data) {
-            self.check_tenant(tenant)?;
-        }
-        if !matches!(
-            data.settings["approval"].as_str(),
-            Some("off" | "ask_unless_read_only" | "ask_always" | "never_ask")
-        ) {
-            data.settings["approval"] = if data.settings["approval"].is_string()
-                && (self.max_approval_wait_ms().is_some() || waiting_approvals::outstanding(&data))
-            {
-                json!("never_ask")
-            } else {
-                json!("ask_always")
-            };
-        }
-        data.project = data.project.canonicalize()?;
-        let previous_plugins = data.plugins.clone();
-        data.plugins = self.registry.read().unwrap().names();
-        let plugins_changed = data.plugins != previous_plugins;
-        // Repair the journal before session preparation, recovery or new history.
-        let recovery = data.unresolved_rewind().is_some();
-        let project = data.project.clone();
-        {
-            let mut sessions = self.sessions.lock().unwrap();
+        op.run(async {
+            let _erasure = self
+                .erasure
+                .try_read()
+                .map_err(|_| anyhow!("erasure in progress"))?;
             ensure!(
-                !sessions.contains_key(id),
+                !self.sessions.lock().unwrap().contains_key(id),
                 OperationError::Busy("session already open here".into())
             );
-            self.check_project_open(&sessions, &data)?;
-            if recovery {
-                self.blocked_projects
-                    .lock()
-                    .unwrap()
-                    .insert(project.clone(), id.into());
-            } else {
-                self.blocked_projects.lock().unwrap().remove(&project);
-            }
-            sessions.insert(
-                id.into(),
-                OpenSession {
-                    data,
-                    lease: Some(lease),
-                    provisional: false,
-                    commits: None,
-                    generation: CancellationToken::new(),
-                    interruption: CancellationToken::new(),
-                    queue: VecDeque::new(),
-                    input_contexts: BTreeMap::new(),
-                    question_contexts: BTreeMap::new(),
-                    approval_views: Default::default(),
-                    interrupted: Vec::new(),
-                    active: None,
-                    rewinding: recovery,
-                    journal_uncertain: false,
-                    environment_work: 0,
-                    steer_closed: false,
-                    continuation_waiters: Default::default(),
-                    cancel: CancellationToken::new(),
-                },
-            );
-        }
-        self.watch_writer(id);
-        if recovery {
-            let result = self.recover_rewind(&Scope::session(id)).await;
-            let mut sessions = self.sessions.lock().unwrap();
-            if let Err(error) = result {
-                sessions.remove(id);
-                return Err(error);
-            }
-            sessions.get_mut(id).unwrap().rewinding = false;
-            self.blocked_projects.lock().unwrap().remove(&project);
-        }
-        if let Ok(questions) = requests(self)
-            && let Err(error) = questions.recover(self, id)
-        {
-            self.sessions.lock().unwrap().remove(id);
-            return Err(error);
-        }
-        if let Err(error) = self.prepare_session(id).await {
-            let _ = self.close(id).await;
-            self.sessions.lock().unwrap().remove(id);
-            return Err(error);
-        }
-        if plugins_changed
-            || !self
-                .snapshot(id)?
-                .entries
-                .iter()
-                .any(|e| e.kind == "plugins.changed")
-        {
-            self.append(
-                &Scope::session(id),
-                "harness",
-                Draft::new(
-                    "plugins.changed",
-                    false,
-                    json!({"previous":previous_plugins,"active":self.snapshot(id)?.plugins}),
-                ),
-            )?;
-        }
-        let snapshot = self.snapshot(id)?;
-        let branch = snapshot.branch();
-        self.reconcile_approvals(id, true)?;
-        self.recover_interface_tools(id, &snapshot)?;
-        let mut interrupted = Vec::new();
-        for scope in unfinished_turns(&branch) {
-            interrupted.push((session_runtime(self, &snapshot)?, scope.clone()));
-        }
-        let mut handed_back = Vec::new();
-        for (input_id, entry) in snapshot.pending_inputs() {
-            {
-                let content = entry.content.as_ref().unwrap();
-                let input = Input {
-                    id: input_id.into(),
-                    actor: entry.scope.actor.clone(),
-                    text: content["text"].as_str().unwrap_or("").into(),
-                    timing: if content["parked"] == true && content["releasedBy"].is_null() {
-                        Timing::Propose
-                    } else {
-                        serde_json::from_value(content["timing"].clone())?
-                    },
-                    key: content["key"].as_str().map(str::to_string),
+            let store = self.store().ok_or_else(|| anyhow!("no history store"))?;
+            let session_id = id.to_owned();
+            let loaded = tokio::task::spawn_blocking(move || -> Result<_> {
+                let lease = store.acquire(&session_id)?;
+                let loaded = store.load(&session_id)?;
+                if !select(&loaded)? {
+                    return Ok(None);
+                }
+                let (data, erased) = match store.reconcile_erasure(&session_id)? {
+                    Some((data, _)) => (data, true),
+                    None => (loaded, false),
                 };
-                if input.key.as_deref().is_some_and(|key| {
-                    key.starts_with("job-task:")
-                        || key.starts_with("job-report:")
-                        || key.starts_with("job:")
-                }) {
-                    self.sessions
+                store.check_erasure(&data)?;
+                Ok(Some((lease, data, erased)))
+            })
+            .await??;
+            let Some((lease, mut data, erased)) = loaded else {
+                return Ok(None);
+            };
+            if let Some(remove) = self.private_erasure.get() {
+                remove(&data)?;
+            }
+            if erased {
+                self.invalidate_providers(id)?;
+            }
+            if let Some(tenant) = tenants::name(&data) {
+                self.check_tenant(tenant)?;
+            }
+            if !matches!(
+                data.settings["approval"].as_str(),
+                Some("off" | "ask_unless_read_only" | "ask_always" | "never_ask")
+            ) {
+                data.settings["approval"] = if data.settings["approval"].is_string()
+                    && (self.max_approval_wait_ms().is_some()
+                        || waiting_approvals::outstanding(&data))
+                {
+                    json!("never_ask")
+                } else {
+                    json!("ask_always")
+                };
+            }
+            data.project = data.project.canonicalize()?;
+            let previous_plugins = data.plugins.clone();
+            data.plugins = self.registry.read().unwrap().names();
+            let plugins_changed = data.plugins != previous_plugins;
+            // Repair the journal before session preparation, recovery or new history.
+            let recovery = data.unresolved_rewind().is_some();
+            let project = data.project.clone();
+            {
+                let mut sessions = self.sessions.lock().unwrap();
+                ensure!(
+                    !sessions.contains_key(id),
+                    OperationError::Busy("session already open here".into())
+                );
+                self.check_project_open(&sessions, &data)?;
+                if recovery {
+                    self.blocked_projects
                         .lock()
                         .unwrap()
-                        .get_mut(id)
-                        .unwrap()
-                        .queue
-                        .push_back(input);
-                    continue;
+                        .insert(project.clone(), id.into());
+                } else {
+                    self.blocked_projects.lock().unwrap().remove(&project);
                 }
-                let scope = Scope::session(id);
-                self.append(
-                    &scope,
-                    "harness",
-                    Draft::new("input.returned", false, json!({"input":input_id})),
-                )?;
-                self.emit(Event::new(&scope, "input.returned", json!(input)))
-                    .await?;
-                handed_back.push(input);
+                sessions.insert(
+                    id.into(),
+                    OpenSession {
+                        data,
+                        lease: Some(lease),
+                        provisional: false,
+                        commits: None,
+                        generation: CancellationToken::new(),
+                        interruption: CancellationToken::new(),
+                        queue: VecDeque::new(),
+                        input_contexts: BTreeMap::new(),
+                        question_contexts: BTreeMap::new(),
+                        approval_views: Default::default(),
+                        interrupted: Vec::new(),
+                        active: None,
+                        rewinding: recovery,
+                        journal_uncertain: false,
+                        environment_work: 0,
+                        steer_closed: false,
+                        continuation_waiters: Default::default(),
+                        cancel: CancellationToken::new(),
+                    },
+                );
             }
-        }
-        if let Err(error) = self
-            .invoke(
-                &self.points["session.start"],
-                &Scope::session(id),
-                json!({"resumed":true}),
-            )
-            .await
-        {
-            let _ = self.close(id).await;
-            self.sessions.lock().unwrap().remove(id);
-            return Err(error);
-        }
-        let mut sessions = self.sessions.lock().unwrap();
-        let open = sessions.get_mut(id).unwrap();
-        // Reserve the session until recovery settles, even before its driver runs.
-        open.active = (!interrupted.is_empty()).then_some(ActiveTurn::Recovery);
-        open.steer_closed = open.active.is_some();
-        open.interrupted = interrupted;
-        Ok(Some(handed_back))
+            self.watch_writer(id);
+            if recovery {
+                let result = self.recover_rewind(&Scope::session(id)).await;
+                let mut sessions = self.sessions.lock().unwrap();
+                if let Err(error) = result {
+                    sessions.remove(id);
+                    return Err(error);
+                }
+                sessions.get_mut(id).unwrap().rewinding = false;
+                self.blocked_projects.lock().unwrap().remove(&project);
+            }
+            if let Ok(questions) = requests(self)
+                && let Err(error) = questions.recover(self, id)
+            {
+                self.sessions.lock().unwrap().remove(id);
+                return Err(error);
+            }
+            if let Err(error) = self.prepare_session(id).await {
+                let _ = self.close(id).await;
+                self.sessions.lock().unwrap().remove(id);
+                return Err(error);
+            }
+            if plugins_changed
+                || !self
+                    .snapshot(id)?
+                    .entries
+                    .iter()
+                    .any(|e| e.kind == "plugins.changed")
+            {
+                self.append(
+                    &Scope::session(id),
+                    "harness",
+                    Draft::new(
+                        "plugins.changed",
+                        false,
+                        json!({"previous":previous_plugins,"active":self.snapshot(id)?.plugins}),
+                    ),
+                )?;
+            }
+            let snapshot = self.snapshot(id)?;
+            let branch = snapshot.branch();
+            self.reconcile_approvals(id, true)?;
+            self.recover_interface_tools(id, &snapshot)?;
+            let mut interrupted = Vec::new();
+            for scope in unfinished_turns(&branch) {
+                interrupted.push((session_runtime(self, &snapshot)?, scope.clone()));
+            }
+            let mut handed_back = Vec::new();
+            for (input_id, entry) in snapshot.pending_inputs() {
+                {
+                    let content = entry.content.as_ref().unwrap();
+                    let input = Input {
+                        id: input_id.into(),
+                        actor: entry.scope.actor.clone(),
+                        text: content["text"].as_str().unwrap_or("").into(),
+                        timing: if content["parked"] == true && content["releasedBy"].is_null() {
+                            Timing::Propose
+                        } else {
+                            serde_json::from_value(content["timing"].clone())?
+                        },
+                        key: content["key"].as_str().map(str::to_string),
+                    };
+                    if input.key.as_deref().is_some_and(|key| {
+                        key.starts_with("job-task:")
+                            || key.starts_with("job-report:")
+                            || key.starts_with("job:")
+                    }) {
+                        self.sessions
+                            .lock()
+                            .unwrap()
+                            .get_mut(id)
+                            .unwrap()
+                            .queue
+                            .push_back(input);
+                        continue;
+                    }
+                    let scope = Scope::session(id);
+                    self.append(
+                        &scope,
+                        "harness",
+                        Draft::new("input.returned", false, json!({"input":input_id})),
+                    )?;
+                    self.emit(Event::new(&scope, "input.returned", json!(input)))
+                        .await?;
+                    handed_back.push(input);
+                }
+            }
+            if let Err(error) = self
+                .invoke(
+                    &self.points["session.start"],
+                    &Scope::session(id),
+                    json!({"resumed":true}),
+                )
+                .await
+            {
+                let _ = self.close(id).await;
+                self.sessions.lock().unwrap().remove(id);
+                return Err(error);
+            }
+            let mut sessions = self.sessions.lock().unwrap();
+            let open = sessions.get_mut(id).unwrap();
+            // Reserve the session until recovery settles, even before its driver runs.
+            open.active = (!interrupted.is_empty()).then_some(ActiveTurn::Recovery);
+            open.steer_closed = open.active.is_some();
+            open.interrupted = interrupted;
+            Ok(Some(handed_back))
+        })
+        .await
     }
 
     async fn run_recovery(&self, id: &str) -> Result<()> {
@@ -814,58 +810,57 @@ impl Harness {
     pub async fn close(&self, id: &str) -> Result<()> {
         let op = Operation::internal("modular_agent.session.close", &Scope::session(id));
         op.attr("modular_agent.session.operation", "close");
-        op.run(self.close_inner(id)).await
-    }
-
-    async fn close_inner(&self, id: &str) -> Result<()> {
-        {
-            let mut sessions = self.sessions.lock().unwrap();
-            if let Some(open) = sessions.get(id)
-                && open.interruption.is_cancelled()
-                && open.active.is_none()
+        op.run(async {
             {
-                if open.journal_uncertain || open.data.unresolved_rewind().is_some() {
+                let mut sessions = self.sessions.lock().unwrap();
+                if let Some(open) = sessions.get(id)
+                    && open.interruption.is_cancelled()
+                    && open.active.is_none()
+                {
+                    if open.journal_uncertain || open.data.unresolved_rewind().is_some() {
+                        self.blocked_projects
+                            .lock()
+                            .unwrap()
+                            .insert(open.data.project.clone(), id.into());
+                    }
+                    sessions.remove(id);
+                    return Ok(());
+                }
+                if let Some(open) = sessions.get(id)
+                    && !open.rewinding
+                    && (open.journal_uncertain || open.data.unresolved_rewind().is_some())
+                {
+                    // Release the writer so the next open can reconcile the journal.
                     self.blocked_projects
                         .lock()
                         .unwrap()
                         .insert(open.data.project.clone(), id.into());
+                    sessions.remove(id);
+                    return Ok(());
                 }
-                sessions.remove(id);
-                return Ok(());
             }
-            if let Some(open) = sessions.get(id)
-                && !open.rewinding
-                && (open.journal_uncertain || open.data.unresolved_rewind().is_some())
-            {
-                // Release the writer so the next open can reconcile the journal.
-                self.blocked_projects
-                    .lock()
-                    .unwrap()
-                    .insert(open.data.project.clone(), id.into());
-                sessions.remove(id);
-                return Ok(());
+            let _workspace = self.begin_environment_work(id)?;
+            ensure!(
+                !self.is_running(id),
+                "cancel and await the turn before closing"
+            );
+            self.abandon_interface_calls(id, "Session closed")?;
+            self.invoke(&self.points["session.end"], &Scope::session(id), json!({}))
+                .await?;
+            if let Ok(environment) = capability::<dyn WorkingEnvironment>(self, "environment") {
+                environment.session_ended(id).await?;
             }
-        }
-        let _workspace = self.begin_environment_work(id)?;
-        ensure!(
-            !self.is_running(id),
-            "cancel and await the turn before closing"
-        );
-        self.abandon_interface_calls(id, "Session closed")?;
-        self.invoke(&self.points["session.end"], &Scope::session(id), json!({}))
-            .await?;
-        if let Ok(environment) = capability::<dyn WorkingEnvironment>(self, "environment") {
-            environment.session_ended(id).await?;
-        }
-        self.emit(Event::new(&Scope::session(id), "session.end", json!({})))
-            .await?;
-        self.invalidate_providers(id)?;
-        self.sessions
-            .lock()
-            .unwrap()
-            .remove(id)
-            .ok_or_else(|| OperationError::NotFound("unknown session".into()))?;
-        Ok(())
+            self.emit(Event::new(&Scope::session(id), "session.end", json!({})))
+                .await?;
+            self.invalidate_providers(id)?;
+            self.sessions
+                .lock()
+                .unwrap()
+                .remove(id)
+                .ok_or_else(|| OperationError::NotFound("unknown session".into()))?;
+            Ok(())
+        })
+        .await
     }
     fn refresh_open_erasure(&self, open: &mut OpenSession) -> Result<()> {
         if !open.provisional
@@ -1453,7 +1448,6 @@ impl Harness {
         };
         wire::parts(&content)?;
         let text = wire::text(&content);
-        // The per-session admission lock already serialized the key lookup.
         let mut sessions = self.sessions.lock().unwrap();
         let open = sessions
             .get_mut(session)
