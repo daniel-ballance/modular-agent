@@ -160,10 +160,11 @@ function changedLines(base, committed) {
     const target = status[i++];
     if (!isMarkdown(target) || !committed.has(key(target)) || historical.test(key(target))) continue;
     const file = name(target);
-    // Only an edited rename (R090 to R099) of a file the review reads keeps its unedited lines out.
-    // An exact pair (R100) shows no edit, and Git pairs any identical add and delete; a file moved
-    // out of a historical folder was never reviewed; a source that is not UTF-8 cannot be named to
-    // Git. Each counts every line: more candidates, never a hidden one.
+    // Only a rename scored R090 to R099 from a file the review reads keeps its unedited lines out.
+    // R100 is a similarity score, not proof the file is unchanged: Git gives it to any identical
+    // add and delete, and to some edits, such as reordered lines. A file moved out of a historical
+    // folder was never reviewed; a source that is not UTF-8 cannot be named to Git. Each counts
+    // every line: more candidates, never a hidden one.
     const moved = source && kind.startsWith("R") && kind !== "R100" && !historical.test(key(source));
     const from = moved ? decodable(source) : undefined;
     const lines = new Set();
