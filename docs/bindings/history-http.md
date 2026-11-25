@@ -165,7 +165,7 @@ The client MUST check `GET /v1` before use and refuse a binding it does not spea
 
 - **2026-11-21.** Add the optional `pendingErasure: 1` profile for durable pending marks, guarded appends and leased completion without changing the base binding version.
 
-- **Proposed production rules.** Clarify raw history isolation, storage provisioning for reservations and the Harness's role in pending erasure. No new endpoints.
+- **Accepted 2026-11-21 ([ADR 0030](../adr/0030-production-gaps.md)).** Clarify raw history isolation, storage provisioning for reservations and the Harness's role in pending erasure. No new endpoints.
 
 - **Production edition 2.** Bounded leases and fork preflight (all five builds: Elixir PE-2, Go P1, Python G88 and G99, Rust PE-01, TypeScript). Actual body and page bytes (Go P5), JSON depth and unencoded HTTP bodies (TypeScript), lease clocks (Rust PE-03, TypeScript), and retryable reopen after a restart hold (Go P4, TypeScript). See the limits on [initial create and legacy migration](../security.md#deliberate-limits) (Elixir PE-7, TypeScript).
 
