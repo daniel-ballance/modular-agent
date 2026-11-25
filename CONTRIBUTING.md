@@ -4,11 +4,46 @@
 
 Every change starts from a GitHub issue. An issue is a bug, a change, or a finding: a gap that a higher layer found in a lower one.
 
-- **Labels.** A `layer:` label gives the layer the work starts in. A `lang:` label marks work or a gap in one language only.
+- **Open work.** Issues are the only list of open work. When you find a gap, a finding or a follow-up, open an issue for it at once, even while you work on another. The next agent finds it with `gh issue list`, which shows no README section, TODO comment or chat note.
+- **Labels.** A `layer:` label gives the layer the work starts in. A `lang:` label marks work or a gap in one language only. A `finding` label marks a gap that must go down a layer.
 - **Milestones.** Each release has a milestone, starting with 0.4.0. An issue belongs to the milestone it is planned for.
-- **Project.** The "Modular Agent" GitHub Project shows each issue's status (Todo, In progress, In review, Done) and priority.
-- **Branch and pull request.** Work on one branch per issue. The pull request says `Closes #N` and lists the checks run, with their counts.
-- **Landing.** The operator lands pull requests.
+- **Project.** The "Modular Agent" GitHub Project shows each issue's status (Todo, In progress, In review, Done) and priority. Whoever works on an issue moves it to In progress when its branch exists and to In review when its pull request is open. The commands are below.
+- **Decisions.** A decision that outlives your session goes where the next reader looks: a comment on the issue, an ADR when it meets the test under [Writing](#writing), or the document it changes. Chat and an agent's own notes end with the session.
+- **One change, every place.** When you change a rule, a status word or a user-facing string, search for every other place that states it with `git grep -n`, which also reads `.github/`. Look in the documents, the READMEs, help text, tests and all four languages. Change them in the same pull request. A language you cannot change there gets an issue with its `lang:` label ([ADR 0036](docs/adr/0036-four-languages-in-lockstep.md)).
+- **Branch and pull request.** Work on one branch per issue. The pull request says `Closes #N` and lists the checks run, with their counts. Its sections are those in [the template](.github/pull_request_template.md).
+- **Review.** Every pull request gets a verdict from a reviewer who did not write it. The reviewer posts the verdict on the pull request and names the commit it reviewed. A push after the verdict needs a new verdict at the new head.
+- **Landing.** The operator lands a pull request once it has a verdict at its current head. GitHub then deletes the remote branch. Remove your worktree and local branch with `git worktree remove PATH` and `git branch -D BRANCH`.
+
+To move an issue on the Project, look up the IDs, then set the Status field:
+
+```sh
+ISSUE=26                                                           # your issue's number
+gh project view 1 --owner daniel-ballance --format json --jq .id    # project ID
+gh project item-list 1 --owner daniel-ballance --format json --limit 500 \
+  --jq ".items[] | select(.content.number==$ISSUE) | .id"          # item ID of the issue
+gh project field-list 1 --owner daniel-ballance --format json \
+  --jq '.fields[] | select(.name=="Status")'                        # field and option IDs
+gh project item-edit --project-id PROJECT_ID --id ITEM_ID \
+  --field-id FIELD_ID --single-select-option-id OPTION_ID
+```
+
+### Releases
+
+A release gives the four SDKs and `ma` one new version, named by its milestone. Steps 1 to 5 go in one release pull request.
+
+1. Bump the version everywhere it is stated:
+   - Rust: `version` in the workspace `rust/Cargo.toml`, and `rust/Cargo.lock`.
+   - TypeScript: `version` in each `typescript/packages/*/package.json`, the exact versions those packages pin for each other, and `typescript/package-lock.json`.
+   - Python: `version` in `python/pyproject.toml` and each `python/packages/*/pyproject.toml`, the exact versions they pin for each other, and `python/uv.lock`.
+   - Go: `ImplementationVersion` in `go/api/api.go`.
+   - The manifests and lock files under `demos/`, the status line in `README.md`, and the `ma --version` example in `.github/ISSUE_TEMPLATE/bug.yml`.
+
+   Then search the tracked files for the old version with `git grep -n -F OLD`, which also reads `.github/`, and change each place that still gives it as current.
+2. Update the status line at the top of `docs/sdk/README.md`. It gives the SDK specification's revision and what the four SDKs pass.
+3. Add a section for the release to `docs/status.md`, with the step counts of `scripts/check.sh` and `scripts/macos-check.sh` on the release commit.
+4. Add a section for the release to `CHANGELOG.md`.
+5. Run the docs-state check (#27). It fails on a version that drifted or a stale status word.
+6. After the operator lands the release pull request and tags its commit on `main` as `vX.Y.Z`, close the milestone. First move each issue still open in it to the next milestone with `gh issue edit N --milestone NEXT`. Then close it with `gh api -X PATCH repos/daniel-ballance/modular-agent/milestones/NUMBER -f state=closed`.
 
 ## How work moves through the layers
 
