@@ -1,3 +1,4 @@
+import { Commands } from "./commands.js";
 import { SessionAuthority, readTenants, intersectRights, type TenantInfo } from "./authority.js";
 import { WorkReservations } from "./work-reservations.js";
 import { HistoryCommit } from "./history-commit.js";
@@ -260,6 +261,25 @@ export interface Tenant { rights: Authority[]; tokens?: number }
  * It runs no turns, calls no models and runs no tools itself.
  */
 export class Harness {
+	private readonly commandWork: Commands = new Commands({
+		lifecycle: () => this.lifecycle,
+		erasure: () => this.erasure,
+		authority: () => this.authority,
+		commandTable: () => this.commandTable,
+		newId: (...args) => this.newId(...args),
+		reservations: () => this.reservations,
+		api: (...args) => this.api(...args),
+		providerFor: (...args) => this.providerFor(...args),
+		modelAccess: (...args) => this.modelAccess(...args),
+		toolDefinitions: (...args) => this.toolDefinitions(...args),
+		interfaceTools: () => this.interfaceTools,
+		turns: () => this.turns,
+		turnModels: () => this.turnModels,
+		questions: () => this.questions,
+		environmentFor: (...args) => this.environmentFor(...args),
+		scopedEnvironment: (...args) => this.scopedEnvironment(...args),
+	});
+
 	private readonly authority: SessionAuthority = new SessionAuthority({
 		tenants: () => this.tenants,
 		historyCommit: () => this.historyCommit,
@@ -341,7 +361,7 @@ export class Harness {
 		checkScopedWork: (...args) => this.authority.checkScopedWork(...args),
 		requireAuthority: (...args) => this.authority.requireAuthority(...args),
 		commandTable: () => this.commandTable,
-		runCommand: (...args) => this.runCommand(...args),
+		runCommand: (...args) => this.commandWork.runCommand(...args),
 		newId: (...args) => this.newId(...args),
 		hooks: () => this.hooks,
 		receiptOperation: () => this.receiptOperation,
@@ -715,7 +735,7 @@ export class Harness {
 				else this.commandTable.set(name, { ...command, plugin: pluginName });
 			},
 			commands: () => [...this.commandTable].map(([name, c]) => ({ name, description: c.description, plugin: c.plugin })),
-			runCommand: (sessionId, line, actorId) => this.runCommand(sessionId, line, actorId),
+			runCommand: (sessionId, line, actorId) => this.commandWork.runCommand(sessionId, line, actorId),
 			startSession: (options) => this.lifecycle.startSession(options),
 			openSession: (id, actor, prepare, operation) => this.lifecycle.openSession(id, actor, prepare, operation),
 			join: (sessionId, actor, grantedBy) => this.authority.join(this.lifecycle.session(sessionId), actor, grantedBy, pluginName),
@@ -957,81 +977,6 @@ export class Harness {
 		}
 		if (!follower.closed) s.followers.add(follower);
 		return Object.assign(() => { s.followers.delete(follower); follower.disconnect(); }, { idle: () => follower.idle() });
-	}
-
-	// ---------- commands ----------
-
-	private async runCommand(sessionId: string, line: string, actorId: string): Promise<string | void> {
-		const match = /^\/(\S+)\s?([\s\S]*)$/.exec(line.trimStart());
-		if (!match) throw failure("invalid_params", "Not a command");
-		const session = this.lifecycle.session(sessionId);
-		await this.erasure.reconcilePending(session);
-		this.authority.requireAuthority(session, actorId, "input");
-		this.lifecycle.checkWriter(session);
-		const command = this.commandTable.get(match[1]);
-		if (!command) throw failure("not_found", `Unknown command /${match[1]}`);
-		const stepId = this.newId();
-		const commandReservation = `command:${stepId}`;
-		if (!this.reservations.reserve(session, commandReservation, { calls: 1, bufferedBytes: resourceBytes(line),
-			storageBytes: this.reservations.limits.settlementBytes })) throw failure("busy", "No capacity for command");
-		const authority = { startingRights: this.authority.rightsOf(session, actorId) };
-		const scope = { sessionId, actors: new Set([actorId]), jobs: new Set<string>(), state: authority };
-		const abort = new AbortController();
-		const signal = AbortSignal.any([abort.signal, session.interruption.signal]);
-		const live = () => {
-			if (abort.signal.aborted || session.closed || session.closing || session.suspended) {
-				throw Object.assign(new Error("Command context has settled"), { code: "invalid_request" });
-			}
-			signal.throwIfAborted();
-			this.erasure.checkPending(session);
-			this.lifecycle.checkWriter(session);
-			this.authority.requireAuthority(session, actorId, "input");
-		};
-		let tail = Promise.resolve();
-		try {
-			return await this.authority.turnAuthority.run(scope, () => command.run(match[2], { sessionId, actorId, stepId, signal, api: this.api(command.plugin),
-				requestModel: async (request) => {
-					live();
-					if (!command.usesModel) throw Object.assign(new Error("Command did not declare usesModel"), { code: "not_supported" });
-					const snapshot = structuredClone(request);
-					const pending = tail.then(async () => {
-						live();
-						await this.providerFor(session)?.refreshModels?.();
-						const model = this.modelAccess(session);
-						if (!model) throw Object.assign(new Error("The selected model is not offered"), { code: "invalid_request" });
-						const allowed = this.authority.rightsOf(session, actorId).includes("tools") ? this.toolDefinitions(session) : [];
-						const offered = session.settings.modelTools;
-						const tools = snapshot.tools.filter(tool => (!tool.callers || tool.callers.includes("model")) && !this.interfaceTools.interfaceSources.has(tool.name) &&
-							(offered == null || Array.isArray(offered) && offered.includes(tool.name)) && allowed.some(t => isDeepStrictEqual(t, tool)));
-						const settings = this.turns.turnSettings(session, model.model);
-						const maxOutput = Math.min(settings.maxOutput ?? Infinity, snapshot.settings.maxOutput ?? Infinity);
-						const request = { ...snapshot, tools, providerTools: "none" as const, settings: { ...snapshot.settings,
-							reasoning: snapshot.settings.reasoning ?? settings.reasoning, maxOutput: Number.isFinite(maxOutput) ? maxOutput : undefined } };
-						return this.turnModels.turnModel(session, undefined, { ...authority, sources: new Map(), actors: scope.actors, jobs: scope.jobs }, model, live)
-							.request(request, { signal, stepId });
-					});
-					tail = pending.then(() => {}, () => {});
-					return pending;
-				},
-				ask: async request => { live(); return this.questions.ask(session, request, command.plugin, signal); },
-				environment: async () => {
-					live();
-					const authorize = () => {
-						if (!this.authority.rightsOf(session, actorId).includes("tools")) throw failure("invalid_request", "Command cannot use the environment");
-					};
-					authorize();
-					const environment = await this.environmentFor(session);
-					live();
-					authorize();
-					if (!environment) throw Object.assign(new Error("No working environment"), { code: "not_supported" });
-					return this.scopedEnvironment(environment, () => { live(); authorize(); });
-				},
-			}));
-		} finally {
-			abort.abort();
-			await tail;
-			this.reservations.release(session, commandReservation);
-		}
 	}
 
 	// ---------- sessions ----------
