@@ -3,6 +3,11 @@ import { execFileSync } from "node:child_process";
 import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const { adrStatus, parseMarkdown, walk } = await import("./markdown.mjs").catch((error) => {
+  if (error.code !== "ERR_MODULE_NOT_FOUND") throw error;
+  console.error("scripts/docs-review.mjs: Missing parser dependencies. Run npm ci --prefix scripts.");
+  process.exit(2);
+});
 const root = fileURLToPath(new URL("..", import.meta.url));
 const usage = "Use node scripts/docs-review.mjs [--all | --base REF]";
 const adrFile = /^docs\/adr\/(\d{4})-[^/]+\.md$/;
@@ -22,8 +27,6 @@ const issueUrl = /https?:\/\/[^\s<>()[\]]+\/issues\/[1-9]\d*\b/;
 const issueNumber = /(?:^|[\s(\[]|[\w.-]+\/[\w.-]+)#\d*[1-9]\d*\b/;
 const link = /\[([^\]\n]+)\]\(<?([^\s)>]+)>?(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?[ \t]*\)/g;
 const adrName = /\bADR[ -]?(\d{4})\b/g;
-const heading = /^ {0,3}#{1,6}(?:[ \t]|$)/;
-const blockStart = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|\||[-*+]\s|\d+[.)]\s|>)/;
 const git = (...args) => execFileSync("git", ["-c", "core.quotePath=false", ...args], { cwd: root, encoding: "utf8", maxBuffer: 1 << 30, stdio: ["ignore", "pipe", "pipe"] });
 const gitBytes = (...args) => execFileSync("git", args, { cwd: root, maxBuffer: 1 << 30, stdio: ["ignore", "pipe", "pipe"] });
 // ignoreBOM keeps a leading U+FEFF, which is part of a valid name.
@@ -73,41 +76,30 @@ const linesOf = (text) => text.split(/\r?\n/);
 // Every file read is in HEAD, so a failed read is an error, never an empty file.
 const read = (file) => git("show", `HEAD:${file}`);
 
-// Copied from check-docs-state.mjs rather than shared: the two scripts stay
-// standalone files that their tests copy into a scratch repository.
-function markdownLines(text) {
-  let fence;
-  let comment = false;
-  return linesOf(text).map((line) => {
-    const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-    if (fence) {
-      if (marker?.[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = undefined;
-      return "";
-    }
-    if (marker && !comment) {
-      fence = marker[1];
-      return "";
-    }
-    const code = line.replace(/(`+)[^`]*?\1/g, (span) => " ".repeat(span.length));
-    let out = "";
-    let at = 0;
-    while (at < line.length) {
-      const next = comment ? line.indexOf("-->", at) : code.indexOf("<!--", at);
-      if (next === -1) {
-        out += comment ? " ".repeat(line.length - at) : line.slice(at);
-        break;
-      }
-      const end = comment ? next + 3 : next + 4;
-      out += comment ? " ".repeat(end - at) : line.slice(at, next) + "    ";
-      at = end;
-      comment = !comment;
-    }
-    return out;
-  });
-}
+const unread = ["code", "inlineCode", "html"];
+const blocks = ["heading", "paragraph", "tableRow"];
 
-function adrStatus(text) {
-  return text.match(/^---\r?\n(.*?)\r?\n---(?:\r?\n|$)/s)?.[1].match(/^status:[ \t]*([^\r\n]+)/m)?.[1].trim().toLowerCase();
+// Code, inline code and HTML are blanked in place, not removed, so each line keeps its number.
+function markdown(text) {
+  let shown = "";
+  let at = 0;
+  const headings = [];
+  const blockOf = new Map();
+  for (const node of walk(parseMarkdown(text))) {
+    const { start, end } = node.position;
+    if (unread.includes(node.type)) {
+      shown += text.slice(at, start.offset) + text.slice(start.offset, end.offset).replace(/[^\r\n]/g, " ");
+      at = end.offset;
+    }
+    if (node.type === "heading") headings.push(start.line - 1);
+    if (blocks.includes(node.type)) for (let i = start.line - 1; i < end.line; i++) blockOf.set(i, [start.line - 1, end.line]);
+  }
+  const lines = linesOf(shown + text.slice(at));
+  return {
+    lines,
+    paragraph: (i) => lines.slice(...(blockOf.get(i) ?? [i, i + 1])).join("\n"),
+    section: (i) => lines.slice(headings.findLast((line) => line <= i) ?? 0, headings.find((line) => line > i)).join("\n"),
+  };
 }
 
 function adrsIn(file, text, adrs) {
@@ -121,25 +113,6 @@ function adrsIn(file, text, adrs) {
   return found;
 }
 
-// A paragraph is the run of lines around a line up to a blank line. A heading,
-// table row, list item or quote starts a new one, so one table or list does not
-// lend every row's links to every other row.
-function paragraph(lines, i) {
-  let start = i;
-  while (start > 0 && lines[start - 1].trim() && !blockStart.test(lines[start])) start--;
-  let end = i + 1;
-  while (end < lines.length && lines[end].trim() && !blockStart.test(lines[end])) end++;
-  return lines.slice(start, end).join("\n");
-}
-
-function section(lines, i) {
-  let start = i;
-  while (start > 0 && !heading.test(lines[start])) start--;
-  let end = i + 1;
-  while (end < lines.length && !heading.test(lines[end])) end++;
-  return lines.slice(start, end).join("\n");
-}
-
 function words(text, pattern) {
   return [...new Set([...text.matchAll(pattern)].map((match) => match[0].toLowerCase()))];
 }
@@ -150,7 +123,7 @@ const tracked = (text) => issueUrl.test(prose(text)) || issueNumber.test(prose(t
 function candidates(file, wanted, adrs) {
   const source = read(file);
   const raw = linesOf(source);
-  const lines = markdownLines(source);
+  const { lines, paragraph, section } = markdown(source);
   const found = [];
   for (const [i, line] of lines.entries()) {
     if (wanted && !wanted.has(i + 1)) continue;
@@ -160,11 +133,11 @@ function candidates(file, wanted, adrs) {
     const status = [...new Set([...words(text, statusWords), ...words(text, todo), ...(named ? words(text, adrStatusWords) : [])])];
     if (status.length) reasons.push(`status ${status.map((word) => `"${word}"`).join(", ")}`);
     const open = [...words(text, openWords), ...(normative.test(text) ? [] : words(text, absentWords))];
-    if (open.length && !tracked(section(lines, i))) {
+    if (open.length && !tracked(section(i))) {
       reasons.push(`open work ${open.map((word) => `"${word}"`).join(", ")} with no issue in its section`);
     }
     if (!reasons.length) continue;
-    const linked = [...adrsIn(file, paragraph(lines, i), adrs)].sort().map((number) => `ADR ${number} ${adrs.get(number) ?? "has no status"}`);
+    const linked = [...adrsIn(file, paragraph(i), adrs)].sort().map((number) => `ADR ${number} ${adrs.get(number) ?? "has no status"}`);
     found.push(`${file}:${i + 1}: ${reasons.join("; ")}${linked.length ? `. Links ${linked.join(", ")}` : ""}.\n    ${raw[i].trim()}`);
   }
   return found;

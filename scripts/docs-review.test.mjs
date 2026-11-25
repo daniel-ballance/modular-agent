@@ -1,15 +1,21 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 const script = "scripts/docs-review.mjs";
+const modules = ["docs-review.mjs", "markdown.mjs"];
 
 function checkout(t, branch = "main") {
-  const cwd = mkdtempSync(join(tmpdir(), "docs-review-"));
-  t.after(() => rmSync(cwd, { force: true, recursive: true }));
+  const outside = mkdtempSync(join(tmpdir(), "docs-review-"));
+  t.after(() => rmSync(outside, { force: true, recursive: true }));
+  // The parsers resolve from above the repository, so no fixture commit includes them.
+  symlinkSync(fileURLToPath(new URL("node_modules", import.meta.url)), join(outside, "node_modules"));
+  const cwd = join(outside, "repo");
+  mkdirSync(cwd);
   const git = (...args) => execFileSync("git", [
     "-c", "user.name=Test", "-c", "user.email=test@example.com",
     "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", ...args,
@@ -20,7 +26,7 @@ function checkout(t, branch = "main") {
   };
   git("init", "-q", "-b", branch);
   mkdirSync(join(cwd, "scripts"));
-  copyFileSync(new URL("docs-review.mjs", import.meta.url), join(cwd, script));
+  for (const module of modules) copyFileSync(new URL(module, import.meta.url), join(cwd, "scripts", module));
   write("docs/adr/0007-accepted.md", "---\nstatus: accepted\n---\n\n# Accepted\n");
   write("docs/adr/0008-proposed.md", "---\nstatus: proposed\n---\n\n# Proposed\n");
   git("add", "-f", "--", "docs/adr");
@@ -95,6 +101,37 @@ test("fenced code, HTML comments, inline code, link targets and tags are not rea
   assert.deepEqual(result.at, ["README.md:14"]);
 });
 
+test("the parser decides what is prose: indented code, HTML blocks and code spans across lines are not; text after an escaped comment opener is", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "Intro.", "",
+    "    Support is planned.", "",
+    "<details>", "<summary>Planned work</summary>", "</details>", "",
+    "Use `a", "planned` here.", "",
+    "\\<!-- Resume is planned.", "",
+    "Support is planned.", "",
+  ]);
+  repo.commit("Docs");
+  assert.deepEqual(repo.run("--all").at, ["README.md:12", "README.md:14"]);
+});
+
+test("an underlined (Setext) heading starts a section", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", ["## Known gaps", "", "Tracked in #30.", "", "Other work", "----------", "", "- A gap in Go.", ""]);
+  repo.commit("Docs");
+  assert.deepEqual(repo.run("--all").at, ["README.md:8"]);
+});
+
+test("missing parser dependencies give a one-line install instruction", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "docs-review-no-deps-"));
+  t.after(() => rmSync(cwd, { force: true, recursive: true }));
+  for (const module of modules) copyFileSync(new URL(module, import.meta.url), join(cwd, module));
+  const result = spawnSync(process.execPath, [join(cwd, "docs-review.mjs"), "--all"], { cwd, encoding: "utf8" });
+  assert.equal(result.status, 2);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "scripts/docs-review.mjs: Missing parser dependencies. Run npm ci --prefix scripts.\n");
+});
+
 test("an issue in the same section tracks open work but not a status word", (t) => {
   const repo = checkout(t);
   repo.track("README.md", [
@@ -120,6 +157,8 @@ test("each candidate lists the ADRs its paragraph links or names, with their sta
     "- The proposed rule in ADR 0008.",
     "- The [missing record](adr/0009-gone.md) is proposed.",
     "",
+    "| Record | Status |",
+    "| --- | --- |",
     "| [ADR 0007](adr/0007-accepted.md) | Accepted |",
     "| Planned | Later |",
   ]);
@@ -130,7 +169,7 @@ test("each candidate lists the ADRs its paragraph links or names, with their sta
     'docs/notes.md:4: status "accepted". Links ADR 0007 accepted.',
     'docs/notes.md:5: status "proposed". Links ADR 0008 proposed.',
     'docs/notes.md:6: status "proposed".',
-    'docs/notes.md:9: status "planned".',
+    'docs/notes.md:11: status "planned".',
   ]);
 });
 
@@ -225,7 +264,7 @@ test("diff attributes and large files never hide a changed line", (t) => {
   repo.commit("Start");
   repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
   repo.track("no-diff.md", "Support is planned.\n");
-  repo.track("large.md", "Support is planned.\n\n" + "A stable line of filler text.\n\n".repeat(40000));
+  repo.track("large.md", "Support is planned.\n\n```text\n" + "A stable line of filler text.\n".repeat(40000) + "```\n");
   repo.commit("Docs");
   assert.deepEqual(repo.run().at, ["large.md:1", "no-diff.md:1"]);
 });

@@ -4,19 +4,12 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const parsers = await Promise.all([
-  import("mdast-util-from-markdown"),
-  import("mdast-util-gfm-table"),
-  import("micromark-extension-gfm-table"),
-  import("smol-toml"),
-]).catch((error) => {
+const parsers = await Promise.all([import("./markdown.mjs"), import("smol-toml")]).catch((error) => {
   if (error.code !== "ERR_MODULE_NOT_FOUND") throw error;
   console.error("scripts/check-docs-state.mjs:1: Missing parser dependencies. Run npm ci --prefix scripts.");
   process.exit(1);
 });
-const [{ fromMarkdown }, { gfmTableFromMarkdown }, { gfmTable }, { parse, TomlError }] = parsers;
-const markdownOptions = { extensions: [gfmTable()], mdastExtensions: [gfmTableFromMarkdown()] };
-const parseMarkdown = (source) => fromMarkdown(source, markdownOptions);
+const [{ adrStatus, parseMarkdown, walk }, { parse, TomlError }] = parsers;
 
 const args = process.argv.slice(2);
 if (args.length && (args.length !== 2 || args[0] !== "--root" || !args[1])) {
@@ -48,12 +41,6 @@ let bad = 0;
 function fail(file, line, problem, fix) {
   console.error(`${file}:${line}: ${problem}. ${fix}.`);
   bad++;
-}
-
-function* walk(node, stopAt = []) {
-  yield node;
-  if (stopAt.includes(node.type)) return;
-  for (const child of node.children ?? []) yield* walk(child, stopAt);
 }
 
 function inlineText(node, includeCode = false) {
@@ -95,10 +82,6 @@ function checkGaps(file, tree) {
     }
   }
   finish();
-}
-
-function adrStatus(text) {
-  return text.match(/^---\r?\n(.*?)\r?\n---(?:\r?\n|$)/s)?.[1].match(/^status:[ \t]*([^\r\n]+)/m)?.[1].trim().toLowerCase();
 }
 
 const adrBase = new URL("https://repository.invalid/docs/adr/");
@@ -277,7 +260,7 @@ function checkVersions(files) {
   const changelog = read("CHANGELOG.md");
   const releaseLine = /^ {0,3}##\s+(\[?v?\d+[^\s]*)/;
   const lines = linesOf(changelog);
-  const heading = fromMarkdown(changelog).children.find((node) => node.type === "heading" && node.depth === 2 && releaseLine.test(lines[node.position.start.line - 1]));
+  const heading = parseMarkdown(changelog).children.find((node) => node.type === "heading" && node.depth === 2 && releaseLine.test(lines[node.position.start.line - 1]));
   const line = heading?.position.start.line ?? 1;
   const version = lines[line - 1].match(releaseLine)?.[1].replace(/^\[([^\]]+)\]$/, "$1").match(release)?.[1];
   if (!heading || !version) {

@@ -63,9 +63,8 @@ function checkout(t) {
 test("missing parser dependencies give a one-line install instruction", (t) => {
   const cwd = mkdtempSync(join(tmpdir(), "docs-state-no-deps-"));
   t.after(() => rmSync(cwd, { force: true, recursive: true }));
-  const copy = join(cwd, "check-docs-state.mjs");
-  copyFileSync(checker, copy);
-  const result = spawnSync(process.execPath, [copy], { cwd, encoding: "utf8" });
+  for (const module of ["check-docs-state.mjs", "markdown.mjs"]) copyFileSync(new URL(module, import.meta.url), join(cwd, module));
+  const result = spawnSync(process.execPath, [join(cwd, "check-docs-state.mjs")], { cwd, encoding: "utf8" });
   assert.equal(result.status, 1);
   assert.equal(result.stdout, "");
   assert.equal(result.stderr, "scripts/check-docs-state.mjs:1: Missing parser dependencies. Run npm ci --prefix scripts.\n");
