@@ -25,7 +25,7 @@ On 2026-11-25, `main` had about 92,000 lines of Rust, 97,000 of Go, 64,000 of Py
 
 - **The full check took 37 to 46 minutes.** Each language runs its own lane, and Python runs its suite in four placements.
 - **Most failures under machine load were in Go or Python.** Six of the ten issues grouped under [#154](https://github.com/daniel-ballance/modular-agent/issues/154) were Go or Python steps, and a seventh was partly Python. Each one cost a rerun and a decision before a pull request could land.
-- **Sixteen of the open issues were about Go or Python alone.**
+- **Seventeen of the open issues were about Go or Python alone.**
 - **Several pull requests waited on one language.** A fix found in one build had to be made, tested and reviewed in three more before it could land.
 
 Two independent builders keep what ADR 0036 was for: every new rule is still built twice from the documents, by builders that do not share code. Four builders found more, and [ADR 0029](0029-sdk-decisions-after-four-builds.md) records what they found; those findings are now in the documents.
