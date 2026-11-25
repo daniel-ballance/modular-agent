@@ -352,8 +352,9 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor, interrupt
 		_ = lease.Close()
 		return err
 	}
+	s.data.Settings.Approval = api.ReopenedApproval(savedApproval)
 	snap = s.data
-	if err = c.registerOpen(ctx, s, host, savedApproval); err != nil {
+	if err = c.registerOpen(ctx, s, host); err != nil {
 		_ = lease.Close()
 		return err
 	}
@@ -431,7 +432,7 @@ func (c *client) open(ctx context.Context, id string, host *api.Actor, interrupt
 	return err
 }
 
-func (c *client) registerOpen(ctx context.Context, s *session, host *api.Actor, savedApproval string) error {
+func (c *client) registerOpen(ctx context.Context, s *session, host *api.Actor) error {
 	c.h.projectGate.Lock()
 	defer c.h.projectGate.Unlock()
 	if err := c.checkStoredRewinds(s.project, s.id); err != nil {
@@ -460,7 +461,6 @@ func (c *client) registerOpen(ctx context.Context, s *session, host *api.Actor, 
 		return err
 	}
 	if host != nil {
-		s.data.Settings.Approval = api.ReopenedApproval(savedApproval)
 		if err := s.joinHostLocked(*host); err != nil {
 			return err
 		}
