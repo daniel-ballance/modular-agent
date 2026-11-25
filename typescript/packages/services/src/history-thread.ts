@@ -28,6 +28,8 @@ export class HistoryThread {
 
 	constructor(config: ThreadOptions) {
 		this.worker = new Worker(new URL("./history-thread.js", import.meta.url), {
+			// An SDK host can start with --input-type=module, which rejects a file entry point.
+			execArgv: [],
 			workerData: { config, failedState: this.failedState },
 		});
 		const fail = (error: Error) => {
