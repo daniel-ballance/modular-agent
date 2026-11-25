@@ -199,12 +199,12 @@ function checkCargo(file, manifest, version) {
 
 // JSON.parse has no positions, so one pass over the text it accepted records the line of each
 // object key by its path. JSON.parse decodes each key, so "\/" and "\u002f" match "/", and the last
-// of duplicate keys wins, as in JSON.parse. Array elements hold null in the path. Only the paths a pin
-// can have are kept: a top-level key, or a key inside one of the dependency groups. Storing any other
-// path would copy its parent key once per child.
+// of duplicate keys wins, as in JSON.parse. Array elements hold null in the path. Only the wanted paths
+// are kept, each a top-level key or a key directly inside a dependency group, so memory follows the
+// number of diagnostics, not the size of the manifest.
 const nodeGroups = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
 
-function keyLines(text) {
+function keyLines(text, wanted) {
   const lines = new Map();
   const path = [];
   const inObject = [];
@@ -227,7 +227,8 @@ function keyLines(text) {
       while (text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
       if (expectKey && (path.length === 1 || (path.length === 2 && nodeGroups.includes(path[0])))) {
         path[path.length - 1] = JSON.parse(text.slice(at, end + 1));
-        lines.set(JSON.stringify(path), line);
+        const key = JSON.stringify(path);
+        if (wanted.has(key)) lines.set(key, line);
       }
       expectKey = false;
       at = end;
@@ -244,18 +245,21 @@ function checkNodePackage(file, text, version) {
     fail(file, 1, "Invalid package JSON", "Restore a valid package manifest");
     return;
   }
-  const lines = keyLines(text);
-  const lineOf = (path) => lines.get(JSON.stringify(path)) ?? 1;
+  const stale = [];
   const check = (path, value) => {
-    if (value === version) return;
-    const field = path.length === 1 ? "Package version" : `Dependency ${path[1]}`;
-    checkVersion(file, { line: value === undefined ? 1 : lineOf(path), value }, version, field);
+    if (value !== version) stale.push({ path, value });
   };
   check(["version"], pkg?.version);
   for (const group of nodeGroups) {
     for (const [name, pin] of Object.entries(pkg?.[group] ?? {})) {
       if (name.startsWith("@modular-agent/")) check([group, name], pin);
     }
+  }
+  if (stale.length === 0) return;
+  const lines = keyLines(text, new Set(stale.map(({ path }) => JSON.stringify(path))));
+  for (const { path, value } of stale) {
+    const field = path.length === 1 ? "Package version" : `Dependency ${path[1]}`;
+    checkVersion(file, { line: value === undefined ? 1 : lines.get(JSON.stringify(path)) ?? 1, value }, version, field);
   }
 }
 

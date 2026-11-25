@@ -350,6 +350,17 @@ test("a long key with many children outside the pin groups costs no more than it
   repo.check([`${node}:2: Package version`], { timeout: 10_000, nodeArgs: ["--max-old-space-size=128"] });
 });
 
+test("many unrelated top-level keys and superseded dependency groups are not kept in memory", (t) => {
+  const repo = checkout(t);
+  const keys = Array.from({ length: 750000 }, (_, i) => `"k${i}": 0`).join(", ");
+  repo.write(node, `{\n  "version": "0.2.0",\n  ${keys}\n}\n`);
+  repo.check([`${node}:2: Package version`], { timeout: 20_000, nodeArgs: ["--max-old-space-size=128"] });
+  const pins = (group) => Array.from({ length: 10000 }, (_, i) => `"@modular-agent/p${group}-${i}": "0.2.0"`).join(", ");
+  const groups = Array.from({ length: 128 }, (_, group) => `  "dependencies": { ${pins(group)} },`).join("\n");
+  repo.write(node, `{\n  "version": "0.3.2",\n${groups}\n  "dependencies": { "@modular-agent/demo": "0.2.0" }\n}\n`);
+  repo.check([`${node}:131: Dependency @modular-agent/demo`], { timeout: 20_000, nodeArgs: ["--max-old-space-size=128"] });
+});
+
 test("Python pins are read from dependency arrays, not from other project strings", (t) => {
   const repo = checkout(t);
   repo.write(python, [
