@@ -1,10 +1,10 @@
 # Ops desk
 
-Send a build failure to a webhook. The Python agent posts a summary, the Rust `ma` asks permission to run a script that edits `limits.py` and commits it, and the Go agent runs the tests on the resulting commit. The host shows the conversation and the approval in one page. The default checks use scripted models and need no sign-in. `--live` runs one event on your subscriptions.
+Send a build failure to a webhook. The TypeScript triage agent posts a summary. The Rust `ma` asks permission to run a script that edits `limits.py` and commits it. The TypeScript verifier runs the tests on that commit. The host shows the conversation and the approval in one page. The default checks use scripted models and need no sign-in. `--live` runs one event on your subscriptions.
 
 ## Build and check
 
-From the repository root on Linux, use `git`, `setpriv` (util-linux), `mise`, `uv`, Python 3 and Node with `node:sqlite` (22.13 or newer):
+From the repository root on Linux, use `git`, `setpriv` (util-linux), `mise`, Python 3 (for the runner and sample tests) and Node with `node:sqlite` (22.13 or newer):
 
 ```sh
 demos/ops-desk/build.sh
@@ -26,7 +26,7 @@ The eight checks use disposable data directories, tokens, loopback ports and scr
 
 ## Run one live event
 
-Build as above. Sign in first through `ma login grok`, `ma login chatgpt` and `ma login claude` if needed. The Python and Go [subscription Providers](../../docs/sdk/subscription-providers.md) use `auth.json` in [ma's configuration folder](../../docs/reference/standard-configuration.md#files), including its normal refresh lock. The Rust coder uses Claude Code's sign-in (`CLAUDE_CONFIG_DIR` or `~/.claude`). No API key or copy of either sign-in is needed.
+Build as above. Sign in first through `ma login grok`, `ma login chatgpt` and `ma login claude` if needed. The TypeScript [subscription Providers](../../docs/sdk/subscription-providers.md) use `auth.json` in [ma's configuration folder](../../docs/reference/standard-configuration.md#files), including its normal refresh lock. The Rust coder uses Claude Code's sign-in (`CLAUDE_CONFIG_DIR` or `~/.claude`). No API key or copy of either sign-in is needed.
 
 ```sh
 # Optional: collect the three agents' traces.
@@ -46,9 +46,9 @@ Auto prints each approval before answering through the same HTTP API as the page
 
 | Agent | Default model | Override (full `provider/id` on the same Provider) |
 |---|---|---|
-| Triage, Python | `grok/grok-4.7` | `DESK_TRIAGE_MODEL` |
+| Triage, TypeScript | `grok/grok-4.7` | `DESK_TRIAGE_MODEL` |
 | Coder, Rust `ma` | `claude/claude-sonnet-5-5` | `DESK_CODER_MODEL` |
-| Verifier, Go | `chatgpt/gpt-6.1-sol` | `DESK_VERIFIER_MODEL` |
+| Verifier, TypeScript | `chatgpt/gpt-6.1-sol` | `DESK_VERIFIER_MODEL` |
 
 Each invocation uses a fresh, private `ops-desk-live-*` directory. The runner chooses it. It prints the posts and exits after the routes settle. Success requires an answered approval, a changed commit checked out by the verifier, and a passing verdict backed by its test tool. The page stops; the logs, database and checkouts stay in that directory until you remove it. Match the printed thread IDs to `gen_ai.conversation.id` in Phoenix. See [the two measured runs](DESIGN.md#two-live-events) for latency and token counts.
 
@@ -97,5 +97,5 @@ Send an event, then open `http://127.0.0.1:6006`. The desk and all three agents 
 ## Where to look
 
 - [Host](host/desk.ts), [SQLite store](host/store.ts), [AG-UI client](host/agui.ts), [agent station](host/station.ts) and [page](host/public/index.html).
-- [Triage](triage/main.py), [coder script](coder/model.json), [live coder instructions](coder/instructions.md), [coder file and command limits](host/coder-scope.ts), [verifier](verifier/main.go) and [sample](sample/limits.py).
+- [Triage](host/triage.ts), [coder script](coder/model.json), [live coder instructions](coder/instructions.md), [coder file and command limits](host/coder-scope.ts), [verifier](host/verifier.ts) and [sample](sample/limits.py).
 - [Design and findings](DESIGN.md).

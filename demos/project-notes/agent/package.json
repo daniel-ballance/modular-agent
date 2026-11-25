@@ -1,0 +1,12 @@
+{
+  "name": "project-notes-agent",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "tsc" },
+  "dependencies": {
+    "@modular-agent/core": "file:../../../typescript/packages/core",
+    "@modular-agent/openai": "file:../../../typescript/packages/openai"
+  },
+  "devDependencies": { "@types/node": "^22.0.0", "typescript": "^6.0.3" }
+}

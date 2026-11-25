@@ -238,7 +238,8 @@ def run_case(root, *, crash=False, model="scripted/script"):
             environment_url = first_line(environment, environment_output)
 
             command = [
-                DEMO / ".build/agent",
+                "node",
+                DEMO / "agent/dist/main.js",
                 "--project",
                 project,
                 "--history",
@@ -249,10 +250,8 @@ def run_case(root, *, crash=False, model="scripted/script"):
                 environment_url,
                 "--environment-token",
                 environment_token,
-                "--python",
-                DEMO / "tools/.venv/bin/python",
                 "--tools",
-                DEMO / "tools/notes.py",
+                REPO / "rust/target/debug/project-notes-tools",
                 "--model",
                 model,
             ]

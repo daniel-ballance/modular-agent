@@ -3,30 +3,32 @@
 One agent adds a line to `notes.txt`, searches for it, and reports the match. Its four parts run on the same machine and use only public SDK APIs and bindings.
 
 ```text
-                     Go agent
+                 TypeScript agent
                  (durable Runtime,
                  scripted Provider)
                    /      |       \
               stdio    WebSocket    HTTP history binding
                 /         |          \
-      Python tools   TypeScript       Rust
+       Rust tools    TypeScript       Rust
                      working env.     history service
                           |            |
                       notes.txt     file history
 ```
 
-Tool file requests go back to the Go agent over stdio. The agent forwards them to the working environment over WebSocket. Both processes see the same absolute project path.
+Tool file requests go back to the TypeScript agent over stdio. The agent forwards them to the working environment over WebSocket. Both processes see the same absolute project path.
 
 | Part | Code |
 |---|---|
-| [Agent (Go)](agent/main.go) | Composes the parts, prompts once or reopens a session, and reports the settled turn. |
-| [Tools (Python)](tools/notes.py) | Appends a line and searches for matching lines. Both tools use the SDK's tool context for all file access. |
+| [Agent (TypeScript)](agent/main.ts) | Composes the parts, prompts once or reopens a session, and reports the settled turn. |
+| [Tools (Rust)](tools/src/main.rs) | Appends a line and searches for matching lines. Both tools use the SDK's tool context for all file access. |
 | [Working environment (TypeScript)](environment/service.ts) | Serves the SDK's local working environment as a WebSocket plugin. |
 | [History service (Rust)](history/src/main.rs) | Serves the SDK's file-backed history over HTTP. |
 
 ## Build and run
 
-From the repository root, on Linux with `mise`, Node.js 22 or later, `uv`, and `python3`:
+The agent runs the Provider and durable Runtime in process. The TypeScript agent talks to Rust over stdio for tool calls and over HTTP for history. The TypeScript working environment stays a WebSocket service.
+
+From the repository root, on Linux with `mise`, Node.js 22 or later, and `python3` for the runner:
 
 ```sh
 demos/project-notes/build.sh
@@ -46,7 +48,7 @@ For a Claude subscription, sign in with `ma login claude` or `claude auth login`
 demos/project-notes/run.py --real claude/claude-haiku-5-5
 ```
 
-The Go SDK loads the Provider as a stdio plugin. Claude Code finds the login under `HOME` (or `CLAUDE_CONFIG_DIR` if set); the demo does not open the credential file. To use an OpenAI API key instead, set `OPENAI_API_KEY` in your environment and run `demos/project-notes/run.py --real openai/gpt-5.2`. Only the Go process receives the key for its in-process Provider.
+The TypeScript SDK loads the Provider as a stdio plugin. Claude Code finds the login under `HOME` (or `CLAUDE_CONFIG_DIR` if set); the demo does not open the credential file. To use an OpenAI API key instead, set `OPENAI_API_KEY` in your environment and run `demos/project-notes/run.py --real openai/gpt-5.2`. Only the agent process receives the key for its in-process Provider.
 
 ## Discovering the history listener address
 

@@ -6,6 +6,7 @@
   "scripts": { "build": "tsc", "test": "node --test test.mjs" },
   "dependencies": {
     "@modular-agent/core": "file:../../../typescript/packages/core",
+    "@modular-agent/subscription": "file:../../../typescript/packages/subscription",
     "@opentelemetry/api": "1.10.0",
     "@opentelemetry/resources": "3.1.1",
     "@opentelemetry/sdk-trace": "3.1.1",

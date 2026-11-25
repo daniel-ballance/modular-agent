@@ -268,7 +268,7 @@ def run(d, case):
         return
     q = d.approval()
     if case == 'callers':
-        subprocess.run([DEMO / 'triage/.venv/bin/python', DEMO / 'scripts/check-callers.py', d.tools, q['thread']],
+        subprocess.run(['node', DEMO / 'scripts/check-callers.mjs', d.tools, q['thread']],
                        cwd=d.root, check=True, timeout=20)
     if case in ('host-restart', 'host-decline'):
         d.proc.kill()

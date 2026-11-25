@@ -18,9 +18,9 @@ An ops desk for a small sample repository:
 
 | Agent | Built with | Tools |
 |---|---|---|
-| Triage | Python SDK app | `post`, `hand_off` |
+| Triage | TypeScript SDK app | `post`, `hand_off` |
 | Coder | Rust `ma` | `ma`'s `codemode` and file tools, `post`, `hand_off` |
-| Verifier | Go SDK app | read-only file tools, `exec` (to run the tests), `post` |
+| Verifier | TypeScript SDK app | read-only file tools, `exec` (to run the tests), `post` |
 
 ## Parts
 
@@ -31,7 +31,7 @@ An ops desk for a small sample repository:
              ┌──────────────────┼──────────────────┐
            AG-UI              AG-UI              AG-UI
              │                  │                  │
-     triage (Python)     coder (Rust ma)    verifier (Go)
+   triage (TypeScript)   coder (Rust ma)   verifier (TypeScript)
              └───── each loads the `desk` plugin via MODULAR_AGENT_PLUGINS ─────┘
                     each exports OpenTelemetry to Phoenix
 ```
@@ -42,7 +42,9 @@ An ops desk for a small sample repository:
   - `hand_off(to, task)`: asks the host to give work to another agent. The host's routing rules decide whether to accept it. The call returns once the host has queued it; it does not wait for the other agent.
 
   A tool result from the host is data, never authority. The host checks each call against which agent may hand to which.
-- **Each agent** runs as its own process with durable history in its own data directory, serving AG-UI on a loopback port the host picks. The host starts each agent to check for open work, and starts it again when work arrives. It stops idle agents. That exercises reopening sessions after a restart.
+- **Each agent** has its own process and durable history. Each serves AG-UI on a loopback port the OS assigns. The host starts agents to check for open work and stops them when idle. When work arrives, it starts them again, which exercises session recovery.
+
+Triage and verifier share TypeScript SDK setup for AG-UI and traces. The verifier's sample tools run in process. Rust `ma` stays the coder so the host can drive the standard approval gate over AG-UI. The coder also calls the TypeScript desk plugin over WebSocket.
 
 ### Why posts are plugin tools, not Interface-run tools
 
@@ -94,7 +96,7 @@ With real models (`--live`) the same flow runs against your sign-ins; it is not 
 - **How a wait closed — used.** The host records `answered`, `declined`, `expired` and `revoked` only from the gated feed. The local clock can disable a button, not decide a question. A lost presence alone produces no closure. The desk also watches the plugin's `turn.end` notification: a parked origin has an open call, and closing its question is not the end of the continuation.
 - **What happened to the run — used.** A receipt supplies `terminal` and `work` independently. After killing the coder during hand-off, the input receipt is `interrupt/completed`; the answer receipt is `unknown/completed`. A missing receipt is shown as unavailable. Neither an EOF nor a snapshot makes it safe to dispatch again.
 - **Identifying plugin callers — used.** One listener loads the operator's caller table. The matched ID and the session ID select the active route together. The ID also selects the checkout for a hand-off. Initialization paths, claimed names and call arguments grant no access to another route.
-- **Finding and waking work — deployment still starts processes.** At startup the host pages the [thread listing](../../docs/bindings/agui.md#listing-threads). The Rust coder uses [`--resume-open`](../../docs/reference/standard-configuration.md#resuming-at-start-up), the Python server uses `resume_open`, and the verifier calls `ResumeInterrupted`. Listing alone does not wake a stopped service. A snapshot cannot authorize a missed Interface hand-off.
+- **Finding and waking work — deployment still starts processes.** At startup the host pages the [thread listing](../../docs/bindings/agui.md#listing-threads). The Rust coder uses [`--resume-open`](../../docs/reference/standard-configuration.md#resuming-at-start-up), and both TypeScript agents use the SDK's `resumeOpen` option. Listing alone does not wake a stopped service. A snapshot cannot authorize a missed Interface hand-off.
 - **Posts during a turn — kept as plugin tools.** A frontend hand-off ends the exchange. A custom event is not a committed, acknowledged post. The desk stores plugin posts by route and call ID.
 - **Tracing — used.** All three work tokens trust the desk's trace parent. The host carries it across the queue. The approval continuation has its own turn span linked to the origin. [Telemetry v1](../../docs/telemetry.md#what-later-versions-add) does not link the receiving turn to another agent's `hand_off` call.
 - **Earlier fixes.** Rust accepts the approval schema without choice options. All three AG-UI adapters run; their status text was corrected.
@@ -146,7 +148,7 @@ Triage and the verifier shared the event trace in both runs. Both runs predate t
 ## Plan
 
 1. Host skeleton: store, webhook and listener, the `desk` plugin, the page. TypeScript.
-2. The three agents, with scripted models: triage (Python), verifier (Go), coder (`ma` with the `desk` plugin and a scripted model).
+2. The three agents, with scripted models: triage (TypeScript), verifier (TypeScript), coder (`ma` with the `desk` plugin and a scripted model).
 3. `run.py` with the scripted checks, and its `check.sh` step.
 4. Traces end to end, and a `--live` run.
 5. Write up the findings, with each one in [docs/status.md](../../docs/status.md) or an open question.
