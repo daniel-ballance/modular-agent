@@ -60,7 +60,7 @@ Plugins adapt outside systems to common forms at this boundary. The Runtime sees
 | [Interface](#interface) | Lets the outside world use the agent | several can be available |
 | [Tool source](#tool-source) | Offers tools and runs them | several can be available |
 | [Working environment](#working-environment) | Hosts files and commands | at most one |
-| [History store](#history-store) | Keeps session history beyond the process | at most one |
+| [History store](#history-store) | Keeps session history, in memory or beyond the process | at most one |
 | [Credential store](#credential-store) | Keeps credentials and runs sign-in | at most one |
 | [Configuration](#configuration) | Supplies settings to the Harness and plugins | at most one |
 
@@ -96,7 +96,7 @@ Containment describes which processes stop. Only strong containment covers all d
 
 ### History store
 
-Keeps a session's record beyond the process. Without it the session is ephemeral. A store can apply retention or support erasure. Writer access prevents two writers from updating the same session at once. See [History store interactions](contracts.md#harness-and-history-store), [Recovery](contracts.md#recovery-and-repeating-work) and [Erasure](contracts.md#erasure).
+Keeps a session's record. A persistent store keeps it beyond the process. A session whose store keeps its history only in memory, or that has no store, is ephemeral. A store can apply retention or support erasure. Writer access prevents two writers from updating the same session at once. See [History store interactions](contracts.md#harness-and-history-store), [Recovery](contracts.md#recovery-and-repeating-work) and [Erasure](contracts.md#erasure).
 
 ### Credential store
 

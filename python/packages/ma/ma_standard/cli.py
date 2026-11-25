@@ -102,7 +102,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--model", metavar="PROVIDER/ID")
     parser.add_argument(
-        "--approval", choices=("off", "ask", "all", "never"), help="default tool approval policy"
+        "--approval",
+        choices=("off", "ask", "all", "never"),
+        metavar="POLICY",
+        help="set each new session's default approval policy: off, ask, all or never",
     )
     parser.add_argument("--thinking", choices=("off", "minimal", "low", "medium", "high", "xhigh"))
     parser.add_argument("--session", metavar="ID")

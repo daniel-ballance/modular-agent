@@ -66,7 +66,7 @@ A turn has a recorded result for its first call. The process stops with the seco
 
 - **Transient Runtime:** reopening ends the interrupted turn as `failed`. The first result stands. The second call gets `outcomeUnknown`; the third gets `notStarted`. The next turn sees those results and does not silently repeat unknown work.
 - **Durable Runtime:** recovery starts from recorded progress and never reruns the first call. It can repeat the second call if its committed start says it was safe to repeat and the current tool and working environment still promise repeat safety and the environment confirms prior work cannot race it. It checks authority and gates again. If those safety promises are missing, or the repeat is refused, the earlier attempt remains unknown. A call not yet dispatched can run for the first time through the same checks.
-- **No history store:** the session was ephemeral. There is nothing to reopen.
+- **No persistent history store:** the session was ephemeral. Its history was in memory and went with the process. There is nothing to reopen.
 
 See [Recovery and repeating work](contracts.md#recovery-and-repeating-work) and [Portable sessions](bindings/data.md#portable-sessions) for the records used on reopen.
 

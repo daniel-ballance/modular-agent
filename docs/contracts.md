@@ -330,7 +330,7 @@ The operation owner defines its hook points, including points owned by plugins. 
 
 - The Harness MUST select at most one Runtime, history store, working environment, credential store and Configuration for a session. Providers, tool sources and Interfaces can have multiple registrations.
 - The Harness MUST refuse a turn without a selected Runtime and available model access before starting effects. Missing services MUST return unavailable for operations that need them. A session can open without a Runtime or selected model.
-- Without a history store, the Harness MUST treat the session as ephemeral across process stops.
+- Without a persistent history store, the Harness MUST treat the session as ephemeral across process stops.
 - The Harness MUST refuse a second singleton, tool name, command name or Provider identity unless a valid replacement removes the conflict.
 - A whole-plugin replacement MUST name a loaded plugin and replace all its registrations atomically after setup and collision checks. The [plugin binding](bindings/plugin.md#starting-the-handshake) instead maps explicit replacements to individual local registrations. Failed replacement leaves the prior registrations in place.
 - The Harness MUST reject a tool-list refresh that would introduce a clash. The last valid list remains registered; the [plugin binding's refresh rules](bindings/plugin.md#the-host-asks-a-tool-source) make an invalidated list unavailable for dispatch until refreshed successfully.

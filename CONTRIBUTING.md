@@ -53,7 +53,7 @@ The project has five layers, and each is made only from the layers below it ([AD
 2. the SDK specification (`docs/sdk/`, the shared scenarios in `conformance/sdk/`);
 3. the SDKs (`rust/`, `typescript/`, `go/`, `python/`);
 4. the reference implementations (`docs/reference/`, each language's `ma`, the checks in `conformance/reference/`);
-5. demonstrative implementations (none yet).
+5. demonstrative implementations (`demos/`: the project notes agent and the ops desk).
 
 **A gap goes down a layer.** When code needs something the layer below does not give, change the lower layer first: the documents, then the code, then the code that found the gap. Do not work around a lower layer from above it. In practice:
 

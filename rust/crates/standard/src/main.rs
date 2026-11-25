@@ -41,7 +41,7 @@ Options:
   --declaration         print what this agent declares it supports
   --acp                 serve the Agent Client Protocol on stdio, for an editor or host
   --agui                serve AG-UI over HTTP and SSE; requires --listen
-  --approval POLICY     load approval: off, ask, all or never
+  --approval POLICY     set each new session's default approval policy: off, ask, all or never
   --resume-open         reopen interrupted turns before serving --acp or --agui
   --listen ADDR         loopback listener for --agui, --acp, or both
   --token-file FILE     configure a single local token for --listen
