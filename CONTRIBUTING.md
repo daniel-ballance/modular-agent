@@ -25,6 +25,16 @@ The documents are plain, specific English: short sentences, one idea each, no ma
 
 Decisions that are hard to reverse, surprising without context and the result of a real trade-off get an ADR in `docs/adr/`, with the next number, and a row in its index.
 
+## Keeping the code maintainable
+
+Keep one concern per module. Split a module by the rule each part enforces, not by line count.
+
+Keep tracked source files at 1,000 lines or fewer. The docs lane runs `scripts/check-maintainability.mjs` to check this. Files listed in `scripts/maintainability-baseline.json` may exceed the limit up to their recorded counts. Lower an entry when its file shrinks. Remove the entry if the file is gone or fits the limit. Adding or raising an entry requires review. Explain why in the PR.
+
+Do not merge a commit into `main` if its subject starts with `WIP`, regardless of case.
+
+Follow the split issues for the four Harness modules over the limit: [TypeScript #8](https://github.com/daniel-ballance/modular-agent/issues/8), [Rust #9](https://github.com/daniel-ballance/modular-agent/issues/9), [Python #10](https://github.com/daniel-ballance/modular-agent/issues/10) and [Go #11](https://github.com/daniel-ballance/modular-agent/issues/11).
+
 ## Checking a change
 
 There is no hosted CI. Run the checks locally before pushing:
