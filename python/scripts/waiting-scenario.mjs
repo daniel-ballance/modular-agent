@@ -39,7 +39,7 @@ async function stop(mode) {
   if (mode === 'close') { await ask('close'); child.stdin.end(); }
   else {
     try { process.kill(-child.pid, 'SIGKILL'); }
-    catch (e) { if (e.code !== 'ESRCH') throw e; }
+    catch (e) { if (e.code !== 'ESRCH' && !(process.platform === 'darwin' && e.code === 'EPERM')) throw e; }
   }
   await exited;
   child = null;

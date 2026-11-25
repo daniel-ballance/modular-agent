@@ -34,9 +34,11 @@ export function manageServices(config, command, cwd, envFor, verbose) {
 		children.add(service);
 		return service;
 	};
+	// macOS kill(2) returns EPERM for a group when a member cannot be signalled, such as a zombie;
+	// the live members are still signalled. Linux returns success.
 	const signalGroup = (service, signal) => {
 		if (!service.child.pid) return;
-		try { process.kill(-service.child.pid, signal); } catch (e) { if (e.code !== "ESRCH") throw e; }
+		try { process.kill(-service.child.pid, signal); } catch (e) { if (e.code !== "ESRCH" && !(process.platform === "darwin" && e.code === "EPERM")) throw e; }
 	};
 	const stop = async (service, signal = "SIGTERM") => {
 		if (service === primary) primary = undefined;

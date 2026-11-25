@@ -31,7 +31,7 @@ export async function runWaitingScenario(path, placement, run) {
     const pid=child.pid;
     try { if(how==='close') await rpc('close'); }
     finally {
-      try { process.kill(-pid,'SIGKILL'); } catch(e) { if(e.code!=='ESRCH')throw e; }
+      try { process.kill(-pid,'SIGKILL'); } catch(e) { if (e.code !== 'ESRCH' && !(process.platform === 'darwin' && e.code === 'EPERM')) throw e; }
       await exited; await waitGroup(pid); await spec.stop(); child=undefined;
     }
   };

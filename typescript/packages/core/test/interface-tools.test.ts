@@ -190,7 +190,7 @@ for (const remote of [false, true]) {
       let stderr = "";
       child.stderr!.setEncoding("utf8").on("data", data => { stderr += data; });
       const died = once(child, "exit");
-      const kill = () => { if (child.pid) try { process.kill(-child.pid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; } };
+      const kill = () => { if (child.pid) try { process.kill(-child.pid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH" && !(process.platform === "darwin" && (error as NodeJS.ErrnoException).code === "EPERM")) throw error; } };
       t.after(async () => { kill(); await died; });
       const ready = await Promise.race([once(child, "message").then(([message]) => message as { id: string; callId: string }),
         died.then(() => { throw new Error(`Agent exited before handoff: ${stderr}`); })]);

@@ -177,7 +177,7 @@ export function launch(projects: Projects, agent: Agent, pluginUrl: string, appr
       try {
         process.kill(-proc.pid, sig);
       } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'ESRCH') throw e;
+        if ((e as NodeJS.ErrnoException).code !== 'ESRCH' && !(process.platform === 'darwin' && (e as NodeJS.ErrnoException).code === 'EPERM')) throw e;
       }
   };
   void exited.then(() => kill('SIGKILL')); // includes a plugin orphaned by SIGKILL

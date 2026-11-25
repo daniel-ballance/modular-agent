@@ -26,7 +26,7 @@ async function rpc(op,params={}){
 }
 async function stop(mode){
  if(!child)return;
- if(mode==='kill')process.kill(-child.pid,'SIGKILL');else await rpc('close');
+ if(mode==='kill'){try{process.kill(-child.pid,'SIGKILL');}catch(e){if(e.code!=='ESRCH'&&!(process.platform==='darwin'&&e.code==='EPERM'))throw e;}}else await rpc('close');
  const [code,signal]=await exit;assert.ok(mode==='kill'?signal==='SIGKILL':code===0);child=undefined;
 }
 const states={},io={

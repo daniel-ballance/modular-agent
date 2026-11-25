@@ -232,7 +232,7 @@ for (const remote of [false, true]) {
         { detached:true, execArgv:[], stdio:["ignore","ignore","pipe","ipc"] });
       let diagnostic = ""; child.stderr!.setEncoding("utf8").on("data", data => { diagnostic += data; });
       const exited = once(child,"exit");
-      const kill = () => { if (child.pid && child.exitCode === null && child.signalCode === null) try { process.kill(-child.pid!,"SIGKILL"); } catch(e) { if ((e as NodeJS.ErrnoException).code !== "ESRCH") throw e; } };
+      const kill = () => { if (child.pid && child.exitCode === null && child.signalCode === null) try { process.kill(-child.pid!,"SIGKILL"); } catch(e) { if ((e as NodeJS.ErrnoException).code !== "ESRCH" && !(process.platform === "darwin" && (e as NodeJS.ErrnoException).code === "EPERM")) throw e; } };
       t.after(async () => { kill(); await exited; });
       const ready = await Promise.race([once(child,"message").then(([v]) => v as {id:string; callId:string; questionId:string; deadline:number}),
         exited.then(() => { throw new Error("Wait fixture exited before its commit barrier: " + diagnostic); })]);

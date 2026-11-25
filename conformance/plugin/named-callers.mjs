@@ -22,7 +22,7 @@ async function launch(command, env, root, config, use) {
   const child = spawn(command[0], command.slice(1), { env: { ...env, MA_PLUGIN_FIXTURE: path }, cwd: root, detached: true, stdio: ['ignore', 'pipe', log] });
   closeSync(log);
   const exited = new Promise((resolve, reject) => { child.once('error', reject); child.once('close', (code, signal) => resolve({ code, signal })); });
-  const stop = () => { if (child.pid) try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; } };
+  const stop = () => { if (child.pid) try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH' && !(process.platform === 'darwin' && e.code === 'EPERM')) throw e; } };
   let interrupted = false;
   const interrupt = () => { interrupted = true; stop(); };
   process.once('exit', stop); process.once('SIGINT', interrupt); process.once('SIGTERM', interrupt);

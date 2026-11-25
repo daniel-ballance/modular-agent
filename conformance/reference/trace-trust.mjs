@@ -97,7 +97,7 @@ export async function checkTraceTrust(command, t, environment, invoke) {
         once(signal, "abort").then(() => { throw Error("ma trace trust check timed out"); })]);
     } finally {
       lines.close();
-      if (child.pid) try { process.kill(-child.pid, "SIGKILL"); } catch (e) { if (e.code !== "ESRCH") throw e; }
+      if (child.pid) try { process.kill(-child.pid, "SIGKILL"); } catch (e) { if (e.code !== "ESRCH" && !(process.platform === "darwin" && e.code === "EPERM")) throw e; }
       await closed;
     }
   }

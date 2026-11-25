@@ -26,7 +26,7 @@ export async function checkResumeOpen(command, t, env) {
       const exit = once(child, "exit");
       let stopped;
       const stop = () => stopped ??= (async () => {
-        if (child.pid) try { process.kill(-child.pid, "SIGKILL"); } catch (e) { if (e.code !== "ESRCH") throw e; }
+        if (child.pid) try { process.kill(-child.pid, "SIGKILL"); } catch (e) { if (e.code !== "ESRCH" && !(process.platform === "darwin" && e.code === "EPERM")) throw e; }
         await exit;
       })();
       children.push(stop);

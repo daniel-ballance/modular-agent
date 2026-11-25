@@ -109,7 +109,7 @@ async function managed(command, name, scenario) {
     });
     stop = async () => {
       if (child.pid) {
-        try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+        try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH' && !(process.platform === 'darwin' && error.code === 'EPERM')) throw error; }
       }
       await closed;
       if (child.pid) await waitGroup(child.pid);

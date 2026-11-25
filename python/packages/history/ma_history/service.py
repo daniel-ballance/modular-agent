@@ -673,13 +673,14 @@ def serve(
         if custom_route is None
         else nullcontext() as store
     ):
-        if ip.version == 6:
-            import socket
+        import socket
 
-            class Server(HTTPServer):
-                address_family = socket.AF_INET6
-        else:
-            Server = HTTPServer
+        class Server(HTTPServer):
+            address_family = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+            # The default backlog of 5 overflows when several writers connect at once;
+            # macOS answers an overflow with a reset instead of dropping the SYN.
+            request_queue_size = socket.SOMAXCONN
+
         with Server(address, Handler) as server:
             if ready is not None:
                 ready(server.server_address)

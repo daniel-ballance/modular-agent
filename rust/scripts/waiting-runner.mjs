@@ -26,7 +26,7 @@ async function stop(mode) {
   if (mode === 'close') await rpc({op:'close'});
   worker = undefined;
   for (const {p,exit} of groups.splice(0).reverse()) {
-    try {process.kill(-p.pid,'SIGKILL');} catch (e) {if(e.code!=='ESRCH') throw e;}
+    try {process.kill(-p.pid,'SIGKILL');} catch (e) {if (e.code !== 'ESRCH' && !(process.platform === 'darwin' && e.code === 'EPERM')) throw e;}
     await exit;
   }
 }
