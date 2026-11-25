@@ -1,3 +1,4 @@
+import { SessionEnvironment } from "./working-environment.js";
 import { Declarations } from "./declaration.js";
 import type { Command, FollowOptions, ListingViewer, Plugin, PluginApi, SessionPrepare, SessionStartOptions } from "./plugin-api.js";
 import { Commands } from "./commands.js";
@@ -97,6 +98,11 @@ export interface Tenant { rights: Authority[]; tokens?: number }
  * It runs no turns, calls no models and runs no tools itself.
  */
 export class Harness {
+	private readonly environment: SessionEnvironment = new SessionEnvironment({
+		use: (...args) => this.use(...args),
+		projectOf: (...args) => this.projectOf(...args),
+	});
+
 	private readonly declarations: Declarations = new Declarations({
 		runtime: (...args) => this.runtime(...args),
 		use: (...args) => this.use(...args),
@@ -129,8 +135,8 @@ export class Harness {
 		turns: () => this.turns,
 		turnModels: () => this.turnModels,
 		questions: () => this.questions,
-		environmentFor: (...args) => this.environmentFor(...args),
-		scopedEnvironment: (...args) => this.scopedEnvironment(...args),
+		environmentFor: (...args) => this.environment.environmentFor(...args),
+		scopedEnvironment: (...args) => this.environment.scopedEnvironment(...args),
 	});
 
 	private readonly authority: SessionAuthority = new SessionAuthority({
@@ -200,7 +206,7 @@ export class Harness {
 		problem: (...args) => this.problem(...args),
 		rightsOf: (...args) => this.authority.rightsOf(...args),
 		requireAuthority: (...args) => this.authority.requireAuthority(...args),
-		environmentFor: (...args) => this.environmentFor(...args),
+		environmentFor: (...args) => this.environment.environmentFor(...args),
 		projectOf: (...args) => this.projectOf(...args),
 		findTool: (...args) => this.findTool(...args),
 		providerFor: (...args) => this.providerFor(...args),
@@ -247,7 +253,7 @@ export class Harness {
 		toolDefinitions: (...args) => this.toolDefinitions(...args),
 		turnAuthority: () => this.authority.turnAuthority,
 		tenantBudgetReached: (...args) => this.authority.tenantBudgetReached(...args),
-		environmentFor: (...args) => this.environmentFor(...args),
+		environmentFor: (...args) => this.environment.environmentFor(...args),
 		projectOf: (...args) => this.projectOf(...args),
 		checkScopedWork: (...args) => this.authority.checkScopedWork(...args),
 		erasure: () => this.erasure,
@@ -289,7 +295,7 @@ export class Harness {
 		findTool: (...args) => this.findTool(...args),
 		actorForJob: (...args) => this.authority.actorForJob(...args),
 		workRights: (...args) => this.authority.workRights(...args),
-		environmentFor: (...args) => this.environmentFor(...args),
+		environmentFor: (...args) => this.environment.environmentFor(...args),
 		projectOf: (...args) => this.projectOf(...args),
 		checkWriter: (...args) => this.lifecycle.checkWriter(...args),
 		commit: (...args) => this.historyCommit.commit(...args),
@@ -297,7 +303,7 @@ export class Harness {
 		agentName: () => this.agentName,
 		emit: (...args) => this.emit(...args),
 		jobWork: () => this.jobWork,
-		scopedEnvironment: (...args) => this.scopedEnvironment(...args),
+		scopedEnvironment: (...args) => this.environment.scopedEnvironment(...args),
 		runtime: (...args) => this.runtime(...args),
 		toolDefinitions: (...args) => this.toolDefinitions(...args),
 		questions: () => this.questions,
@@ -955,38 +961,6 @@ export class Harness {
 
 	projectOf(s: Session): string {
 		return typeof s.settings.cwd === "string" ? s.settings.cwd : this.project;
-	}
-
-	/** The working environment, in the session's project when it has its own. */
-	private scopedEnvironment(env: WorkingEnvironment, check: () => void): WorkingEnvironment {
-		return new Proxy(env, {
-			get: (environment, key) => {
-				const member: unknown = Reflect.get(environment, key, environment);
-				if (typeof member !== "function") return member;
-				if (key === "at" || key === "forSession") return async (...args: unknown[]) => {
-					check();
-					const next = await member.apply(environment, args) as WorkingEnvironment;
-					check();
-					return this.scopedEnvironment(next, check);
-				};
-				return (...args: unknown[]) => {
-					check();
-					const result: unknown = member.apply(environment, args);
-					// A read begun before a revocation cannot disclose its reply afterwards.
-					if (key === "readFile" || key === "exists" || key === "list" || key === "hasPoint") {
-						return Promise.resolve(result).then(value => { check(); return value; });
-					}
-					return result;
-				};
-			},
-		});
-	}
-
-	private async environmentFor(s: Session): Promise<WorkingEnvironment | undefined> {
-		const base = this.use<WorkingEnvironment>("working-environment");
-		const env = await base?.forSession?.(s.id) ?? base;
-		const cwd = this.projectOf(s);
-		return env && env.cwd !== cwd && env.at ? env.at(cwd) : env;
 	}
 	withInterfaceOffer<T>(scope: symbol, work: () => T): T {
 		return this.interfaceTools.withInterfaceOffer(scope, work);
