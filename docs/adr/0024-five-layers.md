@@ -3,6 +3,8 @@ status: accepted
 date: 2026-11-19
 ---
 
+**Current rule:** [ADR 0037](0037-two-languages.md) keeps two languages, Rust and TypeScript. Where this record says four SDKs or four `ma` builds, read two; Go and Python are kept at the tag `four-languages`.
+
 # Five layers, from the specification to demonstrations
 
 Seven rounds proved the specification, and [ADR 0022](0022-standard-configuration.md) built the first system meant to be used. There are now five builds. Each has its own internal API, and none is published for other developers to build on. The next step is to give developers that base in TypeScript, Python, Rust and Go, without losing the property the rounds proved: every part can be swapped for another build's part.
