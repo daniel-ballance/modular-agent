@@ -18,9 +18,9 @@ Open work lives only in GitHub Issues. Read `gh issue list` before you start. Ev
 - A decision that outlives your session goes into an issue comment, an ADR or the document it changes.
 - Move the issue's Status on the GitHub Project: In progress when its branch exists, In review when its pull request is open.
 - When you change a rule, a status or a user-facing string, find every other place that states it with `git grep -n`, which also reads `.github/`. Change them in the same pull request, in all four languages. A language you cannot change there gets an issue with its `lang:` label.
-- Open a pull request whose body says `Closes #N`. That keyword goes only in the pull request body; a closing keyword in a commit message fails the maintainability check. A reviewer who did not write it runs the agent check in `CONTRIBUTING.md` and posts a verdict naming its head SHA. A later push needs a new verdict. Then the operator lands it, so leave it open.
+- Open a pull request whose body says `Closes #N`. That keyword goes only in the pull request body; a closing keyword in a commit message fails the maintainability check. A reviewer who did not write it runs the agent check in `CONTRIBUTING.md` and posts a verdict naming its head SHA. A later push needs a new verdict, except the wording-only push and the unchanged restack that `CONTRIBUTING.md` allows. Then the operator lands it, so leave it open.
 - When the parent of your stacked pull request lands, restack yours as "Working in parallel" in `CONTRIBUTING.md` says.
-- After your pull request merges, remove your worktree and local branch. GitHub deletes the remote branch.
+- After your pull request merges, remove your worktree and local branch. Keep the branch while a stacked pull request is built on it, until that child is restacked. GitHub deletes the remote branch.
 
 `CONTRIBUTING.md` ("How work is tracked") has the detail: labels, review, landing, moving the Status, pull request contents, parallel work and the release checklist.
 
