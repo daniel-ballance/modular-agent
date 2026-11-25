@@ -311,11 +311,7 @@ func agHTTPError(w http.ResponseWriter, err error) {
 	_, _ = w.Write(api.JSON(agObject{"code": code}))
 }
 func (a *Agent) threadMember(s api.Session, host Actor, join bool) bool {
-	_, recorded := s.Actors[host.ID]
-	if !recorded && host.ID != s.Actor && (!join || !a.severalActors) {
-		return false
-	}
-	return a.a.(agHost).DiscoverForHost(s, host)
+	return a.a.(agHost).DiscoverForHost(s, host, join && a.severalActors)
 }
 
 func (q *agRequest) scope(project, tenant string) bool {
@@ -338,8 +334,8 @@ func (q *agRequest) allowed(right string) bool {
 
 type agHost interface {
 	NewForHost(context.Context, string, string, api.Actor) (string, error)
-	OpenForHost(context.Context, string, api.Actor) error
-	DiscoverForHost(api.Session, api.Actor) bool
+	OpenForHost(context.Context, string, api.Actor, bool) error
+	DiscoverForHost(api.Session, api.Actor, bool) bool
 	JoinHost(string, api.Actor) error
 	ViewForOutput(context.Context, string) (api.Session, error)
 	ReadForHost(context.Context, string, string) (api.Session, <-chan struct{}, error)
@@ -381,7 +377,7 @@ func (q *agRequest) attach(id string) error {
 		if !q.member(snap) {
 			return missing
 		}
-		if err := q.host().OpenForHost(q.ctx, id, q.narrowed(snap.Tenant, snap.Limit)); err != nil {
+		if err := q.host().OpenForHost(q.ctx, id, q.narrowed(snap.Tenant, snap.Limit), *q.opt.JoinOnOpen && q.a.severalActors); err != nil {
 			return err
 		}
 		releaseOpen() // Other clients may attach and answer while recovery runs.

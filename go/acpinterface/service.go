@@ -53,6 +53,7 @@ type Principal struct {
 	Actor             api.Actor
 	Projects, Tenants []string
 	Represents        []string
+	joinOnOpen        bool
 }
 
 func (i *Interface) ServePrincipal(ctx context.Context, in io.ReadCloser, out io.Writer, declared func() map[string]any, config Projects, principal Principal) error {
@@ -84,8 +85,8 @@ func (s *server) discoverable(sess api.Session) bool {
 		return false
 	}
 	return s.a.(interface {
-		DiscoverForHost(api.Session, api.Actor) bool
-	}).DiscoverForHost(sess, s.hostActor())
+		DiscoverForHost(api.Session, api.Actor, bool) bool
+	}).DiscoverForHost(sess, s.hostActor(), s.principal.joinOnOpen)
 }
 
 func (s *server) acting(ctx context.Context, id, who string) context.Context {

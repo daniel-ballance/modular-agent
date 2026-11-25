@@ -27,8 +27,11 @@ func (c *client) Authorize(id, who, right string) bool {
 }
 
 // DiscoverForHost applies the existing open admission check without joining.
-func (c *client) DiscoverForHost(snap api.Session, host api.Actor) bool {
-	return c.authorized(viewForHost(snap, host), host.ID, "watch")
+func (c *client) DiscoverForHost(snap api.Session, host api.Actor, joinOnOpen bool) bool {
+	if joinOnOpen {
+		snap = viewForHost(snap, host)
+	}
+	return c.authorized(snap, host.ID, "watch")
 }
 
 func viewForHost(snap api.Session, host api.Actor) api.Session {
