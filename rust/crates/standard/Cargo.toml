@@ -23,6 +23,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 futures-util.workspace = true
+libc.workspace = true
 jiff = "=0.2.46"
 monty-alloc = { version = "=1.6.0", features = ["exit-code"] }
 monty-proto = { version = "=1.6.0", features = ["worker"] }
@@ -33,4 +34,3 @@ tempfile.workspace = true
 [dev-dependencies]
 tokio-tungstenite = "0.30"
 reqwest.workspace = true
-libc.workspace = true

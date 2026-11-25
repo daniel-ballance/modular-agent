@@ -2,7 +2,9 @@
 use crate::sink::Sink;
 use anyhow::{Result, anyhow, bail};
 use futures_util::StreamExt;
-use modular_agent::{Agent, AgentBuilder, Answer, Outcome, Session, Timing};
+use modular_agent::{
+    Agent, AgentBuilder, Answer, Outcome, Question, QuestionKind, Session, Timing,
+};
 use serde_json::Value;
 use std::{
     io::BufRead,
@@ -19,7 +21,7 @@ pub enum Mode {
 
 struct Pending {
     id: String,
-    kind: modular_agent::QuestionKind,
+    kind: QuestionKind,
     prompt: Option<String>,
     sender: oneshot::Sender<Answer>,
 }
@@ -27,6 +29,7 @@ struct Pending {
 struct PendingAnswers {
     items: Vec<Pending>,
     closed: bool,
+    hidden_input: bool,
 }
 impl PendingAnswers {
     fn approval(&self) -> Option<&Pending> {
@@ -53,56 +56,91 @@ impl Drop for Showing {
 #[derive(Clone, Default)]
 pub struct Questions(Arc<Mutex<PendingAnswers>>);
 impl Questions {
+    /// `hidden_input` says whether a secret can be read with echo off.
+    pub fn new(hidden_input: bool) -> Self {
+        let questions = Self::default();
+        questions.0.lock().unwrap().hidden_input = hidden_input;
+        questions
+    }
+
     pub fn install(&self, b: AgentBuilder) -> AgentBuilder {
         let this = self.clone();
         b.on_question(move |q| {
             let this = this.clone();
-            async move {
-                let declined = || Answer::Declined {
-                    reason: Some("terminal closed".into()),
-                };
-                let (sender, rx) = oneshot::channel();
-                let _showing = {
-                    let mut pending = this.0.lock().unwrap();
-                    if pending.closed {
-                        return declined();
-                    }
-                    let prompt = (q.kind == modular_agent::QuestionKind::Approval
-                        && q.call.is_some())
-                    .then(|| format!("{}\nAllow? (y/n)", q.question));
-                    if pending.approval().is_none()
-                        && let Some(prompt) = &prompt
-                    {
-                        eprintln!("{prompt}");
-                    }
-                    pending.items.push(Pending {
-                        id: q.id.clone(),
-                        kind: q.kind,
-                        prompt,
-                        sender,
-                    });
-                    Showing(this.clone(), q.id)
-                };
-                rx.await.unwrap_or_else(|_| declined())
-            }
+            async move { this.ask(q).await }
         })
     }
 
-    fn answer(&self, id: &str, value: &str) -> Result<()> {
-        let Pending { kind, sender, .. } = self
+    async fn ask(&self, q: Question) -> Answer {
+        let declined = |reason: &str| Answer::Declined {
+            reason: Some(reason.into()),
+        };
+        let (sender, rx) = oneshot::channel();
+        let _showing = {
+            let mut pending = self.0.lock().unwrap();
+            if pending.closed {
+                return declined("terminal closed");
+            }
+            if q.kind == QuestionKind::Secret && !pending.hidden_input {
+                return declined("a secret needs a terminal to hide it");
+            }
+            let prompt = (q.kind == QuestionKind::Approval && q.call.is_some())
+                .then(|| format!("{}\nAllow? (y/n)", q.question));
+            if pending.approval().is_none()
+                && let Some(prompt) = &prompt
+            {
+                eprintln!("{prompt}");
+            }
+            pending.items.push(Pending {
+                id: q.id.clone(),
+                kind: q.kind,
+                prompt,
+                sender,
+            });
+            Showing(self.clone(), q.id)
+        };
+        rx.await.unwrap_or_else(|_| declined("terminal closed"))
+    }
+
+    /// Handles `/answer REQUEST_ID [VALUE]`. Returns the ID of a secret
+    /// question whose answer is still to be read with echo off.
+    fn answer_command(&self, args: &str) -> Result<Option<String>> {
+        let (id, value) = match args.split_once(' ') {
+            Some((id, value)) => (id, Some(value)),
+            None => (args, None),
+        };
+        let kind = self
+            .0
+            .lock()
+            .unwrap()
+            .items
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.kind)
+            .ok_or_else(|| anyhow!("no question named {id}"))?;
+        let answer = match (kind, value) {
+            (_, Some("decline")) => Answer::Declined {
+                reason: Some("declined".into()),
+            },
+            (QuestionKind::Secret, Some(_)) => {
+                bail!("Do not put the secret on the command line; use /answer REQUEST_ID")
+            }
+            (QuestionKind::Secret, None) => return Ok(Some(id.into())),
+            (_, None) => bail!("use /answer REQUEST_ID VALUE"),
+            (QuestionKind::Approval, Some("allow")) => Answer::Allow,
+            (_, Some(value)) => Answer::Value(value.into()),
+        };
+        self.reply(id, answer)?;
+        Ok(None)
+    }
+
+    fn reply(&self, id: &str, answer: Answer) -> Result<()> {
+        let Pending { sender, .. } = self
             .0
             .lock()
             .unwrap()
             .remove(id)
             .ok_or_else(|| anyhow!("no question named {id}"))?;
-        let answer = match value {
-            "allow" if kind == modular_agent::QuestionKind::Approval => Answer::Allow,
-            "decline" => Answer::Declined {
-                reason: Some("declined".into()),
-            },
-            value if kind == modular_agent::QuestionKind::Secret => Answer::Secret(value.into()),
-            value => Answer::Value(value.into()),
-        };
         sender
             .send(answer)
             .map_err(|_| anyhow!("question is no longer answerable"))
@@ -254,7 +292,23 @@ async fn interactive(session: &Session, questions: Questions, mode: Mode) -> Res
                     session.cancel().await?;
                     break;
                 }
-                if let Err(error) = input(session, &questions, mode, line).await {
+                let result = match input(session, &questions, mode, line).await {
+                    Ok(Some(id)) => {
+                        let read = read_hidden(&mut lines).await?;
+                        let interrupted = matches!(read, Hidden::Interrupted);
+                        let answer = match read {
+                            Hidden::Line(secret) => Answer::Secret(secret),
+                            _ => Answer::Declined { reason: Some("no secret was read".into()) },
+                        };
+                        let replied = questions.reply(&id, answer);
+                        if interrupted && session.is_running() {
+                            session.cancel().await?;
+                        }
+                        replied
+                    }
+                    other => other.map(drop),
+                };
+                if let Err(error) = result {
                     eprintln!("{error:#}");
                 }
             }
@@ -263,7 +317,41 @@ async fn interactive(session: &Session, questions: Questions, mode: Mode) -> Res
     Ok(())
 }
 
-async fn input(session: &Session, questions: &Questions, mode: Mode, line: &str) -> Result<()> {
+enum Hidden {
+    Line(String),
+    Unavailable,
+    Interrupted,
+}
+
+/// The line reader keeps reading standard input, so the secret is its next
+/// line, typed while echo is off.
+async fn read_hidden(lines: &mut mpsc::Receiver<std::io::Result<String>>) -> Result<Hidden> {
+    let Some(echo) = crate::hidden::EchoOff::new() else {
+        return Ok(Hidden::Unavailable);
+    };
+    eprint!("Secret: ");
+    let read = tokio::select! {
+        ctrl = tokio::signal::ctrl_c() => {
+            ctrl?;
+            Hidden::Interrupted
+        }
+        line = lines.recv() => match line {
+            Some(Ok(line)) => Hidden::Line(line),
+            _ => Hidden::Unavailable,
+        },
+    };
+    drop(echo);
+    eprintln!();
+    Ok(read)
+}
+
+/// Returns the ID of a secret question to read with echo off.
+async fn input(
+    session: &Session,
+    questions: &Questions,
+    mode: Mode,
+    line: &str,
+) -> Result<Option<String>> {
     let display = |text: &str| {
         if mode == Mode::Json {
             eprintln!("{text}");
@@ -278,17 +366,16 @@ async fn input(session: &Session, questions: &Questions, mode: Mode, line: &str)
         let pending = questions.0.lock().unwrap();
         pending.approval().map(|p| p.id.clone())
     } {
-        let value = match line.to_ascii_lowercase().as_str() {
-            "y" => "allow",
-            "n" => "decline",
+        let answer = match line.to_ascii_lowercase().as_str() {
+            "y" => Answer::Allow,
+            "n" => Answer::Declined {
+                reason: Some("declined".into()),
+            },
             _ => bail!("Answer y or n."),
         };
-        questions.answer(&id, value)?;
+        questions.reply(&id, answer)?;
     } else if let Some(args) = line.strip_prefix("/answer ") {
-        let (id, value) = args
-            .split_once(' ')
-            .ok_or_else(|| anyhow!("use /answer REQUEST_ID VALUE"))?;
-        questions.answer(id, value)?;
+        return questions.answer_command(args);
     } else if line == "/questions" {
         display(&serde_json::to_string(
             &questions
@@ -338,5 +425,67 @@ async fn input(session: &Session, questions: &Questions, mode: Mode, line: &str)
         };
         session.send(line, timing).await?;
     }
-    Ok(())
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn question(kind: &str) -> Question {
+        serde_json::from_value(serde_json::json!({
+            "id": "q1", "sessionId": "s", "kind": kind, "question": "Key?", "credential": "key",
+        }))
+        .unwrap()
+    }
+
+    async fn open(questions: &Questions, kind: &str) -> tokio::task::JoinHandle<Answer> {
+        let asking = tokio::spawn({
+            let questions = questions.clone();
+            let q = question(kind);
+            async move { questions.ask(q).await }
+        });
+        while questions.0.lock().unwrap().items.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        asking
+    }
+
+    #[tokio::test]
+    async fn without_a_terminal_a_secret_question_is_declined_when_it_opens() {
+        let answer = Questions::new(false).ask(question("secret")).await;
+        assert!(matches!(answer, Answer::Declined { .. }), "{answer:?}");
+    }
+
+    #[tokio::test]
+    async fn a_secret_given_inline_is_refused_and_the_question_stays_open() {
+        let questions = Questions::new(true);
+        let asking = open(&questions, "secret").await;
+        let error = questions.answer_command("q1 hunter2").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Do not put the secret on the command line; use /answer REQUEST_ID"
+        );
+        assert_eq!(
+            questions.answer_command("q1").unwrap().as_deref(),
+            Some("q1")
+        );
+        assert_eq!(questions.0.lock().unwrap().items.len(), 1);
+        questions
+            .reply("q1", Answer::Secret("typed".into()))
+            .unwrap();
+        assert!(matches!(asking.await.unwrap(), Answer::Secret(s) if s == "typed"));
+    }
+
+    #[tokio::test]
+    async fn answer_takes_a_value_or_decline() {
+        let questions = Questions::new(true);
+        let asking = open(&questions, "secret").await;
+        assert_eq!(questions.answer_command("q1 decline").unwrap(), None);
+        assert!(matches!(asking.await.unwrap(), Answer::Declined { .. }));
+        let asking = open(&questions, "text").await;
+        assert!(questions.answer_command("q1").is_err());
+        assert_eq!(questions.answer_command("q1 teal").unwrap(), None);
+        assert!(matches!(asking.await.unwrap(), Answer::Value(v) if v == "teal"));
+    }
 }

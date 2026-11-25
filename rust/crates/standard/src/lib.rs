@@ -9,6 +9,7 @@
 //!   functions in a Monty sandbox.
 //! - Agent Skills, instruction files, compaction, model selection, commands.
 pub mod acp;
+mod hidden;
 pub mod mcp;
 pub mod policy;
 pub mod prompt;

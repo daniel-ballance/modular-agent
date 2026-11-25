@@ -654,7 +654,7 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
     if let Some(model) = chosen {
         b = b.model(model);
     }
-    let questions = Questions::default();
+    let questions = Questions::new(std::io::IsTerminal::is_terminal(&std::io::stdin()));
     if terminal.prompt.is_none() && !inspecting {
         b = questions.install(b);
     }
