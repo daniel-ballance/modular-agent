@@ -1,3 +1,6 @@
+import type { TurnState } from "./turn-state.js";
+import { shapeViolation } from "./result-shape.js";
+import { InterfaceToolRoutes, type InterfaceConnection } from "./interface-tool-routes.js";
 import { connectionRights, intersectConnectionRights, type ConnectionRights } from "./connection-authority.js";
 import { InputRequests, readRequest } from "./input-requests.js";
 import { Jobs, type JobStart, type KeptJob } from "./jobs.js";
@@ -14,7 +17,6 @@ import { addAbortListener } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { Ajv2020 } from "ajv/dist/2020.js";
 import { interruptedCalls, modelView, pendingToolCalls, restoreAnsweredStep, withoutProviderData } from "./view.js";
 import { HookRegistry } from "./hooks.js";
 import { INTERFACE_HANDOFF, INTERFACE_SOURCE, handoffRecords, isJson, sameDefinition, validReportContent,
@@ -98,7 +100,6 @@ export interface Command { description: string; usesModel?: boolean; run(args: s
 
 export interface SessionStartOptions { tenant?: string; settings?: Record<string, unknown>; actor?: Actor; forkFrom?: { sessionId: string; entryId: string }; parentSessionId?: string; prepare?: SessionPrepare }
 export type SessionPrepare = (id: string) => Promise<void>;
-const schemaValidator = new Ajv2020({ strict: false, validateFormats: false, ownProperties: true, addUsedSchema: false });
 
 export interface InputOptions { resultShape?: Record<string, unknown>; content: ContentPart[] | string; when?: InputTiming; key?: string; actorId: string; kind?: string; delegatedBy?: string; startedBy?: QueuedInput["startedBy"]; sources?: string[] }
 export interface ErasureReport {
@@ -247,15 +248,6 @@ export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer"
 
 export interface Tenant { rights: Authority[]; tokens?: number }
 interface TenantInfo { tenant: string | null; rights: Authority[] | null; tokens: { budget: number; used: number } | null }
-interface InterfaceConnection extends InterfaceToolConnectionOptions {
-	tools: Map<string, ToolDefinition>;
-}
-interface LiveHandoff {
-	deliver(request: InterfaceToolHandoff): void;
-	connection: InterfaceConnection;
-	released: boolean;
-	check: () => boolean;
-}
 /** Kept only from an approval gate through that invocation's live tools.call handle. */
 interface CoveringAllow { toolCallId: string; requestId: string; actorId: string }
 interface ApprovalPass {
@@ -280,13 +272,46 @@ function recordedSnapshot(start: HistoryEntry): RecordedSnapshot {
 	return d;
 }
 
-interface TurnState extends TurnSnapshot { interfaceOffer?: Map<string, InterfaceConnection>; interfaceAllowances?: Map<string, { call: ToolCall; approval: unknown } | null>; dispatched: Set<string>; steps: Map<string, Operation>; startingRights?: Authority[]; connectionRights?: ConnectionRights; endedHook?: boolean; sources: Map<string, string[]>; actors: Set<string>; jobs: Set<string>; tenantLimit?: boolean; capacityLimit?: boolean; stepAfterRunning?: boolean; toolResultError?: string }
 
 /**
  * The Harness: hosts plugins, offers the plugin API, keeps sessions.
  * It runs no turns, calls no models and runs no tools itself.
  */
 export class Harness {
+	private readonly interfaceTools: InterfaceToolRoutes = new InterfaceToolRoutes({
+		runtime: (...args) => this.runtime(...args),
+		plugins: (...args) => this.plugins(...args),
+		useAll: (...args) => this.useAll(...args),
+		now: (...args) => this.now(...args),
+		hasItem: (...args) => this.hasItem(...args),
+		replacements: () => this.replacements,
+		intersectRights,
+		load: (...args) => this.load(...args),
+		session: (...args) => this.session(...args),
+		withConnectionActor: (...args) => this.withConnectionActor(...args),
+		actorRights: (...args) => this.actorRights(...args),
+		sessions: () => this.sessions,
+		hooks: () => this.hooks,
+		problem: (...args) => this.problem(...args),
+		findTool: (...args) => this.findTool(...args),
+		erasure: () => this.erasure,
+		admit: (...args) => this.admit(...args),
+		checkWriter: (...args) => this.checkWriter(...args),
+		newId: (...args) => this.newId(...args),
+		commit: (...args) => this.commit(...args),
+		workRights: (...args) => this.workRights(...args),
+		agentName: () => this.agentName,
+		maybeContinueOpenCalls: (...args) => this.maybeContinueOpenCalls(...args),
+		approvals: () => this.approvals,
+		recordedTurnActors: (...args) => this.recordedTurnActors(...args),
+		recordedTurnJobs: (...args) => this.recordedTurnJobs(...args),
+		recordedTurnRights: (...args) => this.recordedTurnRights(...args),
+		turnAuthority: () => this.turnAuthority,
+		toolAfter: (...args) => this.toolAfter(...args),
+		commitNow: (...args) => this.commitNow(...args),
+		emit: (...args) => this.emit(...args),
+	});
+
 	private readonly questions: InputRequests = new InputRequests({
 		useAll: (...args) => this.useAll(...args),
 		actorRights: (...args) => this.actorRights(...args),
@@ -391,7 +416,7 @@ export class Harness {
 			providers: () => this.useAll<Provider>("provider"),
 			checkWriter: s => this.checkWriter(s),
 			hasUnfinishedJobs: s => this.jobWork.runningJobs(s).length > 0,
-			invalidateErasedHandoffs: (...args) => this.invalidateErasedHandoffs(...args),
+			invalidateErasedHandoffs: (...args) => this.interfaceTools.invalidateErasedHandoffs(...args),
 			commitNow: (...args) => this.commitNow(...args),
 			write: (s, write) => this.write(s, write),
 			emit: (...args) => this.emit(...args),
@@ -824,7 +849,7 @@ export class Harness {
 						if (!model) throw Object.assign(new Error("The selected model is not offered"), { code: "invalid_request" });
 						const allowed = this.rightsOf(session, actorId).includes("tools") ? this.toolDefinitions(session) : [];
 						const offered = session.settings.modelTools;
-						const tools = snapshot.tools.filter(tool => (!tool.callers || tool.callers.includes("model")) && !this.interfaceSources.has(tool.name) &&
+						const tools = snapshot.tools.filter(tool => (!tool.callers || tool.callers.includes("model")) && !this.interfaceTools.interfaceSources.has(tool.name) &&
 							(offered == null || Array.isArray(offered) && offered.includes(tool.name)) && allowed.some(t => isDeepStrictEqual(t, tool)));
 						const settings = this.turnSettings(session, model.model);
 						const maxOutput = Math.min(settings.maxOutput ?? Infinity, snapshot.settings.maxOutput ?? Infinity);
@@ -1143,7 +1168,7 @@ export class Harness {
 		await this.handBack(s, s.recoveredInput, "restart");
 		await this.hooks.observe("session.start", { sessionId: s.id, resumed: true });
 		await this.recoverNestedCalls(s);
-		await this.recoverInterfaceCalls(s);
+		await this.interfaceTools.recoverInterfaceCalls(s);
 		await this.approvals.reconcileApprovals(s, true);
 		await this.recoverInterruptedTurn(s);
 		await this.recoverReports(s);
@@ -1222,7 +1247,7 @@ export class Harness {
 			return viewer.represented?.some(actorId => r.answerers.includes(actorId) && this.actorRights(s, actorId).includes(right) &&
 				(!inTurn || viewer.present?.includes(actorId)));
 		}).length;
-		const toolCalls = !viewer.routeId || !rights.includes("tools") ? 0 : this.unsettledHandoffs(s).filter(({data, checkpoint}) => {
+		const toolCalls = !viewer.routeId || !rights.includes("tools") ? 0 : this.interfaceTools.unsettledHandoffs(s).filter(({data, checkpoint}) => {
 			if (!data || data.routeId !== viewer.routeId || data.executorActorId !== viewer.actor.id || data.deadline <= this.now() ||
 				!branch.some(e => e === checkpoint)) return false;
 			const end = branch.find(e => e.kind === "turnEnd" && e.turnId === checkpoint!.turnId);
@@ -1305,7 +1330,7 @@ export class Harness {
 		await this.erasure.admitHistory(s);
 		if (s.erasing) throw failure("busy", "Erasure is in progress");
 		// Forking at unfinished work would copy work that is still running: refused.
-		if (s.running || this.jobWork.runningJobs(s).length || this.questions.waitingRequests(s).length || this.openCalls(s).length || this.unsettledHandoffs(s).length) throw failure("busy", "Can't fork while the session has unfinished work: a running turn, a job, or a call waiting for an answer");
+		if (s.running || this.jobWork.runningJobs(s).length || this.questions.waitingRequests(s).length || this.openCalls(s).length || this.interfaceTools.unsettledHandoffs(s).length) throw failure("busy", "Can't fork while the session has unfinished work: a running turn, a job, or a call waiting for an answer");
 		const target = s.entries.get(entryId);
 		if (!target) throw Object.assign(new Error("Unknown fork target"), { code: "not_found" });
 		if (target.kind === "position") throw Object.assign(new Error("Cannot fork a position record"), { code: "conflict" });
@@ -1316,7 +1341,7 @@ export class Harness {
 
 	private stopSessionWork(s: Session): void {
 		s.suspended = true;
-		this.clearInterfaceWork(s);
+		this.interfaceTools.clearInterfaceWork(s);
 		this.jobWork.endJobObservation(s);
 		s.steering = [];
 		s.followUps = [];
@@ -1399,7 +1424,7 @@ export class Harness {
 		if (!s) return;
 		await this.admit(s, async () => {
 			if (s.closing || s.reopening) throw Object.assign(new Error("Session is busy"), { code: "busy" });
-			const needsCancel = !!s.running || this.jobWork.runningJobs(s).length > 0 || this.unsettledHandoffs(s).length > 0;
+			const needsCancel = !!s.running || this.jobWork.runningJobs(s).length > 0 || this.interfaceTools.unsettledHandoffs(s).length > 0;
 			if ((needsCancel && authority && !authority.includes("cancel")) || [actorId, delegatedBy].some(id => id !== undefined &&
 				(!s.actors.has(id) || (needsCancel && !this.rightsOf(s, id).includes("cancel"))))) {
 				throw Object.assign(new Error("Actor may not close this session"), { code: "forbidden" });
@@ -1416,7 +1441,7 @@ export class Harness {
 		await this.use<WorkingEnvironment>("working-environment")?.sessionEnded?.(id);
 		this.emit(id, "session.ended", {}, "harness");
 		s.closed = true;
-		this.clearInterfaceWork(s);
+		this.interfaceTools.clearInterfaceWork(s);
 		await this.retireSession(s);
 	}
 
@@ -1629,7 +1654,7 @@ export class Harness {
 		return this.admit(s, async () => {
 			if (options.actorId) this.requireAuthority(s, options.actorId, "settings");
 			if (s.provisional) throw failure("invalid_request", "Session has not admitted its first input");
-			if (s.isBusy() || s.outsideTools || s.erasing || s.settling || s.requests.size || this.questions.waitingRequests(s).length || this.openCalls(s).length || this.unsettledHandoffs(s).length || this.jobWork.runningJobs(s).length) {
+			if (s.isBusy() || s.outsideTools || s.erasing || s.settling || s.requests.size || this.questions.waitingRequests(s).length || this.openCalls(s).length || this.interfaceTools.unsettledHandoffs(s).length || this.jobWork.runningJobs(s).length) {
 				throw failure("busy", "Can't move while work is unfinished");
 			}
 			const target = s.branch().find((e) => e.id === entryId);
@@ -1974,8 +1999,8 @@ export class Harness {
 			throw error;
 		}
 		q.trace ??= currentSpan();
-		const offerScope = this.offerScope.getStore();
-		if (offerScope) this.queuedOffers.set(q, offerScope);
+		const offerScope = this.interfaceTools.offerScope.getStore();
+		if (offerScope) this.interfaceTools.queuedOffers.set(q, offerScope);
 		const receipt: InputReceipt = { inputId: q.id, taken };
 		if (q.when !== "propose") {
 			if (taken === "now") this.startTurn(s, q);
@@ -2044,13 +2069,13 @@ export class Harness {
 			running?.abort.abort();
 			const recorded = this.handBack(s, handedBack, "cancelled");
 			for (const w of waitingApprovals(s).values()) if (!w.result && !w.start && !s.closing) await this.approvals.closeWaiting(s, w, "cancelled", "notStarted");
-			for (const handoff of this.unsettledHandoffs(s)) await this.settleInterfaceCall(s, handoff);
+			for (const handoff of this.interfaceTools.unsettledHandoffs(s)) await this.interfaceTools.settleInterfaceCall(s, handoff);
 			for (const r of [...s.requests.values()]) r.resolve({ requestId: r.request.id, declined: true, actorId: "harness", reason: "cancelled" });
 			await recorded;
 			return { handedBack, running };
 		});
 		await running?.done;
-		if (this.interfaceSources.size || s.hasWaitingApprovals) this.maybeContinueOpenCalls(s);
+		if (this.interfaceTools.interfaceSources.size || s.hasWaitingApprovals) this.maybeContinueOpenCalls(s);
 		return handedBack;
 	}
 
@@ -2113,9 +2138,9 @@ export class Harness {
 		} : undefined);
 		const settings = this.turnSettings(s, model?.model);
 		const modelTools = s.settings.modelTools;
-		const interfaceOffer = this.interfaceOffer(s, this.queuedOffers.get(queued));
+		const interfaceOffer = this.interfaceTools.interfaceOffer(s, this.interfaceTools.queuedOffers.get(queued));
 		const tools = this.toolDefinitions(s).filter((t) => (!t.callers || t.callers.includes("model")) &&
-			(!this.interfaceSources.has(t.name) || interfaceOffer.has(t.name)) &&
+			(!this.interfaceTools.interfaceSources.has(t.name) || interfaceOffer.has(t.name)) &&
 			(modelTools == null || (Array.isArray(modelTools) && modelTools.includes(t.name))));
 		const resultShape = queued.resultShape ?? s.settings.resultShape as Record<string, unknown> | undefined;
 		let point: string | undefined;
@@ -2238,12 +2263,12 @@ export class Harness {
 		}
 		// Committed dispositions survive a lost or invalid Runtime outcome.
 		const complete = async () => {
-		for (const item of this.unsettledHandoffs(s)) {
+		for (const item of this.interfaceTools.unsettledHandoffs(s)) {
 			if ((item.checkpoint ?? item.start)?.turnId === turnId && (signal?.aborted || outcome.outcome.kind !== "completed" || !item.data || item.data.deadline <= this.now())) {
-				await this.settleInterfaceCall(s, item);
+				await this.interfaceTools.settleInterfaceCall(s, item);
 			}
 		}
-		if (signal?.aborted && this.interfaceSources.size) outcome = { ...outcome, outcome: { kind: "cancelled" } };
+		if (signal?.aborted && this.interfaceTools.interfaceSources.size) outcome = { ...outcome, outcome: { kind: "cancelled" } };
 		for (const w of waitingApprovals(s).values()) {
 			if (w.entry.turnId === turnId && !w.result && !w.start && (signal?.aborted || outcome.outcome.kind !== "completed")) {
 				await this.approvals.closeWaiting(s, w, signal?.aborted ? "cancelled" : "noLongerAnswerable", "notStarted");
@@ -2279,7 +2304,7 @@ export class Harness {
 		await this.commit(s, [{ kind: "turnEnd", writer: "harness", modelVisible: false, turnId, sources, data: { outcome: outcome.outcome, result: outcome.result, usage: outcome.usage } }]);
 		return open;
 		};
-		const open = this.interfaceSources.size ? await this.admit(s, complete) : await complete();
+		const open = this.interfaceTools.interfaceSources.size ? await this.admit(s, complete) : await complete();
 		activeOperation()?.set("modular_agent.turn.outcome", outcome.outcome.kind);
 		if (outcome.outcome.kind === "failed") activeOperation()?.fail("failed");
 		if (!state?.endedHook) await this.hooks.observe("turn.end", { sessionId: s.id, turnId, outcome: outcome.outcome, result: outcome.result });
@@ -2490,7 +2515,7 @@ export class Harness {
 					} finally { state.stepAfterRunning = false; state.steps.get(payload.stepId)?.end(); state.steps.delete(payload.stepId); }
 				}
 				const scope = { ...payload, sessionId: s.id, turnId };
-				if (name === "tool.before" && this.interfaceSources.has(payload.call?.name)) {
+				if (name === "tool.before" && this.interfaceTools.interfaceSources.has(payload.call?.name)) {
 					const call = payload.call as ToolCall;
 					const refused = (reason: string) => ({ value: scope, refused: reason });
 					const registration = this.findTool(s, call.name);
@@ -2555,7 +2580,7 @@ export class Harness {
 						if (draft.message?.role === "toolResult") draft.message = { ...draft.message, isError: true, content: [text("The approval deadline passed before dispatch")] };
 					}
 				}
-				if (draft.toolCallId && this.interfaceRecords(s).has(draft.toolCallId)) throw failure("invalid_request", "Interface handoffs are settled by the Harness");
+				if (draft.toolCallId && this.interfaceTools.interfaceRecords(s).has(draft.toolCallId)) throw failure("invalid_request", "Interface handoffs are settled by the Harness");
 				const modelSources = draft.kind === "response" ? [
 					...(state.sources.get(draft.stepId ?? "") ?? []),
 					...s.branch().filter((e) => e.kind === "modelRequest" && e.turnId === turnId && e.stepId === draft.stepId).map((e) => e.id),
@@ -2803,378 +2828,23 @@ export class Harness {
 		const cwd = this.projectOf(s);
 		return env && env.cwd !== cwd && env.at ? env.at(cwd) : env;
 	}
+	withInterfaceOffer<T>(scope: symbol, work: () => T): T {
+		return this.interfaceTools.withInterfaceOffer(scope, work);
+	}
 
-	// ---------- Interface tool routes ----------
-
-	// A request-scoped offer follows its admission, not whichever connection happens
-	// to be present when a queued turn starts. Embedded connections remain ambient.
-	private offerScope = new AsyncLocalStorage<symbol>();
-	private queuedOffers = new WeakMap<QueuedInput, symbol>();
-	private connectionOffers = new WeakMap<InterfaceConnection, symbol>();
-	withInterfaceOffer<T>(scope: symbol, work: () => T): T { return this.offerScope.run(scope, work); }
-	private interfaceSources = new Map<string, InterfaceToolSource>();
-	private interfaceConnections = new WeakMap<Session, Set<InterfaceConnection>>();
-	private interfaceWork = new WeakMap<Session, Map<string, LiveHandoff>>();
-	private interfaceTimers = new WeakMap<Session, Map<string, ReturnType<typeof setTimeout>>>();
-	private handoffSpans = new WeakMap<Session, Map<string, NonNullable<ReturnType<typeof currentSpan>>>>();
-
-	async registerInterfaceTools(sources: readonly InterfaceToolSource[]): Promise<void> {
-		if (!sources.length) return;
-		if (this.runtime()?.supports.interfaceTools !== true) throw new Error("Interface tools need a Runtime that supports result-only continuations");
-		if (this.plugins().includes(INTERFACE_SOURCE)) throw new Error("Interface tools conflict with an existing plugin");
-		const ids = new Set(this.useAll<ToolSource>("tool-source").map(s => s.id));
-		const routes = new Map<string, string>();
-		const definitions = new Map<string, InterfaceToolSource>();
-		const copy = structuredClone(sources);
-		for (const source of copy) {
-			const { sourceId, actorId, routeId, resultTimeoutMs, tools } = source;
-			if (![sourceId, actorId, routeId].every(id => typeof id === "string" && id.length)
-				|| !Number.isSafeInteger(resultTimeoutMs) || resultTimeoutMs <= 0 || !Number.isSafeInteger(this.now() + resultTimeoutMs)) {
-				throw new Error("Interface tool source needs IDs and a positive result timeout within Time range");
-			}
-			if (ids.has(sourceId) || routes.has(routeId) && routes.get(routeId) !== actorId) throw new Error("Conflicting Interface tool source or route");
-			ids.add(sourceId);
-			routes.set(routeId, actorId);
-			for (const tool of tools) {
-				if (!isJson(tool) || typeof tool.name !== "string" || !tool.name || typeof tool.description !== "string" ||
-					!isDeepStrictEqual(tool.callers, ["model"]) || tool.hints?.safeToRepeat === true || tool.hints?.openWorld === false) {
-					throw new Error("An Interface tool must be model-only, open-world and not safe to repeat");
-				}
-				shapeViolation(tool.parameters, {});
-				if (tool.returns !== undefined) shapeViolation(tool.returns, undefined);
-				if (definitions.has(tool.name) || this.hasItem(`tool:${tool.name}`) || this.replacements.has(`tool:${tool.name}`)) throw new Error(`Tool ${tool.name} is already registered`);
-				definitions.set(tool.name, source);
-			}
-		}
-		if (!definitions.size) return;
-		await this.load([{ name: INTERFACE_SOURCE, setup: api => {
-			for (const source of copy) api.provide("tool-source", {
-				id: source.sourceId, tools: () => structuredClone([...source.tools]),
-				run: () => { throw new Error("Only the registered Interface can execute this tool"); },
-			} satisfies ToolSource);
-		} }]);
-		if (!this.plugins().includes(INTERFACE_SOURCE)) throw new Error("Interface tool registration failed");
-		this.interfaceSources = definitions;
+	registerInterfaceTools(sources: readonly InterfaceToolSource[]): Promise<void> {
+		return this.interfaceTools.registerInterfaceTools(sources);
 	}
 
 	connectInterfaceTools(sessionId: string, options: InterfaceToolConnectionOptions): InterfaceToolConnection {
-		const s = this.session(sessionId);
-		if (![...this.interfaceSources.values()].some(r => r.routeId === options.routeId && r.actorId === options.actor.id)) {
-			throw failure("forbidden", "No Interface tool route for this actor");
-		}
-		const connection: InterfaceConnection = { ...options, actor: structuredClone(options.actor), tools: new Map() };
-		if (!this.executorRights(s, connection).includes("watch")) throw failure("forbidden", "Actor cannot watch this session");
-		const connections = this.interfaceConnections.get(s) ?? new Set();
-		this.interfaceConnections.set(s, connections);
-		connections.add(connection);
-		const scope = this.offerScope.getStore();
-		if (scope) this.connectionOffers.set(connection, scope);
-		return {
-			advertise: tools => {
-				if (!this.interfacePresent(s, connection)) throw failure("not_open", "Interface connection ended");
-				const next = new Map<string, ToolDefinition>();
-				for (const tool of tools) {
-					const source = this.interfaceSources.get(tool.name);
-					const definition = source?.tools.find(t => t.name === tool.name);
-					if (!definition || source?.actorId !== connection.actor.id || source.routeId !== connection.routeId ||
-						next.has(tool.name) || !sameDefinition(tool, definition)) throw failure("invalid_request", "Advertisement does not match the registered Interface tool");
-					next.set(tool.name, definition);
-				}
-				connection.tools = next;
-			},
-			release: id => this.releaseInterfaceCall(s, id, connection),
-			reportInterfaceToolResult: report => this.reportInterfaceToolResult(s, connection, report),
-			disconnect: () => { connections.delete(connection); connection.tools.clear(); },
-		};
-	}
-
-	private executorRights(s: Session, connection: InterfaceConnection): Authority[] {
-		return this.withConnectionActor(connection.actor, () => this.actorRights(s, connection.actor.id));
-	}
-
-	private interfacePresent(s: Session, connection: InterfaceConnection): boolean {
-		return !s.closed && !s.closing && !s.suspended && this.sessions.get(s.id) === s && !!this.interfaceConnections.get(s)?.has(connection);
-	}
-
-	private interfaceOffer(s: Session, scope?: symbol): Map<string, InterfaceConnection> {
-		const offer = new Map<string, InterfaceConnection>();
-		for (const connection of this.interfaceConnections.get(s) ?? []) {
-			if (scope !== this.connectionOffers.get(connection)) continue;
-			const rights = this.executorRights(s, connection);
-			if (!this.interfacePresent(s, connection) || !rights.includes("tools") || !rights.includes("watch")) continue;
-			for (const name of connection.tools.keys()) if (!offer.has(name)) offer.set(name, connection);
-		}
-		return offer;
-	}
-
-	private interfaceRecords(s: Session) {
-		return handoffRecords(s.order.filter(id => !s.copied.has(id)).map(id => s.entries.get(id)!));
-	}
-
-	private unsettledHandoffs(s: Session) {
-		return [...this.interfaceRecords(s).values()].filter(item => !item.result);
-	}
-
-	private validHandoff(s: Session, item: HandoffRecord) {
-		const { data, dispatch, checkpoint, start } = item;
-		const source = dispatch?.call && this.interfaceSources.get(dispatch.call.name);
-		return !!data && !!start && !!checkpoint && !!dispatch && !!source && this.runtime()?.supports.interfaceTools === true &&
-			source.actorId === data.executorActorId && source.routeId === data.routeId && source.sourceId === dispatch.source.toolSource &&
-			(source.tools.some(t => sameDefinition(t, dispatch.definition))) &&
-			s.branch().some(e => e.id === checkpoint.id) && s.actors.has(data.executorActorId);
-	}
-
-	private async gateHandoff(s: Session, connection: InterfaceConnection, request: InterfaceToolHandoff): Promise<boolean> {
-		const payload = structuredClone(request);
-		const event = { type: "tool.handoff", time: this.now(), sessionId: s.id, source: INTERFACE_SOURCE,
-			turnId: request.turnId, toolCallId: request.call.id, stepId: request.call.stepId, data: payload };
-		let unchanged = false;
-		const follower = new Follower(this.hooks, connection.actor.id, false, gated => {
-			unchanged = isDeepStrictEqual(gated, event);
-		}, error => this.problem("harness", "Interface handoff output gate", error));
-		follower.push(structuredClone(event));
-		await follower.idle();
-		return unchanged;
-	}
-
-	private async handoffInterfaceCall(s: Session, source: InterfaceToolSource, connection: InterfaceConnection, call: ToolCall,
-		turnId: string, state: TurnState, signal: AbortSignal, allowed: () => boolean, approval: unknown): Promise<ToolResult | (ToolPending & { callId: string })> {
-		const refused = (): ToolResult => ({ callId: call.id, status: "refused", content: [text("Interface handoff is not authorized")] });
-		const definition = source.tools.find(t => t.name === call.name)!;
-		const eligible = () => {
-			const current = this.findTool(s, call.name);
-			const rights = this.executorRights(s, connection);
-			return !signal.aborted && !s.moving && !s.erasing && allowed() && approval === s.settings.approval && this.interfacePresent(s, connection) &&
-				rights.includes("watch") && rights.includes("tools") && connection.tools.get(call.name) === definition &&
-				current?.plugin === INTERFACE_SOURCE && current.source.id === source.sourceId && sameDefinition(current.definition, definition) &&
-				state.tools.some(t => t.name === call.name && sameDefinition(t, definition));
-		};
-		const deadline = this.now() + source.resultTimeoutMs;
-		if (!Number.isSafeInteger(deadline) || !eligible()) return refused();
-		await this.erasure.admitHistory(s);
-		if (!eligible()) return refused();
-		const request = { sessionId: s.id, turnId, deadline, call };
-		if (!(await this.gateHandoff(s, connection, request))) return refused();
-		return this.admit(s, async () => {
-			const freshness = await this.erasure.admitHistory(s);
-			const previous = this.interfaceRecords(s).has(call.id);
-			if (!eligible() || previous || deadline <= this.now()) return refused();
-			this.checkWriter(s);
-			const startId = this.newId();
-			const scope = { toolCallId: call.id, turnId, stepId: call.stepId };
-			const data: HandoffData = { toolStartedId: startId, executorActorId: source.actorId, routeId: source.routeId,
-				rights: this.executorRights(s, connection), deadline };
-			const committed = await this.commit(s, [
-				{ ...scope, id: startId, kind: "toolStarted", writer: "harness", modelVisible: false, actorId: call.actorId,
-					data: { call, source: { plugin: INTERFACE_SOURCE, toolSource: source.sourceId }, definition, safeToRepeat: false, openWorld: true,
-						authorizers: [...state.actors].map(actorId => ({ sessionId: s.id, actorId })), rights: this.workRights(s, state.actors, state.jobs) } },
-				{ ...scope, kind: INTERFACE_HANDOFF, writer: "harness", modelVisible: false, sources: [startId], data: { ...scope, ...data } },
-			], false, () => eligible() && deadline > this.now() && data.rights.every(r => this.executorRights(s, connection).includes(r)) &&
-				(!this.erasure.pendingRegistry() || this.erasure.checkPending(s) === freshness));
-			if (!committed.length) return refused();
-			const pinned = AsyncLocalStorage.snapshot();
-			const live: LiveHandoff = { connection, released: false, check: () => pinned(() => eligible() && deadline > this.now()),
-				deliver: request => pinned(() => this.deliverHandoff(s, live, request)) };
-			const work = this.interfaceWork.get(s) ?? new Map();
-			this.interfaceWork.set(s, work);
-			work.set(call.id, live);
-			state.dispatched.add(call.id);
-			const item = this.interfaceRecords(s).get(call.id)!;
-			let fresh = false;
-			try { fresh = (await this.erasure.admitHistory(s)) === freshness; } catch { /* fail closed */ }
-			if (!fresh || !live.check()) {
-				// No executable request left the Harness.
-				await this.settleInterfaceCall(s, item);
-				return { callId: call.id, pending: "Interface request was not released" };
-			}
-			this.checkWriter(s);
-			this.scheduleInterfaceExpiry(s, item);
-			if (!connection.defer) this.deliverHandoff(s, live, request);
-			return { callId: call.id, pending: "Waiting for Interface tool result" };
-		});
-	}
-
-	private deliverHandoff(s: Session, live: LiveHandoff, request: InterfaceToolHandoff): void {
-		const { call, turnId } = request;
-		const span = startOperation(`execute_tool ${safeName(call.name) ?? "interface"}`, {
-			...conversation(s.id), "modular_agent.turn.id": turnId, "modular_agent.step.id": call.stepId, ...toolAttributes(call),
-			"gen_ai.agent.name": this.agentName, "modular_agent.tool.status": "pending",
-		});
-		if (span.spanContext) {
-			const spans = this.handoffSpans.get(s) ?? new Map();
-			this.handoffSpans.set(s, spans);
-			spans.set(call.id, span.spanContext);
-		}
-		live.released = true; // A delivery error cannot establish that nothing ran.
-		this.interfaceWork.get(s)?.delete(call.id);
-		try { span.run(() => live.connection.onHandoff(structuredClone(request))); }
-		catch { this.problem("harness", "Interface handoff", new Error("Interface delivery was not confirmed")); }
-		finally { span.end(); }
-	}
-
-	private releaseInterfaceCall(s: Session, id: string, connection: InterfaceConnection): Promise<boolean> {
-		return this.admit(s, async () => {
-			const live = this.interfaceWork.get(s)?.get(id);
-			const item = live?.connection === connection && this.interfaceRecords(s).get(id);
-			if (!item || item.result || !live || !this.validHandoff(s, item)) return false;
-			const { data, dispatch, checkpoint } = item;
-			const request = { sessionId: s.id, turnId: checkpoint!.turnId!, deadline: data!.deadline, call: dispatch!.call };
-			const freshness = await this.erasure.admitHistory(s);
-			if (!live.check() || !(await this.gateHandoff(s, connection, request))) return false;
-			if (await this.erasure.admitHistory(s) !== freshness) return false;
-			this.checkWriter(s);
-			if (!live.check()) return false;
-			live.deliver(request);
-			return true;
-		});
-	}
-
-	private scheduleInterfaceExpiry(s: Session, item: HandoffRecord): void {
-		if (!item.data) return;
-		const timers = this.interfaceTimers.get(s) ?? new Map();
-		this.interfaceTimers.set(s, timers);
-		clearTimeout(timers.get(item.id));
-		timers.set(item.id, setTimeout(() => {
-			void withTrace(undefined, () => this.admit(s, async () => {
-				if (s.closed || s.suspended) return;
-				const current = this.interfaceRecords(s).get(item.id);
-				if (!current || current.result || !current.data) return;
-				if (current.data.deadline > this.now()) return this.scheduleInterfaceExpiry(s, current);
-				await this.settleInterfaceCall(s, current);
-				this.maybeContinueOpenCalls(s);
-			})).catch(error => this.problem("harness", "Interface tool expiry", error));
-		}, Math.min(2_147_483_647, Math.max(1, item.data.deadline - this.now()))).unref());
-	}
-
-	private clearInterfaceWork(s: Session): void {
-		this.approvals.clear(s);
-		for (const timer of this.interfaceTimers.get(s)?.values() ?? []) clearTimeout(timer);
-		this.interfaceTimers.delete(s);
-		this.interfaceConnections.delete(s);
-		this.interfaceWork.delete(s);
-		this.handoffSpans.delete(s);
-	}
-
-	private async invalidateErasedHandoffs(s: Session, entryIds: string[]): Promise<void> {
-		const ids = new Set(entryIds);
-		this.approvals.invalidateDeliveries(s);
-		for (const w of waitingApprovals(s).values()) {
-			if (!w.result && !w.start && [w.entry.id, w.decision?.id, w.end?.id, ...(w.entry.sources ?? []),
-				...s.branch().filter(e => e.toolCallId === w.request.toolCallId && e.kind === "toolPending").map(e => e.id)].some(id => id && ids.has(id))) {
-				await this.approvals.closeWaiting(s, w, "noLongerAnswerable", "notStarted", true);
-			}
-		}
-		for (const item of this.unsettledHandoffs(s)) {
-			if ([item.start?.id, item.checkpoint?.id].some(id => id && ids.has(id))) {
-				await this.settleInterfaceCall(s, item, undefined, true);
-			}
-		}
-	}
-
-	private async recoverInterfaceCalls(s: Session): Promise<void> {
-		for (const item of this.unsettledHandoffs(s)) {
-			const end = s.branch().find(e => e.kind === "turnEnd" && e.turnId === (item.checkpoint ?? item.start)?.turnId);
-			if (!this.validHandoff(s, item) || item.data!.deadline <= this.now() ||
-				(end ? end.erased || !(end.data as { result?: TurnOutcome["result"] })?.result?.openToolCalls.includes(item.id) : !this.runtime()?.supports.continuesAfterRestart)) {
-				await this.settleInterfaceCall(s, item);
-			} else this.scheduleInterfaceExpiry(s, item);
-		}
-	}
-
-	private reportInterfaceToolResult(s: Session, connection: InterfaceConnection, raw: InterfaceToolReport): Promise<InterfaceToolReceipt> {
-		const refused = { status: "refused" } as const;
-		let report: InterfaceToolReport;
-		try {
-			const { callId, status, content, value } = raw;
-			if (typeof callId !== "string" || !callId || !["completed", "failed"].includes(status) ||
-				!validReportContent(content) || status === "failed" && !content.length || value !== undefined && !isJson(value)) return Promise.resolve(refused);
-			report = structuredClone({ callId, status, content, ...(value === undefined ? {} : { value }) });
-		} catch { return Promise.resolve(refused); }
-		const parent = currentSpan();
-		return this.admit(s, async () => {
-			if (!this.interfacePresent(s, connection) || s.erasing || s.moving || s.reopening) return refused;
-			const item = this.interfaceRecords(s).get(report.callId);
-			if (!item?.data || !this.validHandoff(s, item)) return refused;
-			const { data, checkpoint } = item;
-			const authorized = () => this.interfacePresent(s, connection) && !s.erasing && !s.moving &&
-				data.executorActorId === connection.actor.id && data.routeId === connection.routeId &&
-				intersectRights(data.rights, this.executorRights(s, connection)).includes("watch") &&
-				intersectRights(data.rights, this.executorRights(s, connection)).includes("tools");
-			if (!authorized()) return refused;
-			try { await this.erasure.admitHistory(s); } catch { return refused; }
-			if (!authorized()) return refused;
-			if (data.deadline <= this.now()) {
-				if (!item.result) { await this.settleInterfaceCall(s, item); this.maybeContinueOpenCalls(s); }
-				return refused;
-			}
-			const end = s.branch().find(e => e.turnId === checkpoint!.turnId && e.kind === "turnEnd");
-			if (end?.erased || item.result?.erased) return refused;
-			if (!end) return { status: "refused", reason: "notReady" };
-			if (!(end.data as { result?: TurnOutcome["result"] })?.result?.openToolCalls.includes(item.id)) return refused;
-			if (item.result) return item.result.actorId === connection.actor.id && !item.result.erased ? { status: "alreadySettled" } : refused;
-			if (this.interfaceWork.get(s)?.has(item.id)) return refused;
-			const span = startOperation("modular_agent.interface.report", { ...conversation(s.id) }, { parent: parent ?? null });
-			return span.observe(async () => {
-				const settled = await this.settleInterfaceCall(s, item, { report, actorId: connection.actor.id, authorized });
-				this.maybeContinueOpenCalls(s, currentSpan());
-				if (settled?.error) throw settled.error;
-				return settled ? { status: "accepted" } : refused;
-			});
-		});
-	}
-
-	private async settleInterfaceCall(s: Session, item: HandoffRecord,
-		submitted?: { report: InterfaceToolReport; actorId: string; authorized: () => boolean }, erasure = false) {
-		if (item.result || s.suspended) return;
-		const { checkpoint, start, dispatch } = item;
-		const origin = checkpoint ?? start;
-		const { id } = item;
-		const link = this.handoffSpans.get(s)?.get(id);
-		const span = startOperation("modular_agent.tool.settle", {
-			...conversation(s.id), "modular_agent.turn.id": origin?.turnId, "modular_agent.step.id": origin?.stepId,
-			"modular_agent.tool.call.id": id,
-		}, { parent: submitted ? currentSpan() : null, links: link ? [link] : undefined });
-		return span.observe(async () => {
-			const live = this.interfaceWork.get(s)?.get(id);
-			const call = dispatch?.call;
-			const branch = s.branch();
-			const actors = new Set(origin?.turnId ? this.recordedTurnActors(branch, origin.turnId) : []);
-			const jobs = new Set(origin?.turnId ? this.recordedTurnJobs(branch, origin.turnId) : []);
-			const startingRights = origin?.turnId ? this.recordedTurnRights(branch, origin.turnId) : [];
-			const checked = submitted && call ? await this.turnAuthority.run({ sessionId: s.id, actors, jobs, state: { startingRights } },
-				() => this.toolAfter(s, { sessionId: s.id, call, result: submitted.report }, true)) : undefined;
-
-			const result: ToolResult = checked?.result ?? { callId: id, status: live && !live.released ? "notStarted" : "outcomeUnknown",
-				content: [text(live && !live.released ? "Interface request was not released" : "Interface tool outcome is unknown")] };
-			const draft: EntryDraft = { kind: "toolResult", writer: "harness", modelVisible: true, turnId: origin?.turnId,
-				stepId: origin?.stepId, toolCallId: id, actorId: submitted?.actorId,
-				sources: [start?.id, checkpoint?.id].filter((entry): entry is string => !!entry),
-				message: { role: "toolResult", toolCallId: id, toolName: call?.name ?? "unknown", content: result.content, isError: result.status !== "completed" },
-				data: { status: result.status, value: result.value },
-			};
-			const written = erasure ? await this.commitNow(s, [draft]) : await this.commit(s, [draft], false, async () => {
-				if (this.interfaceRecords(s).get(id)?.result) return false;
-				if (!submitted) return true;
-				try { await this.erasure.admitHistory(s); } catch { return false; }
-				return submitted.authorized();
-			});
-			if (!written.length) return;
-			clearTimeout(this.interfaceTimers.get(s)?.get(id));
-			this.interfaceTimers.get(s)?.delete(id);
-			this.interfaceWork.get(s)?.delete(id);
-			this.handoffSpans.get(s)?.delete(id);
-			span.set("modular_agent.tool.status", result.status);
-			if (checked?.error || result.status === "failed" || result.status === "outcomeUnknown") span.fail(result.status);
-			this.emit(s, "tool.result", { status: result.status }, "harness", { turnId: origin?.turnId, stepId: origin?.stepId, toolCallId: id, actorId: submitted?.actorId });
-			return { error: checked?.error };
-		});
+		return this.interfaceTools.connectInterfaceTools(sessionId, options);
 	}
 
 	// ---------- tools ----------
 
 	private findTool(s: Session | undefined, name: string): { plugin: string; source: ToolSource; definition: ToolDefinition } | undefined {
 		for (const { plugin, impl } of this.caps.get("tool-source") ?? []) {
-			if (this.interfaceSources.has(name) && plugin !== INTERFACE_SOURCE) continue;
+			if (this.interfaceTools.interfaceSources.has(name) && plugin !== INTERFACE_SOURCE) continue;
 			const source = impl as ToolSource;
 			const definition = source.tools(s?.id).find((t) => t.name === name && !this.replacedFor(plugin, `tool:${t.name}`));
 			if (definition) return { plugin, source, definition };
@@ -3188,7 +2858,7 @@ export class Harness {
 		for (const { plugin, impl } of this.caps.get("tool-source") ?? []) {
 			const source = impl as ToolSource;
 			for (const t of source.tools(s?.id)) {
-				if (this.interfaceSources.has(t.name) && plugin !== INTERFACE_SOURCE) continue;
+				if (this.interfaceTools.interfaceSources.has(t.name) && plugin !== INTERFACE_SOURCE) continue;
 				if (this.replacedFor(plugin, `tool:${t.name}`)) continue;
 				if (seen.has(t.name)) {
 					// A name is never silently shadowed: the later source's tool is refused, and said so once.
@@ -3213,7 +2883,7 @@ export class Harness {
 		const allowance = directAllowance ?? (state && this.dispatchAllowances.get(state)?.get(call.id));
 		if (state) this.dispatchAllowances.get(state)?.delete(call.id);
 		const denied = (): ToolResult => ({ callId: call.id, status: wait && wait.request.deadlineAt! <= this.now() ? "notStarted" : "refused", content: [text("Consent no longer authorizes dispatch")] });
-		const needsGate = !nested && state && !this.interfaceSources.has(call.name) && (this.coversNested() || this.approvals.maximum && s.settings.approvalWait === "untilDeadline" &&
+		const needsGate = !nested && state && !this.interfaceTools.interfaceSources.has(call.name) && (this.coversNested() || this.approvals.maximum && s.settings.approvalWait === "untilDeadline" &&
 			!s.branch().some(e => e.kind === "toolStarted" && e.toolCallId === call.id));
 		if (!this.intactInheritedCall(s, turnId, call) || needsGate && !allowance || wait && (!allowance || wait.start || wait.result || !this.approvals.validWait(s, wait))) return denied();
 		const found = this.findTool(s, call.name);
@@ -3233,14 +2903,14 @@ export class Harness {
 		const refused = () => ({ callId: call.id, status: "refused" as const, content: [text(`No "tools" right: ${owners.join(", ")}`)] });
 		if (!allowed()) return refused();
 		if (found.plugin === INTERFACE_SOURCE) {
-			const registration = this.interfaceSources.get(call.name);
+			const registration = this.interfaceTools.interfaceSources.get(call.name);
 			const connection = state?.interfaceOffer?.get(call.name);
 			const allowance = state?.interfaceAllowances?.get(call.id);
 			if (!allowance || !isDeepStrictEqual({ ...allowance.call, actorId: call.actorId }, call) ||
 				call.actorId !== (owners[0] ?? this.actorForJob(s, state?.jobs))) return refused();
 			state?.interfaceAllowances?.set(call.id, null);
 			if (!registration || !connection || !turnId || !call.stepId || !state || nested || call.startedBy !== "model" || !call.actorId) return refused();
-			return this.handoffInterfaceCall(s, registration, connection, call, turnId, state, signal, allowed, allowance.approval);
+			return this.interfaceTools.handoffInterfaceCall(s, registration, connection, call, turnId, state, signal, allowed, allowance.approval);
 		}
 		const env = await this.environmentFor(s);
 		const safeToRepeat = found.definition.hints?.safeToRepeat === true && env?.containment === "strong";
@@ -3686,7 +3356,7 @@ export class Harness {
 		const continued = new Set(kept.filter((e) => e.kind === "turnStart").map((e) => e.continuesTurnId));
 		const open = new Set(branch.flatMap((e) => e.kind === "turnEnd" && !e.erased && (origin ? e.turnId === origin : !continued.has(e.turnId)) ? (e.data as { result?: TurnOutcome["result"] }).result?.openToolCalls ?? [] : []));
 		const calls: InterruptedTurn["calls"] = [];
-		const handoffs = this.interfaceRecords(s);
+		const handoffs = this.interfaceTools.interfaceRecords(s);
 		for (const e of branch) {
 			if (e.message?.role !== "assistant") continue;
 			for (const part of e.message.content.filter(isToolCall)) {
@@ -3701,7 +3371,7 @@ export class Harness {
 		const branch = s.branch();
 		const visible = new Map(branch.map((e, index) => [e.id, { e, index }]));
 		const used = new Set(s.order.map(id => s.entries.get(id)!).filter(e => e.kind === "turnStart").map(e => e.continuesTurnId));
-		const handoffs = this.interfaceRecords(s);
+		const handoffs = this.interfaceTools.interfaceRecords(s);
 		const requests = this.questions.recordedOpenRequests(s);
 		const ready: { origin: string; record: HistoryEntry; order: number; sources: string[] }[] = [];
 		for (const end of branch) {
@@ -3711,7 +3381,7 @@ export class Harness {
 			const decisions = ids.map(id => {
 				const item = handoffs.get(id);
 				if (item) {
-					if (!this.interfaceSources.size || this.runtime()?.supports.interfaceTools !== true || !item.data || !item.checkpoint || item.checkpoint.turnId !== end.turnId || !visible.has(item.checkpoint.id) || !item.result || item.result.erased || item.result.turnId !== end.turnId || item.result.stepId !== item.checkpoint.stepId) return undefined;
+					if (!this.interfaceTools.interfaceSources.size || this.runtime()?.supports.interfaceTools !== true || !item.data || !item.checkpoint || item.checkpoint.turnId !== end.turnId || !visible.has(item.checkpoint.id) || !item.result || item.result.erased || item.result.turnId !== end.turnId || item.result.stepId !== item.checkpoint.stepId) return undefined;
 					return item.result && visible.get(item.result.id);
 				}
 				const answer = this.questionSettlement(s, branch, end.turnId!, id);
@@ -3739,8 +3409,8 @@ export class Harness {
 			const queued: QueuedInput = { id: `continue:${origin}`, content: [], actorId: owners[0] ?? start.actorId ?? "harness",
 				authorityActors: owners, authorityJobs: jobs, startingRights: this.recordedTurnRights(branch, origin),
 				when: "after", startedBy, kind: "continue", continueTurnId: origin, trace, sources };
-			const scope = this.offerScope.getStore();
-			if (scope) this.queuedOffers.set(queued, scope);
+			const scope = this.interfaceTools.offerScope.getStore();
+			if (scope) this.interfaceTools.queuedOffers.set(queued, scope);
 			s.followUps.push(queued);
 		}
 		this.startQueued(s);
@@ -3782,7 +3452,7 @@ export class Harness {
 		const recovery = this.recoveryPolicy();
 		return {
 			inputDuringTurn: runtime?.supports.inputDuringTurn === true,
-			...(this.interfaceSources.size > 0 && runtime?.supports.interfaceTools === true ? { interfaceTools: true } : {}),
+			...(this.interfaceTools.interfaceSources.size > 0 && runtime?.supports.interfaceTools === true ? { interfaceTools: true } : {}),
 			waitingThroughRestart: runtime?.supports.waitingThroughRestart === true && !!store && !s?.ephemeral,
 			continuesAfterRestart: runtime?.supports.continuesAfterRestart === true,
 			rewinding: env?.keepsPoints?.(s ? this.projectOf(s) : this.project) ?? env?.points === true,
@@ -3938,14 +3608,6 @@ function intersectRights(...ceilings: readonly Authority[][]): Authority[] {
 
 function inputActors(q: QueuedInput): string[] {
 	return [q.startedBy.kind === "job" ? undefined : q.actorId, q.releasedBy, q.delegatedBy, ...(q.authorityActors ?? [])].filter((id): id is string => id !== undefined);
-}
-
-function shapeViolation(shape: Record<string, unknown>, value: unknown): string | undefined {
-	if (value === undefined) return "Return a JSON value matching the result schema.";
-	try {
-		const validate = schemaValidator.compile(shape);
-		if (!validate(value)) return `Value does not match the schema: ${schemaValidator.errorsText(validate.errors)}`;
-	} catch { return "Invalid JSON Schema"; }
 }
 
 function sameRegistration(a: { plugin: string; source: ToolSource; definition: ToolDefinition } | undefined,
