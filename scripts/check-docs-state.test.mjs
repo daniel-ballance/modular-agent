@@ -316,6 +316,19 @@ test("a Node pin written twice in one group is reported at the effective, last k
   repo.check([`${node}:5: Dependency @modular-agent/demo`]);
 });
 
+test("a key that decodes to the probe marker does not move a Node pin's line", (t) => {
+  const repo = checkout(t);
+  repo.write(node, [
+    "{",
+    '  "version": "0.2.0",',
+    '  "\\u005fdocs_state_probe_version": "metadata",',
+    '  "description": "demo"',
+    "}",
+    "",
+  ].join("\n"));
+  repo.check([`${node}:2: Package version`]);
+});
+
 test("Python pins are read from dependency arrays, not from other project strings", (t) => {
   const repo = checkout(t);
   repo.write(python, [

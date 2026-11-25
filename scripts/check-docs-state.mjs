@@ -205,8 +205,16 @@ function checkNodePackage(file, text, version) {
     fail(file, 1, "Invalid package JSON", "Restore a valid package manifest");
     return;
   }
+  // An escaped key such as "\u005f..." can spell the marker without the text containing it.
+  const keys = [...function* keysOf(value) {
+    if (value === null || typeof value !== "object") return;
+    for (const [key, child] of Object.entries(value)) {
+      yield key;
+      yield* keysOf(child);
+    }
+  }(pkg)];
   let marker = "_docs_state_probe_";
-  while (text.includes(marker)) marker += "_";
+  while (text.includes(marker) || keys.some((key) => key.includes(marker))) marker += "_";
   // JSON.parse has no positions, and a key has many spellings ("\/" or "\u002f" for "/"). Mark the
   // text after each quote and reparse: a quote that opens this path's key renames only that key.
   // JSON.parse keeps the last of duplicate keys, so the last such quote opens the effective one.
