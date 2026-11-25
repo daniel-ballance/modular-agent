@@ -149,6 +149,34 @@ test("a subject that only begins with the letters wip passes", (t) => {
   assert.equal(result.status, 0, result.stderr);
 });
 
+test("a closing keyword anywhere in a branch commit message fails", (t) => {
+  const repo = checkout(t);
+  repo.commit("Fixes #3 on main already");
+  repo.git("switch", "-q", "-c", "topic");
+  repo.commit("Closes #12");
+  repo.commit("Split the module\n\nThe old one was too long.\nRESOLVED: owner/repo#13");
+  repo.commit("Tidy\n\nfixed https://github.com/owner/repo/issues/14");
+  repo.commit("Split the parser\n\nfix\t#15 and more");
+  const result = repo.check();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Closes #12: "Closes #12"\. Put Closes #N in the pull request body, not the commit message\./);
+  assert.match(result.stderr, /Split the module: "RESOLVED: owner\/repo#13"/);
+  assert.match(result.stderr, /Tidy: "fixed https:\/\/github\.com\/owner\/repo\/issues\/14"/);
+  assert.match(result.stderr, /Split the parser: "fix\t#15"/);
+  assert.doesNotMatch(result.stderr, /on main already/);
+  assert.match(result.stdout, /Failures: 4\./);
+});
+
+test("a keyword not followed by an issue reference passes", (t) => {
+  const repo = checkout(t);
+  repo.commit("Start");
+  repo.git("switch", "-q", "-c", "topic");
+  repo.commit("Part of #12\n\nThe flake was fixed in #12 already.\nA prefix #3, an unfixed #4, closes the gap in #5.");
+  repo.commit("Closes the file before #6 opens it");
+  const result = repo.check();
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test("no main ref skips the subject check", (t) => {
   const repo = checkout(t, "topic");
   repo.commit("WIP: finish the split");
