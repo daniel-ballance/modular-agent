@@ -428,7 +428,6 @@ export class Harness {
 
 	/** The plugin API, as seen by one plugin. The host uses its own copy, named "host". */
 	api(pluginName: string): PluginApi {
-		const self = this;
 		return {
 			name: pluginName,
 			project: this.project,
@@ -612,7 +611,7 @@ export class Harness {
 				return out;
 			},
 			modelAccess: (sessionId) => this.modelAccess(this.session(sessionId)),
-			config: () => self.use<Configuration>("configuration")?.plugin(pluginName) ?? {},
+			config: () => this.use<Configuration>("configuration")?.plugin(pluginName) ?? {},
 		};
 	}
 
@@ -823,10 +822,10 @@ export class Harness {
 				const results = new Set(own.filter(e => e.kind === "toolResult").map(e => e.toolCallId));
 				const ended = new Set(own.filter(e => e.kind === "turnEnd").map(e => e.turnId));
 				const answered = new Set(own.filter(e => e.kind === "response").map(e => e.stepId));
-				const closed = new Set(own.filter(e => e.kind === "inputAnswer").map(requestIdOf));
+				const closed = new Set(own.filter(e => e.kind === "inputAnswer").map(e => e.requestId));
 				const unit = this.reservations.limits.settlementBytes;
 				for (const e of own) {
-					if (e.kind === "inputRequest" && !e.erased && !closed.has(requestIdOf(e))) {
+					if (e.kind === "inputRequest" && !e.erased && !closed.has(e.requestId)) {
 						this.reservations.reserve(s, `question:${e.requestId}`, { storageBytes: 3 * unit }, true);
 					}
 					if (e.kind === "turnStart" && e.turnId && !ended.has(e.turnId)) this.reservations.reserve(s, `turn:${e.turnId}`, { storageBytes: 2 * unit }, true);
@@ -1472,7 +1471,7 @@ export class Harness {
 				case "toolStarted": case "toolResult": case "toolPending": case INTERFACE_HANDOFF: case "modular-agent.nestedCall":
 					add("call", entry.toolCallId); break;
 				case "inputRequest": case "inputAnswer": case "secretAnswerAccepted":
-					add("question", requestIdOf(entry)); break;
+					add("question", entry.requestId); break;
 			}
 			return { bytes: resourceBytes(entry), keys, control };
 		});
@@ -1511,7 +1510,7 @@ export class Harness {
 				if (this.hasQuestionRoute(s,r)) s.revokedQuestions.delete(r.id);
 				else if (previouslyEligible) s.revokedQuestions.add(r.id);
 			}
-			if (e.kind === "inputAnswer") s.revokedQuestions.delete(requestIdOf(e)!);
+			if (e.kind === "inputAnswer") s.revokedQuestions.delete(e.requestId!);
 			const inputId = inputIdOf(e);
 			if (inputId && e.kind === "input" && e.turnId) {
 				const unit = this.reservations.limits.settlementBytes;
@@ -1527,7 +1526,7 @@ export class Harness {
 				}
 			}
 			if (e.kind === "response" && e.stepId) this.reservations.release(s, `model:${e.stepId}`);
-			if (e.kind === "inputAnswer" && requestIdOf(e)) this.reservations.release(s, `question:${requestIdOf(e)}`);
+			if (e.kind === "inputAnswer" && e.requestId) this.reservations.release(s, `question:${e.requestId}`);
 			if (e.kind === "toolResult" && e.toolCallId) this.reservations.release(s, `call:${e.toolCallId}`);
 			const ids = { turnId: e.turnId, stepId: e.stepId, toolCallId: e.toolCallId, actorId: e.actorId };
 			this.emit(s, "entry.added", e, e.writer, ids);
@@ -2435,7 +2434,7 @@ export class Harness {
 				if (start && span.spanContext) this.turnTraces.set(start, span.spanContext);
 				this.emit(s, "turn.started", { startedBy: queued.startedBy }, "harness", { turnId });
 				let outcome: TurnOutcome;
-				if (limited) outcome = this.tenantLimitOutcome();
+				if (limited) outcome = { outcome: { kind: "limit", limit: "tenantTokens" }, result: { openToolCalls: [] }, entries: [], usage: zeroUsage() };
 				else if (failure) outcome = this.failedOutcome(failure);
 				else if (!runtime) outcome = this.failedOutcome("No Runtime is loaded");
 				else if (!model) outcome = this.failedOutcome("No model is selected, or its Provider is not loaded");
@@ -2658,10 +2657,6 @@ export class Harness {
 
 	private turnSettings(s: Session, model?: ModelInfo): TurnSettings {
 		return { maxSteps: s.settings.maxSteps as number | undefined, reasoning: lowerReasoning(s.settings.reasoning, model), maxOutput: s.settings.maxOutput as number | undefined };
-	}
-
-	private tenantLimitOutcome(): TurnOutcome {
-		return { outcome: { kind: "limit", limit: "tenantTokens" }, result: { openToolCalls: [] }, entries: [], usage: zeroUsage() };
 	}
 
 	private inputEntry(s: Session, q: QueuedInput, turnId: string): EntryDraft {
@@ -4027,7 +4022,7 @@ export class Harness {
 
 	private recordedOpenQuestionEntries(s: Session, branch: HistoryEntry[]) {
 		const settled = new Set(s.order.map(id => s.entries.get(id)!).filter(e =>
-			e.kind === "inputAnswer" || e.kind === "inputClosed" || e.kind === "secretAnswerAccepted").map(requestIdOf));
+			e.kind === "inputAnswer" || e.kind === "inputClosed" || e.kind === "secretAnswerAccepted").map(e => e.requestId));
 		return branch.filter(e => e.kind === "inputRequest" && !s.copied.has(e.id) && !e.erased && e.requestId && !settled.has(e.requestId));
 	}
 
@@ -4111,7 +4106,7 @@ export class Harness {
 	private async recoverSecrets(s: Session): Promise<void> {
 		const entries = s.order.map(id => s.entries.get(id)!).filter(e => !s.copied.has(e.id));
 		const decisions = new Map(entries.filter(e => e.kind === "secretAnswerAccepted").map(e => [e.requestId, e]));
-		const answers = new Map(entries.filter(e => e.kind === "inputAnswer").map(e => [requestIdOf(e), e]));
+		const answers = new Map(entries.filter(e => e.kind === "inputAnswer").map(e => [e.requestId, e]));
 		for (const entry of entries) {
 			if (entry.kind !== "inputRequest" || entry.erased) continue;
 			const request = readRequest(entry);
@@ -4391,7 +4386,7 @@ export class Harness {
 					if (entry.kind !== "inputRequest" || entry.erased) continue;
 					const prior = readRequest(entry);
 					if (prior.kind === "secret" && prior.key === key && branch.some(e => e.kind === "inputAnswer" &&
-						requestIdOf(e) === prior.id && (e.data as Answer | undefined)?.reason === "restart")) key += ":" + prior.id;
+						e.requestId === prior.id && (e.data as Answer | undefined)?.reason === "restart")) key += ":" + prior.id;
 				}
 			}
 			draft = { ...draft, key };
@@ -5086,7 +5081,6 @@ function copyForkPrefix(branch: HistoryEntry[], sessionId: string, makeId: () =>
 	});
 }
 
-/** Walk copy links to a fixed point, without following parentId (which is just position). */
 /** Wait for work against one writer generation, independently of event delivery. */
 export async function untilAborted<T>(signal: AbortSignal, work: () => Promise<T>): Promise<T> {
 	signal.throwIfAborted();
@@ -5167,10 +5161,6 @@ function approvalKey(binding?: ApprovalBinding): string {
 }
 
 type BoundRequest = InputRequestDraft & { coversNested?: true; boundCall?: Pick<ToolCall, "name" | "input"> };
-
-function requestIdOf(entry: HistoryEntry): string | undefined {
-	return entry.requestId;
-}
 
 function readRequest(entry: HistoryEntry): InputRequest {
 	const request = (entry.data as { request: InputRequest }).request;
