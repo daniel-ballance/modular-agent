@@ -4,8 +4,9 @@ import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
-const checker = "scripts/check-docs-state.mjs";
+const checker = fileURLToPath(new URL("check-docs-state.mjs", import.meta.url));
 const sdk = "docs/sdk/README.md";
 const go = "go/api/api.go";
 const workspace = "rust/Cargo.toml";
@@ -27,8 +28,6 @@ function checkout(t) {
     writeFileSync(join(cwd, file), content);
   };
   git("init", "-q");
-  mkdirSync(join(cwd, "scripts"));
-  copyFileSync(new URL("check-docs-state.mjs", import.meta.url), join(cwd, checker));
   write("CHANGELOG.md", "# Changelog\n\n## Unreleased\n\n## 0.3.2\n\n## 0.2.0\n");
   write(sdk, "# The SDK specification\n\n**Status: 0.3, accepted.**\n");
   write(go, 'package api\n\nconst ImplementationVersion = "0.3.2"\n');
@@ -45,8 +44,11 @@ function checkout(t) {
       write(file, content);
       git("add", "-f", "--", file);
     },
+    index(...rows) {
+      this.track(adrIndex, ["| ADR | Decision | Status | Rule |", "| --- | --- | --- | --- |", ...rows].join("\n"));
+    },
     check(failures = []) {
-      const result = spawnSync(process.execPath, [checker], { cwd, encoding: "utf8" });
+      const result = spawnSync(process.execPath, [checker, "--root", cwd], { cwd, encoding: "utf8" });
       const diagnostics = result.stderr.trim().split("\n").filter(Boolean);
       assert.equal(result.status, Number(failures.length > 0), result.stderr);
       assert.match(result.stdout, new RegExp(`Failures: ${failures.length}\\.$`, "m"));
@@ -57,6 +59,17 @@ function checkout(t) {
     },
   };
 }
+
+test("missing parser dependencies give a one-line install instruction", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "docs-state-no-deps-"));
+  t.after(() => rmSync(cwd, { force: true, recursive: true }));
+  const copy = join(cwd, "check-docs-state.mjs");
+  copyFileSync(checker, copy);
+  const result = spawnSync(process.execPath, [copy], { cwd, encoding: "utf8" });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "scripts/check-docs-state.mjs:1: Missing parser dependencies. Run npm ci --prefix scripts.\n");
+});
 
 function record(repo, file, status) {
   repo.track(file, `---\nstatus: ${status}\n---\n\n# Decision\n`);
@@ -146,14 +159,49 @@ test("issue numbers and URLs satisfy gap headings; history and untracked files a
   repo.check();
 });
 
+test("an escaped comment opener leaves an issue visible", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", "## Known gaps\n\\<!-- Tracked in #31.\n");
+  repo.check();
+});
+
+test("an escaped backtick does not start an inline code span", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", "## Known gaps\n\\` Tracked in #31. `\n");
+  repo.check();
+});
+
+test("Setext gap headings start a section and any heading ends it", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", "Known gaps\n----------\n\n# Next\n\nTracked in #31.\n");
+  repo.check(["README.md:1: Gap or finding has no issue"]);
+});
+
+test("an indented code block does not supply an issue", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", "## Findings\n\n    Tracked in #31.\n");
+  repo.check(["README.md:1: Gap or finding has no issue"]);
+});
+
+test("only visible link labels and URLs supply issues", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "## Known gaps", "See [the issue][tracked].", "", "[tracked]: https://example.org/repo/issues/31", "",
+    "## Findings", "See [the docs](README.md \"Tracked in #32\").", "", "[unused]: https://example.org/repo/issues/33", "",
+    "<div>Tracked in #34.</div>",
+    "", "## Other gaps", "See [#35](README.md).",
+  ].join("\n"));
+  repo.check(["README.md:6: Gap or finding has no issue"]);
+});
+
 test("ADR index rejects a wrong status or superseding record number", (t) => {
   const repo = checkout(t);
   record(repo, accepted, "accepted");
   record(repo, proposed, "superseded by 0033");
-  repo.track(adrIndex, [row(accepted, "Proposed"), row(proposed, "Superseded by [0035](0035-other.md)")].join("\n"));
+  repo.index(row(accepted, "Proposed"), row(proposed, "Superseded by [0035](0035-other.md)"));
   repo.check([
-    "docs/adr/README.md:1: Index status does not match",
-    "docs/adr/README.md:2: Index status does not match",
+    "docs/adr/README.md:3: Index status does not match",
+    "docs/adr/README.md:4: Index status does not match",
   ]);
 });
 
@@ -161,16 +209,30 @@ test("every ADR needs an index row, with or without a leading pipe", (t) => {
   const repo = checkout(t);
   record(repo, accepted, "accepted");
   record(repo, proposed, "accepted");
-  repo.track(adrIndex, [row(accepted, "Accepted").slice(1), row(proposed, "Proposed").replace(/^\| /, "")].join("\n"));
-  repo.check(["docs/adr/README.md:2: Index status does not match"]);
-  repo.track(adrIndex, row(accepted, "Accepted"));
+  repo.index(row(accepted, "Accepted").slice(1), row(proposed, "Proposed").replace(/^\| /, ""));
+  repo.check(["docs/adr/README.md:4: Index status does not match"]);
+  repo.index(row(accepted, "Accepted"));
   repo.check(["docs/adr/README.md:1: No index row for docs/adr/0034-approvals-that-wait.md"]);
 });
 
 test("an escaped pipe stays inside its ADR index cell", (t) => {
   const repo = checkout(t);
   record(repo, accepted, "accepted");
-  repo.track(adrIndex, `| [0033](${accepted.split("/").at(-1)}) | Host tools \\| AG-UI | Accepted | Rule |`);
+  repo.index(`| [0033](${accepted.split("/").at(-1)}) | Host tools \\| AG-UI | Accepted | Rule |`);
+  repo.check();
+});
+
+test("an escaped pipe does not disappear from the status text", (t) => {
+  const repo = checkout(t);
+  record(repo, accepted, "accepted");
+  repo.index(row(accepted, "Accep\\|ted"));
+  repo.check(["docs/adr/README.md:3: Index status does not match"]);
+});
+
+test("ADR rows use the link URL rather than its title or label", (t) => {
+  const repo = checkout(t);
+  record(repo, accepted, "accepted");
+  repo.index(`| [Host tools](${accepted.split("/").at(-1)} "wrong.md") | Decision | Accepted | Rule |`);
   repo.check();
 });
 
@@ -180,10 +242,10 @@ test("ADR index allows annotations and calls accepted experiments historical", (
   record(repo, accepted, "accepted");
   record(repo, proposed, "superseded by 0033");
   record(repo, experiment, "accepted");
-  repo.track(adrIndex, [row(accepted, "Accepted; amended later"), row(proposed, "Superseded by [0033](0033-interface-tools-and-ag-ui.md)"), row(experiment, "Historical experiment")].join("\n"));
+  repo.index(row(accepted, "Accepted; amended later"), row(proposed, "Superseded by [0033](0033-interface-tools-and-ag-ui.md)"), row(experiment, "Historical experiment"));
   repo.check();
   record(repo, experiment, "proposed");
-  repo.check(["docs/adr/README.md:3: Index status does not match"]);
+  repo.check(["docs/adr/README.md:5: Index status does not match"]);
 });
 
 test("release versions agree across package manifests and major.minor in the SDK status", (t) => {
@@ -223,6 +285,41 @@ test("Python pins are read from dependency arrays, not from other project string
     'readme = "demo-sdk==0.1.0"',
   ].join("\n") + "\n");
   repo.check([`${python}:7: Dependency demo-sdk`]);
+});
+
+test("a bracket in a dependency marker does not end the TOML array", (t) => {
+  const repo = checkout(t);
+  repo.write(python, [
+    "[project]", 'name = "modular-agent"', 'version = "0.3.2"', "dependencies = [",
+    String.raw`  "outside==1.0.0; platform_release == \"]\"",`,
+    '  "demo-sdk==0.2.0",', "]",
+  ].join("\n"));
+  repo.check([`${python}:6: Dependency demo-sdk`]);
+});
+
+test("a quoted dependencies key still holds Python pins", (t) => {
+  const repo = checkout(t);
+  repo.write(python, '[project]\nname = "modular-agent"\nversion = "0.3.2"\n"dependencies" = ["demo-sdk==0.2.0"]\n');
+  repo.check([`${python}:4: Dependency demo-sdk`]);
+});
+
+test("Python pin locations distinguish identical prose and grouped requirements", (t) => {
+  const repo = checkout(t);
+  const pin = "  DEMO.Sdk [test] (>=0, === 0.2.0); python_version >= '3.13'";
+  repo.write(python, [
+    "[project]", 'name = "modular-agent"', 'version = "0.3.2"', `description = "${pin}"`,
+    "[project.optional-dependencies]", `dev = ["${pin}"]`, "[dependency-groups]",
+    `dev = [{include-group = "test"}, "${pin}"]`, 'test = ["demo-sdk @ https://example.org/demo-sdk==0.2.0"]',
+  ].join("\n"));
+  repo.check([`${python}:6: Dependency DEMO.Sdk`, `${python}:8: Dependency DEMO.Sdk`]);
+});
+
+test("Cargo reads quoted and dotted keys and locates the value, not a matching comment", (t) => {
+  const repo = checkout(t);
+  repo.write(workspace, '# workspace.package.version = "0.2.0"\nworkspace."package" . "version" = "0.2.0"\n');
+  repo.write(crate, '[package]\nname = "sdk"\n"version" = { workspace = true }\n');
+  repo.write(demoCrate, '[package]\nname = "demo"\nversion = { workspace = false }\n');
+  repo.check([`${workspace}:2: Cargo workspace version`, `${demoCrate}:3: Cargo package version`]);
 });
 
 test("a malformed newest changelog release cannot fall back to an older release", (t) => {

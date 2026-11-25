@@ -1,0 +1,10 @@
+{
+  "name": "modular-agent-docs-checks",
+  "private": true,
+  "dependencies": {
+    "mdast-util-from-markdown": "2.1.0",
+    "mdast-util-gfm-table": "2.0.1",
+    "micromark-extension-gfm-table": "2.1.2",
+    "smol-toml": "1.9.1"
+  }
+}

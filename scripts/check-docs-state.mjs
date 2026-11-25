@@ -1,10 +1,29 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { join, posix } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const root = fileURLToPath(new URL("..", import.meta.url));
+const parsers = await Promise.all([
+  import("mdast-util-from-markdown"),
+  import("mdast-util-gfm-table"),
+  import("micromark-extension-gfm-table"),
+  import("smol-toml"),
+]).catch((error) => {
+  if (error.code !== "ERR_MODULE_NOT_FOUND") throw error;
+  console.error("scripts/check-docs-state.mjs:1: Missing parser dependencies. Run npm ci --prefix scripts.");
+  process.exit(1);
+});
+const [{ fromMarkdown }, { gfmTableFromMarkdown }, { gfmTable }, { parse, TomlError }] = parsers;
+const markdownOptions = { extensions: [gfmTable()], mdastExtensions: [gfmTableFromMarkdown()] };
+const parseMarkdown = (source) => fromMarkdown(source, markdownOptions);
+
+const args = process.argv.slice(2);
+if (args.length && (args.length !== 2 || args[0] !== "--root" || !args[1])) {
+  console.error("Usage: node scripts/check-docs-state.mjs [--root DIR]");
+  process.exit(1);
+}
+const root = args.length ? resolve(args[1]) : fileURLToPath(new URL("..", import.meta.url));
 const adrIndex = "docs/adr/README.md";
 const sdkIndex = "docs/sdk/README.md";
 const goVersion = "go/api/api.go";
@@ -14,7 +33,6 @@ const historicalGaps = /^(?:docs\/(?:adr|research|pressure-test)\/)|\/docs\/clea
 const issueUrl = /https?:\/\/[^\s<>()[\]]+\/issues\/[1-9]\d*\b/;
 const issueNumber = /(?:^|[\s(\[]|[\w.-]+\/[\w.-]+)#\d*[1-9]\d*\b/;
 const release = /^v?(\d+\.\d+\.\d+)$/;
-const link = /\[([^\]\n]+)\]\(<?([^\s)>]+)>?(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?[ \t]*\)/g;
 const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 const linesOf = (text) => text.split(/\r?\n/);
 const read = (file) => {
@@ -32,73 +50,48 @@ function fail(file, line, problem, fix) {
   bad++;
 }
 
-// CommonMark code span: a backtick run closed by a run of the same length.
-const codeSpan = /(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)/g;
-// CommonMark fences: a backtick opener's info string has no backtick; a closer has only spaces or tabs after it.
-const fenceOpen = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
-const fenceClose = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
-
-// Blank fenced code and mask HTML comments with NUL, keeping line numbers.
-// NUL is not a space, so a masked comment cannot complete an ATX opener.
-// A fence or a code span can hold a literal "<!--"; it does not open a comment.
-function markdownLines(text) {
-  let fence;
-  let comment = false;
-  return linesOf(text).map((line) => {
-    if (fence) {
-      const close = line.match(fenceClose)?.[1];
-      if (close?.[0] === fence[0] && close.length >= fence.length) fence = undefined;
-      return "";
-    }
-    const open = !comment && line.match(fenceOpen)?.[1];
-    if (open) {
-      fence = open;
-      return "";
-    }
-    const code = line.replace(codeSpan, (span) => " ".repeat(span.length));
-    let out = "";
-    let at = 0;
-    while (at < line.length) {
-      const next = comment ? line.indexOf("-->", at) : code.indexOf("<!--", at);
-      if (next === -1) {
-        out += comment ? "\0".repeat(line.length - at) : line.slice(at);
-        break;
-      }
-      if (!comment) {
-        // CommonMark also closes a comment at once with <!--> or <!--->.
-        const short = line.startsWith(">", next + 4) ? 5 : line.startsWith("->", next + 4) ? 6 : 0;
-        out += line.slice(at, next) + "\0".repeat(short || 4);
-        at = next + (short || 4);
-        comment = !short;
-        continue;
-      }
-      out += "\0".repeat(next + 3 - at);
-      at = next + 3;
-      comment = false;
-    }
-    return out;
-  });
+function* walk(node, stopAt = []) {
+  yield node;
+  if (stopAt.includes(node.type)) return;
+  for (const child of node.children ?? []) yield* walk(child, stopAt);
 }
 
-// CommonMark ATX heading: a closing run of # counts only after a space, and an empty heading is still a heading.
-function atxTitle(line) {
-  const match = line.match(/^ {0,3}#{1,6}(?:[ \t]+(.*?))?[ \t]*$/);
-  return match ? (match[1] ?? "").replace(/(?:^|[ \t]+)#+$/, "").replace(/\0/g, "").trim() : undefined;
+function inlineText(node, includeCode = false) {
+  if (node?.type === "text" || (includeCode && node?.type === "inlineCode")) return node.value;
+  if (node?.type === "break") return "\n";
+  return (node?.children ?? []).map((child) => inlineText(child, includeCode)).join("");
 }
 
-function checkGaps(file, lines) {
+function linkUrls(tree) {
+  const definitions = new Map();
+  for (const node of walk(tree)) {
+    if (node.type === "definition" && !definitions.has(node.identifier)) definitions.set(node.identifier, node.url);
+  }
+  return (node) => node.type === "link" ? node.url : node.type === "linkReference" ? definitions.get(node.identifier) : undefined;
+}
+
+function checkGaps(file, tree) {
+  const urlOf = linkUrls(tree);
   let heading;
   const finish = () => {
     if (heading && !heading.tracked) fail(file, heading.line, "Gap or finding has no issue", "Link an issue below the heading, before the next heading");
   };
-  for (const [i, line] of lines.entries()) {
-    const title = atxTitle(line);
-    if (title !== undefined) {
+  const inlineBlocks = ["heading", "paragraph", "tableCell"];
+  for (const node of walk(tree, inlineBlocks)) {
+    if (node.type === "heading") {
       finish();
-      heading = gapHeading.test(title) ? { line: i + 1, tracked: false } : undefined;
-    } else if (heading) {
-      const prose = line.replace(codeSpan, "").replace(/\0/g, "");
-      heading.tracked ||= issueUrl.test(prose) || issueNumber.test(prose.replace(link, "$1"));
+      heading = gapHeading.test(inlineText(node, true).trim()) ? { line: node.position.start.line, tracked: false } : undefined;
+    } else if (heading && !heading.tracked && inlineBlocks.includes(node.type)) {
+      const text = inlineText(node);
+      heading.tracked = issueUrl.test(text) || issueNumber.test(text);
+      if (heading.tracked) continue;
+      for (const inline of walk(node)) {
+        const url = urlOf(inline);
+        if (url !== undefined && (issueUrl.test(url) || issueNumber.test(inlineText(inline)))) {
+          heading.tracked = true;
+          break;
+        }
+      }
     }
   }
   finish();
@@ -108,20 +101,33 @@ function adrStatus(text) {
   return text.match(/^---\r?\n(.*?)\r?\n---(?:\r?\n|$)/s)?.[1].match(/^status:[ \t]*([^\r\n]+)/m)?.[1].trim().toLowerCase();
 }
 
-function checkAdrIndex(lines, statuses) {
+const adrBase = new URL("https://repository.invalid/docs/adr/");
+
+function adrTarget(href) {
+  const target = href && URL.parse(href, adrBase);
+  if (target?.origin !== adrBase.origin) return;
+  const file = target.pathname.slice(1);
+  if (adrFile.test(file)) return file;
+}
+
+function checkAdrIndex(tree, statuses) {
   const indexed = new Set();
-  for (const [i, line] of lines.entries()) {
-    const row = line.replace(/\\\|/g, "\0").match(/^ {0,3}\|?\s*\[\d{4}\]\(([^)]+)\)\s*\|[^|]*\|([^|]*)(?:\||$)/);
-    if (!row) continue;
-    const file = posix.join("docs/adr", row[1]);
-    indexed.add(file);
-    const status = statuses.get(file);
-    const cell = row[2].replace(/\0/g, "").trim().toLowerCase().replace(link, "$1");
-    // Historical describes applicability, not a change to the original accepted decision.
-    if (status === "accepted" && /^historical\b/.test(cell)) continue;
-    if (!status) fail(adrIndex, i + 1, `No front matter status for ${file}`, "Restore the record and its status");
-    else if (!cell.startsWith(status) || /^[\w-]/.test(cell.slice(status.length))) {
-      fail(adrIndex, i + 1, `Index status does not match ${file}`, `Start the status cell with "${status}"`);
+  const urlOf = linkUrls(tree);
+  for (const node of walk(tree)) {
+    if (node.type !== "tableRow") continue;
+    const [firstCell, , statusCell] = node.children;
+    const cell = inlineText(statusCell, true).trim().toLowerCase();
+    const line = node.position.start.line;
+    for (const link of walk(firstCell)) {
+      const file = adrTarget(urlOf(link));
+      if (!file) continue;
+      indexed.add(file);
+      const status = statuses.get(file);
+      if (status === "accepted" && /^historical\b/.test(cell)) continue;
+      if (!status) fail(adrIndex, line, `No front matter status for ${file}`, "Restore the record and its status");
+      else if (!cell.startsWith(status) || /^[\w-]/.test(cell.slice(status.length))) {
+        fail(adrIndex, line, `Index status does not match ${file}`, `Start the status cell with "${status}"`);
+      }
     }
   }
   for (const file of statuses.keys()) {
@@ -137,33 +143,74 @@ function first(lines, pattern) {
   return { line: 1 };
 }
 
-function section(lines, name) {
-  const table = (line) => line.match(/^\s*\[\[?([\w][\w.-]*)\]\]?\s*(?:#.*)?$/)?.[1];
-  const start = lines.findIndex((line) => table(line) === name);
-  if (start === -1) return { lines: [], offset: 0 };
-  const end = lines.findIndex((line, i) => i > start && table(line));
-  return { lines: lines.slice(start + 1, end === -1 ? undefined : end), offset: start + 1 };
-}
-
-const quotedVersion = /^\s*version\s*=\s*["']([^"']+)["']/;
-
-function tomlValue(lines, table, pattern) {
-  const part = section(lines, table);
-  const match = first(part.lines, pattern);
-  return { ...match, line: part.offset + match.line };
-}
-
 function checkVersion(file, { line, value }, version, field) {
-  if (value !== version) fail(file, line, `${field} is ${value === undefined ? "missing" : JSON.stringify(value)}`, `Set it to ${version} to match CHANGELOG.md`);
+  if (value === version) return;
+  const found = value === undefined ? "missing" : JSON.stringify(value, (_, item) => typeof item === "bigint" ? String(item) : item);
+  fail(file, line, `${field} is ${found}`, `Set it to ${version} to match CHANGELOG.md`);
 }
 
-function checkCargo(file, lines, version) {
-  if (file === "rust/Cargo.toml" || section(lines, "workspace.package").offset) {
-    checkVersion(file, tomlValue(lines, "workspace.package", quotedVersion), version, "Cargo workspace version");
+const tomlOptions = { integersAsBigInt: "asNeeded" };
+const atPath = (data, path) => path.reduce((value, key) => value?.[key], data);
+
+function parseManifest(file) {
+  const source = read(file);
+  try {
+    return { source, data: parse(source, tomlOptions) };
+  } catch (error) {
+    if (!(error instanceof TomlError)) throw error;
+    fail(file, error.line, error.message.split("\n")[0], "Restore a valid TOML manifest");
   }
-  const pkg = section(lines, "package");
-  if (pkg.offset && !pkg.lines.some((line) => /^\s*version\s*(?:\.\s*workspace\s*=\s*true|=\s*\{\s*workspace\s*=\s*true\s*\})\s*(?:#.*)?$/.test(line))) {
-    checkVersion(file, tomlValue(lines, "package", quotedVersion), version, "Cargo package version");
+}
+
+function tomlLine({ source, data }, path, value) {
+  let marker = "_docs_state_probe_";
+  while (source.includes(marker)) marker += "_";
+  const probe = (offset, matches) => {
+    try {
+      return matches(parse(source.slice(0, offset) + marker + source.slice(offset), tomlOptions));
+    } catch (error) {
+      if (!(error instanceof TomlError)) throw error;
+      return false;
+    }
+  };
+  // smol-toml has no value positions. Reparse a marked candidate to distinguish a value from identical prose or pins elsewhere.
+  if (typeof value === "string") {
+    for (const quote of source.matchAll(/"""|'''|["']/g)) {
+      const offset = quote.index + quote[0].length;
+      const newline = quote[0].length === 3 ? source.slice(offset, offset + 2).match(/^\r?\n/)?.[0].length ?? 0 : 0;
+      if (probe(offset + newline, (marked) => atPath(marked, path) === marker + value)) {
+        return linesOf(source.slice(0, quote.index)).length;
+      }
+    }
+  }
+  if (value !== undefined && path.at(-1) === "version") {
+    const markedPath = [...path.slice(0, -1), `${marker}version`];
+    if (atPath(data, markedPath) === undefined) {
+      for (const key of source.matchAll(/\bversion\b|["']/g)) {
+        const offset = key.index + (key[0] === "version" ? 0 : 1);
+        if (probe(offset, (marked) => atPath(marked, path) === undefined && atPath(marked, markedPath) !== undefined)) {
+          return linesOf(source.slice(0, key.index)).length;
+        }
+      }
+    }
+  }
+  return 1;
+}
+
+function checkTomlVersion(file, manifest, path, version, field) {
+  const value = atPath(manifest.data, path);
+  if (value !== version) checkVersion(file, { line: tomlLine(manifest, path, value), value }, version, field);
+}
+
+function checkCargo(file, manifest, version) {
+  const { data } = manifest;
+  if (file === "rust/Cargo.toml" || data.workspace?.package !== undefined) {
+    checkTomlVersion(file, manifest, ["workspace", "package", "version"], version, "Cargo workspace version");
+  }
+  const packageVersion = data.package?.version;
+  const inherited = packageVersion?.workspace === true && Object.keys(packageVersion).length === 1;
+  if (data.package !== undefined && !inherited) {
+    checkTomlVersion(file, manifest, ["package", "version"], version, "Cargo package version");
   }
 }
 
@@ -192,23 +239,33 @@ function checkNodePackage(file, text, version) {
 
 const pythonName = (name) => name.toLowerCase().replace(/[-_.]+/g, "-");
 
+function* pythonPins(requirement) {
+  if (typeof requirement !== "string") return;
+  const match = requirement.split(";", 1)[0].trim().match(/^([a-z\d](?:[a-z\d._-]*[a-z\d])?)(?:\s*\[[^\]]*\])?\s*(.*)$/is);
+  if (!match || match[2].startsWith("@")) return;
+  const [, name, specifiers] = match;
+  for (const specifier of specifiers.replace(/^\((.*)\)$/s, "$1").split(",")) {
+    const pin = specifier.trim().match(/^===?\s*([^=\s]\S*)$/);
+    if (pin) yield { name, value: pin[1] };
+  }
+}
+
 function checkPython(packages, version) {
-  const names = new Set([...packages.values()].map((lines) => tomlValue(lines, "project", /^\s*name\s*=\s*["']([^"']+)["']/).value).filter(Boolean).map(pythonName));
-  for (const [file, lines] of packages) {
-    checkVersion(file, tomlValue(lines, "project", quotedVersion), version, "Python project version");
-    for (const table of ["project", "project.optional-dependencies", "dependency-groups"]) {
-      const part = section(lines, table);
-      // In [project] only the dependencies array holds pins; other strings are metadata.
-      let open = table !== "project";
-      for (const [i, line] of part.lines.entries()) {
-        const starts = table === "project" && /^\s*dependencies\s*=\s*\[/.test(line);
-        if (!open && !starts) continue;
-        if (table === "project" && /\]/.test(line.replace(/"[^"\n]*"|'[^'\n]*'|#.*/g, ""))) open = false;
-        else if (starts) open = true;
-        for (const token of line.matchAll(/"[^"\n]*"|'[^'\n]*'|#.*/g)) {
-          const pin = token[0].slice(1, -1).match(/^([\w.-]+)(?:\[[^\]]+\])?\s*===?\s*([^\s;,]+)/);
-          if (pin && names.has(pythonName(pin[1]))) {
-            checkVersion(file, { line: part.offset + i + 1, value: pin[2] }, version, `Dependency ${pin[1]}`);
+  const names = new Set([...packages.values()].map(({ data }) => data.project?.name).filter((name) => typeof name === "string").map(pythonName));
+  for (const [file, manifest] of packages) {
+    checkTomlVersion(file, manifest, ["project", "version"], version, "Python project version");
+    const { data } = manifest;
+    const optionals = Object.keys(data.project?.["optional-dependencies"] ?? {});
+    const groups = Object.keys(data["dependency-groups"] ?? {});
+    const arrays = [["project", "dependencies"], ...optionals.map((group) => ["project", "optional-dependencies", group]), ...groups.map((group) => ["dependency-groups", group])];
+    for (const path of arrays) {
+      const dependencies = atPath(data, path);
+      if (!Array.isArray(dependencies)) continue;
+      for (const [i, requirement] of dependencies.entries()) {
+        for (const { name, value } of pythonPins(requirement)) {
+          if (value !== version && names.has(pythonName(name))) {
+            const line = tomlLine(manifest, [...path, i], requirement);
+            checkVersion(file, { line, value }, version, `Dependency ${name}`);
           }
         }
       }
@@ -217,19 +274,27 @@ function checkPython(packages, version) {
 }
 
 function checkVersions(files) {
-  const heading = first(markdownLines(read("CHANGELOG.md")), /^ {0,3}##\s+(\[?v?\d+\S*)/);
-  const version = heading.value?.replace(/^\[([^\]]+)\]$/, "$1").match(release)?.[1];
-  if (!version) {
-    fail("CHANGELOG.md", heading.line, "No valid top release heading", "Use a heading with the current major.minor.patch release");
+  const changelog = read("CHANGELOG.md");
+  const releaseLine = /^ {0,3}##\s+(\[?v?\d+[^\s]*)/;
+  const lines = linesOf(changelog);
+  const heading = fromMarkdown(changelog).children.find((node) => node.type === "heading" && node.depth === 2 && releaseLine.test(lines[node.position.start.line - 1]));
+  const line = heading?.position.start.line ?? 1;
+  const version = lines[line - 1].match(releaseLine)?.[1].replace(/^\[([^\]]+)\]$/, "$1").match(release)?.[1];
+  if (!heading || !version) {
+    fail("CHANGELOG.md", line, "No valid top release heading", "Use a heading with the current major.minor.patch release");
     return;
   }
   checkVersion(sdkIndex, first(linesOf(read(sdkIndex)), /^\*\*Status:\s*([^,\s*]+)/), version.split(".").slice(0, 2).join("."), "SDK specification version");
   checkVersion(goVersion, first(linesOf(read(goVersion)), /^\s*const\s+ImplementationVersion\s*=\s*"([^"]+)"/), version, "Go implementation version");
   const python = new Map();
   for (const file of files) {
-    if (file.endsWith("Cargo.toml")) checkCargo(file, linesOf(read(file)), version);
-    else if (file.endsWith("package.json")) checkNodePackage(file, read(file), version);
-    else if (file.endsWith("pyproject.toml")) python.set(file, linesOf(read(file)));
+    if (file.endsWith("package.json")) checkNodePackage(file, read(file), version);
+    else if (!file.endsWith(".md")) {
+      const manifest = parseManifest(file);
+      if (!manifest) continue;
+      if (file.endsWith("Cargo.toml")) checkCargo(file, manifest, version);
+      else python.set(file, manifest);
+    }
   }
   checkPython(python, version);
 }
@@ -239,10 +304,9 @@ try {
     .split("\0").filter(Boolean);
   const markdown = files.filter((file) => file.endsWith(".md"));
   const statuses = new Map(markdown.filter((file) => adrFile.test(file)).map((file) => [file, adrStatus(read(file))]));
-  checkAdrIndex(markdownLines(read(adrIndex)), statuses);
+  checkAdrIndex(parseMarkdown(read(adrIndex)), statuses);
   for (const file of markdown) {
-    const lines = markdownLines(read(file));
-    if (!historicalGaps.test(file)) checkGaps(file, lines);
+    if (!historicalGaps.test(file)) checkGaps(file, parseMarkdown(read(file)));
   }
   checkVersions(files);
   console.log(`${markdown.length} tracked Markdown files and ${files.length - markdown.length} package manifests checked. Failures: ${bad}.`);
