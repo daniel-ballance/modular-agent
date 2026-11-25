@@ -14,7 +14,7 @@ How each language expresses the [API](api.md). The rule is the same throughout: 
 | Cancellation | `CancellationToken` | `AbortSignal` | `context.Context` | task cancellation, plus `context.cancelled` |
 | Errors | `Result<T, modular_agent::Error>` | thrown `AgentError` | returned `*modular.Error` | raised `AgentError` |
 | Error code | `error.code()`, an enum | `error.code`, a string union | `err.Code`, typed string constants | `error.code`, a `StrEnum` |
-| `lastTurn()` | `session.last_turn(): Result<Option<PromptResult>>` | `session.lastTurn(): Promise<PromptResult \| undefined>` | `session.LastTurn(ctx): (*PromptResult, error)` | `await session.last_turn()`; `None` if absent |
+| `lastTurn()` | `session.last_turn().await`: `Result<Option<PromptResult>>` | `session.lastTurn(): Promise<PromptResult \| undefined>` | `session.LastTurn(ctx): (*PromptResult, error)` | `await session.last_turn()`; `None` if absent |
 | Optional arguments | builder methods | an options object | functional options (`WithX`) | keyword arguments |
 | Closed sets of values | enums with an `Unknown(String)` variant where shared data keeps unknown values | string unions | typed string constants | `StrEnum` |
 | Tool input | a type deriving `Deserialize` and `JsonSchema` | a [Standard Schema](https://standardschema.dev) or JSON Schema | a struct with `json` tags | type hints or a Pydantic model |

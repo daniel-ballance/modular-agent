@@ -142,7 +142,7 @@ The [shared scenarios](testing.md#the-shared-scenarios) and the ACP kit check th
 | `callTool(name, input)` | a ToolResult; a direct call by this actor, through every gate |
 | `events(fromEntry?)` | every event in the session this actor may see, from the start or a cursor, then live |
 | `waitIdle()` | waits until the running turn and every input already admitted have finished, without admitting input or closing the session |
-| `lastTurn()` | the latest settled turn as a PromptResult, or no value if no turn has settled. Does not admit input or wait for a running turn. |
+| `lastTurn()` | the latest settled turn as a PromptResult, as this actor may see it through the [output gate](../contracts.md#the-output-gate), or no value if no turn has settled. Does not admit input or wait for a running turn. |
 | `close()` | closes the session; cancels its work as [Jobs](../contracts.md#jobs) says |
 
 `input` is a string or Content. `options` carries `key`, for safe retries ([input admission](../contracts.md#input)), and `actor`, to act as an actor other than the local one.
