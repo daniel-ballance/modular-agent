@@ -571,7 +571,6 @@ func (c *client) view(ctx context.Context, id string, gateRemote bool) (api.Sess
 	return api.Decode[api.Session](out.Event.Data), nil
 }
 
-// commitLocked stages a new state and publishes only after persistence succeeds.
 func (s *session) commitLocked(next api.Session, contexts ...context.Context) error {
 	if s.rewindBlocked {
 		return errRewindUnresolved
@@ -580,15 +579,6 @@ func (s *session) commitLocked(next api.Session, contexts ...context.Context) er
 }
 
 var errProvisionalSession = errors.New("session has not admitted its first input")
-
-func isSetup(e api.Entry) bool {
-	switch e.Kind {
-	case "setting", "actor.set", "actor.left", "plugins.set", "tenant", "limit", "subagent.bound":
-		return true
-	default:
-		return false
-	}
-}
 
 // Only admission and fork publication can start a persistent writer. Save the
 // already staged setup with the new entries before making the state visible.
@@ -633,13 +623,20 @@ func (s *session) commitSnapshotLocked(next api.Session, contexts ...context.Con
 	})
 }
 
-func (s *session) commitReservedSnapshotLocked(next api.Session, contexts ...context.Context) error {
-	ctx := firstContext(contexts)
+func (s *session) commitReservedSnapshotLocked(next api.Session, ctx context.Context) error {
 	if err := s.checkWriterLocked(); err != nil {
 		return err
 	}
 	if s.pendingStore != nil {
-		if len(next.Entries) < len(s.data.Entries) || slices.ContainsFunc(next.Entries[len(s.data.Entries):], func(e api.Entry) bool { return !isSetup(e) }) {
+		nonSetup := func(e api.Entry) bool {
+			switch e.Kind {
+			case "setting", "actor.set", "actor.left", "plugins.set", "tenant", "limit", "subagent.bound":
+				return false
+			default:
+				return true
+			}
+		}
+		if len(next.Entries) < len(s.data.Entries) || slices.ContainsFunc(next.Entries[len(s.data.Entries):], nonSetup) {
 			return errProvisionalSession
 		}
 		s.publishLocked(next)
@@ -750,57 +747,53 @@ func (c *client) Move(ctx context.Context, id, target string, rewind bool) error
 }
 
 func (c *client) MoveDetails(ctx context.Context, id, target string, rewind bool) ([]string, error) {
-	var outside []string
-	err := c.move(ctx, id, target, rewind, &outside)
-	return outside, err
-}
-
-func (c *client) move(ctx context.Context, id, target string, rewind bool, outside *[]string) error {
 	if rewind {
 		c.h.projectGate.Lock()
 		defer c.h.projectGate.Unlock()
 	}
 	s, err := c.find(id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !c.authorizedBy(s.data, ctx, "settings") {
-		return errors.New("move refused")
+		return nil, errors.New("move refused")
 	}
 	if s.pendingStore != nil {
-		return errProvisionalSession
+		return nil, errProvisionalSession
 	}
 	if s.rewindBlocked {
-		return errRewindUnresolved
+		return nil, errRewindUnresolved
 	}
-	if err = s.checkWriterLocked(); err != nil {
-		return err
+	if err := s.checkWriterLocked(); err != nil {
+		return nil, err
 	}
 	if s.running || s.opening || s.closing || len(s.queue) > 0 || unfinished(s.data) {
-		return api.ErrUnfinishedWork
+		return nil, api.ErrUnfinishedWork
 	}
 	branch := s.data.Branch()
 	i := slices.IndexFunc(branch, func(e api.Entry) bool { return e.ID == target })
 	if i == -1 || (branch[i].Turn != "" && branch[i].Kind != "turn.end" && branch[i].OriginalKind != "turn.end") {
-		return api.ErrMoveConflict
+		return nil, api.ErrMoveConflict
 	}
 	candidate := clone(s.data)
 	candidate.Position = target
 	if unfinished(candidate) {
-		return api.ErrMoveConflict
+		return nil, api.ErrMoveConflict
 	}
 	if pending, _ := recovery(candidate); pending != nil {
-		return api.ErrMoveConflict
+		return nil, api.ErrMoveConflict
 	}
 	if rewind {
-		return c.rewindLocked(ctx, s, target, branch[i+1:], outside)
+		var outside []string
+		err := c.rewindLocked(ctx, s, target, branch[i+1:], &outside)
+		return outside, err
 	}
 	if err := c.resetMoveProviders(ctx, s.id); err != nil {
-		return err
+		return nil, err
 	}
-	return c.movePosition(s, target, nil)
+	return nil, c.movePosition(s, target, nil)
 }
 func (c *client) Fork(ctx context.Context, id, target string) (string, error) {
 	s, err := c.find(id)
@@ -1603,7 +1596,7 @@ func (c *client) stopSessionAs(ctx context.Context, id string, closing bool, who
 	return err
 }
 func (c *client) Emit(ctx context.Context, e api.Event) {
-	// A failing output gate drops the event. A listener cannot change execution.
+	// A listener cannot change execution.
 	defer func() { _ = recover() }()
 	if epoch, err := c.ErasureEpoch(e.Session); err != nil {
 		return
