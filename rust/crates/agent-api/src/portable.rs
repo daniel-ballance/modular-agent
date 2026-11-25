@@ -859,8 +859,8 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                     .flatten()
                     .map(parse_definition)
                     .collect::<Result<Vec<_>>>()?;
-                let mut settings = optional(d, "rust.settings").cloned().unwrap_or(json!({}));
-                merge(&mut settings, settings_from_wire(&d["settings"]));
+                let mut settings = private_turn_settings(d)?;
+                merge(&mut settings, recorded_settings(&d["settings"])?);
                 if let Some(shape) = d.get("resultShape") {
                     settings["result_shape"] = shape.clone();
                 }
@@ -925,7 +925,7 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                 } else {
                     json!({(key):d["value"]})
                 };
-                if let Some(patch) = settings_from_wire(&patch).as_object() {
+                if let Some(patch) = recorded_settings(&patch)?.as_object() {
                     for (k, v) in patch {
                         data.settings[k] = v.clone();
                     }

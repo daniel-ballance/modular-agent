@@ -91,6 +91,57 @@ fn only_the_operator_configures_approval_and_its_maximum() {
     }
 }
 #[test]
+fn an_unrecognized_saved_policy_refuses_without_asking_on_reopen() {
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
+    let script = dir.join("reopen-script");
+    fs::write(
+        &script,
+        json!([
+            {"text":"ready"},
+            {"toolCalls":[{"name":"codemode","input":{"code":"tools.write(path='effect', content='unexpected')"}}]},
+            {"text":"done"}
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let started = ma(dir)
+        .env("MODULAR_AGENT_SCRIPT", &script)
+        .args(["-p", "Start"])
+        .output()
+        .unwrap();
+    assert!(started.status.success(), "{:?}", started);
+
+    let sessions = dir.join("state/sessions");
+    let store = modular_agent::file_history(&sessions).unwrap();
+    let id = &store.sessions(None).unwrap()[0].id;
+    let path = sessions.join(format!("{id}.json"));
+    let mut saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    saved["defaults"]["approval"] = json!("future-policy");
+    fs::write(path, serde_json::to_vec(&saved).unwrap()).unwrap();
+
+    let reopened = ma(dir)
+        .env("MODULAR_AGENT_SCRIPT", script)
+        .args(["--approval", "off", "-c", "-p", "Resume"])
+        .output()
+        .unwrap();
+    assert!(reopened.status.success(), "{:?}", reopened);
+    let history = ma(dir).args(["-c", "--history"]).output().unwrap();
+    assert!(history.status.success(), "{:?}", history);
+    let entries: Vec<Value> = serde_json::from_slice(&history.stdout).unwrap();
+    assert!(
+        entries.iter().all(|entry| entry["kind"] != "inputRequest"),
+        "the unknown policy must refuse without asking"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["kind"] == "toolResult" && entry["data"]["status"] == "refused")
+    );
+    assert!(!dir.join("project/effect").exists());
+}
+
+#[test]
 fn the_terminal_displays_the_script_and_reads_one_decision() {
     for (answer, exists) in [("y", true), ("n", false)] {
         let dir = tempfile::tempdir().unwrap();

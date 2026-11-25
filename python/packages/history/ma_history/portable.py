@@ -1,6 +1,6 @@
 """Project an open session from the ordered shared history record."""
 
-from ma_core.wire import entry_in
+from ma_core.wire import entry_in, validate_recorded_approval
 
 from .profile import fork_prefix
 from .service import tombstone
@@ -11,6 +11,7 @@ def session_view(meta, records, defaults=None):
     entries = [entry_in(e, meta["id"], actor) for e in records]
     prefix = fork_prefix(meta, records)
     settings = dict((defaults or {}).get("settings", {}))
+    validate_recorded_approval(settings)
     settings["approval"] = "ask always"
     actors = dict((defaults or {}).get("actors", {}))
     has_actor_record = "actors" in (defaults or {})

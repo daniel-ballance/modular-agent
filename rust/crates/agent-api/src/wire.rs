@@ -44,6 +44,27 @@ pub fn string<'a>(v: &'a Value, field: &str) -> Result<&'a str> {
         .as_str()
         .ok_or_else(|| anyhow!("missing string {field}"))
 }
+/// Reject a malformed policy before converting recorded settings to a working view.
+pub fn validate_recorded_approval(settings: &Value) -> Result<()> {
+    if settings.get("approval").is_some() {
+        string(settings, "approval")?;
+    }
+    Ok(())
+}
+
+pub(crate) fn recorded_settings(settings: &Value) -> Result<Value> {
+    validate_recorded_approval(settings)?;
+    Ok(crate::portable::settings_from_wire(settings))
+}
+
+pub(crate) fn private_turn_settings(turn: &Value) -> Result<Value> {
+    let settings = optional(turn, "rust.settings")
+        .cloned()
+        .unwrap_or(json!({}));
+    validate_recorded_approval(&settings)?;
+    Ok(settings)
+}
+
 pub fn content(parts: &[Part]) -> Vec<Value> {
     parts
         .iter()

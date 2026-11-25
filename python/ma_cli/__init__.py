@@ -30,7 +30,7 @@ async def build(
     history = configured_history(root)
     h = Harness(process_plugins=process_plugins)
     h.lazy_setup = True
-    config = Config(root, project)
+    config = Config(root, project, defaults={"approval": "off"})
     try:
         for plugin in [
             history,

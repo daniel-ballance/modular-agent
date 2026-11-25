@@ -12,6 +12,33 @@ import (
 	"testing"
 )
 
+func TestBaseAgentDefaultsToExplicitOff(t *testing.T) {
+	root := t.TempDir()
+	global := filepath.Join(root, "settings.json")
+	h, err := vanilla.New(vanilla.Options{History: filepath.Join(root, "history"), Global: global, Model: "fake", Provider: fake.New().Plugin()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	a := h.API()
+	ctx := context.Background()
+	for _, want := range []string{"off", "ask-always"} {
+		if want != "off" {
+			if err := os.WriteFile(global, []byte(`{"approval":"ask-always"}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		id, err := a.New(ctx, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := a.Snapshot(id)
+		if err != nil || s.Settings.Approval != want {
+			t.Fatalf("approval = %q, %v; want %q", s.Settings.Approval, err, want)
+		}
+	}
+}
+
 func TestDurableReplacesOnlyRuntimeAndKeepsFeatureHandlers(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "fact"), []byte("swap-fact"), 0600); err != nil {

@@ -246,7 +246,9 @@ Each implementation honors these environment variables, so one set of [checks](.
 
 ## Approval
 
-Off by default: with no `approval` setting and no `--approval`, `ma` loads no approval feature and behaves as without one. When configured:
+With no `approval` setting and no `--approval`, `ma` loads no approval feature and records no approval policy for a new session. This differs from configuring `off`, which records an explicit policy. If `ma` later reopens a session with the feature loaded and no recorded policy, it uses `all` as required by the [approval policy contract](../contracts.md#approval-policy).
+
+When configured:
 
 - `ma` loads the approval feature with the configured policy as each new session's default. On reopen, `ma` uses the [recorded policy or its fallback](../contracts.md#approval-policy). An ACP or AG-UI client with the `settings` right can change it per session through the `approval` option. `ask` asks for every `codemode` call, since `codemode` is not read-only.
 - `ma` turns on [covered approvals](../contracts.md#approvals-that-cover-nested-calls) and declares `approvalCoversNested: true`. An allow for a `codemode` call covers the file and command calls its script makes in that run. The approval view shows the whole script and says that it covers them.

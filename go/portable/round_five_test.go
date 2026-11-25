@@ -5,6 +5,7 @@ import (
 	"github.com/daniel-ballance/modular-agent/go/api"
 	"github.com/daniel-ballance/modular-agent/go/portable"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -45,6 +46,39 @@ func TestRoundFivePortableShapes(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("got %s, want %s", api.JSON(got), raw)
 		}
+	}
+}
+
+func TestUnrecognizedApprovalIsNotAnAbsentPolicy(t *testing.T) {
+	for _, value := range []string{`""`, `"future"`} {
+		t.Run(value, func(t *testing.T) {
+			e := readPortable(t, `{"id":"setting","kind":"setting","data":{"key":"approval","value":`+value+`}}`)
+			s := portable.Session(api.Session{ID: "foreign", Entries: []api.Entry{e}})
+			if got := api.ReopenedApproval(s.Settings.Approval); got != "never" {
+				t.Fatalf("reopened approval = %q, want never", got)
+			}
+		})
+	}
+}
+
+func TestReadRejectsMalformedApproval(t *testing.T) {
+	values := map[string]string{
+		"null": `null`, "number": `1`, "array": `["off"]`, "object": `{"approval":"off"}`, "bool": `true`,
+		"wide": `[` + strings.Repeat(`"off",`, 2047) + `"off"]`,
+		"deep": strings.Repeat(`{"nested":`, 48) + `"off"` + strings.Repeat(`}`, 48),
+	}
+	for name, value := range values {
+		t.Run(name, func(t *testing.T) {
+			for _, patch := range []string{
+				`"key":"approval","value":` + value,
+				`"key":"settings","value":{"approval":` + value + `}`,
+			} {
+				_, err := portable.ReadEntry(json.RawMessage(`{"id":"setting","kind":"setting","data":{` + patch + `}}`))
+				if err == nil || !strings.Contains(err.Error(), "approval") {
+					t.Fatalf("ReadEntry(%s) error = %v, want malformed approval", patch, err)
+				}
+			}
+		})
 	}
 }
 

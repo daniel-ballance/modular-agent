@@ -1,4 +1,4 @@
-import type { ModelInfo } from "./types.js";
+import type { HistoryEntry, ModelInfo } from "./types.js";
 
 export function parseModel(value: unknown): { provider: string; id: string } | undefined {
 	if (typeof value === "string" && value.includes("/")) {
@@ -22,8 +22,27 @@ export function lowerReasoning(value: unknown, model?: ModelInfo): string | unde
 	return thinkingLevels(model).findLast((level) => REASONING_LEVELS.findIndex((known) => known === level) <= index);
 }
 
+export function validateRecordedApproval(entry: HistoryEntry): void {
+	if (entry.erased) return;
+	const data = entry.data as { key?: string; value?: unknown; settings?: unknown } | undefined;
+	if (!data) return;
+	const patch = entry.kind === "turnStart" ? data.settings :
+		entry.kind !== "setting" ? undefined :
+		data.key === "settings" ? data.value : { [data.key ?? ""]: data.value };
+	if (!patch || typeof patch !== "object") return;
+	for (const key of ["approval", "approvalPolicy"] as const) {
+		if (Object.hasOwn(patch, key) && typeof (patch as Record<string, unknown>)[key] !== "string") {
+			throw new Error("Recorded approval must be a string");
+		}
+	}
+}
+
+export function recordedApproval(value: unknown): "off" | "ask" | "all" | "never" {
+	return value === "off" || value === "ask" || value === "all" ? value : "never";
+}
+
 export function normalizeSetting({ key, value }: { key: string; value: unknown }): { key: string; value: unknown } {
-	if (key === "approvalPolicy" || key === "approval") return { key: "approval", value: ["off", "ask", "all", "never"].includes(String(value)) ? value : "never" };
+	if (key === "approvalPolicy" || key === "approval") return { key: "approval", value: recordedApproval(value) };
 	if (key === "thinking") return { key: "reasoning", value };
 	if (key === "model") return { key, value: parseModel(value) ?? null };
 	if (key === "settings" && value && typeof value === "object") {

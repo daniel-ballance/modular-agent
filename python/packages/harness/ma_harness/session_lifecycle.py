@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 
 from ma_core import AgentError, identity, now
-from ma_core.wire import recorded_as
+from ma_core.wire import recorded_as, validate_recorded_approval
 
 from .authority import PERMISSIONS
 from .interface_tools import branch_entries, handoff_fold, unfinished_turn
@@ -239,7 +239,6 @@ class SessionLifecycle:
             ),
             **({"provisional": True} if provisional else {}),
             "settings": {
-                "approval": "off",
                 **({"approvalWait": "live"} if self.max_approval_wait_ms else {}),
                 **settings,
                 **d.get("settings", {}),
@@ -295,6 +294,17 @@ class SessionLifecycle:
             ):
                 await self.call("@harness", "history", "close", {"session": sid})
                 return None
+        try:
+            validate_recorded_approval(s["settings"])
+        except ValueError:
+            await self.call("@harness", "history", "close", {"session": sid})
+            raise
+        policy = s["settings"].get("approval", "ask always")
+        s["settings"]["approval"] = (
+            policy
+            if policy in ("off", "ask unless read-only", "ask always", "never ask, refuse")
+            else "never ask, refuse"
+        )
         self.capacity.restore(s)
         s["plugins"] = list(self.plugins)
         s.setdefault("authority", sorted(self.admin & self.tenant))

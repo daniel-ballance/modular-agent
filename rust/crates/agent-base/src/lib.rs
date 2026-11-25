@@ -48,7 +48,10 @@ async fn compose_with(
         }),
     };
     let plugins: Vec<Arc<dyn Plugin>> = vec![
-        Arc::new(config_files::FilesConfiguration::new(options.global_config)),
+        Arc::new(
+            config_files::FilesConfiguration::new(options.global_config)
+                .with_defaults(json!({"approval":"off"})),
+        ),
         history,
         Arc::new(credentials_file::FileCredentials {
             openai_key: options.key_file,

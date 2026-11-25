@@ -15,7 +15,8 @@ class Config(Plugin):
     role = "configuration"
     declarations = {"project_trust": True, "plugins_fixed_at_startup": True}
 
-    def __init__(self, root, project=None):
+    def __init__(self, root, project=None, *, defaults=None):
+        self.defaults = {**DEFAULTS, **(defaults or {})}
         self.root = Path(root)
         self.project = str(Path(project).resolve()) if project is not None else None
 
@@ -56,7 +57,7 @@ class Config(Plugin):
         )
 
     async def load(self, d, emit):
-        settings = dict(DEFAULTS)
+        settings = dict(self.defaults)
         for layer in self.layers(d["project"]):
             settings.update({k: v for k, v in layer.items() if k not in PLUGIN_KEYS})
         return settings

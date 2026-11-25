@@ -1,6 +1,6 @@
 import type { Tenant } from "./harness.js";
 import { ALL_AUTHORITY } from "./authority.js";
-import { normalizeSetting, type parseModel } from "./settings.js";
+import { normalizeSetting, recordedApproval, validateRecordedApproval, type parseModel } from "./settings.js";
 import type { ListingViewer, SessionStartOptions, SessionPrepare, SessionSummary } from "./plugin-api.js";
 import { InputAdmission } from "./input-admission.js";
 import { TurnExecution, recordedSnapshot } from "./turn-execution.js";
@@ -186,7 +186,10 @@ export class SessionLifecycle {
 		if (!entries.length) return undefined;
 		const s = new Session(meta, false);
 		if (store.historyErasure) this.operations.erasure().loadTombstones(s, new Set(entries.filter(e => e.erased === true).map(e => e.id)));
-		for (const e of entries) s.apply(e);
+		for (const e of entries) {
+			validateRecordedApproval(e);
+			s.apply(e);
+		}
 		const interrupted = this.unfinishedTurn(s, s.branch());
 		if (interrupted) recordedSnapshot(interrupted);
 		return s;
@@ -275,8 +278,7 @@ export class SessionLifecycle {
 			}
 		}
 
-		if (s.settings.approval === undefined) s.settings.approval = "all";
-		else if (!["off", "ask", "all", "never"].includes(String(s.settings.approval))) s.settings.approval = "never";
+		s.settings.approval = s.settings.approval === undefined ? "all" : recordedApproval(s.settings.approval);
 		await this.recordPlugins(s);
 		const admissions = [...s.admissions.values()].filter((q) => !s.proposals.has(q.id));
 		const recovery = this.operations.recoveryPolicy();

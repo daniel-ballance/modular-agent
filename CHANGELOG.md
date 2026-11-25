@@ -2,6 +2,10 @@
 
 The four SDKs and `ma` share one project version. The [SDK specification](docs/sdk/README.md) has its own revision. Nothing is published to a registry; a version names a commit on `main`.
 
+## Unreleased
+
+- Go and Python `ma` sessions that previously recorded `off` without loading the approval feature keep that policy. Load the feature and change the policy with the ACP or AG-UI `approval` setting, or with `/approval` in Go's terminal.
+
 ## 0.3.0
 
 The third release, on Linux and macOS. Approvals can wait past their turn and cover a whole script, `ma` gains an approval setting, a host can learn why a wait closed and how a lost run ended, and code kept only for earlier versions of this project is gone. Results are in [docs/status.md](docs/status.md#030).

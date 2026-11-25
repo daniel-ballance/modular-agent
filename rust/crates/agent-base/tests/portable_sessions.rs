@@ -12,6 +12,31 @@ async fn a_served_durable_runtime_recovers_started_calls_without_tools_authority
 }
 
 #[test]
+fn non_string_approval_refuses_portable_history() {
+    let deep = (0..48).fold(json!("off"), |nested, _| json!({ "nested": nested }));
+    for value in [
+        Value::Null,
+        json!(1),
+        json!(["off"]),
+        json!({"approval": "off"}),
+        json!(true),
+        json!(vec!["off"; 2048]),
+        deep,
+    ] {
+        for setting in [
+            json!({"key": "approval", "value": value}),
+            json!({"key": "settings", "value": {"approval": value}}),
+        ] {
+            let meta = json!({"id": "foreign", "project": "."});
+            let entry = json!({"id": "setting", "kind": "setting", "sessionId": "foreign",
+                "parentId": null, "time": 1, "writer": "foreign", "data": setting});
+            let err = portable::session(&meta, &[entry]).expect_err("malformed history");
+            assert!(err.to_string().contains("approval"), "{err}");
+        }
+    }
+}
+
+#[test]
 fn off_branch_cleanup_unconfirmed_is_payload_free_and_survives_until_job_end() {
     let row = |id: &str, parent: Option<&str>, kind: &str, data: Value| {
         let mut entry = json!({"id":id,"parentId":parent,"sessionId":"portable","time":0,

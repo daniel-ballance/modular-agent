@@ -6,13 +6,12 @@ import (
 	"strings"
 )
 
-func applySetting(s *api.Settings, d object) {
+func settingPatch(d object) object {
 	k := str(d, "key")
 	if k == "settings" {
-		applySettings(s, asObject(d["value"]))
-	} else {
-		applySettings(s, object{k: d["value"]})
+		return asObject(d["value"])
 	}
+	return object{k: d["value"]}
 }
 
 // Session rebuilds the shared state in append order, without reading a snapshot
@@ -68,7 +67,7 @@ func Session(s api.Session) api.Session {
 			}
 		case "setting":
 			if len(e.Wire) > 0 {
-				applySetting(&s.Settings, asObject(obj(e.Wire)["data"]))
+				applySettings(&s.Settings, settingPatch(asObject(obj(e.Wire)["data"])))
 			} else {
 				s.Settings = api.Decode[api.Settings](e.Data)
 			}

@@ -38,6 +38,21 @@ async fn agent(
     }
     h
 }
+#[tokio::test]
+async fn base_agent_defaults_to_explicit_off() {
+    let root = TempDir::new().unwrap();
+    let h = agent(
+        root.path(),
+        false,
+        Arc::new(FakePlugin::new(vec![])),
+        vec![],
+    )
+    .await;
+    let id = h.create(root.path(), json!({})).await.unwrap();
+    assert_eq!(h.snapshot(&id).unwrap().settings["approval"], "off");
+    h.close(&id).await.unwrap();
+}
+
 async fn start_checkpoint(h: &Arc<agent_harness::Harness>, session: &str) -> Scope {
     let selector: Arc<dyn ModelSelection> = capability(h.as_ref(), "model.selection").unwrap();
     let scope = Scope {

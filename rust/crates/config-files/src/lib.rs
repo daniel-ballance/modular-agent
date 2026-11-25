@@ -18,7 +18,17 @@ impl FilesConfiguration {
             defaults: None,
         }
     }
+
+    pub fn with_defaults(mut self, patch: Value) -> Self {
+        merge(self.defaults.get_or_insert_with(base_defaults), patch);
+        self
+    }
 }
+
+fn base_defaults() -> Value {
+    json!({"model":"gpt-6-luna","thinking":"low","step_limit":12,"output_limit":2048,"context_tokens":24000})
+}
+
 fn read(path: &Path) -> Result<Value> {
     match std::fs::read(path) {
         Ok(bytes) => {
@@ -111,7 +121,7 @@ impl Plugin for FilesConfiguration {
 }
 impl Configuration for FilesConfiguration {
     fn settings(&self, project: &Path) -> Result<Value> {
-        let mut settings = self.defaults.clone().unwrap_or_else(|| json!({"model":"gpt-6-luna","thinking":"low","step_limit":12,"output_limit":2048,"context_tokens":24000}));
+        let mut settings = self.defaults.clone().unwrap_or_else(base_defaults);
         for path in [&self.global, &project.join(".modular-agent.json")] {
             let mut layer = read(path)?;
             // Executable plugin configuration is not a session default or history content.

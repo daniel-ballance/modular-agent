@@ -672,6 +672,12 @@ def question_signature(q):
     )
 
 
+def validate_recorded_approval(settings):
+    if isinstance(settings, dict) and "approval" in settings:
+        if not isinstance(settings["approval"], str):
+            raise ValueError("Recorded approval must be a string")
+
+
 def entry_in(e, sid, default_actor="user"):
     if "session" in e and "sessionId" not in e:
         raise ValueError("History entry lacks its sessionId")
@@ -755,6 +761,7 @@ def entry_in(e, sid, default_actor="user"):
         result.update(data={**d, **response}, content=response["content"])
         result["data"]["usage"] = {k: (response.get("usage") or {}).get(k, 0) for k in USAGE}
     elif kind == "turnStart":
+        validate_recorded_approval(d.get("settings"))
         if not e.get("actorId"):
             started_by = d.get("startedBy") or {}
             if started_by.get("kind") == "actor":
@@ -774,9 +781,9 @@ def entry_in(e, sid, default_actor="user"):
             "toolName": message.get("toolName", "unknown"),
         }
     elif kind == "setting":
-        result["data"] = settings_in(
-            d["value"] if d["key"] == "settings" else {d["key"]: d["value"]}
-        )
+        patch = d["value"] if d["key"] == "settings" else {d["key"]: d["value"]}
+        validate_recorded_approval(patch)
+        result["data"] = settings_in(patch)
     elif kind == "turnEnd":
         outcome, final = d["outcome"], d["result"]
         limit = {"steps": "step limit", "output": "output limit"}.get(

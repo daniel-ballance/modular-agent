@@ -1192,7 +1192,7 @@ def create_agent(
                 )
             if not folder.is_dir():
                 raise ValueError("Project must be a directory")
-            defaults = settings_in(settings or {})
+            defaults = settings_in(({"approval": "off"} if conformance else {}) | (settings or {}))
             if approval is not None:
                 defaults.update(settings_in({"approval": approval}))
             agent = Agent(h, folder, defaults, on_question, scratch)
