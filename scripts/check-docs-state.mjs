@@ -107,22 +107,28 @@ function localTarget(file, target) {
   return target.startsWith("#") ? file + target : posix.join(posix.dirname(file), target);
 }
 
+const sentenceBreak = /[.!?][)\]"'*_]*(?=\s)|\n[ \t]*(?=\n)|\n(?=[ \t]*(?:[-*+][ \t]|\d+[.)][ \t]|#|\|))|\|/g;
+// "Proposed" names something new when a noun such as "change" follows it, not the status of a decision.
+const statusWord = /\bproposed\b(?![*_]*[ \t\n]+(?:changes?|edits?|checks?|text|fix(?:es)?|replacements?|wording|additions?|amendments?)\b)/i;
+
 function checkAdrProse(file, lines, statuses, rules) {
   const text = lines.join("\n");
   if (!/\bproposed\b/i.test(text)) return;
   const prose = text.replace(/(`+)[^\n]*?\1/g, (code) => " ".repeat(code.length));
-  for (const { 0: span, 1: label, 2: target, index } of prose.matchAll(link)) {
+  const breaks = [0, ...[...prose.matchAll(sentenceBreak)].map((m) => m.index + m[0].length), prose.length];
+  const reported = new Set();
+  for (const { 0: span, 2: target, index } of prose.matchAll(link)) {
     const local = localTarget(file, target);
     if (!local) continue;
     const direct = local.split("#")[0];
     const adr = adrFile.test(direct) ? direct : rules.get(local);
     if (statuses.get(adr) !== "accepted") continue;
-    // Match status wording attached to the link, not e.g. "proposed changes to" an accepted rule.
-    const before = prose.slice(0, index).match(/\bproposed[*_]*(?:[ \t\n]+(?:in|by))?[ \t\n]+[*_]*$/i);
-    const after = prose.slice(index + span.length).match(/^[*_ \t)]*(?:\n[ \t]*)?(?:is|are|remains?)[ \t\n]+(?:(?:still|currently)[ \t\n]+)?proposed\b/i);
-    const phrase = before?.[0] ?? after?.[0];
-    if (!/^proposed\s/i.test(label) && (!phrase || /\n[ \t]*\n/.test(phrase))) continue;
-    const line = linesOf(text.slice(0, before?.index ?? index)).length;
+    const start = breaks.findLast((b) => b <= index);
+    const end = breaks.find((b) => b >= index + span.length);
+    const hit = prose.slice(start, end).match(statusWord);
+    if (!hit || reported.has(start)) continue;
+    reported.add(start);
+    const line = linesOf(text.slice(0, start + hit.index)).length;
     fail(file, line, `Prose calls an accepted decision in ${adr} proposed`, "Describe the accepted rule instead");
   }
 }

@@ -227,10 +227,6 @@ The [binding](../../../docs/bindings/agui.md#interrupts-and-frontend-tools) requ
 
 A waiting exchange receives `RUN_ERROR` with code `busy` if its ready continuation cannot reserve a turn. That refusal does not undo a committed result or start a different turn.
 
-### Proposed standard configuration text
-
-Tracked in #18.
-
 ### Telemetry context
 
 Plugin peers agree to per-operation context at initialize. ACP stdio accepts context from the launching peer; set `serveAcp({ traceTrusted: false })` to ignore it. An authenticated ACP WebSocket actor accepts it only when its token entry sets `traceTrusted: true`. The SDK carries trace context in history HTTP headers and MCP request metadata. It does not carry baggage or vendor state. Durable resume links a new span to the committed segment in the same trace. Forks omit the checkpoint and the starting context; raw plugin and ACP views keep the envelope but not the context.
