@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -37,7 +37,7 @@ function checkout(t, branch = "main") {
     },
     run(...args) {
       const result = spawnSync(process.execPath, [script, ...args], { cwd, encoding: "utf8" });
-      const found = result.stdout.split("\n").filter((line) => /^\S.*?:\d+: /.test(line));
+      const found = result.stdout.split("\n").filter((line) => /^[^ ].*?:\d+: /.test(line));
       return { ...result, found, at: found.map((line) => line.match(/^(.*?:\d+): /)[1]) };
     },
   };
@@ -245,6 +245,44 @@ test("a valid name with U+FFFD, an undecodable non-Markdown name and a Markdown 
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(result.at, ["valid-\uFFFD.md:1"]);
   }
+});
+
+test("a name that starts with a byte-order mark is read as written", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", "Start.\n");
+  repo.track("review-bom.md", "A stable line.\n");
+  repo.commit("Start");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  repo.track("\uFEFFreview-bom.md", "Support is planned.\n");
+  repo.commit("Docs");
+  for (const args of [[], ["--all"]]) {
+    const result = repo.run(...args);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.at, ["\uFEFFreview-bom.md:1"]);
+  }
+});
+
+test("names that are not UTF-8 stop the review only when it must read them", (t) => {
+  const repo = checkout(t);
+  const top = repo.git("rev-parse", "--show-toplevel").toString().trim();
+  const bad = (stem) => Buffer.concat([Buffer.from(`${stem}-`), Buffer.from([0xff]), Buffer.from(".md")]);
+  const filler = Array.from({ length: 30 }, (_, i) => `Stable line ${i + 1}.`).join("\n\n");
+  repo.track("README.md", "Start.\n");
+  writeFileSync(Buffer.concat([Buffer.from(`${top}/`), bad("unchanged")]), "Support is planned.\n");
+  writeFileSync(Buffer.concat([Buffer.from(`${top}/`), bad("rename")]), `${filler}\n`);
+  repo.git("add", "-A");
+  repo.commit("Start");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  renameSync(Buffer.concat([Buffer.from(`${top}/`), bad("rename")]), join(top, "review-renamed.md"));
+  writeFileSync(join(top, "review-renamed.md"), `${filler}\nResume is planned.\n`);
+  repo.write("review-control.md", "Support is planned.\n");
+  repo.git("add", "-A");
+  const head = repo.git("rev-parse", "HEAD").toString().trim();
+  execFileSync("git", ["update-index", "--index-info"], { cwd: top, input: Buffer.concat([Buffer.from(`160000 commit ${head}\t`), bad("vendored"), Buffer.from("\n")]) });
+  repo.commit("Docs");
+  const result = repo.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.at, ["review-control.md:1", "review-renamed.md:60"]);
 });
 
 test("a version or edition number before draft is a status word", (t) => {

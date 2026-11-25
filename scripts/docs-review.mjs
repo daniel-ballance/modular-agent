@@ -26,9 +26,10 @@ const heading = /^ {0,3}#{1,6}(?:[ \t]|$)/;
 const blockStart = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|\||[-*+]\s|\d+[.)]\s|>)/;
 const git = (...args) => execFileSync("git", ["-c", "core.quotePath=false", ...args], { cwd: root, encoding: "utf8", maxBuffer: 1 << 30, stdio: ["ignore", "pipe", "pipe"] });
 const gitBytes = (...args) => execFileSync("git", args, { cwd: root, maxBuffer: 1 << 30, stdio: ["ignore", "pipe", "pipe"] });
-const utf8 = new TextDecoder("utf-8", { fatal: true });
-// Split -z output into names. A name that is not UTF-8 cannot be passed back to Git exactly,
-// so reading one is an error that shows its bytes; callers read only the names they review.
+// ignoreBOM keeps a leading U+FEFF, which is part of a valid name.
+const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+// Split -z output into raw names. A name is decoded only when the review reads it, so a name
+// that is not UTF-8 stops the review only if it is a Markdown file the review must read.
 function fields(output) {
   const parts = [];
   for (let at = 0; at < output.length;) {
@@ -48,14 +49,24 @@ function name(bytes) {
     throw new Error(`Cannot read the file name "${shown}" as UTF-8. Rename it to review it`);
   }
 }
-// Markdown files committed at HEAD as blobs; a gitlink (submodule) named *.md has no text to read.
+const key = (bytes) => bytes.toString("latin1");
+// Markdown files committed at HEAD as blobs, keyed by raw path bytes; a gitlink (submodule)
+// named *.md has no text to read.
 function committedMarkdown() {
-  return fields(gitBytes("ls-tree", "-r", "-z", "HEAD")).flatMap((entry) => {
+  const blobs = new Map();
+  for (const entry of fields(gitBytes("ls-tree", "-r", "-z", "HEAD"))) {
     const tab = entry.indexOf(9);
     const path = entry.subarray(tab + 1);
-    if (!isMarkdown(path) || entry.subarray(0, tab).toString("latin1").split(" ")[1] !== "blob") return [];
-    return [name(path)];
-  });
+    if (isMarkdown(path) && entry.subarray(0, tab).toString("latin1").split(" ")[1] === "blob") blobs.set(key(path), path);
+  }
+  return blobs;
+}
+function decodable(bytes) {
+  try {
+    return utf8.decode(bytes);
+  } catch {
+    return undefined;
+  }
 }
 const linesOf = (text) => text.split(/\r?\n/);
 // The review reads the committed head, the same snapshot the diff compares, not the working tree.
@@ -175,13 +186,14 @@ function changedLines(base, committed) {
     const kind = status[i++].toString("latin1");
     const source = kind.startsWith("R") || kind.startsWith("C") ? status[i++] : undefined;
     const target = status[i++];
-    if (!isMarkdown(target)) continue;
+    if (!isMarkdown(target) || !committed.has(key(target)) || historical.test(key(target))) continue;
     const file = name(target);
-    if (!committed.has(file)) continue;
-    const from = source && name(source);
+    // A rename source that is not UTF-8 cannot be named to Git; the target is then diffed alone,
+    // so all its lines count: more candidates, never a hidden one.
+    const from = source && kind.startsWith("R") ? decodable(source) : undefined;
     const lines = new Set();
     // Literal pathspecs: a file name such as ":(glob)x.md" is a name, not pathspec magic.
-    const paths = from && kind.startsWith("R") ? [from, file] : [file];
+    const paths = from ? [from, file] : [file];
     for (const line of git("--literal-pathspecs", "diff", "--unified=0", "--no-color", "--no-ext-diff", "--text", "--no-textconv", "-M90%", merge, "HEAD", "--", ...paths).split("\n")) {
       const hunk = line.match(/^@@ -\S+ \+(\d+)(?:,(\d+))? @@/);
       if (!hunk) continue;
@@ -209,11 +221,13 @@ function parse(args) {
 
 try {
   const options = parse(process.argv.slice(2));
-  const markdown = committedMarkdown();
-  const adrs = new Map(markdown.filter((file) => adrFile.test(file)).map((file) => [file.match(adrFile)[1], adrStatus(read(file))]));
+  const committed = committedMarkdown();
+  const adrs = new Map([...committed.values()].map(decodable).filter((path) => path && adrFile.test(path)).map((path) => [path.match(adrFile)[1], adrStatus(read(path))]));
   const base = options.all ? undefined : options.base ?? defaultBase();
-  const scope = options.all ? new Map(markdown.map((file) => [file, undefined])) : changedLines(base, new Set(markdown));
-  const files = [...scope.keys()].filter((file) => !historical.test(file)).sort();
+  const scope = options.all
+    ? new Map([...committed].filter(([path]) => !historical.test(path)).map(([, bytes]) => [name(bytes), undefined]))
+    : changedLines(base, committed);
+  const files = [...scope.keys()].sort();
   const found = files.flatMap((file) => candidates(file, scope.get(file), adrs));
   if (found.length) console.log(found.join("\n"));
   const where = options.all ? "tracked Markdown" : `Markdown changed since the merge base with ${base}`;
