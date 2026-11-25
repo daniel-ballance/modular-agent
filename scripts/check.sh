@@ -2,7 +2,7 @@
 # Run the local checks. See CONTRIBUTING.md for the tools and how to start a long run.
 #
 #   scripts/check.sh [--quick] [--serial] [rust|typescript|go|python ...]
-#   --quick    Builds, lint, SDK suites and cross-language checks; no binding kits.
+#   --quick    Builds, lint, SDK suites and cross-language checks; skips the full binding kits.
 #   --serial   Run one step at a time in the original order.
 #
 # With no language arguments, run all four. Cross-language checks need all four.
@@ -150,6 +150,9 @@ plan() {
   fi
 
   if $all; then
+    for language in rust typescript go python; do
+      step "$language" "ACP kit: $language stdio rights" scripts/acp-kit.sh "$language" stdio-rights
+    done
     step shared "scenarios: Rust runner, every placement" bash -c "cd rust && MODULAR_AGENT_SDK_REQUIRE=all mise exec -- cargo test -q -p sdk-scenarios --test shared -- --test-threads=1"
     step shared "scenarios: TypeScript runner, every placement" bash -c "cd typescript && MODULAR_AGENT_SDK_REQUIRE=all node --test packages/fixtures/dist/test/shared.test.js"
     step shared "scenarios: Go runner, every placement" bash -c "cd go && MODULAR_AGENT_SDK_REQUIRE=all mise exec -- go test -count=1 ./modular/scenarios/"

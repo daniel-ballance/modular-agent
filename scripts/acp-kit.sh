@@ -9,8 +9,8 @@ flags=(--group "$group")
 case "$group" in
   core) registry=reference/agents; flags+=(--crash-checks --probe-checks --job-checks); args=(--acp --approval off) ;;
   covered) registry=reference/agents; args=(--acp --approval off) ;;
-  waiting) registry=sdk/fixtures; args=(acp-waiting) ;;
-  *) echo "use core, covered or waiting; production groups need production-kits.sh" >&2; exit 2 ;;
+  waiting|stdio-rights) registry=sdk/fixtures; args=("acp-$group") ;;
+  *) echo "use core, covered, waiting or stdio-rights; production groups need production-kits.sh" >&2; exit 2 ;;
 esac
 command=()
 while IFS= read -r arg; do command+=("$arg"); done < <(

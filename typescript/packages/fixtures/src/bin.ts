@@ -11,6 +11,8 @@ try {
   }
   if (name === "acp-waiting" && !extra.length) {
     await import(new URL("../../../../scripts/acp-waiting.mjs", import.meta.url).href);
+  } else if (name === "acp-stdio-rights" && !extra.length) {
+    await import("./acp-stdio-rights.js");
   } else if (extra.length) {
     const server = await serve(() => fixture(name), { listen, tokenFile });
     process.stdout.write(server.url + "\n");

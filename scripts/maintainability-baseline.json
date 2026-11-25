@@ -1,5 +1,5 @@
 {
-  "conformance/acp/run.mjs": 2041,
+  "conformance/acp/run.mjs": 2040,
   "conformance/plugin/run.mjs": 1361,
   "go/harness/sessions.go": 2058,
   "python/modular_agent/_agent.py": 1531,

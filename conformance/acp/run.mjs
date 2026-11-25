@@ -1,8 +1,4 @@
 #!/usr/bin/env node
-// Conformance kit for the ACP host binding, modular-agent-acp/1 and /2 (docs/bindings/acp.md).
-// Usage: node run.mjs [--verbose] [options] -- <agent command> [args...] [--then <second agent command> [args...]]
-// The agent is started in conformance mode, with a fresh data folder and project, and driven with the
-// official ACP client library. No external model. Service options use a disposable history service.
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual as equal, parseArgs } from "node:util";
@@ -18,6 +14,7 @@ import { manageServices, trackProcess } from "./service.mjs";
 import { capacity, erasure, isolation } from "./production.mjs";
 import { coveredApproval } from "./covered.mjs";
 import { waitingChecks } from "./waiting.mjs";
+import { stdioRights } from "./stdio-rights.mjs";
 import { ACP_PROTOCOL, checkUpgrades, CONTROL_MS, readToken, socketPeer, websocketOptions } from "../tools/websocket.mjs";
 
 const args = process.argv.slice(2);
@@ -32,7 +29,7 @@ try {
 		...Object.fromEntries(["verbose", ...coreOptions].map(k => [k, { type: "boolean" }])),
 	} });
 	group = values.group ?? "core";
-	if (!["core", "covered", "waiting", ...Object.keys(production)].includes(group)) throw Error("unknown ACP group: " + group);
+	if (!["core", "covered", "waiting", "stdio-rights", ...Object.keys(production)].includes(group)) throw Error("unknown ACP group: " + group);
 	if (group !== "core" && coreOptions.some(k => values[k])) throw Error("core check options require --group core");
 	const options = websocketOptions(argv);
 	network = options && { ...options, tokenFile: resolve(options.tokenFile), protocol: ACP_PROTOCOL };
@@ -48,6 +45,7 @@ try {
 	if (values["plugin-checks"] && !process.env.MODULAR_AGENT_PLUGINS) throw Error("--plugin-checks needs MODULAR_AGENT_PLUGINS");
 	expectedActor = option("--actor");
 	const otherFile = option("--other-token-file");
+	if (group === "stdio-rights" && (network || args.indexOf("--then", dash + 1) >= 0)) throw Error("stdio-rights requires one stdio fixture command");
 	if (network ? dash >= 0 : serviceCommand || expectedActor || otherFile || dash < 0 || dash === args.length - 1) throw new Error("choose a stdio command or a WebSocket URL");
 	if (otherFile) {
 		otherToken = readToken(otherFile);
@@ -330,6 +328,7 @@ let extensions = [];
 if (group !== "core") {
 	if (group === "waiting") await waitingChecks({ root: probeDir, project, command, second, connect, stop, crash, check, attempt, within });
 	else if (group === "covered") await runCovered();
+	else if (group === "stdio-rights") await stdioRights({ project, connect, stop, check, within, history, prompt, closeSession, attempt, command });
 	else await runProduction();
 	await finish();
 }

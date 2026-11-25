@@ -18,6 +18,12 @@ func main() {
 	if len(os.Args) < 2 {
 		log.Fatal("usage: fixtures NAME [--listen ADDR --token-file FILE]")
 	}
+	if len(os.Args) == 2 && os.Args[1] == "acp-stdio-rights" {
+		if err := serveStdioRights(context.Background()); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if os.Args[1] == "acp-waiting" {
 		if err := serveWaiting(); err != nil {
 			log.Fatal(err)

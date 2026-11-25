@@ -31,16 +31,23 @@ func validACPActor(actor Actor) bool {
 	return actor.ID != "" && utf8.ValidString(actor.ID) && slices.Contains([]string{"user", "host", "agent", "program"}, actor.Kind)
 }
 
+func validACPRights(rights []string) bool {
+	for _, right := range rights {
+		if !slices.Contains(api.Rights, right) {
+			return false
+		}
+	}
+	return true
+}
+
 func acpPolicy(projects, tenants, rights, represents []string) (acpinterface.Principal, error) {
 	p := acpinterface.Principal{Tenants: slices.Clone(tenants), Projects: slices.Clone(projects), Represents: slices.Clone(represents)}
 	p.Actor.Rights = slices.Clone(rights)
 	bad := func(message string) (acpinterface.Principal, error) {
 		return acpinterface.Principal{}, &Error{Code: InvalidComposition, Message: message}
 	}
-	for _, right := range rights {
-		if !slices.Contains(api.Rights, right) {
-			return bad("unknown ACP connection right")
-		}
+	if !validACPRights(rights) {
+		return bad("unknown ACP connection right")
 	}
 	for _, tenant := range tenants {
 		if !utf8.ValidString(tenant) {

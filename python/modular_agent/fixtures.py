@@ -11,7 +11,18 @@ from pathlib import Path
 
 from ma_plugin.websocket import wait_for_stop
 
-from . import AgentError, ErrorCode, JsonObject, Plugin, Registrar, Tool, ToolContext, serve, tool
+from . import (
+    AgentError,
+    ErrorCode,
+    JsonObject,
+    Plugin,
+    Registrar,
+    Tool,
+    ToolContext,
+    create_agent,
+    serve,
+    tool,
+)
 
 
 @tool(read_only=True)
@@ -114,6 +125,28 @@ def fixture(name: str, *, config: JsonObject | None = None, choice: str = "yes")
             raise AgentError(ErrorCode.NOT_FOUND, f"Unknown fixture: {name}")
 
 
+async def _serve_stdio_rights() -> None:
+    from .testing import scripted_provider
+
+    data_dir = os.environ.get("MODULAR_AGENT_DATA_DIR")
+    if os.environ.get("MODULAR_AGENT_CONFORMANCE") != "1" or not data_dir:
+        raise ValueError("acp-stdio-rights requires a disposable conformance directory")
+    raw = os.environ.get("MA_ACP_STDIO_RIGHTS")
+    async with create_agent(
+        data_dir=data_dir,
+        durability="kept",
+        providers=[scripted_provider([{"text": "First turn."}, {"text": "Second turn."}])],
+    ) as agent:
+        await agent.serve_acp(
+            actor={
+                "id": "rights-fixture",
+                "kind": "host",
+                "rights": ["watch", "input", "settings"],
+            },
+            rights=json.loads(raw) if raw is not None else None,
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Serve a shared SDK fixture")
     parser.add_argument("fixture")
@@ -125,6 +158,9 @@ def main() -> None:
     if args.fixture == "acp-waiting" and args.listen is None:
         path = Path(__file__).resolve().parents[1] / "scripts/acp_wait_fixture.py"
         os.execv(sys.executable, [sys.executable, str(path)])
+    if args.fixture == "acp-stdio-rights" and args.listen is None:
+        asyncio.run(_serve_stdio_rights())
+        return
     if args.listen is None:
         plugin = fixture(args.fixture)
         if endpoint := os.environ.get("MODULAR_AGENT_TELEMETRY_OTLP"):
