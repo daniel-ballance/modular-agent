@@ -1,3 +1,5 @@
+import { ApprovalReconciliation } from "./approval-reconciliation.js";
+import { failure } from "./failure.js";
 import { sameJson, waitingApprovals, type ApprovalBinding, type ApprovalProof, type ApprovalDelivery, type ApprovalRoute, type WaitingApproval } from "./waiting-approval.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { activeOperation, carrier, conversation, currentSpan, historyForPeer, observeInference, readTrace, safeName, startOperation, telemetryEvent, toolAttributes, TURN_TRACE, withTrace, type Operation } from "./telemetry.js";
@@ -311,12 +313,26 @@ export class Harness {
 	private commandTable = new Map<string, Command & { plugin: string }>();
 	private now: () => number;
 	private readonly questionsOutlastTurns: boolean;
-	private maxApprovalWaitMs?: number;
 	private readonly approvalCoversNested: boolean;
+	private readonly approvals: ApprovalReconciliation = new ApprovalReconciliation({
+		now: () => this.now(),
+		newId: () => this.newId(),
+		reservations: () => this.reservations,
+		findTool: (s, name) => this.findTool(s, name),
+		actorRights: (s, actor) => this.actorRights(s, actor),
+		originalWorkAllows: (s, approval) => this.originalWorkAllows(s, approval),
+		exitTurn: work => this.turnAuthority.exit(work),
+		exitConnection: work => connectionRights.exit(work),
+		commit: (...args) => this.commit(...args),
+		commitNow: (...args) => this.commitNow(...args),
+		interfaces: () => this.interfaces(),
+		emitAnswer: (...args) => this.emitAnswer(...args),
+		toolDisposition: (...args) => this.toolDisposition(...args),
+		maybeContinueOpenCalls: (...args) => this.maybeContinueOpenCalls(...args),
+		problem: (...args) => this.problem(...args),
+		intersectRights,
+	});
 	private readonly approvalPass = new AsyncLocalStorage<ApprovalPass>();
-	private readonly approvalRoutes = new Map<string, ApprovalRoute>();
-	private readonly approvalDeliveries = new WeakMap<Session, Set<ApprovalDelivery & { entryId: string }>>();
-	private readonly approvalTimer = new WeakMap<Session, NodeJS.Timeout>();
 	private readonly modelGate = new AsyncLocalStorage<{ response: HistoryEntry; actorId: string; turnId: string; callId: string }>();
 	private readonly dispatchAllowances = new WeakMap<TurnState, Map<string, DispatchAllowance>>();
 	private readonly settingsDuringTurn?: "nextTurn" | "refused";
@@ -487,12 +503,11 @@ export class Harness {
 				await this.hooks.observe("session.leave", { sessionId, actorId, requestedBy });
 				this.emit(s, "session.left", { actorId }, pluginName, { actorId });
 				await this.closeRevokedWaits(s);
-				await this.reconcileApprovals(s);
+				await this.approvals.reconcileApprovals(s);
 			},
 			presentActors: (id) => this.presentActors(this.session(id)),
 			presenceChanged: (id) => { const s = this.sessions.get(id); if (s) {
-				const delivered = this.approvalDeliveries.get(s);
-				for (const d of delivered ?? []) if (!d.present()) delivered!.delete(d);
+				this.approvals.presenceChanged(s);
 				void this.closeUnanswerable(s).catch(e => this.problem("harness", "close unanswerable wait", e));
 			} },
 			listSessions: async (project) => (await this.use<HistoryStore>("history-store")?.list(project === null ? undefined : { project: project ?? this.project })) ?? [],
@@ -536,11 +551,9 @@ export class Harness {
 			callTool: (sessionId, call) => this.callTool(this.session(sessionId), { ...call, id: call.id ?? this.newId() }),
 			ask: (sessionId, request) => this.ask(this.session(sessionId), request, pluginName),
 			deferTool: (id, turnId, question) => this.deferTool(this.session(id), turnId, question, pluginName),
-			refreshApprovals: id => this.reconcileApprovals(this.session(id)),
-			registerApprovalRoute: policy => { this.approvalRoutes.set(policy.id, policy); return () => {
-				if (this.approvalRoutes.get(policy.id) === policy) this.approvalRoutes.delete(policy.id);
-			}; },
-			presentApproval: (id, requestId, delivery) => this.presentApproval(this.session(id), requestId, delivery),
+			refreshApprovals: id => this.approvals.reconcileApprovals(this.session(id)),
+			registerApprovalRoute: policy => this.approvals.registerRoute(policy),
+			presentApproval: (id, requestId, delivery) => this.approvals.presentApproval(this.session(id), requestId, delivery),
 			submitAnswer: (sessionId, answer, handle) => this.submitAnswer(this.session(sessionId), answer, handle),
 			openRequests: (sessionId) => {
 				const s = this.session(sessionId);
@@ -1086,7 +1099,7 @@ export class Harness {
 		await this.hooks.observe("session.start", { sessionId: s.id, resumed: true });
 		await this.recoverNestedCalls(s);
 		await this.recoverInterfaceCalls(s);
-		await this.reconcileApprovals(s, true);
+		await this.approvals.reconcileApprovals(s, true);
 		await this.recoverInterruptedTurn(s);
 		await this.recoverReports(s);
 		s.reopening = false;
@@ -1156,7 +1169,7 @@ export class Harness {
 			const r = readRequest(e);
 			const inTurn = !!r.turnId && r.turnId === start?.turnId;
 			if (inTurn && viewer.inTurn !== true && !viewer.inTurn?.includes(r.id) ||
-				r.kind === "approval" && !inTurn && !(r.approvalWait === "untilDeadline" && this.maxApprovalWaitMs && waitingApprovals(s).get(r.toolCallId!)?.end) || r.kind === "secret" && !viewer.secrets ||
+				r.kind === "approval" && !inTurn && !(r.approvalWait === "untilDeadline" && this.approvals.maximum && waitingApprovals(s).get(r.toolCallId!)?.end) || r.kind === "secret" && !viewer.secrets ||
 				r.timeLimitMs !== undefined && r.whenTimeLimit !== "leaveOpen" && this.now() >= e.time + r.timeLimitMs) return false;
 			const right = r.kind === "approval" ? "approve" : "answer";
 			if (!rights.includes(right)) return false;
@@ -1420,7 +1433,7 @@ export class Harness {
 				const setting = normalizeSetting(entry.data as { key: string; value: unknown });
 				const changes = setting.key === "settings" ? setting.value : { [setting.key]: setting.value };
 				if (changes && typeof changes === "object" && "approvalWait" in changes) {
-					if (!this.maxApprovalWaitMs) throw failure("not_supported", "Waiting approvals are not enabled");
+					if (!this.approvals.maximum) throw failure("not_supported", "Waiting approvals are not enabled");
 					if (changes.approvalWait !== "live" && changes.approvalWait !== "untilDeadline") throw failure("invalid_params", "Invalid approvalWait setting");
 				}
 				entry.data = setting;
@@ -1562,7 +1575,7 @@ export class Harness {
 		if (actorId) this.requireAuthority(s, actorId, "settings");
 		if (this.settingsDuringTurn === "refused" && s.isBusy()) throw Object.assign(new Error("Cannot change settings during a turn"), { code: "busy" });
 		await this.commit(s, [{ kind: "setting", writer, actorId, modelVisible: false, data: { key, value } }]);
-		if (s.hasWaitingApprovals) await this.reconcileApprovals(s);
+		if (s.hasWaitingApprovals) await this.approvals.reconcileApprovals(s);
 		this.emit(s, "setting.changed", { key, value, appliesFrom: this.settingsDuringTurn === "nextTurn" ? "next turn" : "next step" }, writer, { actorId });
 	}
 
@@ -2002,7 +2015,7 @@ export class Harness {
 		await this.hooks.observe("session.join", { sessionId: s.id, actorId: actor.id, actor, grantedBy });
 		this.emit(s, "session.joined", { actor }, writer, { actorId: actor.id });
 		await this.closeRevokedWaits(s);
-		await this.reconcileApprovals(s);
+		await this.approvals.reconcileApprovals(s);
 	}
 
 	private requireAuthority(s: Session, actorId: string, authority: Authority): void {
@@ -2076,7 +2089,7 @@ export class Harness {
 			if ((rights ?? ALL_AUTHORITY).some((right) => !effective.includes(right))) throw Object.assign(new Error("A limit cannot give a right the administrator lacks"), { code: "forbidden" });
 			await this.commit(s, [{ kind: "limit", writer, actorId, modelVisible: false, data: { rights: rights === null ? null : [...new Set(rights)] } }]);
 			await this.closeRevokedWaits(s);
-			await this.reconcileApprovals(s);
+			await this.approvals.reconcileApprovals(s);
 		});
 	}
 
@@ -2311,7 +2324,7 @@ export class Harness {
 			const running = s.running;
 			running?.abort.abort();
 			const recorded = this.handBack(s, handedBack, "cancelled");
-			for (const w of waitingApprovals(s).values()) if (!w.result && !w.start && !s.closing) await this.closeWaiting(s, w, "cancelled", "notStarted");
+			for (const w of waitingApprovals(s).values()) if (!w.result && !w.start && !s.closing) await this.approvals.closeWaiting(s, w, "cancelled", "notStarted");
 			for (const handoff of this.unsettledHandoffs(s)) await this.settleInterfaceCall(s, handoff);
 			for (const r of [...s.requests.values()]) r.resolve({ requestId: r.request.id, declined: true, actorId: "harness", reason: "cancelled" });
 			await recorded;
@@ -2324,7 +2337,7 @@ export class Harness {
 
 	private async waitForIdle(sessionId: string): Promise<void> {
 		const s = this.session(sessionId);
-		if (s.hasWaitingApprovals) await this.reconcileApprovals(s);
+		if (s.hasWaitingApprovals) await this.approvals.reconcileApprovals(s);
 		await untilAborted(s.interruption.signal, async () => {
 			while (!s.suspended && (s.running || s.settling)) {
 				if (s.settling) await s.settling;
@@ -2514,7 +2527,7 @@ export class Harness {
 		if (signal?.aborted && this.interfaceSources.size) outcome = { ...outcome, outcome: { kind: "cancelled" } };
 		for (const w of waitingApprovals(s).values()) {
 			if (w.entry.turnId === turnId && !w.result && !w.start && (signal?.aborted || outcome.outcome.kind !== "completed")) {
-				await this.closeWaiting(s, w, signal?.aborted ? "cancelled" : "noLongerAnswerable", "notStarted");
+				await this.approvals.closeWaiting(s, w, signal?.aborted ? "cancelled" : "noLongerAnswerable", "notStarted");
 			}
 		}
 		const branch = s.branch();
@@ -2553,7 +2566,7 @@ export class Harness {
 		if (!state?.endedHook) await this.hooks.observe("turn.end", { sessionId: s.id, turnId, outcome: outcome.outcome, result: outcome.result });
 		this.emit(s, "turn.ended", outcome, "harness", { turnId });
 		if (s.hasWaitingApprovals) {
-			await this.reconcileApprovals(s);
+			await this.approvals.reconcileApprovals(s);
 			for (const w of waitingApprovals(s).values()) if (w.end?.turnId === turnId && !w.decision && !w.result) {
 				this.emit(s, "input.request.opened", { request: w.request, waiting: true }, "harness", { toolCallId: w.request.toolCallId });
 				for (const i of this.viewersFor(s, w.request)) i.onInputRequest?.(w.request);
@@ -3315,8 +3328,7 @@ export class Harness {
 	}
 
 	private clearInterfaceWork(s: Session): void {
-		clearTimeout(this.approvalTimer.get(s));
-		this.approvalDeliveries.delete(s);
+		this.approvals.clear(s);
 		for (const timer of this.interfaceTimers.get(s)?.values() ?? []) clearTimeout(timer);
 		this.interfaceTimers.delete(s);
 		this.interfaceConnections.delete(s);
@@ -3326,11 +3338,11 @@ export class Harness {
 
 	private async invalidateErasedHandoffs(s: Session, entryIds: string[]): Promise<void> {
 		const ids = new Set(entryIds);
-		this.approvalDeliveries.delete(s);
+		this.approvals.invalidateDeliveries(s);
 		for (const w of waitingApprovals(s).values()) {
 			if (!w.result && !w.start && [w.entry.id, w.decision?.id, w.end?.id, ...(w.entry.sources ?? []),
 				...s.branch().filter(e => e.toolCallId === w.request.toolCallId && e.kind === "toolPending").map(e => e.id)].some(id => id && ids.has(id))) {
-				await this.closeWaiting(s, w, "noLongerAnswerable", "notStarted", true);
+				await this.approvals.closeWaiting(s, w, "noLongerAnswerable", "notStarted", true);
 			}
 		}
 		for (const item of this.unsettledHandoffs(s)) {
@@ -3482,9 +3494,9 @@ export class Harness {
 		const allowance = directAllowance ?? (state && this.dispatchAllowances.get(state)?.get(call.id));
 		if (state) this.dispatchAllowances.get(state)?.delete(call.id);
 		const denied = (): ToolResult => ({ callId: call.id, status: wait && wait.request.deadlineAt! <= this.now() ? "notStarted" : "refused", content: [text("Consent no longer authorizes dispatch")] });
-		const needsGate = !nested && state && !this.interfaceSources.has(call.name) && (this.coversNested() || this.maxApprovalWaitMs && s.settings.approvalWait === "untilDeadline" &&
+		const needsGate = !nested && state && !this.interfaceSources.has(call.name) && (this.coversNested() || this.approvals.maximum && s.settings.approvalWait === "untilDeadline" &&
 			!s.branch().some(e => e.kind === "toolStarted" && e.toolCallId === call.id));
-		if (!this.intactInheritedCall(s, turnId, call) || needsGate && !allowance || wait && (!allowance || wait.start || wait.result || !this.validWait(s, wait))) return denied();
+		if (!this.intactInheritedCall(s, turnId, call) || needsGate && !allowance || wait && (!allowance || wait.start || wait.result || !this.approvals.validWait(s, wait))) return denied();
 		const found = this.findTool(s, call.name);
 		if (s.erasing) return { callId: call.id, status: "refused", content: [text("Erasure is in progress")] };
 		if (!found && wait) return denied();
@@ -3525,10 +3537,10 @@ export class Harness {
 			if (!wait) return true;
 			const w = waitingApprovals(s).get(call.id);
 			return !!w && w.start === afterStart && w.entry === wait.entry && w.decision === wait.decision && !w.result &&
-				sameJson(call, allowance?.call) && this.matchesApproval(w, call, s) && this.approvalPrincipalsAllow(s, w) &&
+				sameJson(call, allowance?.call) && this.approvals.matchesApproval(w, call, s) && this.approvals.approvalPrincipalsAllow(s, w) &&
 				this.workRights(s, owners, state?.jobs).includes("tools") && !signal.aborted && !s.erasing && !s.suspended;
 		};
-		if (wait && (!consent() || !await this.approverStillAllows(s, wait) || !consent())) return denied();
+		if (wait && (!consent() || !await this.approvals.approverStillAllows(s, wait) || !consent())) return denied();
 		const [start] = await this.commit(s, [{ kind: "toolStarted", writer: "harness", modelVisible: false, turnId, actorId: call.actorId ?? owners[0] ?? this.actorForJob(s, state?.jobs), toolCallId: call.id, stepId: call.stepId,
 			sources: wait ? [wait.entry.id, wait.decision!.id] : nested ? s.branch().filter(e => e.kind === "modular-agent.nestedCall" && e.toolCallId === call.id).map(e => e.id) : undefined,
 			data: { call: { ...call, actorId: call.actorId ?? owners[0] ?? this.actorForJob(s, state?.jobs) }, source: { plugin: found.plugin, toolSource: found.source.id }, definition: found.definition, safeToRepeat, point, openWorld: found.definition.hints?.openWorld ?? true,
@@ -3539,7 +3551,7 @@ export class Harness {
 		if (!eligible(current)) return refused();
 		this.checkWriter(s);
 		if (signal.aborted) return { callId: call.id, status: "notStarted", content: [text("Cancelled before it ran")] };
-		if (wait && !await this.approverStillAllows(s, wait)) return denied();
+		if (wait && !await this.approvals.approverStillAllows(s, wait)) return denied();
 		await this.admitHistory(s);
 		this.checkWriter(s);
 		if (wait && !consent(start)) return denied();
@@ -3776,7 +3788,7 @@ export class Harness {
 		if (!this.intactInheritedCall(s, turnId, call)) return { value: payload, refused: "Missing continuation checkpoint" };
 		this.dispatchAllowances.get(state)?.delete(call.id);
 		const branch = s.branch();
-		const parkable = this.maxApprovalWaitMs && s.settings.approvalWait === "untilDeadline" && call.startedBy === "model" && !call.parentCallId &&
+		const parkable = this.approvals.maximum && s.settings.approvalWait === "untilDeadline" && call.startedBy === "model" && !call.parentCallId &&
 			!branch.some(e => e.kind === "toolStarted" && e.toolCallId === call.id);
 		if (!wait && !parkable && !this.coversNested()) return this.toolGate(payload, signal);
 		const actorId = state.actors.values().next().value ?? this.actorForJob(s, state.jobs);
@@ -3788,7 +3800,7 @@ export class Harness {
 		const offered = branch.some(e => e.kind === "modelRequest" && !e.erased && e.turnId === origin && e.stepId === call.stepId && (e.data as { tools?: string[] })?.tools?.includes(call.name));
 		const refuse = () => ({ value: payload, refused: "The waiting approval cannot authorize this call" });
 		if (!actorId || !response || !offered || call.startedBy !== "model" || call.parentCallId || call.actorId && call.actorId !== actorId || !this.workRights(s, state.actors, state.jobs).includes("tools")) return refuse();
-		if (wait && (!wait.end || !wait.proof || wait.start || wait.result || !this.validWait(s, wait) ||
+		if (wait && (!wait.end || !wait.proof || wait.start || wait.result || !this.approvals.validWait(s, wait) ||
 			!branch.some(e => e.kind === "turnStart" && !e.erased && e.turnId === turnId && e.continuesTurnId === origin))) return refuse();
 		const found = this.findTool(s, call.name);
 		if (!found || found.definition.callers && !found.definition.callers.includes("model")) return refuse();
@@ -3799,7 +3811,7 @@ export class Harness {
 		const result = wait || parkable ? await this.modelGate.run({ response, turnId, actorId, callId: call.id }, run) : await run();
 		if (result.refused === undefined && !result.pending) {
 			const final = { ...result.value.call, actorId };
-			if (wait && (!this.matchesApproval(wait, final, s) || !await this.approverStillAllows(s, wait))) return refuse();
+			if (wait && (!this.approvals.matchesApproval(wait, final, s) || !await this.approvals.approverStillAllows(s, wait))) return refuse();
 			const allowances = this.dispatchAllowances.get(state) ?? new Map();
 			this.dispatchAllowances.set(state, allowances);
 			const cover = wait ? this.coversNested() && wait.request.coversNested === true
@@ -3825,20 +3837,6 @@ export class Harness {
 			}
 			return this.workRights(s, this.recordedTurnActors(branch, origin), this.recordedTurnJobs(branch, origin)).includes("tools");
 		}));
-	}
-
-	private approvalPrincipalsAllow(s: Session, w: WaitingApproval) {
-		const p = w.proof;
-		if (!p || !this.validWait(s, w) || !w.end || !w.decision?.actorId || w.result || !this.originalWorkAllows(s, w) ||
-			!["off", "ask", "all"].includes(String(s.settings.approval ?? "all"))) return false;
-		const rights = this.turnAuthority.exit(() => connectionRights.exit(() => this.approvalRights(s, w, this.approvalRoutes.get(p.routeId), w.decision!.actorId!, p.submittedBy)));
-		return ["watch", "approve"].every(right => rights.includes(right as Authority) && p.rights.includes(right as Authority));
-	}
-
-	private async approverStillAllows(s: Session, w: WaitingApproval) {
-		if (!this.approvalPrincipalsAllow(s, w)) return false;
-		const route = this.approvalRoutes.get(w.proof!.routeId)!;
-		return connectionRights.exit(() => this.unchanged(w, route, w.decision!.actorId!));
 	}
 
 	private coversNested() { return this.approvalCoversNested && this.plugins().includes("approval"); }
@@ -3990,7 +3988,7 @@ export class Harness {
 
 	private hasQuestionRoute(s: Session, r: InputRequest) {
 		return this.turnAuthority.exit(() => connectionRights.exit(() => r.approvalWait
-			? [...s.actors.keys()].some(id => this.eligibleMember(s, r.answerers.length ? r.answerers : undefined, id))
+			? [...s.actors.keys()].some(id => this.approvals.eligibleMember(s, r.answerers.length ? r.answerers : undefined, id))
 			: this.hasAnswerer(s, r)));
 	}
 
@@ -4140,202 +4138,6 @@ export class Harness {
 		return { pending: "Waiting for an answer to the gate" };
 	}
 
-	/** Only this gate scope can create a pre-dispatch checkpoint. A tool's own ask is live-only. */
-	private async parkApproval(s: Session, draft: BoundRequest, binding: ApprovalBinding, gate: { response: HistoryEntry; actorId: string; turnId: string }): Promise<Answer> {
-		const call = { ...binding.call, actorId: gate.actorId };
-		const denied = (reason: string): Answer => ({ requestId: "", actorId: "harness", declined: true, reason });
-		const prior = waitingApprovals(s).get(call.id);
-		if (prior) {
-			if (prior.end && prior.proof && !prior.start && !prior.result && this.matchesApproval(prior, call, s)) {
-				return { requestId: prior.request.id, actorId: prior.decision!.actorId!, value: "allow" };
-			}
-			return denied("Consent does not match this call");
-		}
-		const limit = Math.min(this.maxApprovalWaitMs!, draft.timeLimitMs ?? this.maxApprovalWaitMs!);
-		if (!Number.isSafeInteger(limit) || limit < 0) return denied("Invalid approval time limit");
-		if (![...s.actors.keys()].some(id => this.eligibleMember(s, draft.answerers, id))) return denied("No eligible approver");
-		const id = this.newId(), entryId = this.newId();
-		const request = { kind: "approval", id, sessionId: s.id, question: draft.question, details: draft.details, key: draft.key,
-			...(draft.coversNested ? { coversNested: true } : {}), toolCallId: call.id, askedBy: "approval", answerable: false, approvalWait: "untilDeadline", timeLimitMs: limit,
-			whenTimeLimit: "decline", ...(draft.answerers ? { answerers: [...draft.answerers] } : {}) };
-		const data = structuredClone({ request, ...binding, call });
-		const bytes = resourceBytes(data) + 2048;
-		if (bytes > this.reservations.limits.entryBytes || !this.reservations.reserve(s, `question:${id}`, { storageBytes: bytes + 3 * this.reservations.limits.settlementBytes })) throw failure("busy", "No capacity for an approval");
-		const fields = { writer: "harness", modelVisible: false, turnId: gate.turnId, stepId: call.stepId, toolCallId: call.id };
-		try {
-			const records = await this.commit(s, [
-				{ ...fields, id: entryId, kind: "inputRequest", requestId: id, data, sources: [gate.response.id] },
-				{ ...fields, kind: "toolPending", data: { requestIds: [id] }, sources: [entryId] },
-			], false, () => !s.suspended && !s.erasing && s.settings.approvalWait === "untilDeadline" && !s.running?.abort.signal.aborted &&
-				![...s.entries.values()].some(e => e.toolCallId === call.id && ["toolStarted", "toolPending", "toolResult"].includes(e.kind)));
-			if (!records.length) { this.reservations.release(s, `question:${id}`); return denied("Call is no longer eligible"); }
-		} catch (error) {
-			if (!s.suspended) this.reservations.release(s, `question:${id}`);
-			throw error;
-		}
-		telemetryEvent("modular_agent.question.open", { "modular_agent.question.id": id, "modular_agent.question.kind": "approval" });
-		this.scheduleApprovalExpiry(s);
-		return { requestId: id, actorId: "harness", pending: true };
-	}
-
-	private eligibleMember(s: Session, answerers: string[] | undefined, id: string) {
-		const rights = this.turnAuthority.exit(() => connectionRights.exit(() => this.actorRights(s, id)));
-		return (!answerers || answerers.includes(id)) && rights.includes("watch") && rights.includes("approve");
-	}
-
-	private matchesApproval(w: WaitingApproval, call: ToolCall, s: Session) {
-		const found = this.findTool(s, call.name);
-		const { call: original, source, definition } = w.binding;
-		return w.intact && !!found && found.plugin !== INTERFACE_SOURCE && sameJson(original, call) &&
-			source.plugin === found.plugin && source.toolSource === found.source.id && sameJson(definition, found.definition);
-	}
-
-	private validWait(s: Session, w: WaitingApproval) {
-		return w.intact && !!this.maxApprovalWaitMs && s.settings.approvalWait === "untilDeadline" &&
-			w.request.timeLimitMs! <= this.maxApprovalWaitMs && w.request.deadlineAt! > this.now();
-	}
-
-	private approvalRights(s: Session, w: WaitingApproval, route: ApprovalRoute | undefined, actor: string, principal: string): Authority[] {
-		const raw = (w.entry.data as { request: InputRequest }).request;
-		if (!route || !this.eligibleMember(s, raw.answerers, actor)) return [];
-		return this.turnAuthority.exit(() => intersectRights(this.actorRights(s, actor), this.actorRights(s, principal), [...route.ceiling(s.id, actor, principal)]));
-	}
-
-	private async unchanged(w: WaitingApproval, route: ApprovalRoute, actor: string) {
-		try { return await this.turnAuthority.exit(() => route.unchanged(structuredClone(w.entry), actor)); }
-		catch { return false; }
-	}
-
-	private async presentApproval(s: Session, id: string, delivery: ApprovalDelivery) {
-		await this.reconcileApprovals(s);
-		const w = [...waitingApprovals(s).values()].find(w => w.request.id === id);
-		if (!w) return false;
-		const { actorId, submittedBy, routeId, handle } = delivery;
-		const delivered = this.approvalDeliveries.get(s) ?? new Set();
-		this.approvalDeliveries.set(s, delivered);
-		for (const old of delivered) if (!old.present() || old.handle === handle && old.routeId === routeId && old.entryId === w.entry.id && old.actorId === actorId) delivered.delete(old);
-		const route = this.approvalRoutes.get(routeId);
-		const eligible = () => {
-			const item = waitingApprovals(s).get(w.request.toolCallId!);
-			const rights = this.approvalRights(s, w, route, actorId, submittedBy);
-			return !s.closed && !s.suspended && !s.erasing && !!item?.end && !item.decision && !item.result && !item.start && this.validWait(s, item) &&
-				rights.includes("watch") && rights.includes("approve") && delivery.present();
-		};
-		if (!route || !eligible() || !await this.unchanged(w, route, actorId) || !eligible()) return false;
-		delivered.add({ ...delivery, entryId: w.entry.id });
-		return true;
-	}
-
-	private async decideWaiting(s: Session, request: InputRequest, answer: Answer, handle?: object) {
-		const span = startOperation("modular_agent.question.answer", { ...conversation(s.id), "modular_agent.turn.id": request.turnId });
-		const decide = async () => {
-			await this.reconcileApprovals(s);
-			const w = waitingApprovals(s).get(request.toolCallId!);
-			const submittedBy = answer.delegatedBy ?? answer.actorId;
-			const deliveries = this.approvalDeliveries.get(s);
-			if (!w || !answer.declined && answer.value !== "allow") return { accepted: false };
-			let delivery, route;
-			for (const d of deliveries ?? []) {
-				if (d.handle !== handle || d.entryId !== w.entry.id || d.actorId !== answer.actorId || d.submittedBy !== submittedBy) continue;
-				const policy = this.approvalRoutes.get(d.routeId);
-				if (d.present() && policy && await this.unchanged(w, policy, answer.actorId)) { delivery = d; route = policy; break; }
-				deliveries!.delete(d);
-			}
-			if (!delivery || !route) return { accepted: false };
-			const acceptedRoute = route, delivered = delivery;
-			const rights = () => this.approvalRights(s, w, acceptedRoute, answer.actorId, submittedBy);
-			const proof = { requestEntryId: w.entry.id, routeId: route.id, submittedBy, rights: rights() };
-			const body = { requestId: request.id, actorId: answer.actorId, ...(answer.declined ? { declined: true, reason: answer.reason } : { value: "allow", approvalView: proof }) };
-			const id = this.newId();
-			const drafts: EntryDraft[] = [{ id, kind: "inputAnswer", writer: "harness", modelVisible: false, actorId: answer.actorId, requestId: request.id,
-				toolCallId: request.toolCallId, turnId: request.turnId, stepId: w.entry.stepId, sources: [w.entry.id], data: body }];
-			if (answer.declined) drafts.push(this.approvalResult(s, w, "refused", "The approver declined", id));
-			const entries = await this.commit(s, drafts, false, () => {
-				const current = waitingApprovals(s).get(request.toolCallId!);
-				proof.rights = rights();
-				return !s.suspended && !s.closing && !s.erasing && !s.moving && this.approvalRoutes.get(acceptedRoute.id) === acceptedRoute && deliveries!.has(delivered) && delivered.present() &&
-					!!current?.end && !current.start && !current.result && !current.decision && this.validWait(s, current) && proof.rights.includes("watch") && proof.rights.includes("approve");
-			});
-			if (!entries.length) { await this.reconcileApprovals(s); return { accepted: false }; }
-			this.waitingClosed(s, w, answer, answer.declined ? "declined" : "answered");
-			if (answer.declined) this.toolDisposition(w.binding.call, "refused");
-			this.maybeContinueOpenCalls(s, currentSpan());
-			return { accepted: true };
-		};
-		return span.observe(decide);
-	}
-
-	private waitingClosed(s: Session, w: WaitingApproval, answer: Answer, disposition: string) {
-		const deliveries = this.approvalDeliveries.get(s);
-		for (const d of deliveries ?? []) if (d.entryId === w.entry.id) deliveries!.delete(d);
-		for (const i of this.interfaces()) i.onInputRequestClosed?.(w.request.id);
-		telemetryEvent("modular_agent.question.close", { "modular_agent.question.id": w.request.id, "modular_agent.question.kind": "approval", "modular_agent.question.disposition": disposition });
-		this.emitAnswer(s, w.request, answer, true);
-	}
-
-	private approvalResult(s: Session, w: WaitingApproval, status: "notStarted" | "refused" | "outcomeUnknown", message: string, decisionId?: string): EntryDraft {
-		const continuation = s.branch().find(e => e.kind === "turnStart" && e.continuesTurnId === w.entry.turnId && !e.erased);
-		return { kind: "toolResult", writer: "harness", modelVisible: true, turnId: continuation?.turnId ?? w.entry.turnId, stepId: w.entry.stepId, toolCallId: w.request.toolCallId,
-			sources: [w.entry.id, ...(decisionId ? [decisionId] : []), ...(w.start ? [w.start.id] : [])],
-			message: { role: "toolResult", toolCallId: w.request.toolCallId!, toolName: w.binding.call?.name ?? "", isError: true, content: [text(message)] }, data: { status } };
-	}
-
-	private async closeWaiting(s: Session, w: WaitingApproval, reason: string, status: "refused" | "notStarted" | "outcomeUnknown", erasing = false) {
-		const run = async () => {
-			const id = w.decision?.id ?? this.newId();
-			const body = { requestId: w.request.id, declined: true, reason,
-				...(reason === "noLongerAnswerable" && s.revokedQuestions.has(w.request.id) && {cause:"revoked" as const}) };
-			const drafts: EntryDraft[] = w.decision ? [] : [{ kind: "inputAnswer", id, writer: "harness", modelVisible: false, turnId: w.entry.turnId, stepId: w.entry.stepId,
-				toolCallId: w.entry.toolCallId, requestId: w.request.id, data: body, sources: [w.entry.id] }];
-			drafts.push(this.approvalResult(s, w, status, reason, id));
-			const guard = () => {
-				const item = waitingApprovals(s).get(w.entry.toolCallId!);
-				return item?.entry === w.entry && !item.result && item.start === w.start && item.decision === w.decision;
-			};
-			const entries = erasing ? guard() && await this.commitNow(s, drafts) : await this.commit(s, drafts, false, guard);
-			if (!entries || !entries.length) return;
-			if (!w.decision) this.waitingClosed(s, w, { ...body, actorId: "harness" }, reason);
-			if (w.binding.call) this.toolDisposition(w.binding.call, status);
-		};
-		if (activeOperation()?.isOpen) await run();
-		else await startOperation("modular_agent.question.answer", { ...conversation(s.id), "modular_agent.turn.id": w.entry.turnId }).observe(run);
-	}
-
-	private scheduleApprovalExpiry(s: Session) {
-		clearTimeout(this.approvalTimer.get(s));
-		const deadlines = [...waitingApprovals(s).values()].filter(w => w.intact && !w.result && !w.start).map(w => w.request.deadlineAt!);
-		if (!deadlines.length || s.suspended || s.closing || s.closed) return;
-		const ms = Math.max(1, Math.min(2_147_483_647, Math.min(...deadlines) - this.now()));
-		const timer = setTimeout(() => void withTrace(undefined, () => this.reconcileApprovals(s)).catch(error => this.problem("harness", "approval expiry", error)), ms);
-		this.approvalTimer.set(s, timer.unref());
-	}
-
-	private async reconcileApprovals(s: Session, reopening = false) {
-		if (!s.hasWaitingApprovals || s.erasing || s.closed || s.suspended || s.closing) return;
-		const deliveries = this.approvalDeliveries.get(s);
-		const waits = waitingApprovals(s);
-		for (const d of deliveries ?? []) {
-			const w = [...waits.values()].find(w => w.entry.id === d.entryId);
-			const rights = w && this.approvalRights(s, w, this.approvalRoutes.get(d.routeId), d.actorId, d.submittedBy);
-			if (!w || w.result || w.decision || !d.present() || !rights?.includes("watch") || !rights.includes("approve")) deliveries!.delete(d);
-		}
-		for (const w of waits.values()) {
-			if (w.result) continue;
-			if (w.start) {
-				if (reopening) await this.closeWaiting(s, w, "The tool started before interruption", "outcomeUnknown");
-				continue;
-			}
-			if (!w.intact || !this.maxApprovalWaitMs) await this.closeWaiting(s, w, "noLongerAnswerable", "notStarted");
-			else if (w.request.deadlineAt! <= this.now()) await this.closeWaiting(s, w, "timeLimit", "notStarted");
-			else if (w.decision && !this.approvalPrincipalsAllow(s, w)) {
-				await this.closeWaiting(s, w, "refused", "refused");
-			} else if (!this.validWait(s, w)) await this.closeWaiting(s, w, "refused", "refused");
-			else if (!w.decision && ![...s.actors.keys()].some(id => this.eligibleMember(s, (w.entry.data as { request: InputRequest }).request.answerers, id))) await this.closeWaiting(s, w, "noLongerAnswerable", "refused");
-		}
-		this.scheduleApprovalExpiry(s);
-		this.maybeContinueOpenCalls(s);
-	}
-
 	private async ask(s: Session, draft: BoundRequest, askedBy: string, signal?: AbortSignal): Promise<Answer> {
 		if ("approvalWait" in draft || "deadlineAt" in draft || "coversNested" in draft) throw failure("invalid_request", "Only the Harness sets the approval lifetime and coverage");
 		const pass = this.approvalPass.getStore();
@@ -4373,8 +4175,8 @@ export class Harness {
 		const approval = registered && call ? { call, source: { plugin: registered.plugin, toolSource: registered.source.id }, definition: registered.definition } : undefined;
 		const gate = this.modelGate.getStore();
 		if (draft.kind === "approval" && askedBy === "approval" && gate && approval && draft.toolCallId === gate.callId && approval.call.id === gate.callId && approval.call.startedBy === "model" && !approval.call.parentCallId &&
-			approval.source.plugin !== INTERFACE_SOURCE && (this.maxApprovalWaitMs && s.settings.approvalWait === "untilDeadline" || waitingApprovals(s).has(approval.call.id))) {
-			return this.parkApproval(s, draft, approval, gate);
+			approval.source.plugin !== INTERFACE_SOURCE && (this.approvals.maximum && s.settings.approvalWait === "untilDeadline" || waitingApprovals(s).has(approval.call.id))) {
+			return this.approvals.parkApproval(s, draft, approval, gate);
 		}
 		let reopened = false;
 		if (draft.key) {
@@ -4588,7 +4390,7 @@ export class Harness {
 			(!answer.delegatedBy || this.mayAnswer(s, { ...request, answerers: [] }, answer.delegatedBy));
 		const request = find();
 		if (!request || !may(request)) return { accepted: false };
-		if (request.approvalWait) return this.decideWaiting(s, request, answer, handle);
+		if (request.approvalWait) return this.approvals.decideWaiting(s, request, answer, handle);
 		if (request.kind === "secret" && !answer.declined) {
 			const store = this.secretStore();
 			if (!store || !request.credential || typeof answer.value !== "string") return { accepted: false };
@@ -4803,7 +4605,7 @@ export class Harness {
 	enableWaitingApprovals(maximum: number): void {
 		if (!Number.isSafeInteger(maximum) || maximum <= 0 || !this.questionsOutlastTurns || !this.plugins().includes("approval") ||
 			this.runtime()?.supports.interfaceTools !== true) throw failure("invalid_composition", "Waiting approvals need a positive Duration and a Runtime that continues settled calls");
-		this.maxApprovalWaitMs = maximum;
+		this.approvals.maximum = maximum;
 	}
 
 	declaration(s?: Session): Declaration {
@@ -4839,7 +4641,7 @@ export class Harness {
 			mixedActorInput: "shared",
 			erasureDuringTurn: "refused",
 			questionsOutlastTurns: this.questionsOutlastTurns,
-			...(this.maxApprovalWaitMs === undefined ? {} : { approvalsOutlastTurns: true, lateAnswersStartTurns: true }),
+			...(this.approvals.maximum === undefined ? {} : { approvalsOutlastTurns: true, lateAnswersStartTurns: true }),
 			...(this.coversNested() ? { approvalCoversNested: true } : {}),
 			queuedInputAfterRestart: recovery.input,
 			...(recovery.jobs !== recovery.input ? { queuedJobReportsAfterRestart: recovery.jobs } : {}),
@@ -5091,10 +4893,6 @@ export async function untilAborted<T>(signal: AbortSignal, work: () => Promise<T
 			return work();
 		}).then(resolve, reject).finally(() => subscription[Symbol.dispose]());
 	});
-}
-
-function failure(code: "invalid_composition" | "invalid_params" | "invalid_request" | "not_open" | "not_found" | "forbidden" | "not_supported" | "busy" | "lost" | "conflict" | "result_too_large" | "unavailable", message: string) {
-	return Object.assign(new Error(message), { code });
 }
 
 function eraseCopies(origin: Session, ids: string[], sessions: Map<string, Session>): Map<Session, Set<string>> {
