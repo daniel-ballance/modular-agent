@@ -7,6 +7,10 @@ use modular_agent::{
 use serde_json::{Value, json};
 use std::{path::Path, sync::Mutex, time::SystemTime};
 
+#[path = "fixtures/git_project.rs"]
+mod git_project;
+use git_project::git_project;
+
 mod subscription_support;
 use subscription_support::{Http, Request, private_file};
 
@@ -310,8 +314,10 @@ async fn requests_use_one_locked_refresh_and_replay_encrypted_reasoning() -> Res
             });
             grok(options)?.with_test_endpoints(&http.url("/responses"), &http.url("/token"))
         };
+        let project = git_project();
         let builder = |model| {
             Agent::builder()
+                .project(project.path())
                 .model(model)
                 .default_prompt(false)
                 .setting("maxOutput", json!(50_000))
@@ -461,13 +467,14 @@ async fn invalid_grant_leaves_the_login_and_reports_credentials() -> Result<()> 
         let provider = grok(GrokOptions::new(subscription_logins(&auth)))?
             .with_test_endpoints(&http.url("/responses"), &http.url("/token"))?;
         let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
-        let builder =
-            Agent::builder()
-                .model("grok/grok-4.3")
-                .plugin(Plugin::new("capture").on_model_failed(move |p| {
-                    send.send(p.error).unwrap();
-                    async { Ok(ModelDecision::Stop) }
-                }));
+        let project = git_project();
+        let builder = Agent::builder()
+            .project(project.path())
+            .model("grok/grok-4.3")
+            .plugin(Plugin::new("capture").on_model_failed(move |p| {
+                send.send(p.error).unwrap();
+                async { Ok(ModelDecision::Stop) }
+            }));
         let (agent, server) = agent(builder, provider, served, dir.path()).await?;
         let outcome = agent.session().await?.prompt("hi").await?.outcome;
         assert!(matches!(outcome, Some(Outcome::Failed { .. })));
@@ -502,7 +509,9 @@ async fn distinguishes_service_errors_and_an_incomplete_stream() -> Result<()> {
     let provider = grok(GrokOptions::new(subscription_logins(auth)))?
         .with_test_endpoints(&http.url("/responses"), &http.url("/token"))?;
     let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
+    let project = git_project();
     let agent = Agent::builder()
+        .project(project.path())
         .provider(provider)
         .model("grok/grok-4.3")
         .plugin(Plugin::new("capture").on_model_failed_with(
@@ -551,7 +560,9 @@ async fn cancelling_does_not_wait_for_the_stream() -> Result<()> {
     });
     let provider = grok(GrokOptions::new(subscription_logins(auth)))?
         .with_test_endpoints(&format!("{base}/responses"), &format!("{base}/token"))?;
+    let project = git_project();
     let agent = Agent::builder()
+        .project(project.path())
         .provider(provider)
         .model("grok/grok-4.3")
         .build()

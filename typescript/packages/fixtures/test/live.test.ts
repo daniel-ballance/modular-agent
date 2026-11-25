@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { anthropic } from "@modular-agent/anthropic";
 import { createAgent } from "@modular-agent/core";
@@ -13,13 +17,16 @@ for (const [make, key, modelVar, fallback] of [
   test(`live Provider: ${key}`, {
     skip: !enabled ? "set MODULAR_AGENT_LIVE=1 to opt in" : !process.env[key] ? `${key} is absent` : false,
     timeout: 120_000,
-  }, async () => {
+  }, async t => {
     const provider = make();
     const id = process.env[modelVar] ?? fallback;
     const info = provider.models().find(m => m.id === id);
     assert.ok(info, `${provider.id}/${id} is not in the installed catalog; choose a model with ${modelVar}`);
     const reasoning = info.thinking?.find(level => level !== "off") ?? (info.reasoning ? "low" : "off");
-    const agent = await createAgent({ providers: [provider], model: `${provider.id}/${id}`, tools: [tide],
+    const project = await mkdtemp(join(tmpdir(), "ma-test-project-"));
+    t.after(() => rm(project, { recursive: true, force: true }));
+    execFileSync("git", ["init", "-q", project]);
+    const agent = await createAgent({ project, providers: [provider], model: `${provider.id}/${id}`, tools: [tide],
       settings: { reasoning, maxSteps: 3, maxOutput: 512 } });
     try {
       const session = await agent.session();

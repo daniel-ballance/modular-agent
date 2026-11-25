@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from modular_agent import (
     ModelFailure,
@@ -43,10 +45,10 @@ class Beacon:
 
 @pytest.mark.parametrize("key", ["offline-key", "rejected"])
 async def test_beacon_streams_and_records_failures(
-    key: str, monkeypatch: pytest.MonkeyPatch
+    key: str, monkeypatch: pytest.MonkeyPatch, git_project: Path
 ) -> None:
     monkeypatch.setenv("BEACON_API_KEY", key)
-    async with create_agent(providers=[Beacon()]) as agent:
+    async with create_agent(project=git_project, providers=[Beacon()]) as agent:
         assert (await agent.models())[0]["id"] == "demo"
         session = await agent.session()
         pieces = [

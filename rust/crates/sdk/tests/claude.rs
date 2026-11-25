@@ -2,6 +2,10 @@ use futures_util::StreamExt;
 use modular_agent::{Agent, ClaudeOptions, Code, Outcome, Plugin, claude};
 use std::path::PathBuf;
 
+#[path = "fixtures/git_project.rs"]
+mod git_project;
+use git_project::git_project;
+
 const API_KEY_REASON: &str =
     "The fixture is using an API key from ANTHROPIC_API_KEY, not a Claude plan.";
 
@@ -11,7 +15,9 @@ async fn claude_runs_as_a_process_plugin_and_the_host_runs_its_tool() -> modular
         program: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude.cjs")),
     })?;
     assert!(provider.available().await);
+    let project = git_project();
     let agent = Agent::builder()
+        .project(project.path())
         .claude_provider(provider)
         .model("claude/claude-haiku-5-5")
         .tool(modular_agent::testing::fixtures::tide())
@@ -64,7 +70,9 @@ async fn a_claude_api_key_is_not_a_plan_sign_in() -> modular_agent::Result<()> {
         provider.unavailable_reason().await.as_deref(),
         Some(API_KEY_REASON)
     );
+    let project = git_project();
     let agent = Agent::builder()
+        .project(project.path())
         .claude_provider(provider)
         .model("claude/claude-haiku-5-5")
         .build()

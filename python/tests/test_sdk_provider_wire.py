@@ -56,11 +56,11 @@ def plugin(provider):
 
 @pytest.mark.parametrize("served", [False, True])
 @pytest.mark.parametrize("key", ["offline-key", "rejected"])
-async def test_provider_records_its_response_and_streams(served, key, monkeypatch):
+async def test_provider_records_its_response_and_streams(served, key, monkeypatch, git_project):
     monkeypatch.setenv("BEACON_API_KEY", key)
     process = ProcessPlugin([sys.executable, str(Path(__file__).resolve())])
     kwargs = {"process_plugins": [process]} if served else {"plugins": [plugin(Beacon())]}
-    async with create_agent(**kwargs) as agent:
+    async with create_agent(project=git_project, **kwargs) as agent:
         assert (await agent.models())[0]["id"] == "demo"
         session = await agent.session()
         chunks = [
@@ -98,9 +98,9 @@ async def test_sdk_provider_declaration_only_advertises_kept_state(served):
         assert value["liveSessions"] is False
 
 
-async def test_provider_refreshes_catalog_and_consults_readiness():
+async def test_provider_refreshes_catalog_and_consults_readiness(git_project):
     beacon = Beacon()
-    async with create_agent(providers=[beacon]) as agent:
+    async with create_agent(project=git_project, providers=[beacon]) as agent:
         assert [m["id"] for m in await agent.models()] == ["demo"]
         beacon.name = "new"
         beacon.changed()

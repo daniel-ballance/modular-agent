@@ -3,6 +3,10 @@ use futures_util::StreamExt;
 use modular_agent::{Agent, ApiKeyProvider, Outcome, Result, ToolStatus, anthropic, openai};
 use serde_json::json;
 
+#[path = "fixtures/git_project.rs"]
+mod git_project;
+use git_project::git_project;
+
 async fn check(
     id: &str,
     env_prefix: &str,
@@ -20,7 +24,9 @@ async fn check(
     let model = std::env::var(format!("MODULAR_AGENT_LIVE_{env_prefix}_MODEL"))
         .unwrap_or_else(|_| default_model.into());
     let model_ref = format!("{id}/{model}");
+    let project = git_project();
     let agent = Agent::builder()
+        .project(project.path())
         .provider(provider().model(&model, 32_768, 3072))
         .model(&model_ref)
         .tool(modular_agent::testing::fixtures::tide())
@@ -120,7 +126,9 @@ async fn chatgpt_live() -> Result<()> {
     let model =
         std::env::var("MODULAR_AGENT_LIVE_CHATGPT_MODEL").unwrap_or_else(|_| "gpt-6.1-sol".into());
     let model_ref = format!("chatgpt/{model}");
+    let project = git_project();
     let agent = Agent::builder()
+        .project(project.path())
         .provider(provider)
         .model(&model_ref)
         .tool(modular_agent::testing::fixtures::tide())
@@ -142,7 +150,9 @@ async fn grok_live() -> Result<()> {
     }
     let model =
         std::env::var("MODULAR_AGENT_LIVE_GROK_MODEL").unwrap_or_else(|_| "grok-4.7".into());
+    let project = git_project();
     let agent = Agent::builder()
+        .project(project.path())
         .provider(provider)
         .model(format!("grok/{model}"))
         .setting("maxOutput", json!(256))
@@ -175,7 +185,9 @@ async fn claude_live() -> Result<()> {
     let model = std::env::var("MODULAR_AGENT_LIVE_CLAUDE_MODEL")
         .unwrap_or_else(|_| "claude-haiku-5-5".into());
     let model_ref = format!("claude/{model}");
+    let project = git_project();
     let agent = Agent::builder()
+        .project(project.path())
         .claude_provider(provider)
         .model(&model_ref)
         .tool(modular_agent::testing::fixtures::tide())

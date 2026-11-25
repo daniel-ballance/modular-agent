@@ -11,6 +11,10 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 
+#[path = "fixtures/git_project.rs"]
+mod git_project;
+use git_project::git_project;
+
 mod subscription_support;
 use subscription_support::{Http, private_file};
 
@@ -253,8 +257,10 @@ async fn requests_and_locked_refresh_work_locally_and_over_the_binding() -> Resu
         let bearer = dir.path().join("service-token");
         private_file(&bearer, b"af712a1174815937db47ebb99cc64e83\n");
         let mut service = None;
+        let project = git_project();
         let builder = |model: &str| {
             Agent::builder()
+                .project(project.path())
                 .model(format!("chatgpt/{model}"))
                 .setting("reasoning", json!("minimal"))
         };
@@ -377,12 +383,14 @@ async fn invalid_grant_is_a_credentials_failure_and_changes_no_bytes() -> Result
             .with_test_endpoints(&http.url("/responses"), &http.url("/token"))?;
         let seen = Arc::new(Mutex::new(None));
         let capture = seen.clone();
-        let builder = Agent::builder().model("chatgpt/gpt-6.1-sol").plugin(
-            Plugin::new("capture").on_model_failed(move |p| {
+        let project = git_project();
+        let builder = Agent::builder()
+            .project(project.path())
+            .model("chatgpt/gpt-6.1-sol")
+            .plugin(Plugin::new("capture").on_model_failed(move |p| {
                 *capture.lock().unwrap() = Some(p.error);
                 async { Ok(modular_agent::ModelDecision::Stop) }
-            }),
-        );
+            }));
         let mut service = None;
         let agent = if served {
             let bearer = dir.path().join("service-token");

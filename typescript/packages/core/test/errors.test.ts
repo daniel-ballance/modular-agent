@@ -9,6 +9,7 @@ import {
   type ErrorCode,
 } from "@modular-agent/core";
 import { memoryEnvironment, overWire, testAgent } from "@modular-agent/core/testing";
+import { gitProject } from "./fixtures/git-project.js";
 
 async function scratch(t: TestContext) {
   const dir = await mkdtemp(join(tmpdir(), "sdk-errors-"));
@@ -123,7 +124,7 @@ for (const served of [false, true]) test(`job start without authority is invalid
       return "denied";
     },
   })] });
-  const agent = await createAgent({ severalActors: true, plugins: [served ? overWire(plugin) : plugin] });
+  const agent = await createAgent({ project: await gitProject(t), severalActors: true, plugins: [served ? overWire(plugin) : plugin] });
   t.after(() => agent.close());
   const session = await agent.session();
   await session.join({ id: "tool-user", kind: "user", rights: ["watch", "tools"] });

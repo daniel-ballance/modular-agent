@@ -97,7 +97,7 @@ async def test_session_prepare_installs_resources_before_start(tmp_path):
 
 
 @pytest.mark.parametrize("served", [False, True])
-async def test_a_late_answer_resumes_a_tool_in_a_new_turn(served):
+async def test_a_late_answer_resumes_a_tool_in_a_new_turn(served, git_project):
     async def ask(arguments, context):
         answer = await context.ask(
             {"kind": "text", "question": "Which file?"}, wait=0, then="leaveOpen"
@@ -112,6 +112,7 @@ async def test_a_late_answer_resumes_a_tool_in_a_new_turn(served):
         [{"toolCalls": [{"name": "ask_file", "input": {}}]}, {"text": "continued"}]
     )
     async with create_agent(
+        project=git_project,
         providers=[provider],
         plugins=[over_wire(plugin) if served else plugin],
         late_answers_start_turns=True,

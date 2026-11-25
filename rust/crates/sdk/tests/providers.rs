@@ -5,6 +5,10 @@ use tokio::{
     net::TcpListener,
 };
 
+#[path = "fixtures/git_project.rs"]
+mod git_project;
+use git_project::git_project;
+
 async fn fake(
     status: &str,
     kind: &str,
@@ -74,7 +78,9 @@ async fn mapped_body(
     if enrolled {
         provider = provider.model_with_input(id, 10_000, output, ["text", "image"]);
     }
+    let project = git_project();
     let mut builder = Agent::builder()
+        .project(project.path())
         .provider(provider.with_test_endpoint(&url)?)
         .model(format!("{vendor}/{id}"))
         .setting("maxOutput", json!(output));
@@ -222,7 +228,9 @@ async fn openai_responses_stream_offline() -> Result<()> {
         ],"usage":{"input_tokens":3,"output_tokens":1}}}),
     ]);
     let (url, server) = fake("200 OK", "text/event-stream", response).await;
+    let project = git_project();
     let agent = Agent::builder()
+        .project(project.path())
         .provider(openai().with_test_endpoint(&url)?)
         .model("openai/gpt-6-luna")
         .build()
@@ -247,7 +255,9 @@ async fn anthropic_messages_stream_offline() -> Result<()> {
         json!({"type":"message_stop"}),
     ]);
     let (url, server) = fake("200 OK", "text/event-stream", response).await;
+    let project = git_project();
     let agent = Agent::builder()
+        .project(project.path())
         .provider(anthropic().with_test_endpoint(&url)?)
         .model("anthropic/claude-sonnet-4-6")
         .build()
@@ -280,7 +290,9 @@ async fn credentials_rejected_is_a_failed_model_attempt() -> Result<()> {
         } else {
             openai()
         };
+        let project = git_project();
         let agent = Agent::builder()
+            .project(project.path())
             .model(if anthropic_vendor {
                 "anthropic/claude-sonnet-4-6"
             } else {

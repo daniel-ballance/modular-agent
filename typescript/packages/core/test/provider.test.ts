@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createAgent, definePlugin, defineProvider, environmentCredentials, type ModelInfo } from "../src/index.js";
 import { overWire } from "../src/testing.js";
+import { gitProject } from "./fixtures/git-project.js";
 
 for (const served of [false, true]) {
-  test(`Provider readiness, catalog changes, hooks and credentials (${served ? "served" : "local"})`, async () => {
+  test(`Provider readiness, catalog changes, hooks and credentials (${served ? "served" : "local"})`, async t => {
     const catalog: ModelInfo[] = [{ provider: "beacon", id: "demo", contextWindow: 4096, maxOutput: 256, input: ["text"], reasoning: false }];
     const calls: string[] = [];
     let ready = false;
@@ -26,7 +27,7 @@ for (const served of [false, true]) {
       r.on("provider.request", ({ request }) => { calls.push("request"); return { change: { ...request, systemPrompt: "Transformed" } }; });
       r.on("provider.response", ({ message }) => { calls.push(`response:${message.stop}`); });
     } });
-    const agent = await createAgent({ plugins: [served ? overWire(plugin) : plugin, hooks],
+    const agent = await createAgent({ project: await gitProject(t), plugins: [served ? overWire(plugin) : plugin, hooks],
       credentials: { ...environmentCredentials(), read: async id => id === "beacon" ? "test-credential" : undefined } });
     try {
       let changes = 0;

@@ -302,7 +302,7 @@ async def mounted(tmp_path, provider, served, model, runtime_kind, **options):
     ],
 )
 async def test_chatgpt_request_and_replay(
-    tmp_path, subscription_http, runtime_kind, served, model, identity, asked, expected
+    tmp_path, git_project, subscription_http, runtime_kind, served, model, identity, asked, expected
 ):
     seen = []
     failures = []
@@ -342,7 +342,13 @@ async def test_chatgpt_request_and_replay(
         "observe-failure", hooks={"model.failed": lambda d: failures.append(d["error"])}
     )
     async with mounted(
-        tmp_path, provider, served, f"chatgpt/{model}", runtime_kind, plugins=[observe]
+        tmp_path,
+        provider,
+        served,
+        f"chatgpt/{model}",
+        runtime_kind,
+        project=git_project,
+        plugins=[observe],
     ) as agent:
         session = await agent.session(settings={"reasoning": asked} if asked else {})
         assert (await session.prompt("First")).text == "Hello"
@@ -555,7 +561,7 @@ def _grok_stream():
 @pytest.mark.parametrize("served", [False, True], ids=["embedded", "served"])
 @pytest.mark.parametrize("model", ["grok-4.3", "fixture-unlisted"])
 async def test_grok_request_replay_and_refused_refresh(
-    tmp_path, subscription_http, runtime_kind, served, model
+    tmp_path, git_project, subscription_http, runtime_kind, served, model
 ):
     seen = []
     failures = []
@@ -589,7 +595,13 @@ async def test_grok_request_replay_and_refused_refresh(
         },
     )
     async with mounted(
-        tmp_path, provider, served, f"grok/{model}", runtime_kind, plugins=[observe]
+        tmp_path,
+        provider,
+        served,
+        f"grok/{model}",
+        runtime_kind,
+        project=git_project,
+        plugins=[observe],
     ) as agent:
         session = await agent.session(settings={"reasoning": "minimal", "maxOutput": 60000})
         assert (await session.prompt("First")).text == "Hello"
@@ -627,7 +639,7 @@ async def test_grok_request_replay_and_refused_refresh(
 @pytest.mark.loopback
 @pytest.mark.parametrize("served", [False, True], ids=["embedded", "served"])
 async def test_grok_concurrent_refresh_keeps_old_refresh_token(
-    tmp_path, monkeypatch, subscription_http, runtime_kind, served
+    tmp_path, git_project, monkeypatch, subscription_http, runtime_kind, served
 ):
     # Stop the first refresh at the HTTP boundary until the other Provider has
     # tried to acquire the same kernel lock. Neither request can race past it.
@@ -668,7 +680,7 @@ async def test_grok_concurrent_refresh_keeps_old_refresh_token(
 
     start = time.time_ns() // 1_000_000
     async with mounted(
-        tmp_path, grok(logins=logins), served, "grok/grok-4.7", runtime_kind
+        tmp_path, grok(logins=logins), served, "grok/grok-4.7", runtime_kind, project=git_project
     ) as agent:
         first_session, second_session = await agent.session(), await agent.session()
         async with asyncio.timeout(5), asyncio.TaskGroup() as tasks:

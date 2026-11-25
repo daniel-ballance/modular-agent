@@ -39,6 +39,16 @@ logs="$(mktemp -d "$TMPDIR/check-XXXXXX")" || exit 1
 printf 'Step logs: %s\n' "$logs"
 start_run=$SECONDS
 
+. "$repo/scripts/point-refs.sh"
+if ! point_refs >"$logs/refs-before"; then
+  echo "check.sh: cannot list refs/modular-agent/ in $repo; run it from a Git checkout" >&2
+  exit 1
+fi
+if ! worktree_roots >"$logs/worktrees-before"; then
+  echo "check.sh: cannot list the worktrees of $repo with git worktree list" >&2
+  exit 1
+fi
+
 step_limit=${MA_CHECK_STEP_LIMIT:-1800}
 kill_tree() { # pid: stop it and every process below it, deepest first
   local child
@@ -132,6 +142,7 @@ plan() {
   step docs "docs: state tests" node --test scripts/check-docs-state.test.mjs
   step docs "docs: review candidate tests" node --test scripts/docs-review.test.mjs
   step docs "docs: check slot tests" node --test scripts/check-slot.test.mjs
+  step docs "docs: point ref guard tests" node --test scripts/point-refs.test.mjs
 
   if $quick; then
     step rust "rust: SDK tests" bash -c "cd rust && mise exec -- cargo test -q -p modular-agent -p standard -- --test-threads=1"
@@ -211,6 +222,7 @@ else
   done
   plan shared
 fi
+selection=serial step shared "tests: no environment refs in the enclosing repository" check_test_refs
 if ! $all; then
   echo "(cross-language steps skipped: they need all four languages)"
 fi

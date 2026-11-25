@@ -13,6 +13,10 @@ use tokio::{
     process::{Child, Command},
 };
 
+#[path = "fixtures/git_project.rs"]
+mod git_project;
+use git_project::git_project;
+
 const EXECUTOR: &str = "picker";
 const ROUTE: &str = "swatch";
 const WAIT: Duration = Duration::from_secs(5);
@@ -87,7 +91,9 @@ fn entry<'a>(rows: &'a [Value], kind: &str) -> &'a Value {
 }
 
 async fn round_trip(builder: AgentBuilder) -> Result<String> {
+    let project = git_project();
     let agent = builder
+        .project(project.path())
         .interface_tools(sources(30_000))
         .plugin(Plugin::new("checked-report").on_tool_after(|_| async {
             Ok(ToolChange {
@@ -189,7 +195,9 @@ async fn a_new_connection_reports_once_and_continues_without_dispatch() -> Resul
 #[tokio::test]
 async fn expiry_or_cancellation_closes_a_started_call_as_unknown() -> Result<()> {
     for cancel in [false, true] {
+        let project = git_project();
         let agent = builder()
+            .project(project.path())
             .interface_tools(sources(if cancel { 30_000 } else { 300 }))
             .build()
             .await?;
@@ -227,7 +235,9 @@ async fn expiry_or_cancellation_closes_a_started_call_as_unknown() -> Result<()>
 #[tokio::test]
 async fn approval_denial_and_missing_advertisement_do_not_start_a_tool() -> Result<()> {
     for advertises in [false, true] {
+        let project = git_project();
         let agent = builder()
+            .project(project.path())
             .interface_tools(sources(30_000))
             .approval(Approval::All)
             .on_question(|_| async { Answer::Declined { reason: None } })
@@ -251,7 +261,8 @@ async fn approval_denial_and_missing_advertisement_do_not_start_a_tool() -> Resu
 
 #[tokio::test]
 async fn ordinary_agents_do_not_declare_the_feature() -> Result<()> {
-    let agent = builder().build().await?;
+    let project = git_project();
+    let agent = builder().project(project.path()).build().await?;
     let session = agent.session().await?;
     assert!(agent.declaration()?.get("interfaceTools").is_none());
     assert!(
@@ -532,7 +543,9 @@ async fn withheld_or_changed_executable_output_never_commits_a_start() -> Result
                 Ok(OutputDecision::Block)
             }
         });
+        let project = git_project();
         let agent = builder()
+            .project(project.path())
             .interface_tools(sources(30_000))
             .plugin(gate)
             .build()
@@ -564,7 +577,9 @@ async fn a_report_is_not_ready_until_the_origin_ends_and_rights_are_current() ->
             }
         }
     });
+    let project = git_project();
     let agent = builder()
+        .project(project.path())
         .interface_tools(sources(30_000))
         .plugin(gate)
         .build()

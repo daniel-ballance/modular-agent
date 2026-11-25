@@ -25,7 +25,7 @@ from modular_agent.testing import memory_environment, over_wire, scripted_provid
 
 
 @pytest.mark.parametrize("served", [False, True])
-async def test_typed_step_hook_and_stream(served):
+async def test_typed_step_hook_and_stream(served, git_project):
     seen = []
 
     async def before(payload: StepBefore, cx: HookContext) -> Change[JsonObject]:
@@ -41,6 +41,7 @@ async def test_typed_step_hook_and_stream(served):
 
     plugin = Plugin("typed", setup=setup)
     async with create_agent(
+        project=git_project,
         providers=[scripted_provider([{"text": "result"}])],
         plugins=[over_wire(plugin) if served else plugin],
     ) as agent:

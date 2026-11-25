@@ -29,8 +29,9 @@ async def test_only_one_proposal_wins_and_refused_key_is_reusable(scope):
         assert not (await loser.send("try again", "propose", key=losing_key)).duplicate
 
 
-async def test_capacity_refuses_model_attempt_without_dispatch():
+async def test_capacity_refuses_model_attempt_without_dispatch(git_project):
     async with create_agent(
+        project=git_project,
         providers=[scripted_provider([{"text": "unexpected"}])],
         resource_reservations={"session": {"calls": 0}},
     ) as agent:
@@ -41,7 +42,7 @@ async def test_capacity_refuses_model_attempt_without_dispatch():
         assert not any(e["kind"] == "modelRequest" for e in await session.history())
 
 
-async def test_over_capacity_call_list_is_replaced_before_recording():
+async def test_over_capacity_call_list_is_replaced_before_recording(git_project):
     script = [
         {
             "toolCalls": [{"name": "a", "input": {}}, {"name": "b", "input": {}}],
@@ -49,6 +50,7 @@ async def test_over_capacity_call_list_is_replaced_before_recording():
         }
     ]
     async with create_agent(
+        project=git_project,
         providers=[scripted_provider(script)],
         resource_reservations={"session": {"calls": 1}},
     ) as agent:
@@ -63,14 +65,14 @@ async def test_over_capacity_call_list_is_replaced_before_recording():
         assert response["message"]["usage"]["input"] == 3
 
 
-async def test_oversized_tool_result_still_records_terminal_call():
+async def test_oversized_tool_result_still_records_terminal_call(git_project):
     @tool
     async def large() -> str:
         """Return a result larger than the tool settlement budget."""
         return "x" * (64 * 1024 + 1)
 
     async with create_agent(
-        tools=[large], resource_reservations={"session": {"calls": 1}}
+        project=git_project, tools=[large], resource_reservations={"session": {"calls": 1}}
     ) as agent:
         session = await agent.session()
         with pytest.raises(AgentError) as too_large:

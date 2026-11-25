@@ -1,4 +1,6 @@
 import socket
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -57,6 +59,14 @@ def no_network(monkeypatch, request):
 
     monkeypatch.setattr(socket.socket, "connect", guarded(socket.socket.connect))
     monkeypatch.setattr(socket.socket, "connect_ex", guarded(socket.socket.connect_ex))
+
+
+@pytest.fixture
+def git_project(tmp_path: Path) -> Path:
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(["git", "init", "-q", str(project)], check=True)
+    return project
 
 
 @pytest.fixture

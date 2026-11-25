@@ -33,7 +33,9 @@ pytestmark = [
         ),
     ],
 )
-async def test_live_provider(provider_id, key_variable, model_variable, default_model, build):
+async def test_live_provider(
+    provider_id, key_variable, model_variable, default_model, build, git_project
+):
     if not os.getenv(key_variable):
         pytest.skip(f"{key_variable} is absent")
     model = os.getenv(model_variable, default_model)
@@ -41,7 +43,7 @@ async def test_live_provider(provider_id, key_variable, model_variable, default_
     [info] = provider.models()
     reasoning = next((level for level in info.get("thinking", []) if level != "off"), "off")
     async with create_agent(
-        providers=[provider], model=f"{provider_id}/{model}", tools=[tide]
+        project=git_project, providers=[provider], model=f"{provider_id}/{model}", tools=[tide]
     ) as agent:
         session = await agent.session()
         await session.set_setting("reasoning", reasoning)
@@ -75,7 +77,7 @@ async def test_live_provider(provider_id, key_variable, model_variable, default_
         ("claude", "claude-haiku-5-5"),
     ],
 )
-async def test_live_subscription(provider_id, default_model):
+async def test_live_subscription(provider_id, default_model, git_project):
     login_path = os.getenv("MODULAR_AGENT_LIVE_LOGINS")
     if not login_path:
         pytest.skip("MODULAR_AGENT_LIVE_LOGINS is absent")
@@ -89,7 +91,9 @@ async def test_live_subscription(provider_id, default_model):
         provider = claude(models=[model])
         if not await provider.available():
             pytest.skip(provider.unavailable_reason or "No Claude Code plan sign-in")
-    async with create_agent(providers=[provider], model=f"{provider_id}/{model}") as agent:
+    async with create_agent(
+        project=git_project, providers=[provider], model=f"{provider_id}/{model}"
+    ) as agent:
         session = await agent.session(settings={"maxOutput": 128})
         result = await session.prompt("Say hello in one sentence.")
         assert result.outcome is not None and result.outcome.kind == "completed"

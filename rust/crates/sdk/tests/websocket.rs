@@ -10,6 +10,10 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[path = "fixtures/git_project.rs"]
+mod git_project;
+use git_project::git_project;
+
 fn token(dir: &Path, name: &str, value: &str) -> PathBuf {
     let path = dir.join(name);
     writeln!(
@@ -425,8 +429,10 @@ async fn service_factory_creates_and_stops_one_instance_per_connection() -> modu
     .await?;
     assert_eq!(created.load(Ordering::SeqCst), 0);
     let mut agents = Vec::new();
+    let project = git_project();
     for (index, suffix) in [(1, "first"), (2, "second")] {
         let agent = Agent::builder()
+            .project(project.path())
             .service_plugins([
                 ServicePlugin::new(&service.url, &bearer).config(json!({"suffix": suffix}))
             ])

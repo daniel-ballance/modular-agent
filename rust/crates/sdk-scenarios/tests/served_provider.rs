@@ -6,6 +6,10 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+#[path = "../../sdk/tests/fixtures/git_project.rs"]
+mod git_project;
+use git_project::git_project;
+
 #[tokio::test]
 async fn serves_a_provider_over_stdio_and_streams_through_both_callbacks() -> Result<()> {
     let observed = Arc::new(AtomicBool::new(false));
@@ -28,7 +32,9 @@ async fn serves_a_provider_over_stdio_and_streams_through_both_callbacks() -> Re
                 Ok(())
             }
         });
+    let project = git_project();
     let agent = Agent::builder()
+        .project(project.path())
         .plugin(hooks)
         .process_plugin(
             ProcessPlugin::new([

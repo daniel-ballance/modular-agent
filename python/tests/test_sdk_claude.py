@@ -273,7 +273,9 @@ async def test_claude_uses_reported_catalog_and_passes_stream_pieces():
 
 @pytest.mark.loopback
 @pytest.mark.parametrize("served", [False, True], ids=["embedded", "served"])
-async def test_claude_host_runs_the_tool_and_replays_result(tmp_path, runtime_kind, served):
+async def test_claude_host_runs_the_tool_and_replays_result(
+    tmp_path, git_project, runtime_kind, served
+):
     model = "claude-sonnet-5-5"
     fixture = ClaudeFixture(
         callers=[
@@ -290,7 +292,13 @@ async def test_claude_host_runs_the_tool_and_replays_result(tmp_path, runtime_ki
     )
     provider = claude(client_factory=fixture)
     async with mounted(
-        tmp_path, provider, served, "claude/" + model, runtime_kind, tools=[tide]
+        tmp_path,
+        provider,
+        served,
+        "claude/" + model,
+        runtime_kind,
+        project=git_project,
+        tools=[tide],
     ) as agent:
         session = await agent.session(settings={"reasoning": "high"})
         result = await session.prompt("Tell me about the tide.")

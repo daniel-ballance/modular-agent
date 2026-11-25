@@ -195,7 +195,7 @@ async def test_host_service_config_and_environment(token_file, monkeypatch):
 
 
 @pytest.mark.parametrize("stall", [False, True])
-async def test_service_loss_settles_dispatched_tool(token_file, stall):
+async def test_service_loss_settles_dispatched_tool(token_file, stall, git_project):
     dispatched = asyncio.Event()
     pinged = asyncio.Event()
 
@@ -241,6 +241,7 @@ async def test_service_loss_settles_dispatched_tool(token_file, stall):
     url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}" if stall else server.url
     try:
         async with create_agent(
+            project=git_project,
             providers=[
                 scripted_provider(
                     [{"toolCalls": [{"name": "hold", "input": {}}]}, {"text": "done"}]

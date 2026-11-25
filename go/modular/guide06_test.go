@@ -107,6 +107,7 @@ func TestLoadServedBeaconProvider(t *testing.T) {
 	t.Setenv("MODULAR_AGENT_PLUGINS", "")
 	ctx := t.Context()
 	agent, err := modular.New(ctx,
+		modular.WithProject(gitProject(t)),
 		modular.WithProcessPlugin(modular.ProcessPlugin{
 			Command: []string{exe, "-test.run=^TestBeaconPluginProgram$"},
 			Env:     map[string]string{"BEACON_PLUGIN_TEST": "1"},
