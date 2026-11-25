@@ -109,7 +109,6 @@ export class InputRequests {
 		return this.recordedOpenQuestionEntries(s, s.branch()).map(readRequest);
 	}
 
-	/** The recorded request with this key, if it still matches the draft, with its answer when that answer can be reused. Without an answer the caller asks the request again. */
 	private recordedAnswer(s: Session, draft: BoundRequest, approval?: ApprovalBinding): { request: InputRequest; answer?: Answer } | undefined {
 		const branch = s.branch();
 		const entry = [...branch].reverse().find((e) => e.kind === "inputRequest" && !e.erased && readRequest(e).key === draft.key);
@@ -354,14 +353,12 @@ export class InputRequests {
 		return this.interfaces().filter((i) => i.present?.(s.id, request) !== false && (this.operations.actorRights(s, i.actorId).includes("watch") || this.mayAnswer(s, request, i.actorId)));
 	}
 
-	/** Recorded questions on the current branch that can take a late answer: those left open past their time limit, even while their own turn runs, those of open calls, and those of other turns. */
 	waitingRequests(s: Session): InputRequest[] {
 		const calls = new Set(this.operations.openCalls(s).map((c) => c.id));
 		return this.recordedOpenRequests(s).filter((r) => (s.waiting.has(r.id) || calls.has(r.toolCallId ?? "") || r.turnId !== s.running?.turnId)
 			&& !s.requests.has(r.id) && !s.lateAnswers.has(r.id) && (r.approvalWait !== "untilDeadline" || !!waitingApprovals(s).get(r.toolCallId!)?.end));
 	}
 
-	/** Answer a question that can take a late answer (see waitingRequests). The answer is recorded first; then the open calls carry on if they can. */
 	private async answerLate(s: Session, answer: Answer): Promise<{ accepted: boolean; reason?: string }> {
 		const request = this.waitingRequests(s).find((r) => r.id === answer.requestId);
 		if (!request || request.approvalWait) return { accepted: false, reason: "The request is closed or can no longer be answered" };
