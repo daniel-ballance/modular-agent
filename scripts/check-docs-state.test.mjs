@@ -47,8 +47,8 @@ function checkout(t) {
     index(...rows) {
       this.track(adrIndex, ["| ADR | Decision | Status | Rule |", "| --- | --- | --- | --- |", ...rows].join("\n"));
     },
-    check(failures = [], timeout = 0) {
-      const result = spawnSync(process.execPath, [checker, "--root", cwd], { cwd, encoding: "utf8", timeout });
+    check(failures = [], { timeout = 0, nodeArgs = [] } = {}) {
+      const result = spawnSync(process.execPath, [...nodeArgs, checker, "--root", cwd], { cwd, encoding: "utf8", timeout });
       const diagnostics = result.stderr.trim().split("\n").filter(Boolean);
       assert.equal(result.status, Number(failures.length > 0), result.stderr);
       assert.match(result.stdout, new RegExp(`Failures: ${failures.length}\\.$`, "m"));
@@ -340,7 +340,14 @@ test("deeply nested objects after a stale Node version are read in one pass", (t
   const repo = checkout(t);
   const deep = '{"k": '.repeat(20000) + "0" + "}".repeat(20000);
   repo.write(node, `{\n  "version": "0.2.0",\n  "metadata": ${deep}\n}\n`);
-  repo.check([`${node}:2: Package version`], 10_000);
+  repo.check([`${node}:2: Package version`], { timeout: 10_000 });
+});
+
+test("a long key with many children outside the pin groups costs no more than its text", (t) => {
+  const repo = checkout(t);
+  const children = Array.from({ length: 20000 }, (_, i) => `"k${i}": 0`).join(", ");
+  repo.write(node, `{\n  "version": "0.2.0",\n  "${"x".repeat(8192)}": { ${children} }\n}\n`);
+  repo.check([`${node}:2: Package version`], { timeout: 10_000, nodeArgs: ["--max-old-space-size=128"] });
 });
 
 test("Python pins are read from dependency arrays, not from other project strings", (t) => {

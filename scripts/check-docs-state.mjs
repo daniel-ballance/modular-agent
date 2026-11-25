@@ -199,8 +199,11 @@ function checkCargo(file, manifest, version) {
 
 // JSON.parse has no positions, so one pass over the text it accepted records the line of each
 // object key by its path. JSON.parse decodes each key, so "\/" and "\u002f" match "/", and the last
-// of duplicate keys wins, as in JSON.parse. Array elements hold null in the path. Pins are at most two
-// keys deep, so only those paths are kept; a deeper one would cost its whole path for each key.
+// of duplicate keys wins, as in JSON.parse. Array elements hold null in the path. Only the paths a pin
+// can have are kept: a top-level key, or a key inside one of the dependency groups. Storing any other
+// path would copy its parent key once per child.
+const nodeGroups = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
+
 function keyLines(text) {
   const lines = new Map();
   const path = [];
@@ -222,7 +225,7 @@ function keyLines(text) {
     else if (char === '"') {
       let end = at + 1;
       while (text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
-      if (expectKey && path.length <= 2) {
+      if (expectKey && (path.length === 1 || (path.length === 2 && nodeGroups.includes(path[0])))) {
         path[path.length - 1] = JSON.parse(text.slice(at, end + 1));
         lines.set(JSON.stringify(path), line);
       }
@@ -249,7 +252,7 @@ function checkNodePackage(file, text, version) {
     checkVersion(file, { line: value === undefined ? 1 : lineOf(path), value }, version, field);
   };
   check(["version"], pkg?.version);
-  for (const group of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
+  for (const group of nodeGroups) {
     for (const [name, pin] of Object.entries(pkg?.[group] ?? {})) {
       if (name.startsWith("@modular-agent/")) check([group, name], pin);
     }
