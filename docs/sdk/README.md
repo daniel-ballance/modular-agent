@@ -59,9 +59,3 @@ The third check is the swap matrix of the experiment, made part of every SDK's t
 The four SDKs share one version number, the revision of this specification. SDK 0.3 in any language implements SDK specification 0.3. Patch releases are each SDK's own. Implement the current normative documents and SDK scenarios from the same revision. Report the commit or tag tested and the binding versions implemented.
 
 Until 1.0, a minor version can break the API. From 1.0, a breaking change needs a major version in all four.
-
-## Dependencies on layer 1
-
-Some of what the SDK promises needs the specification to change first:
-
-- **A machine-readable schema.** The SDK's data types follow [Shared data](../bindings/data.md). They are hand-written until shared data has a JSON Schema to generate them from.

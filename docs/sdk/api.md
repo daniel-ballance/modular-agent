@@ -486,4 +486,4 @@ The SDK's data types are the [shared data](../bindings/data.md) shapes: Content 
 - keep unknown fields and unknown content parts when it stores or relays a shape;
 - represent each closed set of values, such as ToolStatus or a ModelError's kind, as the language's enumeration, with a way to keep an unknown value where shared data says to.
 
-The types will be generated from shared data's JSON Schema once it has one.
+Each SDK writes these types by hand. The [binding kits](../conformance.md#the-conformance-kits) check them on the wire. The [shared scenarios](testing.md#the-shared-scenarios) check that each SDK works with the other three's fixture plugins.
