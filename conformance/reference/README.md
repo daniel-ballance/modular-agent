@@ -1,6 +1,6 @@
 # Reference checks
 
-The 32 checks test whether an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs, its ACP and AG-UI responses and the telemetry it exports. So one set of checks covers all four implementations.
+The 33 checks test whether an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs, its ACP and AG-UI responses and the telemetry it exports. So one set of checks covers all four implementations.
 
 Install the shared OTLP receiver's dependencies from this directory: `npm ci --prefix ../telemetry`.
 
@@ -48,6 +48,7 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 | `sessions-service` | Over the TypeScript build's history service: the same listing for sessions `ma` made, then for copies written with chosen times. A session whose newest entry has an earlier time than an older entry sorts by the newest entry. Two sessions with the same last time follow in ID order, and `ma -c` reopens the first. Without the TypeScript build it is reported as skipped, not passed, and it fails for a language that `MODULAR_AGENT_REF_REQUIRE` requires |
 | `telemetry-export` | Export is off without an endpoint. With one, invocation and inference spans carry metadata only. Disabling the SDK stops export but leaves `telemetry: 1` in the declaration. |
 | `trace-trust` | An AG-UI or ACP work request continues the supplied trace only for an opted-in network token. The single-token shorthand starts a new trace. Stdio trusts the launcher unless disabled. A non-boolean policy value fails startup. |
+| `secret-answer-tty` | In a pseudo-terminal, `/answer REQUEST_ID` refuses an inline secret, reads the secret with echo off, stores it only in `auth.json` (absent from terminal output, history and logs), and restores echo afterwards. Uses `python3`'s `pty` module and skips if unavailable. |
 | `version` | `ma --version` names the implementation's language |
 
 The default endpoint assertion listens on `127.0.0.1:4318` inside a private Linux network namespace. It needs unprivileged `unshare -rn` and `ip` to bring up loopback. The runner reports a reason if it skips this assertion and still runs the rest of `telemetry-export`.
