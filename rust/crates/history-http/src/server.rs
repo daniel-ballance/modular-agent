@@ -28,6 +28,7 @@ use std::{
 };
 use subtle::ConstantTimeEq;
 
+mod leases;
 #[cfg(test)]
 mod tests;
 
@@ -197,24 +198,14 @@ pub struct SnapshotStore {
     hold: Option<Instant>,
     authoritative: bool,
     max_sessions: usize,
-    state: Mutex<State>,
-}
-struct State {
-    leases: HashMap<String, Grant>,
     // Reads and mutations share this lock. A new random epoch on startup
     // invalidates every old observation, even after an uncertain save.
-    revision: String,
+    revision: Mutex<String>,
+    leases: leases::Leases,
 }
-impl State {
-    fn advance(revision: &mut String) -> std::result::Result<(), Failure> {
-        *revision = nonce()?;
-        Ok(())
-    }
-}
-struct Grant {
-    token: String,
-    owner: String,
-    until: Instant,
+fn advance(revision: &mut String) -> std::result::Result<(), Failure> {
+    *revision = nonce()?;
+    Ok(())
 }
 struct Snapshot {
     metadata: Value,
@@ -268,10 +259,8 @@ impl SnapshotStore {
             hold,
             authoritative,
             max_sessions,
-            state: Mutex::new(State {
-                leases: HashMap::new(),
-                revision: nonce().map_err(|_| anyhow!("cannot generate history revision"))?,
-            }),
+            revision: Mutex::new(nonce().map_err(|_| anyhow!("cannot generate history revision"))?),
+            leases: leases::Leases::new(lease_ttl),
         })
     }
 
@@ -346,13 +335,14 @@ impl SnapshotStore {
         registry: Registry,
         revision: &mut String,
     ) -> Answer {
-        State::advance(revision)?;
+        advance(revision)?;
         control.settings["pendingErasureV1"] = json!(registry);
         self.store.save(&control).map_err(|_| Failure::Uncertain)?;
         Ok(json!({}))
     }
 
     fn publish(&self, session: &str, request: Publication, revision: &mut String) -> Answer {
+        let lease = json!(request.lease);
         let (control, mut registry) = self.registry()?;
         let targets = request.entry_ids.into_iter().collect();
         if let Some(intent) = registry.intents.iter().find(|i| i.id == request.intent_id) {
@@ -403,6 +393,7 @@ impl SnapshotStore {
         }
         let reply = json!(intent.published());
         registry.intents.push(intent);
+        self.leases.check(session, &lease)?;
         self.save_registry(control, registry, revision)?;
         Ok(reply)
     }
@@ -412,6 +403,7 @@ impl SnapshotStore {
         session: &str,
         intent: &str,
         record: &Snapshot,
+        lease: &Value,
         ids: Value,
         revision: &mut String,
     ) -> Answer {
@@ -458,6 +450,7 @@ impl SnapshotStore {
             }
         }
         if changed {
+            self.leases.check(session, lease)?;
             self.save_registry(control, registry, revision)
         } else {
             Ok(json!({}))
@@ -468,10 +461,13 @@ impl SnapshotStore {
         if !self.authoritative && !matches!(route, Route::Root) {
             return Err(Failure::unavailable());
         }
-        let mut state = self.state.lock().map_err(|_| Failure::unavailable())?;
-        let State { leases, revision } = &mut *state;
-        let now = Instant::now();
-        leases.retain(|_, lease| lease.until > now);
+        if let Route::Renew(ref id, ref token) = route
+            && self.leases.renew(id, token)?
+        {
+            return Ok(json!({"ttlMs":self.ttl_ms}));
+        }
+        let mut revision = self.revision.lock().map_err(|_| Failure::unavailable())?;
+        let revision = &mut *revision;
         let id = match route {
             Route::Root => {
                 return Ok(
@@ -542,7 +538,7 @@ impl SnapshotStore {
             {
                 return Err(Failure::unavailable());
             }
-            State::advance(revision)?;
+            advance(revision)?;
             self.save(
                 id,
                 Snapshot {
@@ -555,11 +551,7 @@ impl SnapshotStore {
         let mut record = self
             .load(id)?
             .ok_or_else(|| Failure::http(404, "unknown_session"))?;
-        let now = Instant::now();
-        leases.retain(|_, lease| lease.until > now);
-        let hold = self.hold.filter(|until| *until > now);
-        let active = leases.get_mut(id);
-        let ttl = Duration::from_millis(self.ttl_ms);
+        let hold = self.hold.filter(|until| *until > Instant::now());
         match op {
             Op::Get => page(
                 json!({"session":record.metadata}),
@@ -572,47 +564,27 @@ impl SnapshotStore {
                 if let Some(until) = hold {
                     return Err(Failure::held(until));
                 }
-                let owner = body["owner"].as_str().unwrap();
-                if let Some(grant) = active {
-                    if grant.owner != owner {
-                        return Err(Failure::held(grant.until));
-                    }
-                    return Ok(json!({"lease":grant.token,"ttlMs":self.ttl_ms}));
-                }
-                let token = nonce()?;
-                leases.insert(
-                    id.clone(),
-                    Grant {
-                        token: token.clone(),
-                        owner: owner.into(),
-                        until: Instant::now() + ttl,
-                    },
-                );
+                let token = self.leases.acquire(id, body["owner"].as_str().unwrap())?;
                 Ok(json!({"lease":token,"ttlMs":self.ttl_ms}))
             }
             Op::Renew => {
-                let Route::Renew(_, token) = route else {
+                let Route::Renew(_, ref token) = route else {
                     unreachable!()
                 };
-                let grant = active
-                    .filter(|g| g.token == token)
-                    .ok_or_else(Failure::lost)?;
-                grant.until = Instant::now() + ttl;
+                if !self.leases.renew(id, token)? {
+                    return Err(Failure::lost());
+                }
                 Ok(json!({"ttlMs":self.ttl_ms}))
             }
             Op::Release => {
                 let Route::Lease(_, ref token) = route else {
                     unreachable!()
                 };
-                if active.is_some_and(|g| g.token == *token) {
-                    leases.remove(id);
-                }
+                self.leases.release(id, token)?;
                 Ok(json!({}))
             }
             Op::Append => {
-                if !active.is_some_and(|g| body["lease"] == g.token) {
-                    return Err(Failure::lost());
-                }
+                self.leases.check(id, &body["lease"])?;
                 if let Some(guard) = &query.revision {
                     self.registry()?;
                     if guard != revision {
@@ -623,7 +595,8 @@ impl SnapshotStore {
                 let added = stage(&record, more.as_array().unwrap())?;
                 let kept = added.len();
                 if kept != 0 {
-                    State::advance(revision)?;
+                    self.leases.check(id, &body["lease"])?;
+                    advance(revision)?;
                     record.entries.extend(added);
                     self.save(id, record)?;
                 }
@@ -631,10 +604,8 @@ impl SnapshotStore {
             }
             Op::Erase => {
                 if let Some(token) = body.get("lease") {
-                    if !active.is_some_and(|g| *token == g.token) {
-                        return Err(Failure::lost());
-                    }
-                } else if let Some(until) = hold.or_else(|| active.map(|g| g.until)) {
+                    self.leases.check(id, token)?;
+                } else if let Some(until) = hold.or(self.leases.until(id)?) {
                     return Err(Failure::held(until));
                 }
                 let mut entries = record
@@ -654,15 +625,16 @@ impl SnapshotStore {
                     }
                 }
                 if changed {
-                    State::advance(revision)?;
+                    if let Some(token) = body.get("lease") {
+                        self.leases.check(id, token)?;
+                    }
+                    advance(revision)?;
                     self.save(id, record)?;
                 }
                 Ok(json!({"erased":erased}))
             }
             Op::Mark | Op::Complete => {
-                if !active.is_some_and(|g| body["lease"] == g.token) {
-                    return Err(Failure::lost());
-                }
+                self.leases.check(id, &body["lease"])?;
                 match route {
                     Route::Pending(_) => self.publish(
                         id,
@@ -670,7 +642,8 @@ impl SnapshotStore {
                         revision,
                     ),
                     Route::Complete(_, ref intent) => {
-                        self.complete(id, intent, &record, body["entryIds"].take(), revision)
+                        let ids = body["entryIds"].take();
+                        self.complete(id, intent, &record, &body["lease"], ids, revision)
                     }
                     _ => unreachable!(),
                 }
