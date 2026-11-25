@@ -1,4 +1,5 @@
-import { parseModel, untilAborted } from "./harness.js";
+import { untilAborted } from "./harness.js";
+import { parseModel } from "./settings.js";
 import type { Command, InputOptions } from "./plugin-api.js";
 import { TurnExecution, inputActors } from "./turn-execution.js";
 import { InterfaceToolRoutes } from "./interface-tool-routes.js";
@@ -11,7 +12,6 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { conversation, currentSpan, startOperation } from "./telemetry.js";
 import { Reservations } from "./reservations.js";
 import { type ReceiptOperation } from "./run-receipts.js";
-import { resolve } from "node:path";
 import { HookRegistry } from "./hooks.js";
 import { inputKeyScope, type InputReceipt, type InputTiming, type QueuedInput, Session } from "./session.js";
 import { type AgentEvent, type Authority, type EntryDraft, type HistoryEntry, type ModelAccess, type Provider, type Runtime, text, textOf } from "./types.js";

@@ -1,4 +1,4 @@
-import type { parseModel } from "./harness.js";
+import type { parseModel } from "./settings.js";
 import { ToolDispatch } from "./tool-dispatch.js";
 import { InterfaceToolRoutes } from "./interface-tool-routes.js";
 import { SessionErasure } from "./session-erasure.js";

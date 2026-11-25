@@ -1,4 +1,4 @@
-import { normalizeSetting } from "./harness.js";
+import { normalizeSetting } from "./settings.js";
 import type { Transaction, InputOptions } from "./plugin-api.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
 import { InputAdmission } from "./input-admission.js";

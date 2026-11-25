@@ -1,4 +1,4 @@
-import type { parseModel } from "./harness.js";
+import type { parseModel } from "./settings.js";
 import type { Command, PluginApi } from "./plugin-api.js";
 import { SessionAuthority } from "./authority.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
@@ -9,7 +9,6 @@ import { InputRequests } from "./input-requests.js";
 import { SessionErasure } from "./session-erasure.js";
 import { failure } from "./failure.js";
 import { Reservations, resourceBytes } from "./reservations.js";
-import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { Session } from "./session.js";
 import { type ModelAccess, type Provider, type ToolDefinition, type WorkingEnvironment } from "./types.js";

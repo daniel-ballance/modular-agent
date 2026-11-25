@@ -1,4 +1,5 @@
-import { ALL_AUTHORITY, normalizeSetting, type parseModel, type Tenant } from "./harness.js";
+import { ALL_AUTHORITY, type Tenant } from "./harness.js";
+import { normalizeSetting, type parseModel } from "./settings.js";
 import type { ListingViewer, SessionStartOptions, SessionPrepare, SessionSummary } from "./plugin-api.js";
 import { InputAdmission } from "./input-admission.js";
 import { TurnExecution, recordedSnapshot } from "./turn-execution.js";
@@ -16,7 +17,6 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { conversation, historyForPeer, startOperation, TURN_TRACE, type Operation } from "./telemetry.js";
 import { addAbortListener } from "node:events";
 import { createHash } from "node:crypto";
-import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { interruptedCalls } from "./view.js";
 import { HookRegistry } from "./hooks.js";

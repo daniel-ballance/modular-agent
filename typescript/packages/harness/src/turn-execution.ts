@@ -1,4 +1,4 @@
-import { lowerReasoning, parseModel, REASONING_LEVELS } from "./harness.js";
+import { lowerReasoning, parseModel, REASONING_LEVELS } from "./settings.js";
 import { TurnModelAccess } from "./model-access.js";
 import { ToolDispatch } from "./tool-dispatch.js";
 import type { TurnState } from "./turn-state.js";
@@ -36,7 +36,6 @@ export function recordedSnapshot(start: HistoryEntry): RecordedSnapshot {
 	}
 	return d;
 }
-
 
 interface TurnExecutionOperations {
 	intersectRights(...ceilings: readonly Authority[][]): Authority[];

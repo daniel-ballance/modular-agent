@@ -1,91 +1,52 @@
+import { parseModel } from "./settings.js";
 import { SessionEnvironment } from "./working-environment.js";
 import { Declarations } from "./declaration.js";
-import type { Command, FollowOptions, ListingViewer, Plugin, PluginApi, SessionPrepare, SessionStartOptions } from "./plugin-api.js";
+import type { Command, FollowOptions, Plugin, PluginApi, SessionPrepare, SessionStartOptions } from "./plugin-api.js";
 import { Commands } from "./commands.js";
-import { SessionAuthority, readTenants, intersectRights, type TenantInfo } from "./authority.js";
+import { SessionAuthority, readTenants, intersectRights } from "./authority.js";
 import { WorkReservations } from "./work-reservations.js";
 import { HistoryCommit } from "./history-commit.js";
-import { SessionLifecycle, actorJoined } from "./session-lifecycle.js";
+import { SessionLifecycle } from "./session-lifecycle.js";
 import { InputAdmission } from "./input-admission.js";
-import { TurnExecution, recordedSnapshot, tokenCount, inputActors } from "./turn-execution.js";
+import { TurnExecution } from "./turn-execution.js";
 import { TurnModelAccess } from "./model-access.js";
 import { ToolDispatch } from "./tool-dispatch.js";
-import type { TurnState } from "./turn-state.js";
-import { shapeViolation } from "./result-shape.js";
-import { InterfaceToolRoutes, type InterfaceConnection } from "./interface-tool-routes.js";
-import { connectionRights, intersectConnectionRights, type ConnectionRights } from "./connection-authority.js";
-import { InputRequests, readRequest } from "./input-requests.js";
-import { Jobs, type JobStart, type KeptJob } from "./jobs.js";
+import { InterfaceToolRoutes } from "./interface-tool-routes.js";
+import { connectionRights } from "./connection-authority.js";
+import { InputRequests } from "./input-requests.js";
+import { Jobs } from "./jobs.js";
 import { SessionErasure } from "./session-erasure.js";
 import { ApprovalReconciliation } from "./approval-reconciliation.js";
-import { failure, turnLimit } from "./failure.js";
-import { sameJson, waitingApprovals, type ApprovalBinding, type ApprovalProof, type ApprovalDelivery, type ApprovalRoute, type WaitingApproval } from "./waiting-approval.js";
+import { failure } from "./failure.js";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { activeOperation, carrier, conversation, currentSpan, historyForPeer, observeInference, readTrace, safeName, startOperation, telemetryEvent, toolAttributes, TURN_TRACE, withTrace, type Operation } from "./telemetry.js";
+import { safeName } from "./telemetry.js";
 import { Follower } from "./output-gate.js";
-import { Reservations, resourceBytes, reservationLimits, type ReservationOptions } from "./reservations.js";
+import { Reservations, reservationLimits, type ReservationOptions } from "./reservations.js";
 import { RunReceipts, type ReceiptOperation } from "./run-receipts.js";
 import { addAbortListener } from "node:events";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import { isDeepStrictEqual } from "node:util";
-import { interruptedCalls, modelView, pendingToolCalls, restoreAnsweredStep, withoutProviderData } from "./view.js";
 import { HookRegistry } from "./hooks.js";
-import { INTERFACE_HANDOFF, INTERFACE_SOURCE, handoffRecords, isJson, sameDefinition, validReportContent,
-	type HandoffData, type HandoffRecord, type InterfaceToolConnection, type InterfaceToolConnectionOptions,
-	type InterfaceToolHandoff, type InterfaceToolReceipt, type InterfaceToolReport, type InterfaceToolSource } from "./interface-tools.js";
-import { inputIdOf, inputKeyScope, type InputReceipt, type InputTiming, type QueuedInput, Session } from "./session.js";
+import { INTERFACE_SOURCE, type InterfaceToolConnection, type InterfaceToolConnectionOptions, type InterfaceToolSource } from "./interface-tools.js";
+import { Session } from "./session.js";
 import {
-	interruptedNote,
 	type Actor,
 	type AgentEvent,
-	type Answer,
-	type AssistantMessage,
 	type Authority,
 	type Configuration,
-	type ContentPart,
 	type Declaration,
-	type CredentialStore,
-	type SecretScope,
 	type EntryDraft,
 	type GateResult,
-	type HandlerOrder,
 	type HistoryEntry,
 	type HistoryStore,
 	type HookRule,
-	type InputRequest,
-	type InputRequestDraft,
-	type InterruptedTurn,
 	type InterfaceCapability,
-	type Job,
-	type JobState,
 	type ModelAccess,
 	type ModelInfo,
-	type ModelMessage,
-	type ModelRequest,
-	type OutputAnswer,
-	type OutputPayload,
 	type Provider,
 	type Runtime,
-	type RuntimeHost,
-	type SessionInterruptionReason,
-	type StoredSession,
-	type ToolCall,
 	type ToolDefinition,
-	type ToolPending,
-	type ToolResult,
 	type ToolSource,
-	type TurnOutcome,
-	type TurnSettings,
-	type TurnSnapshot,
-	type Usage,
-	type WorkingEnvironment,
-	addUsage,
-	isPending,
-	isToolCall,
-	text,
-	textOf,
-	zeroUsage,
 } from "./types.js";
 
 export interface HarnessOptions { receiptDir?:string; approvalCoversNested?: boolean; agentName?: string; project: string; home: string; now?: () => number; newId?: () => string; questionsOutlastTurns?: boolean; settingsDuringTurn?: "nextTurn" | "refused"; jobReportsStartTurns?: boolean; rejectUnknownModel?: boolean; resourceReservations?: ReservationOptions; tenants?: Record<string, Tenant> | null }
@@ -492,8 +453,6 @@ export class Harness {
 		h("provider.piece", "observe", "provider");
 	}
 
-	// ---------- hosting ----------
-
 	async load(plugins: Plugin[]): Promise<void> {
 		const replaced = new Set(plugins.map((p) => p.replaces).filter((r): r is string => !!r));
 		for (const plugin of plugins) {
@@ -731,8 +690,6 @@ export class Harness {
 		};
 	}
 
-	// ---------- capabilities ----------
-
 	/**
 	 * Items one plugin deliberately takes over from the others: "working-environment",
 	 * "provider:<id>", "tool:<name>" or "command:<name>", mapped to the plugin that owns
@@ -773,8 +730,6 @@ export class Harness {
 		return !!this.use(item);
 	}
 
-	// ---------- events ----------
-
 	private emit(session: string | Session, type: string, data: any, source: string, ids?: Partial<AgentEvent>): void {
 		const sessionId = typeof session === "string" ? session : session.id;
 		const s = this.sessions.get(sessionId);
@@ -799,8 +754,6 @@ export class Harness {
 		this.problems.push({ plugin, where, error: message });
 		this.emit("", "plugin.problem", { plugin, where, error: message }, "harness");
 	}
-
-	// ---------- following, through the output gate ----------
 
 	private pluginFollowers: Follower[] = [];
 	private eventViews = new WeakMap<AgentEvent, { session: Session; epoch: number }>();
@@ -837,8 +790,6 @@ export class Harness {
 		if (!follower.closed) s.followers.add(follower);
 		return Object.assign(() => { s.followers.delete(follower); follower.disconnect(); }, { idle: () => follower.idle() });
 	}
-
-	// ---------- sessions ----------
 
 	resourceLimits() { return structuredClone(this.reservations.limits); }
 
@@ -898,8 +849,6 @@ export class Harness {
 	closeSession(id: string, actorId?: string, delegatedBy?: string, authority?: readonly Authority[]): Promise<void> {
 		return this.lifecycle.closeSession(id, actorId, delegatedBy, authority);
 	}
-
-	// ---------- the record ----------
 
 	/** Commit drafts to the session. All are kept, or none are. */
 	commit(s: Session, drafts: EntryDraft[], pluginRecord = false, guard?: () => boolean | Promise<boolean>): Promise<HistoryEntry[]> {
@@ -1025,14 +974,6 @@ export class Harness {
 }
 
 /** One recipient following a session, through the output gate. */
-export function parseModel(value: unknown): { provider: string; id: string } | undefined {
-	if (typeof value === "string" && value.includes("/")) {
-		const i = value.indexOf("/");
-		return { provider: value.slice(0, i), id: value.slice(i + 1) };
-	}
-	if (value && typeof value === "object" && "provider" in value && "id" in value) return value as { provider: string; id: string };
-	return undefined;
-}
 
 /** Wait for work against one writer generation, independently of event delivery. */
 export async function untilAborted<T>(signal: AbortSignal, work: () => Promise<T>): Promise<T> {
@@ -1044,33 +985,6 @@ export async function untilAborted<T>(signal: AbortSignal, work: () => Promise<T
 			return work();
 		}).then(resolve, reject).finally(() => subscription[Symbol.dispose]());
 	});
-}
-
-
-export const REASONING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
-
-export function thinkingLevels(model?: ModelInfo): string[] {
-	return REASONING_LEVELS.filter(level => model?.thinking?.includes(level) === true);
-}
-
-export function lowerReasoning(value: unknown, model?: ModelInfo): string | undefined {
-	if (typeof value !== "string" || value === "default") return undefined;
-	if (!model) return value;
-	const index = REASONING_LEVELS.findIndex((level) => level === value);
-	return thinkingLevels(model).findLast((level) => REASONING_LEVELS.findIndex((known) => known === level) <= index);
-}
-
-export function normalizeSetting({ key, value }: { key: string; value: unknown }): { key: string; value: unknown } {
-	if (key === "approvalPolicy" || key === "approval") return { key: "approval", value: ["off", "ask", "all", "never"].includes(String(value)) ? value : "never" };
-	if (key === "thinking") return { key: "reasoning", value };
-	if (key === "model") return { key, value: parseModel(value) ?? null };
-	if (key === "settings" && value && typeof value === "object") {
-		return { key, value: Object.fromEntries(Object.entries(value).map(([key, value]) => {
-			const setting = normalizeSetting({ key, value });
-			return [setting.key, setting.value];
-		})) };
-	}
-	return { key, value: value ?? null };
 }
 
 export type { GateResult };
