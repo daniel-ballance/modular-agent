@@ -11,7 +11,6 @@
   "rust/crates/agent-api/src/portable.rs": 1098,
   "rust/crates/agent-base/tests/plugin_binding.rs": 1998,
   "rust/crates/agent-harness/src/interface_tools.rs": 1268,
-  "rust/crates/agent-harness/src/lib.rs": 3913,
   "rust/crates/history-http/src/lib.rs": 1286,
   "rust/crates/history-http/src/server.rs": 1619,
   "rust/crates/plugin-stdio/src/host.rs": 2394,
