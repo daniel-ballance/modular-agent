@@ -48,20 +48,41 @@ if ! point_refs >"$logs/refs-before"; then
 fi
 
 # Worktrees share one ref store, so another checkout's run can add points while this one runs.
-# A point commit names its project; only points saved for a project inside this checkout count.
+# Each point commit names its project in a `project:` trailer. A new point counts only when Git
+# says that project lies in this worktree; a sibling or nested worktree, a missing trailer or
+# more than one is not this run's.
+point_owner() { # project: print the top level of the worktree holding project, or nothing
+  local dir=$1
+  until [ -d "$dir" ]; do
+    [ "$dir" = / ] || [ -z "$dir" ] && return 0
+    dir=$(dirname -- "$dir")
+  done
+  git -C "$dir" rev-parse --show-toplevel 2>/dev/null
+}
+
 check_test_refs() {
-  local root
+  local root ref sha record project owner
+  local -A projects=() owners=()
   root="$(cd "$repo" && pwd -P)" || return
   point_refs >"$logs/refs-after" || return
   LC_ALL=C comm -13 "$logs/refs-before" "$logs/refs-after" >"$logs/refs-new" || return
   : >"$logs/refs-added"
   [ -s "$logs/refs-new" ] || return 0
-  cut -d' ' -f2 "$logs/refs-new" | git log --no-walk=unsorted --stdin --format='%x01%H%n%B' |
-    awk -v root="$root" '
-      /^\001/ { sha = substr($0, 2); next }
-      /^project: / { project = substr($0, 10); if (project == root || index(project, root "/") == 1) print sha }
-    ' >"$logs/refs-ours" || return
-  awk 'NR == FNR { ours[$1]; next } $2 in ours' "$logs/refs-ours" "$logs/refs-new" >"$logs/refs-added" || return
+  cut -d' ' -f2 "$logs/refs-new" |
+    git log --no-walk=unsorted --stdin -z --format='%H %(trailers:key=project,valueonly,separator=%x01)' \
+      >"$logs/refs-projects" || return
+  while IFS= read -r -d '' record; do
+    projects[${record%% *}]=${record#* }
+  done <"$logs/refs-projects"
+  while read -r ref sha; do
+    project=${projects[$sha]-}
+    [ -n "$project" ] && [[ $project != *[$'\n\001']* ]] || continue
+    if [ -z "${owners[$project]+set}" ]; then
+      owner=$(point_owner "$project")
+      owners[$project]=$([ -n "$owner" ] && cd "$owner" 2>/dev/null && pwd -P)
+    fi
+    [ "${owners[$project]}" = "$root" ] && printf '%s %s\n' "$ref" "$sha" >>"$logs/refs-added"
+  done <"$logs/refs-new"
   if [ -s "$logs/refs-added" ]; then
     printf 'Tests added %s refs under refs/modular-agent/ to the enclosing repository. See %s\n' \
       "$(wc -l <"$logs/refs-added")" "$logs/refs-added" >&2
