@@ -15,7 +15,9 @@ Open work lives only in GitHub Issues. Read `gh issue list` before you start. Ev
 - Work in parallel only on files that no open pull request changes. If yours overlap one, wait for it to land or stack on it.
 - `scripts/check.sh` and `scripts/stress.sh` wait for a free check slot on the machine by themselves. Leave `MA_CHECK_SLOTS` unset. Stop a run with `systemctl --user stop UNIT`.
 - Delegates keep scratch and worktrees in their own subfolder of `~/.cache/ma-std-tmp/`, not `/tmp`, and delete only that subfolder before they report. Never delete the shared folder, `check-slot.sh` or `slots/`. Never run tests under `git rebase -x`, `git bisect run` or anything else that exports `GIT_DIR`.
-- A gap, finding or follow-up you find becomes an issue, with the `finding`, `layer:` and `lang:` labels that apply. It never becomes a README section, a TODO comment or a chat note.
+- A gap, finding or follow-up that a user, a real repository or a real run can hit becomes an issue, with the `finding`, `layer:` and `lang:` labels that apply. It never becomes a README section, a TODO comment or a chat note. Search the open issues first and comment on a matching one instead of filing another. A finding that only contrived input reaches is a non-blocking note in the verdict, not an issue.
+- Give every new issue a milestone: the current one only if its "Done when" needs the issue, otherwise the next one.
+- A step that misses a deadline under machine load and passes when rerun alone goes on #154 as a comment, not a new issue. `CONTRIBUTING.md` ("Checking a change") says when such a rerun lets a pull request land.
 - A decision that outlives your session goes into an issue comment, an ADR or the document it changes.
 - Learn a lesson once. When a rule was broken, a review finding repeated or a run went wrong, write the lesson down before you finish: one line here if every agent needs it, the detail in `CONTRIBUTING.md`, or a check in `scripts/` when the rule is exact. An issue comment or chat note alone is lost to the next agent.
 - Move the issue's Status on the GitHub Project: In progress when its branch exists, In review when its pull request is open.
