@@ -180,16 +180,16 @@ With a state plugin, set `StatePlugin` and supply its current revision and JSON 
 
 ### Remaining ADR 0030 work
 
+Tracked in #19.
+
 - The Go ledger charges queued input and output in the Harness, ACP attachment caches, and SDK event and prompt streams. It still does not bound every transport queue, open session, or connection. Logical storage accounts for portable encoded records and known obligations; it does not count all native metadata and sidecars or reserve physical disk. Not all terminal write paths use bounded records, notably recovery and unusually large turn output. The SDK does not yet prove settlement at every store and transport limit.
 - The ACP output gate and update handoff recheck authority and erasure. The transport can queue an already checked reply; Go does not yet recheck inside the ACP library's final write queue. Direct tools and commands recheck after preparation, but there is not a single atomic barrier for every callback or external effect.
 - The dedicated Go history service implements the optional `pendingErasure: 1` profile. Keep all participating readers and writers on a coordinated service. A file/snapshot adapter that can have writers outside the service lock does not offer HTTP erasure coordination. Existing raw Go service stores without a registry do not advertise it; do not initialize an empty registry to recover missing state. The operator must fence restores. The registry blocks stale copy publication and new views. It does not serialize an external dispatch or a transport write already in progress with intent publication.
 - The Harness reconciles on acquire or authorized use and retains Provider deletion debt across restart. It has no autonomous sweep of unopened sessions. Interrupted work is settled without Runtime replay; unconfirmed physical job cleanup is recorded, not asserted. A held destination with an active job still needs its writer to stop the job or yield the lease. The kit passed **18/18** on each launcher in isolated runs. One concurrent run lost the writer before reaching the third injected fault on each launcher (**13/14** each); the cause was not established. Fault-injection failures now report the phase and recent history proxy timing and status without recording lease tokens or entry contents. A separate regression test shows that a blocked history response could prevent another session's lease from renewing. Valid renewals on the file-backed history service no longer wait for storage operations.
 
-### Specification findings
-
-None open.
-
 ### Known gaps
+
+Tracked in #34.
 
 One project-notes run reported `session interrupted; reopen to recover` during its ordinary scripted turn. The final run completed both cases, and all six ops-desk cases passed. The interruption did not recur in the diagnostic run; its cause is unresolved. No timeout or retry behavior was changed.
 

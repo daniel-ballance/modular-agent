@@ -210,6 +210,8 @@ The Harness declares `telemetry: 1`, whether export is installed or not. Set `Ag
 
 ## Findings for the SDK specification
 
+Tracked in #17. ADR 0030 implementation work is tracked in #19.
+
 - **[Placement, plugin environment scope](../../../docs/sdk/placement.md):** Add “A single-token Rust plugin listener serves one operator-assigned host trust scope. For multiple authenticated scopes, use the named-caller factory. Set each environment's exact project roots outside client control. Use independent factories, retained state, credentials and confinement for isolated hosts. A callback invoked by two connections may share captured state only if the operator intentionally provided shared trusted code.” The base conformance plugin also accepts `--serve-plugin --listen ADDR --host-policy FILE`. Give it a JSON list of `{ "tokenFile": "…", "project": "…", "state": "…" }` entries with distinct credentials and nonoverlapping existing project and state directories. Relative paths resolve beside the policy. The host's `home` does not choose retained state.
 
 - **[Authority and ACP](../../../docs/bindings/acp.md#authorization):** A Rust listener shares the open writer and tracks presence by route. It checks watch authority again as ACP frames leave the binding. Standard permission and form RPCs still address the authenticated principal; represented members answer through the extension. The socket writer and the pending registry do not share a transaction. Proposed replacement for the delivery cutoff: “Recheck authorization and freshness before handing content to the transport. If the transport queues that content, it MUST repeat the check before the first byte leaves the queue. If either check is unavailable, withhold the content and settle the protocol waiter without content.”
@@ -224,6 +226,8 @@ The Harness declares `telemetry: 1`, whether export is installed or not. Set `Ag
 - **[API, configuration and ACP](../../../docs/sdk/api.md#the-agent):** Replace “Project settings supply defaults for new sessions, not replacements on reopen.” with “Before invoking a factory that loads project-selected parts, consult the operator's configuration source for project trust. `trusted(project)` reads that decision; ACP's trust operation, where offered, changes it under operator authority. Project settings supply defaults for new sessions, not replacements on reopen.”
 
 ## Remaining
+
+Tracked in #38.
 
 - Commands receive exec output in their result, not as a standard `toolOutput`: the command has no tool call ID. A separate event shape would be needed to report that progress to followers.
 - `ModelRequest` and `AssistantMessage` still wrap shared JSON rather than representing all standardized fields as Rust structs. ACP trust lookup remains opt-in for composition factories; a fixed-project Agent has already loaded its plugins.

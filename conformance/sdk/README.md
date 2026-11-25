@@ -75,4 +75,6 @@ Check existing `count` against the actual counter file, including while a writer
 
 ## Proposed, not yet written
 
+Tracked in #31.
+
 - **queued-cancel:** an input queued `after` a held call, then cancel, then a retry with the same key returns `handedBack` without another turn. Needs receipt expectations in the format.

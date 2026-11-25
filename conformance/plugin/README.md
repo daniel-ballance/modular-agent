@@ -93,7 +93,3 @@ The [ACP kit](../acp/README.md) checks the host side:
 Use the ACP kit's `--plugin-checks` with the `hooks` part from another build for an interoperability run. The probe, recovery and jobs programs are test fixtures, not production plugins.
 
 The kit tests selected transcripts, not arbitrary schemas, credential handling, credential-bearing Providers, tenant separation, or reliable cleanup of unconfirmed external effects. Use separate acceptance tests for these. A pass is not proof of [conformance](../../docs/conformance.md#what-conforms).
-
-## Findings
-
-None open.

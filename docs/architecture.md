@@ -156,7 +156,7 @@ A **hook point** is a place for a plugin to observe, change or stop an operation
 
 ## Waiting for an answer
 
-An **input request** asks an actor to approve, choose, type, sign in or give a secret. Seeing a question does not imply eligibility to answer. A turn can wait for an answer. An eligible non-approval question can keep a call open past the turn if the build declares support. Once the group of questions closes, a continuation can rerun only unsettled question-backed calls through their checks. An answer is not a tool result. The proposed [Interface-run tool rules](contracts.md#interface-run-tools) also let an actor's Interface return the result of a handed-off call. The continuation uses that result without running the call again. A question interrupted inside a turn follows a different recovery path. See [Questions](contracts.md#questions), [Secrets](contracts.md#secrets) and [Tool dispatch](contracts.md#tool-dispatch).
+An **input request** asks an actor to approve, choose, type, sign in or give a secret. Seeing a question does not imply eligibility to answer. A turn can wait for an answer. An eligible non-approval question can keep a call open past the turn if the build declares support. Once the group of questions closes, a continuation can rerun only unsettled question-backed calls through their checks. An answer is not a tool result. The [Interface-run tool rules](contracts.md#interface-run-tools) also let an actor's Interface return the result of a handed-off call. The continuation uses that result without running the call again. A question interrupted inside a turn follows a different recovery path. See [Questions](contracts.md#questions), [Secrets](contracts.md#secrets) and [Tool dispatch](contracts.md#tool-dispatch).
 
 ## Jobs
 

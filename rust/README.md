@@ -178,6 +178,8 @@ MODULAR_AGENT_DATA_DIR="$scratch" MODULAR_AGENT_SCRIPT="$scratch/script.json" \
 
 ## Known gaps
 
+Tracked in #37.
+
 - **Claude:** The sidecar must be installed separately. `ma --acp` loads it when the launch settings or the reopened session choose a Claude model, not when a client later switches a session that was composed without Claude. Claude Code starts per request and adds some text of its own; see the [sidecar's gaps](../typescript/packages/claude/README.md#known-gaps-and-open-problems). This migration did not exercise the sidecar with a real model.
 - **Images:** They are attached as read, up to 4.5 MiB. They are not resized.
 - **MCP:** tools only, no OAuth negotiation. The official MCP plugin's changing catalog is local to this agent; the SDK does not yet serve that plugin over stdio. It can still connect to remote MCP servers.
@@ -185,6 +187,8 @@ MODULAR_AGENT_DATA_DIR="$scratch" MODULAR_AGENT_SCRIPT="$scratch/script.json" \
 - **Credential staging:** the Rust base stores a named answer directly; it does not implement the full staged-secret transaction.
 
 ## Findings for docs/reference and docs/sdk
+
+Tracked in #16.
 
 These are proposed edits; the shared documents are unchanged in this branch.
 
@@ -196,9 +200,11 @@ These are proposed edits; the shared documents are unchanged in this branch.
 - **[`docs/sdk`, Hooks](../docs/sdk/api.md#hooks):** Add to `turn.before`: “A contribution may name the history entry ids it used in `sources`. An empty list means the contribution did not use session history. When omitted, the agent conservatively treats the contribution as derived from the current history.”
 - **[`docs/sdk`, Working environment](../docs/sdk/api.md#contexts):** Add: “The tool environment exposes byte reads and writes, directory listing and a command timeout. Command output includes exit code, status and whether it timed out. A native ignore-aware file walk is optional and in-process only; a served file tool may fall back to a command. Shared content parts, including images, are preserved in ToolOutput and ToolResult.”
 
-## Where the specification was silent
+<a id="where-the-specification-was-silent"></a>
 
-Building this turned up seven places where edition 3 was silent. They are now the edition 4 draft rules, in [ADR 0023](../docs/adr/0023-edition-4-draft.md), and this build implements all of them:
+## Rules added in edition 4
+
+Building `ma` exposed seven cases that edition 3 did not cover. [ADR 0023](../docs/adr/0023-edition-4-draft.md) records the edition 4 rules. This build implements all seven:
 
 | Rule | Where it lives here |
 |---|---|

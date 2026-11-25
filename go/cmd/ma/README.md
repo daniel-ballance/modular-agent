@@ -108,11 +108,15 @@ scripts/websocket-kits.sh go
 
 ## Known gaps
 
+Tracked in #32.
+
 - `find` uses `git ls-files` where Git can read a worktree and falls back to `find` otherwise. It does not interpret `.gitignore` outside a Git worktree. The existing SDK command environment is required for this tool. Very long command output is held by that environment before being cut and spilled.
 - The SDK's question handler supports in-turn text and choice answers. `auth.json` preserves named answers written by Rust, but this configuration does not store new secret answers. The SDK's question tool keeps its existing definition, which is not word-for-word the Rust question tool.
 - Only offline fixtures checked the subscription protocols in this round. ChatGPT and Grok streams honor request cancellation and a response-header timeout; a quiet stream after headers has no independent idle timeout.
 
 ## Findings for docs/reference and docs/sdk
+
+Tracked in #33.
 
 The base ACP server published the SDK's declaration but went straight to Harness operations for proposed input, joining another actor, changing the session limit and querying the tenant. It now checks the session declaration first and returns `not_supported` where appropriate, leaving `proposals`, `release` and `withdraw` usable for parked job reports. The base declares all three features true and still passes the positive checks.
 

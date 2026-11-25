@@ -1,6 +1,10 @@
 # The SDK specification
 
-**Status: 0.1, accepted** ([ADR 0027](../adr/0027-sdk-0-1-and-edition-4.md)). All four SDKs exist: [Rust](../../rust/crates/sdk/README.md), [TypeScript](../../typescript/packages/core/README.md), [Go](../../go/modular/README.md) and [Python](../../python/SDK.md). Every SDK's runner passes all eleven [shared scenarios](../../conformance/sdk/README.md) in process and served by every SDK, 220 runs in all, and runs the [guides](guides/README.md)' examples as tests. Two build rounds shaped this revision; ADR 0025 records their [first](../adr/0025-sdk-specification.md#the-first-build-round) and [second](../adr/0025-sdk-specification.md#the-second-build-round) rounds.
+**Status: 0.3, accepted.** [ADR 0027](../adr/0027-sdk-0-1-and-edition-4.md) accepted the first revision.
+
+All four SDKs implement the specification: [Rust](../../rust/crates/sdk/README.md), [TypeScript](../../typescript/packages/core/README.md), [Go](../../go/modular/README.md) and [Python](../../python/SDK.md). Each SDK runs the [shared scenarios](../../conformance/sdk/README.md) in process and served by every SDK. See [Status](../status.md) for release results. Each SDK runs the [guide examples](guides/README.md) as tests.
+
+ADR 0025 records the [first](../adr/0025-sdk-specification.md#the-first-build-round) and [second](../adr/0025-sdk-specification.md#the-second-build-round) rounds of building the SDKs.
 
 This is layer 2 of the [five layers](../adr/0024-five-layers.md). The [specification](../conformance.md#the-documents) says what an agent and its parts must do and what crosses the wire. It deliberately says nothing about the API a developer writes against. This document set does. It describes one SDK, expressed in four languages, so that someone who has built an agent in one language can build one in another without learning a new model.
 

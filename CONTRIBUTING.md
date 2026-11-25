@@ -42,7 +42,7 @@ A release gives the four SDKs and `ma` one new version, named by its milestone. 
 2. Update the status line at the top of `docs/sdk/README.md`. It gives the SDK specification's revision and what the four SDKs pass.
 3. Add a section for the release to `docs/status.md`, with the step counts of `scripts/check.sh` and `scripts/macos-check.sh` on the release commit.
 4. Add a section for the release to `CHANGELOG.md`.
-5. Run the docs-state check (#27). It fails on a version that drifted or a stale status word.
+5. Run the docs-state check (#27). It fails on a version that drifted, an ADR index status that disagrees with its record, or a gap section without an issue.
 6. After the operator lands the release pull request and tags its commit on `main` as `vX.Y.Z`, close the milestone. First move each issue still open in it to the next milestone with `gh issue edit N --milestone NEXT`. Then close it with `gh api -X PATCH repos/daniel-ballance/modular-agent/milestones/NUMBER -f state=closed`.
 
 ## How work moves through the layers
@@ -75,6 +75,8 @@ Decisions that are hard to reverse, surprising without context and the result of
 Keep one concern per module. Split a module by the rule each part enforces, not by line count.
 
 Keep tracked source files at 1,000 lines or fewer. The docs lane runs `scripts/check-maintainability.mjs` to check this. Files listed in `scripts/maintainability-baseline.json` may exceed the limit up to their recorded counts. Lower an entry when its file shrinks. Remove the entry if the file is gone or fits the limit. Adding or raising an entry requires review. Explain why in the PR.
+
+The docs lane runs `scripts/check-docs-state.mjs`, which checks three things. The setup step installs its parsers with `npm ci --silent --prefix scripts`. First, in tracked Markdown outside `docs/adr/`, `docs/research/`, `docs/pressure-test/` and `*/docs/clean-room/`, a heading that starts with Known gaps, Gaps, Findings or Remaining (alone, or ending in work or gaps), ends in gaps or findings, starts with Proposed and names text, or reads "Proposed, not yet written" must reference an issue before the next heading. The check follows CommonMark for both `#` and underlined (Setext) headings. Indented code blocks do not count as issue references. Other headings that list open work are not checked, but their work still belongs in an issue. Second, every record in `docs/adr/` must have a row in `docs/adr/README.md`, and each row must start its status with its record's status; a row for an accepted record may instead start with Historical. Third, the release at the top of `CHANGELOG.md` must match the versions in every tracked `Cargo.toml`, in each `typescript/packages/*/package.json` with its `@modular-agent/` pins, in each `pyproject.toml` under `python/` with its pins on other packages there, and in the Go `ImplementationVersion`. Its major.minor must match the SDK specification status. Lock files and the Node and Python manifests under `demos/` are not checked; the release checklist covers them. Prose that still calls an accepted decision proposed is left to review.
 
 Do not merge a commit into `main` if its subject starts with `WIP`, regardless of case.
 

@@ -64,7 +64,7 @@ See [Model changes](contracts.md#settings) under Settled.
 
 ### Tools run by an Interface
 
-See the proposed [Interface-run tool rules](contracts.md#interface-run-tools) and [ADR 0033](adr/0033-interface-tools-and-ag-ui.md). ACP client file and terminal methods are still not used by the current ACP binding. Host-supplied MCP servers are agent-started programs, not Interface execution.
+See the [Interface-run tool rules](contracts.md#interface-run-tools) and [ADR 0033](adr/0033-interface-tools-and-ag-ui.md). ACP client file and terminal methods are still not used by the current ACP binding. Host-supplied MCP servers are agent-started programs, not Interface execution.
 
 ### Tool calls outside a turn
 

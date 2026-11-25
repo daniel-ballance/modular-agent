@@ -59,7 +59,7 @@ Every session in an embedded agent has one actor the app speaks for:
 - it holds every right the deployment allows;
 - it is present whenever the app has a question handler registered.
 
-This keeps the specification's rule that an approval with no present, eligible answerer is [refused rather than left waiting](../contracts.md#approval-policy). This is the default. The proposed [waiting approval](api.md#questions) lets a kept session opt in to ending the turn with the call unstarted. The local actor can be present for the answer later. Other questions close as the [question rules](../contracts.md#questions) say.
+This keeps the specification's rule that an approval with no present, eligible answerer is [refused rather than left waiting](../contracts.md#approval-policy). This is the default. A kept session can opt in to [waiting approvals](api.md#questions). It can then end the turn without starting the call. The local actor can be present for the answer later. Other questions close as the [question rules](../contracts.md#questions) say.
 
 An Interface, such as ACP, brings its own authenticated actors. An app with several users adds actors to sessions itself; see [Actors](api.md#actors-and-rights).
 

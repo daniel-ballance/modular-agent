@@ -105,12 +105,16 @@ See the [SDK README](../../SDK.md) for fixture build commands and SDK scenario r
 
 ## Known gaps
 
+Tracked in #36.
+
 - The local environment does not confine paths. Strong command containment requires a writable, delegated Linux cgroup v2 subtree. Without it, `ma` declares `processGroup`, which cannot stop descendants that leave the group. The terminal and local tool environment are for POSIX systems.
 - Some file and MCP errors still differ from the Rust wording. The file search uses Git enumeration or `find` plus Python glob matching; it does not support every Rust glob extension. Monty requires a finite suspension ceiling, separate from the 500 nested-call budget; Python sets it to 2,147,483,647 so lookups do not spend that budget.
 - Terminal secret answers use the SDK's staged credential store. ACP does not accept secret answers. Served tools have byte, directory and command callbacks; served commands do not have working-environment access.
 - No real sign-ins or model requests were made. The new Claude Provider was tested with Python Agent SDK message fixtures.
 
 ## Served Runtime findings
+
+Tracked in #15.
 
 The base ACP Interface forwarded proposed input, actor joins, limit changes and tenant queries to the underlying APIs despite the SDK's session declaration. The bound handlers now use that declaration to return `not_supported`. They still allow `proposals`, `release` and `withdraw` for parked job reports. This change does not touch served Runtime composition or the Provider callback.
 
@@ -124,6 +128,8 @@ Suggested text. No shared specification documents were changed.
 The newly reachable Provider check also found that Python accepted an unknown `provider.response` payload member but inserted an absent `model` into the recorded assistant message. The bridge now leaves that field absent unless it needs trusted provenance to replay opaque Provider data. When it binds provenance, it uses the associated request's model, not the Provider's claimed identity.
 
 ## Findings for the shared docs
+
+Tracked in #15.
 
 Suggested replacement text. No shared documents were changed.
 

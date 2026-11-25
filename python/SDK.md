@@ -194,11 +194,13 @@ Use `await sign_in("chatgpt", logins, on_step=show, paste=read_line, device=Fals
 
 Call `await claude_provider.available()` before displaying account-specific models. If it returns false, `claude_provider.unavailable_reason` explains why. Claude has no SDK sign-in. The Provider checks the account before sending a prompt, using Anthropic's [Python Agent SDK](https://github.com/anthropics/claude-agent-sdk-python). It maps `budgetTokens` in the shared table to `budget_tokens` in the Python options.
 
-## Trace trust and spec findings
+## Trace trust
 
 The launcher of a stdio ACP host is trusted for per-request trace context unless `serve_acp(trace_trusted=False)` disables it. Set `trace_trusted=True` in an embedded network ACP `actors` entry only for a peer allowed to share trace IDs. Network principals are not trace-trusted by default. Configured history and plugin destinations get context per request. The SDK does not accept or send baggage. AG-UI can accept allowlisted vendor state on a trusted work POST.
 
 ### ADR 0033 spec findings
+
+Tracked in #14.
 
 - The [SDK API](../docs/sdk/api.md#the-agent) now defines a session-bound executor handle. Python's existing handle is scoped to the configured project and actor; its `advertise`, `release` and `report_tool_result` take the session ID explicitly. For a language note:
 
@@ -270,6 +272,8 @@ page or a cached history after a move or erasure.
 
 ### Proposed binding text (not implemented)
 
+Tracked in #14.
+
 For a negotiated extension to [Runtime callbacks](../docs/bindings/plugin.md#runtime-callbacks)
 and [Provider requests](../docs/bindings/plugin.md#the-host-asks-a-provider):
 
@@ -305,6 +309,8 @@ For [paging history](../docs/bindings/plugin.md#paging-history):
 
 ## Remaining Python implementation gaps
 
+Tracked in #35. ADR 0030 work is tracked in #19.
+
 The base build's private `MA_PLUGIN_PROCESSES` placement does not install OpenTelemetry in its worker processes. The shared telemetry check does not exercise it: `create_agent` passes an empty internal worker list to the Harness, and `process:<sdk>` uses the SDK's explicit plugin binding. The SDK's public hosted Runtime placement records the invocation in the host and uses the plugin binding for propagation.
 
 Provider-owned tool dispatch, live sessions and late answers are outside the SDK 0.1 Provider port ([API, Providers](../docs/sdk/api.md#providers)).
@@ -333,6 +339,8 @@ The service keeps marks and revisions with its records. Keep raw writers outside
 The history kit passed 42/42 base and restart checks and 18/18 profile checks, including publication, refusal and takeover by separate wire clients. The ACP erasure check ran against the Python service without shared filesystem state.
 
 ## Specification findings
+
+Tracked in #14.
 
 - **SDK API, Questions.** After the `call` row, insert: “| `coversNested` | True when an explicit allow for this top-level call also answers the approval check for its nested calls in this dispatch. Omission means false. |”
 - **AG-UI, Questions.** After the sentence beginning “For approvals include”, insert: “For an approval marked `coversNested: true`, the message MUST say the allow covers the call's nested calls and the interrupt MUST include `metadata[\"modular-agent.coversNested\"]: true`. Otherwise omit the key.”

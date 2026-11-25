@@ -5,6 +5,6 @@
   "type": "module",
   "exports": "./dist/src/index.js",
   "dependencies": {
-    "@modular-agent/core": "*"
+    "@modular-agent/core": "0.3.0"
   }
 }

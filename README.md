@@ -103,6 +103,8 @@ The other languages' builds are in [`typescript/packages/ma`](typescript/package
 
 ## Known gaps
 
+Tracked in #30. Real Provider use is tracked in #20.
+
 - **Command containment varies by OS.** Linux uses namespaces, ptrace and cgroups. macOS (Apple silicon; checked with `scripts/macos-check.sh`, where all four SDKs and `ma` builds pass their suites, the reference checks and the ACP kit) uses process-group containment, not strong containment: a process that leaves its command's group is not stopped, so a command interrupted by a crash is never repeated there. Windows is unsupported.
 - **Few real requests.** The test suites use scripted models and local fakes. The ChatGPT, Grok and Claude subscription Providers have answered real requests through all four `ma` builds, each reading a file through `codemode`, and the `openai` and `anthropic` API-key Providers pass the [live checks](docs/sdk/testing.md#live-checks) in all four SDKs.
 - **`ma` turns off several actors, session limits and tenants.** The SDKs offer them as options.

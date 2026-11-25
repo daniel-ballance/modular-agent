@@ -153,7 +153,3 @@ Controlled cases add these behaviors:
 | `crash-continuation` | Pause at `duringContinuation` after committing its `turnStart` and trace checkpoint but before the model step. Use durable recovery and the original checkpoint. |
 
 The fake checks whether the runner recognizes known good and deliberately wrong behavior. It does not show that an SDK enforces the gates, stores the records atomically, exports real spans, or recovers from a process death. The fake's recovery cases drop transport connections and reopen in-memory state. Run the managed kit with an SDK fixture to test a real crash.
-
-## Findings
-
-None open.
