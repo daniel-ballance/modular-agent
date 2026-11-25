@@ -3,11 +3,20 @@
 # Usage: scripts/stress.sh N [check.sh options]
 set -euo pipefail
 
+usage='Usage: scripts/stress.sh N [check.sh options] (N must be a positive integer)'
+case "${1:-}" in -h|--help) echo "$usage"; exit 0 ;; esac
 if [[ ! ${1:-} =~ ^[1-9][0-9]{0,8}$ ]]; then
-  echo 'Usage: scripts/stress.sh N [check.sh options] (N must be a positive integer)' >&2
+  echo "$usage" >&2
   exit 2
 fi
 count=$1; shift
+for arg in "$@"; do
+  case "$arg" in
+    --quick|--serial|rust|typescript|go|python) ;;
+    -h|--help) echo "$usage"; exit 0 ;;
+    *) echo "unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo"
 # The runs must overlap to load the machine, so all of them wait for their slots together.
@@ -35,7 +44,6 @@ rm "$root/source.tar"
 check() {
   local dir="$1" status=0; shift
   (
-    drop_check_slots
     cd "$dir/src" && export TMPDIR="$dir/tmp" &&
       export MISE_TRUSTED_CONFIG_PATHS="$dir/src${MISE_TRUSTED_CONFIG_PATHS:+:$MISE_TRUSTED_CONFIG_PATHS}" &&
       exec scripts/check.sh "$@"
@@ -47,11 +55,24 @@ check() {
   fi
 }
 
+# Each run gets its own process group, so stopping stress.sh can stop all of
+# a run's processes. The runs do not hold the slot files: if stress.sh is
+# killed outright, its slots come free even though its runs carry on.
 pids=()
+stop_runs() { # exit status
+  local pid
+  for pid in "${pids[@]}"; do kill -TERM -- "-$pid" 2>/dev/null || true; done
+  exit "$1"
+}
+trap 'stop_runs 129' HUP
+trap 'stop_runs 130' INT
+trap 'stop_runs 143' TERM
+set -m
 for ((run = 1; run <= count; run++)); do
-  check "$root/$run" "$@" &
+  { drop_check_slots; check "$root/$run" "$@"; } &
   pids+=("$!")
 done
+set +m
 
 shopt -s nullglob
 failed=0
