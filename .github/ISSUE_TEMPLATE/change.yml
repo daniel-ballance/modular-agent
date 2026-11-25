@@ -1,0 +1,41 @@
+name: Change
+description: A change to the specification, an SDK, ma or a demonstrative implementation, or a finding (a gap a higher layer found).
+labels: ["needs triage"]
+body:
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Layer
+      description: The layer the change starts in. A gap goes down a layer, so pick the lowest layer that changes. Triage applies the matching `layer:` label.
+      options:
+        - "1 spec: docs/, the binding kits"
+        - "2 SDK spec: docs/sdk/, the shared scenarios"
+        - "3 SDK: the four SDKs"
+        - "4 reference: ma, the standard configuration, the reference checks"
+        - "5 demo: demonstrative implementations in demos/"
+    validations:
+      required: true
+  - type: checkboxes
+    id: languages
+    attributes:
+      label: Languages
+      description: The languages whose code changes. A change to one language is a change to all four, or a recorded gap in the others. Leave all unticked for a change to the documents only.
+      options:
+        - label: Rust
+        - label: TypeScript
+        - label: Go
+        - label: Python
+  - type: textarea
+    id: what
+    attributes:
+      label: What changes
+      description: The rule, behavior or API that changes, and why.
+    validations:
+      required: true
+  - type: textarea
+    id: check
+    attributes:
+      label: How it is checked
+      description: The kit check, shared scenario, reference check or test that shows the change works.
+    validations:
+      required: true
