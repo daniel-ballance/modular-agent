@@ -2,7 +2,7 @@
 
 This binding carries the [plugin binding](plugin.md) and the [ACP host binding](acp.md) over a network: the same messages, one per WebSocket text message instead of one per line. It is what lets a part, or a whole agent, run as a service. [ADR 0028](../adr/0028-websocket-transport.md) records why.
 
-The same listener can also serve the proposed [AG-UI HTTP binding](agui.md). Its routes are not WebSocket subprotocols.
+The same listener can also serve the [AG-UI HTTP binding](agui.md). Its routes are not WebSocket subprotocols.
 
 Everything in the carried binding still applies, except for the transport rules on this page: how peers connect and authenticate, how a message is framed, liveness and what ends a connection.
 

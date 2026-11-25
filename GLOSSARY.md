@@ -317,7 +317,7 @@ An input request about one exact tool call and its tool registration. The recipi
 _Avoid_: Permission request, confirmation
 
 **Waiting approval**:
-An approval left open past its turn for a call that has not started. The actor is asked for consent, not for a tool result. Proposed in [ADR 0034](docs/adr/0034-approvals-that-wait.md).
+An approval left open past its turn for a call that has not started. The actor is asked for consent, not for a tool result. See [ADR 0034](docs/adr/0034-approvals-that-wait.md).
 
 **Approval policy**:
 The session setting for the approval check: `off` skips it, `ask` asks except for tools a trusted definition marks read-only, `all` asks for every call, and `never` refuses every call without asking. See [Tool dispatch](docs/contracts.md#tool-dispatch) and the [ACP options](docs/bindings/acp.md#configuration-options).

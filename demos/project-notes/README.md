@@ -48,6 +48,6 @@ demos/project-notes/run.py --real claude/claude-haiku-5-5
 
 The Go SDK loads the Provider as a stdio plugin. Claude Code finds the login under `HOME` (or `CLAUDE_CONFIG_DIR` if set); the demo does not open the credential file. To use an OpenAI API key instead, set `OPENAI_API_KEY` in your environment and run `demos/project-notes/run.py --real openai/gpt-5.2`. Only the Go process receives the key for its in-process Provider.
 
-## SDK finding
+## Discovering the history listener address
 
 [Placement](../../docs/sdk/placement.md#services) did not say how to learn a history listener's bound address. It now does: `serveHistory` with port `0` returns a server with `url` and `close()`. The demo uses Rust's `listen_history`, which already behaves that way.

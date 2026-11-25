@@ -144,6 +144,8 @@ Two more single requests, made directly against the Provider class to look into 
 
 ## Known gaps and open problems
 
+Tracked in #39.
+
 - **`off` did not stop thinking in one real request.** With `reasoning: "off"` Claude Code is started with thinking disabled. With no tools offered, Haiku 5.5 sent only text. With a tool offered and a replayed record, it still sent a thinking block whose text was empty, at a cost of roughly 90 output tokens. The sidecar passes the setting correctly as far as the SDK's options go; why Claude Code or the model thought anyway was not investigated, to stay inside the request budget. Empty thinking is not streamed and leaves no reasoning part.
 - **Claude Code adds to the prompt.** The host's system prompt is passed unchanged as the system prompt, but Claude Code itself adds an identity line ("You are a Claude agent, built on Anthropic's Claude Agent SDK.") and `<system-reminder>` context such as the working directory, platform, date and account email. The no-tools request above, with a seven-word system prompt, counted 858 input tokens, so this overhead is real. The exact text was not captured. The Agent SDK offers no option to remove it.
 - **Built-in agents, plugin skills and plugins are still listed at start.** Claude Code's init message names its built-in agents (`Explore`, `Plan` and others), four built-in `cc-plugin-*` plugins and three skills those plugins supply. With `skills: []` and `disableBundledSkills` the bundled skills are gone and no skill is listed to the model, and since the tool list is only the host's tools there is no Agent or Skill tool to reach any of them. Whether any of their descriptions reach the prompt could not be checked.

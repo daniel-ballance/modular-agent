@@ -2,6 +2,8 @@
 
 ## Production gaps
 
+Remaining ADR 0030 work is tracked in #19.
+
 [ADR 0021](adr/0021-production-edition.md) listed four gaps. [Secret staging and recovery](contracts.md#secrets) shipped first. [ADR 0029](adr/0029-sdk-decisions-after-four-builds.md) settled ACP service token scope and rights ceilings, and [ADR 0030](adr/0030-production-gaps.md) set the rules for the other three. All four SDKs and `ma` now implement them, checked on 2026-11-21 by the opt-in kit checks that `scripts/check.sh` runs through `scripts/production-kits.sh` and `scripts/erasure-matrix.sh`:
 
 | Gap | Rules | Checked |
@@ -261,7 +263,7 @@ When the code and the description disagree, this page says so. Update it when ei
 | the turn's result is ready | proven |
 | Provider: before a request, as the response arrives | built |
 
-## Gaps the code found in the description
+## Rules clarified after implementation
 
 - **Declared support** gained rows the description lacked: `continuesAfterRestart`, `questionsOutlastTurns`, `inputKeys`. They are now in [Architecture](architecture.md#declared-support).
 - **Joining a session** was in the plugin API only as "join". It is now `join(session, actor, grantedBy)`, which refuses to grant more authority than the granter has.

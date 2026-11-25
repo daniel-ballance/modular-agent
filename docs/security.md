@@ -90,7 +90,7 @@ The operator MUST NOT enable or keep enabled a production path that cannot enfor
 - [Principals, rights, tenant access and joining on open](#authority).
 - [Project trust](#plugins), allowed plugins and destinations for model context and tool data, and [host-supplied MCP servers](contracts.md#mcp-servers).
 - The [approval policy](contracts.md#tool-dispatch), including its default, and [direct commands](contracts.md#commands), which are not tool calls. Check whether policy requires an approval plugin, [output gating](#data-the-record-views-the-output-gate-and-erasure), or both.
-- If enabling the proposed [approvals that wait](contracts.md#approvals-that-wait), set the maximum wait and restrict which writers can reopen the session. A writer that ignores the new records must not run the work. A checked tool name and input do not pin an external file or account: put required target and revision checks in the tool's contract.
+- If you enable [approvals that wait](contracts.md#approvals-that-wait), set the maximum wait and restrict which writers can reopen the session. A writer that ignores the new records must not run the work. A checked tool name and input do not pin an external file or account: put required target and revision checks in the tool's contract.
 - [Command containment and file confinement](contracts.md#the-working-environment). The operator MUST use a sandboxed working environment if policy limits what commands can reach. The operator MUST NOT enable rewind if agents in different processes share the project.
 - [Authentication, tokens and TLS](#authentication-on-each-wire).
 - [Resource limits and cancellation](#resource-limits-and-denial-of-service).

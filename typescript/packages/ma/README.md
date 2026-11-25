@@ -112,6 +112,8 @@ git diff --check
 
 ## Known gaps
 
+Tracked in #41.
+
 - The waiting ACP fixture passed 44/50 checks at kit revision `2dc41493`. In each binding, two checks require erasure during a running turn; the SDK refuses it. The capacity check compares `resourceReservations` to `true` rather than inspecting its session, tenant and agent limits.
 
 - macOS local commands use process-group containment, not strong containment. A process that leaves its group is outside that guarantee.
@@ -120,6 +122,8 @@ git diff --check
 - `find` honors `.gitignore` files at or below its search root, but not parent or global Git rules, `.ignore` or `.git/info/exclude`. Its glob parser, filesystem diagnostics and Monty's tracebacks can differ from Rust.
 
 ## Findings for docs/reference and docs/sdk
+
+Tracked in #42.
 
 Proposed replacement text; the shared documents are unchanged in this branch.
 

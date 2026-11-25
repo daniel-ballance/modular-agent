@@ -4,7 +4,7 @@ The original desk ran with scripted models and with three subscription Providers
 
 ## Purpose
 
-Find out what the framework must give an application that drives several whole agents. The application, called the **host** here, is outside the specification ([ADR 0012](../../docs/adr/0012-one-agent-is-the-scope.md)). It builds, at small scale, the layer that [Agent platform 2027](../../docs/research/agent-platform-2027.md) describes: one conversation, one inbox and one listener across several agents. Anything the host cannot build cleanly from the bindings and the declaration is a framework gap found in practice. Each one is recorded in [Findings](#findings) as it is met.
+Find out what the framework must give an application that drives several whole agents. The application, called the **host** here, is outside the specification ([ADR 0012](../../docs/adr/0012-one-agent-is-the-scope.md)). It builds, at small scale, the layer that [Agent platform 2027](../../docs/research/agent-platform-2027.md) describes: one conversation, one inbox and one listener across several agents. Anything the host cannot build cleanly from the bindings and the declaration is a framework gap found in practice. Each one is recorded in [Desk observations](#findings) as it is met.
 
 ## The scenario
 
@@ -86,7 +86,9 @@ All three agents can export to Phoenix (`scripts/phoenix.sh`). The host saves th
 
 With real models (`--live`) the same flow runs against your sign-ins; it is not part of `check.sh`.
 
-## Findings
+<a id="findings"></a>
+
+## Desk observations
 
 - **Approval in stock `ma` and approvals that wait — used.** The desk used to ask inside a custom editing tool and refuse every other edit or command. The [built-in gate](../../docs/contracts.md#approvals-that-cover-nested-calls) now asks before `codemode`. On allow, `tools.edit`, `tools.write` and the fixed commit command run without another approval. The sample scope gate does not ask or grant permission. [ADR 0034](../../docs/adr/0034-approvals-that-wait.md) lets the desk park this exact call until its original deadline. The station no longer keeps a presence alive for a dead host.
 - **How a wait closed — used.** The host records `answered`, `declined`, `expired` and `revoked` only from the gated feed. The local clock can disable a button, not decide a question. A lost presence alone produces no closure. The desk also watches the plugin's `turn.end` notification: a parked origin has an open call, and closing its question is not the end of the continuation.
@@ -124,7 +126,9 @@ Phoenix reported the following usage on the `chat` spans, selected by the three 
 
 Triage and the verifier shared the event trace in both runs. Both runs predate the coder's trace trust policy. Their event traces omit the coder turn.
 
-## Where the findings went
+<a id="where-the-findings-went"></a>
+
+## How the desk handles each case
 
 | Finding | Outcome |
 |---|---|

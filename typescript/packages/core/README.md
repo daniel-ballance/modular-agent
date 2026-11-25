@@ -221,11 +221,15 @@ With `serveAgui({ resumeOpen:true, ... })` or `serveAcp({ resumeOpen:true, ... }
 
 #### Gaps in the core operations
 
+Tracked in #40.
+
 The [binding](../../../docs/bindings/agui.md#interrupts-and-frontend-tools) requires settlement **if the Harness can confirm non-delivery**. Withholding the final group sends `RUN_ERROR`; it does not report a tool failure on the actor's behalf. The handle has no acknowledgment from the adapter proving non-delivery. If the Harness cannot prove it independently, the call remains open until a valid report, cancellation or its existing deadline. No handoff is repeated.
 
 A waiting exchange receives `RUN_ERROR` with code `busy` if its ready continuation cannot reserve a turn. That refusal does not undo a committed result or start a different turn.
 
 ### Proposed standard configuration text
+
+Tracked in #18.
 
 ### Telemetry context
 
@@ -264,10 +268,9 @@ Use `encodeHistoryJson`, `parseHistoryJson` and `equalHistoryJson` to preserve o
 
 ## Findings
 
+Tracked in #18.
 
 These are proposed documentation replacements, not changes to the specification.
-
-
 
 - **Availability diagnostics.** In [Providers](../../../docs/sdk/api.md#providers), replace the `available` description with: “Whether the Provider can take requests now, for example whether it has credentials. A Provider may expose a separate diagnostic in process. The `/1` plugin binding reports only a boolean.” Claude can name an API-key source locally without extending the wire reply.
 
@@ -284,5 +287,7 @@ These are proposed documentation replacements, not changes to the specification.
 
 
 ## Remaining
+
+Tracked in #19.
 
 ADR 0030 coverage is not complete. New work records a starting ceiling; a continued turn intersects that ceiling with current rights. The wire Provider checks the fence at the successful preparation reply. The integration matrix does not yet prove this cutoff for every remote callback, child, buffered delivery, or foreign SDK. The ledger charges retained records, buffered input, model attempts, questions, and tracked follower output. It does not account for every transport buffer, every cleanup obligation, or physical backend write amplification, and there is no bounded-store saturation run. The local registry can keep pending Provider discards across reopen. The history HTTP registry records only history work. Reconciliation runs on writer acquisition and on later operations; there is no background retry of every held destination. A destination with work the agent cannot safely settle, such as an unfinished job, stays pending. A deployment must keep the authoritative erasure state and the authority freshness source outside the backup being restored.
