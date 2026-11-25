@@ -69,7 +69,7 @@ function checkSizes(sizes, baseline) {
 
 function checkSubjects() {
   const refs = git("for-each-ref", "--format=%(refname)", "refs/heads/main", "refs/remotes/origin/main").split("\n");
-  const main = ["refs/heads/main", "refs/remotes/origin/main"].find((ref) => refs.includes(ref));
+  const main = ["refs/remotes/origin/main", "refs/heads/main"].find((ref) => refs.includes(ref));
   if (!main) return 0;
 
   let base;
@@ -80,7 +80,7 @@ function checkSubjects() {
   }
   let bad = 0;
   for (const commit of git("log", "--format=%h %s", `${base}..HEAD`).split("\n")) {
-    if (!/^\S+ WIP/i.test(commit)) continue;
+    if (!/^\S+ WIP\b/i.test(commit)) continue;
     console.error(`${commit}: Rewrite the commit subject before merging into main.`);
     bad++;
   }

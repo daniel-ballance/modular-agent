@@ -118,9 +118,33 @@ test("origin/main is used when there is no local main", (t) => {
 
 test("HEAD on main has no subjects to check", (t) => {
   const repo = checkout(t);
-  repo.commit("Start");
-  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
   repo.commit("WIP already on main");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const result = repo.check();
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("origin/main wins over a local main that is behind it or ahead of it", (t) => {
+  const repo = checkout(t);
+  repo.commit("Start");
+  repo.commit("WIP landed long ago");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  repo.git("switch", "-q", "-c", "topic");
+  repo.git("update-ref", "refs/heads/main", "HEAD~1");
+  assert.equal(repo.check().status, 0, "a local main behind origin/main does not flag landed commits");
+  repo.commit("WIP: finish the split");
+  repo.git("update-ref", "refs/heads/main", "HEAD");
+  const result = repo.check();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /WIP: finish the split/);
+  assert.doesNotMatch(result.stderr, /WIP landed long ago/);
+});
+
+test("a subject that only begins with the letters wip passes", (t) => {
+  const repo = checkout(t);
+  repo.commit("Start");
+  repo.git("switch", "-q", "-c", "topic");
+  repo.commit("Wipe the stale cache");
   const result = repo.check();
   assert.equal(result.status, 0, result.stderr);
 });
