@@ -1,3 +1,4 @@
+import { SessionAuthority, readTenants, intersectRights, type TenantInfo } from "./authority.js";
 import { WorkReservations } from "./work-reservations.js";
 import { HistoryCommit } from "./history-commit.js";
 import { SessionLifecycle, actorJoined } from "./session-lifecycle.js";
@@ -254,12 +255,26 @@ export interface HarnessOptions { receiptDir?:string; approvalCoversNested?: boo
 export const ALL_AUTHORITY: Authority[] = ["watch", "propose", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"];
 
 export interface Tenant { rights: Authority[]; tokens?: number }
-interface TenantInfo { tenant: string | null; rights: Authority[] | null; tokens: { budget: number; used: number } | null }
 /**
  * The Harness: hosts plugins, offers the plugin API, keeps sessions.
  * It runs no turns, calls no models and runs no tools itself.
  */
 export class Harness {
+	private readonly authority: SessionAuthority = new SessionAuthority({
+		tenants: () => this.tenants,
+		historyCommit: () => this.historyCommit,
+		hooks: () => this.hooks,
+		emit: (...args) => this.emit(...args),
+		questions: () => this.questions,
+		approvals: () => this.approvals,
+		sessions: () => this.sessions,
+		jobWork: () => this.jobWork,
+		admission: () => this.admission,
+		use: (...args) => this.use(...args),
+		turns: () => this.turns,
+		tools: () => this.tools,
+	});
+
 	private readonly workReservations: WorkReservations = new WorkReservations({
 		use: (...args) => this.use(...args),
 		lifecycle: () => this.lifecycle,
@@ -291,9 +306,9 @@ export class Harness {
 		newId: (...args) => this.newId(...args),
 		now: (...args) => this.now(...args),
 		project: () => this.project,
-		workActors: (...args) => this.workActors(...args),
-		turnAuthority: () => this.turnAuthority,
-		workRights: (...args) => this.workRights(...args),
+		workActors: (...args) => this.authority.workActors(...args),
+		turnAuthority: () => this.authority.turnAuthority,
+		workRights: (...args) => this.authority.workRights(...args),
 		activePlugins: (...args) => this.activePlugins(...args),
 		observeCommit: (...args) => this.historyCommit.observeCommit(...args),
 		commit: (...args) => this.historyCommit.commit(...args),
@@ -306,12 +321,12 @@ export class Harness {
 		interfaceTools: () => this.interfaceTools,
 		approvals: () => this.approvals,
 		turns: () => this.turns,
-		actorRights: (...args) => this.actorRights(...args),
-		withinLimits: (...args) => this.withinLimits(...args),
+		actorRights: (...args) => this.authority.actorRights(...args),
+		withinLimits: (...args) => this.authority.withinLimits(...args),
 		jobWork: () => this.jobWork,
 		problem: (...args) => this.problem(...args),
-		rightsOf: (...args) => this.rightsOf(...args),
-		requireAuthority: (...args) => this.requireAuthority(...args),
+		rightsOf: (...args) => this.authority.rightsOf(...args),
+		requireAuthority: (...args) => this.authority.requireAuthority(...args),
 		environmentFor: (...args) => this.environmentFor(...args),
 		projectOf: (...args) => this.projectOf(...args),
 		findTool: (...args) => this.findTool(...args),
@@ -323,19 +338,19 @@ export class Harness {
 		session: (...args) => this.lifecycle.session(...args),
 		erasure: () => this.erasure,
 		checkWriter: (...args) => this.lifecycle.checkWriter(...args),
-		checkScopedWork: (...args) => this.checkScopedWork(...args),
-		requireAuthority: (...args) => this.requireAuthority(...args),
+		checkScopedWork: (...args) => this.authority.checkScopedWork(...args),
+		requireAuthority: (...args) => this.authority.requireAuthority(...args),
 		commandTable: () => this.commandTable,
 		runCommand: (...args) => this.runCommand(...args),
 		newId: (...args) => this.newId(...args),
 		hooks: () => this.hooks,
 		receiptOperation: () => this.receiptOperation,
 		commit: (...args) => this.historyCommit.commit(...args),
-		rightsOf: (...args) => this.rightsOf(...args),
+		rightsOf: (...args) => this.authority.rightsOf(...args),
 		rejectUnknownModel: () => this.rejectUnknownModel,
 		providerFor: (...args) => this.providerFor(...args),
 		modelAccess: (...args) => this.modelAccess(...args),
-		workRights: (...args) => this.workRights(...args),
+		workRights: (...args) => this.authority.workRights(...args),
 		runtime: (...args) => this.runtime(...args),
 		reserveInput: (...args) => this.workReservations.reserveInput(...args),
 		reservations: () => this.reservations,
@@ -357,11 +372,11 @@ export class Harness {
 		modelAccess: (...args) => this.modelAccess(...args),
 		interfaceTools: () => this.interfaceTools,
 		toolDefinitions: (...args) => this.toolDefinitions(...args),
-		turnAuthority: () => this.turnAuthority,
-		tenantBudgetReached: (...args) => this.tenantBudgetReached(...args),
+		turnAuthority: () => this.authority.turnAuthority,
+		tenantBudgetReached: (...args) => this.authority.tenantBudgetReached(...args),
 		environmentFor: (...args) => this.environmentFor(...args),
 		projectOf: (...args) => this.projectOf(...args),
-		checkScopedWork: (...args) => this.checkScopedWork(...args),
+		checkScopedWork: (...args) => this.authority.checkScopedWork(...args),
 		erasure: () => this.erasure,
 		hooks: () => this.hooks,
 		use: (...args) => this.use(...args),
@@ -372,19 +387,19 @@ export class Harness {
 		questions: () => this.questions,
 		admit: (...args) => this.admission.admit(...args),
 		findTool: (...args) => this.findTool(...args),
-		workRights: (...args) => this.workRights(...args),
-		actorForJob: (...args) => this.actorForJob(...args),
+		workRights: (...args) => this.authority.workRights(...args),
+		actorForJob: (...args) => this.authority.actorForJob(...args),
 		tools: () => this.tools,
 		providerFor: (...args) => this.providerFor(...args),
 	});
 
 	private readonly turnModels: TurnModelAccess = new TurnModelAccess({
 		newId: (...args) => this.newId(...args),
-		turnAuthority: () => this.turnAuthority,
-		tenantBudgetReached: (...args) => this.tenantBudgetReached(...args),
+		turnAuthority: () => this.authority.turnAuthority,
+		tenantBudgetReached: (...args) => this.authority.tenantBudgetReached(...args),
 		erasure: () => this.erasure,
 		reservations: () => this.reservations,
-		checkScopedWork: (...args) => this.checkScopedWork(...args),
+		checkScopedWork: (...args) => this.authority.checkScopedWork(...args),
 		checkWriter: (...args) => this.lifecycle.checkWriter(...args),
 		hooks: () => this.hooks,
 		commit: (...args) => this.historyCommit.commit(...args),
@@ -399,8 +414,8 @@ export class Harness {
 		approvals: () => this.approvals,
 		intactInheritedCall: (...args) => this.turns.intactInheritedCall(...args),
 		findTool: (...args) => this.findTool(...args),
-		actorForJob: (...args) => this.actorForJob(...args),
-		workRights: (...args) => this.workRights(...args),
+		actorForJob: (...args) => this.authority.actorForJob(...args),
+		workRights: (...args) => this.authority.workRights(...args),
 		environmentFor: (...args) => this.environmentFor(...args),
 		projectOf: (...args) => this.projectOf(...args),
 		checkWriter: (...args) => this.lifecycle.checkWriter(...args),
@@ -420,7 +435,7 @@ export class Harness {
 		approvalCoversNested: () => this.approvalCoversNested,
 		plugins: (...args) => this.plugins(...args),
 		hooks: () => this.hooks,
-		rightsOf: (...args) => this.rightsOf(...args),
+		rightsOf: (...args) => this.authority.rightsOf(...args),
 	});
 
 	private readonly interfaceTools: InterfaceToolRoutes = new InterfaceToolRoutes({
@@ -433,8 +448,8 @@ export class Harness {
 		intersectRights,
 		load: (...args) => this.load(...args),
 		session: (...args) => this.lifecycle.session(...args),
-		withConnectionActor: (...args) => this.withConnectionActor(...args),
-		actorRights: (...args) => this.actorRights(...args),
+		withConnectionActor: (...args) => this.authority.withConnectionActor(...args),
+		actorRights: (...args) => this.authority.actorRights(...args),
 		sessions: () => this.sessions,
 		hooks: () => this.hooks,
 		problem: (...args) => this.problem(...args),
@@ -444,14 +459,14 @@ export class Harness {
 		checkWriter: (...args) => this.lifecycle.checkWriter(...args),
 		newId: (...args) => this.newId(...args),
 		commit: (...args) => this.historyCommit.commit(...args),
-		workRights: (...args) => this.workRights(...args),
+		workRights: (...args) => this.authority.workRights(...args),
 		agentName: () => this.agentName,
 		maybeContinueOpenCalls: (...args) => this.turns.maybeContinueOpenCalls(...args),
 		approvals: () => this.approvals,
 		recordedTurnActors: (...args) => this.turns.recordedTurnActors(...args),
 		recordedTurnJobs: (...args) => this.turns.recordedTurnJobs(...args),
 		recordedTurnRights: (...args) => this.turns.recordedTurnRights(...args),
-		turnAuthority: () => this.turnAuthority,
+		turnAuthority: () => this.authority.turnAuthority,
 		toolAfter: (...args) => this.tools.toolAfter(...args),
 		commitNow: (...args) => this.historyCommit.commitNow(...args),
 		emit: (...args) => this.emit(...args),
@@ -459,8 +474,8 @@ export class Harness {
 
 	private readonly questions: InputRequests = new InputRequests({
 		useAll: (...args) => this.useAll(...args),
-		actorRights: (...args) => this.actorRights(...args),
-		turnAuthority: () => this.turnAuthority,
+		actorRights: (...args) => this.authority.actorRights(...args),
+		turnAuthority: () => this.authority.turnAuthority,
 		approvals: () => this.approvals,
 		maybeContinueOpenCalls: (...args) => this.turns.maybeContinueOpenCalls(...args),
 		use: (...args) => this.use(...args),
@@ -482,9 +497,9 @@ export class Harness {
 
 	private readonly jobWork: Jobs = new Jobs({
 		erasure: () => this.erasure,
-		workActors: (...args) => this.workActors(...args),
-		turnAuthority: () => this.turnAuthority,
-		workRights: (...args) => this.workRights(...args),
+		workActors: (...args) => this.authority.workActors(...args),
+		turnAuthority: () => this.authority.turnAuthority,
+		workRights: (...args) => this.authority.workRights(...args),
 		reservations: () => this.reservations,
 		newId: (...args) => this.newId(...args),
 		reserveJob: (...args) => this.workReservations.reserveJob(...args),
@@ -519,9 +534,9 @@ export class Harness {
 		newId: () => this.newId(),
 		reservations: () => this.reservations,
 		findTool: (s, name) => this.findTool(s, name),
-		actorRights: (s, actor) => this.actorRights(s, actor),
-		originalWorkAllows: (s, approval) => this.originalWorkAllows(s, approval),
-		exitTurn: work => this.turnAuthority.exit(work),
+		actorRights: (s, actor) => this.authority.actorRights(s, actor),
+		originalWorkAllows: (s, approval) => this.authority.originalWorkAllows(s, approval),
+		exitTurn: work => this.authority.turnAuthority.exit(work),
 		exitConnection: work => connectionRights.exit(work),
 		commit: (...args) => this.historyCommit.commit(...args),
 		commitNow: (...args) => this.historyCommit.commitNow(...args),
@@ -538,7 +553,6 @@ export class Harness {
 	private readonly agentName?: string;
 	private newId: () => string;
 	private refusedTools = new Set<string>();
-	private turnAuthority = new AsyncLocalStorage<{ sessionId: string; actors: Set<string>; jobs: Set<string>; state?: Pick<TurnState, "connectionRights" | "startingRights"> }>();
 	readonly problems: { plugin: string; where: string; error: string }[] = [];
 
 	constructor(options: HarnessOptions) {
@@ -559,10 +573,10 @@ export class Harness {
 			write: (s, write) => this.lifecycle.write(s, write),
 			emit: (...args) => this.emit(...args),
 			loadInto: id => this.lifecycle.loadInto(id),
-			requireAuthority: (...args) => this.requireAuthority(...args),
+			requireAuthority: (...args) => this.authority.requireAuthority(...args),
 			newId: () => this.newId(),
 			problem: (...args) => this.problem(...args),
-			actorRights: (s, actor) => this.actorRights(s, actor),
+			actorRights: (s, actor) => this.authority.actorRights(s, actor),
 		});
 		this.now = options.now ?? Date.now;
 		this.newId = options.newId ?? randomUUID;
@@ -704,10 +718,10 @@ export class Harness {
 			runCommand: (sessionId, line, actorId) => this.runCommand(sessionId, line, actorId),
 			startSession: (options) => this.lifecycle.startSession(options),
 			openSession: (id, actor, prepare, operation) => this.lifecycle.openSession(id, actor, prepare, operation),
-			join: (sessionId, actor, grantedBy) => this.join(this.lifecycle.session(sessionId), actor, grantedBy, pluginName),
+			join: (sessionId, actor, grantedBy) => this.authority.join(this.lifecycle.session(sessionId), actor, grantedBy, pluginName),
 			leave: async (sessionId, actorId, requestedBy) => {
 				const s = this.lifecycle.session(sessionId);
-				if (requestedBy && requestedBy !== actorId) this.requireAuthority(s, requestedBy, "grant");
+				if (requestedBy && requestedBy !== actorId) this.authority.requireAuthority(s, requestedBy, "grant");
 				if (!s.actors.has(actorId)) throw new Error(`Actor ${actorId} is not part of this session`);
 				await this.historyCommit.commit(s, [{ kind: "actorLeft", writer: pluginName, actorId, modelVisible: false, data: { actorId } }]);
 				await this.hooks.observe("session.leave", { sessionId, actorId, requestedBy });
@@ -726,13 +740,13 @@ export class Harness {
 			closeSession: (id, actorId, delegatedBy, authority) => this.lifecycle.closeSession(id, actorId, delegatedBy, authority),
 			session: (id) => {
 				const s = this.lifecycle.session(id);
-				return { id: s.id, project: s.meta.project, tenant: s.tenant, settings: { ...s.settings }, position: s.position, busy: s.isBusy(), actors: [...s.actors.values()].map((a) => ({ ...a, authority: this.rightsOf(s, a.id) })), ephemeral: s.ephemeral };
+				return { id: s.id, project: s.meta.project, tenant: s.tenant, settings: { ...s.settings }, position: s.position, busy: s.isBusy(), actors: [...s.actors.values()].map((a) => ({ ...a, authority: this.authority.rightsOf(s, a.id) })), ephemeral: s.ephemeral };
 			},
 			input: (sessionId, options) => this.admission.input(sessionId, options),
 			withdraw: (sessionId, inputId) => this.admission.withdraw(sessionId, inputId),
 			proposals: (id, actorId) => {
 				const s = this.lifecycle.session(id);
-				this.requireAuthority(s, actorId, "watch");
+				this.authority.requireAuthority(s, actorId, "watch");
 				return [...s.proposals.values()].map((q) => ({ inputId: q.id, actorId: q.actorId, content: q.content, time: q.time! }));
 			},
 			withdrawProposal: (id, inputId, actorId, delegatedBy) => this.admission.withdrawProposal(this.lifecycle.session(id), inputId, actorId, delegatedBy),
@@ -742,14 +756,14 @@ export class Harness {
 			waitForIdle: (sessionId) => this.admission.waitForIdle(sessionId),
 			moveTo: (sessionId, entryId, options) => this.lifecycle.moveTo(sessionId, entryId, options ?? {}, pluginName),
 			setSetting: (sessionId, key, value, actorId) => this.setSetting(this.lifecycle.session(sessionId), key, value, pluginName, actorId),
-			setLimit: (id, rights, actorId) => this.setLimit(this.lifecycle.session(id), rights, actorId, pluginName),
-			tenant: (id) => this.tenantInfo(this.lifecycle.session(id)),
+			setLimit: (id, rights, actorId) => this.authority.setLimit(this.lifecycle.session(id), rights, actorId, pluginName),
+			tenant: (id) => this.authority.tenantInfo(this.lifecycle.session(id)),
 			checkPending: id => this.erasure.admitHistory(this.lifecycle.session(id)),
 			readHistory: (id, options) => this.inspectHistory(id, options ?? {}, entries => entries),
 			inspectHistory: (id, options, inspect) => this.inspectHistory(id, options, inspect),
 			history: (sessionId, options) => {
 				const s = this.lifecycle.session(sessionId);
-				this.checkScopedWork(s, "watch");
+				this.authority.checkScopedWork(s, "watch");
 				if (this.erasure.httpErasure() && !s.provisional) throw failure("unavailable", "HTTP history requires asynchronous readHistory");
 				this.erasure.checkPending(s);
 				return options?.all ? s.order.map((id) => s.entries.get(id)!) : s.branch();
@@ -770,9 +784,9 @@ export class Harness {
 				return [...[...s.requests.values()].map((r) => r.request), ...this.questions.waitingRequests(s)];
 			},
 			startJob: (sessionId, options) => this.jobWork.startJob(this.lifecycle.session(sessionId), options, pluginName),
-			workActors: (id) => this.workActors(this.lifecycle.session(id)),
-			workJobs: (id) => { const work = this.turnAuthority.getStore(); return work?.sessionId === id ? [...work.jobs] : []; },
-			workMay: (id, right, actors, jobs) => this.workRights(this.lifecycle.session(id), actors, jobs).includes(right),
+			workActors: (id) => this.authority.workActors(this.lifecycle.session(id)),
+			workJobs: (id) => { const work = this.authority.turnAuthority.getStore(); return work?.sessionId === id ? [...work.jobs] : []; },
+			workMay: (id, right, actors, jobs) => this.authority.workRights(this.lifecycle.session(id), actors, jobs).includes(right),
 			jobTrace: (id, jobId) => {
 				const s = this.lifecycle.session(id);
 				return s.jobs.get(jobId)?.job.plugin === pluginName ? this.jobWork.jobSpans.get(s)?.get(jobId) : undefined;
@@ -952,7 +966,7 @@ export class Harness {
 		if (!match) throw failure("invalid_params", "Not a command");
 		const session = this.lifecycle.session(sessionId);
 		await this.erasure.reconcilePending(session);
-		this.requireAuthority(session, actorId, "input");
+		this.authority.requireAuthority(session, actorId, "input");
 		this.lifecycle.checkWriter(session);
 		const command = this.commandTable.get(match[1]);
 		if (!command) throw failure("not_found", `Unknown command /${match[1]}`);
@@ -960,7 +974,7 @@ export class Harness {
 		const commandReservation = `command:${stepId}`;
 		if (!this.reservations.reserve(session, commandReservation, { calls: 1, bufferedBytes: resourceBytes(line),
 			storageBytes: this.reservations.limits.settlementBytes })) throw failure("busy", "No capacity for command");
-		const authority = { startingRights: this.rightsOf(session, actorId) };
+		const authority = { startingRights: this.authority.rightsOf(session, actorId) };
 		const scope = { sessionId, actors: new Set([actorId]), jobs: new Set<string>(), state: authority };
 		const abort = new AbortController();
 		const signal = AbortSignal.any([abort.signal, session.interruption.signal]);
@@ -971,11 +985,11 @@ export class Harness {
 			signal.throwIfAborted();
 			this.erasure.checkPending(session);
 			this.lifecycle.checkWriter(session);
-			this.requireAuthority(session, actorId, "input");
+			this.authority.requireAuthority(session, actorId, "input");
 		};
 		let tail = Promise.resolve();
 		try {
-			return await this.turnAuthority.run(scope, () => command.run(match[2], { sessionId, actorId, stepId, signal, api: this.api(command.plugin),
+			return await this.authority.turnAuthority.run(scope, () => command.run(match[2], { sessionId, actorId, stepId, signal, api: this.api(command.plugin),
 				requestModel: async (request) => {
 					live();
 					if (!command.usesModel) throw Object.assign(new Error("Command did not declare usesModel"), { code: "not_supported" });
@@ -985,7 +999,7 @@ export class Harness {
 						await this.providerFor(session)?.refreshModels?.();
 						const model = this.modelAccess(session);
 						if (!model) throw Object.assign(new Error("The selected model is not offered"), { code: "invalid_request" });
-						const allowed = this.rightsOf(session, actorId).includes("tools") ? this.toolDefinitions(session) : [];
+						const allowed = this.authority.rightsOf(session, actorId).includes("tools") ? this.toolDefinitions(session) : [];
 						const offered = session.settings.modelTools;
 						const tools = snapshot.tools.filter(tool => (!tool.callers || tool.callers.includes("model")) && !this.interfaceTools.interfaceSources.has(tool.name) &&
 							(offered == null || Array.isArray(offered) && offered.includes(tool.name)) && allowed.some(t => isDeepStrictEqual(t, tool)));
@@ -1003,7 +1017,7 @@ export class Harness {
 				environment: async () => {
 					live();
 					const authorize = () => {
-						if (!this.rightsOf(session, actorId).includes("tools")) throw failure("invalid_request", "Command cannot use the environment");
+						if (!this.authority.rightsOf(session, actorId).includes("tools")) throw failure("invalid_request", "Command cannot use the environment");
 					};
 					authorize();
 					const environment = await this.environmentFor(session);
@@ -1057,7 +1071,7 @@ export class Harness {
 
 	/** Check the operator's creation ceiling before allocating a provisional session. */
 	tenantAllows(tenant: string | undefined, right: Authority): boolean {
-		return tenant === undefined || this.tenants.get(tenant)?.rights.includes(right) === true;
+		return this.authority.tenantAllows(tenant, right);
 	}
 
 	/** Discovery is the open authority check without joining or taking a writer lease. */
@@ -1089,7 +1103,7 @@ export class Harness {
 	}
 
 	private async setSetting(s: Session, key: string, value: unknown, writer: string, actorId?: string): Promise<void> {
-		if (actorId) this.requireAuthority(s, actorId, "settings");
+		if (actorId) this.authority.requireAuthority(s, actorId, "settings");
 		if (this.settingsDuringTurn === "refused" && s.isBusy()) throw Object.assign(new Error("Cannot change settings during a turn"), { code: "busy" });
 		await this.historyCommit.commit(s, [{ kind: "setting", writer, actorId, modelVisible: false, data: { key, value } }]);
 		if (s.hasWaitingApprovals) await this.approvals.reconcileApprovals(s);
@@ -1099,7 +1113,7 @@ export class Harness {
 	private inspectHistory<T>(id: string, options: { all?: boolean }, inspect: (entries: HistoryEntry[]) => T): T | Promise<T> {
 		const s = this.lifecycle.session(id);
 		const snapshot = () => {
-			this.checkScopedWork(s, "watch");
+			this.authority.checkScopedWork(s, "watch");
 			return inspect(options.all ? s.order.map(id => s.entries.get(id)!) : s.branch());
 		};
 		if (this.erasure.httpErasure() && !s.provisional) return this.erasure.admitHistory(s).then(snapshot);
@@ -1107,129 +1121,9 @@ export class Harness {
 		return snapshot();
 	}
 
-
-	// ---------- authority ----------
-
-	/** Authority only narrows: a granted actor can do no more than whoever grants it. */
-	private async join(s: Session, actor: Actor, grantedBy: string, writer: string): Promise<void> {
-		this.requireAuthority(s, grantedBy, "grant");
-		const beyond = actor.authority.filter((a) => !ALL_AUTHORITY.includes(a) || !this.rightsOf(s, grantedBy).includes(a));
-		if (beyond.length) throw Object.assign(new Error(`${grantedBy} can't grant ${beyond.join(", ")}`), { code: "forbidden" });
-		await this.historyCommit.commit(s, [actorJoined(actor, writer, grantedBy)]);
-		await this.hooks.observe("session.join", { sessionId: s.id, actorId: actor.id, actor, grantedBy });
-		this.emit(s, "session.joined", { actor }, writer, { actorId: actor.id });
-		await this.questions.closeRevokedWaits(s);
-		await this.approvals.reconcileApprovals(s);
-	}
-
-	private requireAuthority(s: Session, actorId: string, authority: Authority): void {
-		const actor = s.actors.get(actorId);
-		if (!actor || !this.rightsOf(s, actorId).includes(authority)) {
-			throw Object.assign(new Error(`Actor ${actorId} may not ${authority}`), { code: "forbidden" });
-		}
-	}
-
-	private withinLimits(s: Session, right: Authority): boolean {
-		const tenant = s.tenant === undefined ? undefined : this.tenants.get(s.tenant);
-		return ALL_AUTHORITY.includes(right) && (right === "administer" || s.limit === null || s.limit.includes(right)) &&
-			(s.tenant === undefined || tenant?.rights.includes(right) === true);
-	}
-
 	/** Apply the token ceiling to this connection's operations without rewriting recorded grants. */
 	withConnectionActor<T>(actor: Actor, run: () => T): T {
-		return this.turnAuthority.exit(() => connectionRights.run({ [actor.id]: [...actor.authority] }, run));
-	}
-
-	private actorRights(s: Session, actorId: string): Authority[] {
-		const scope = this.turnAuthority.getStore();
-		const ceilings = [connectionRights.getStore(), scope?.state?.connectionRights].flatMap(rights =>
-			rights && Object.hasOwn(rights, actorId) ? [rights[actorId]] : []);
-		const allowed = (s.actors.get(actorId)?.authority ?? []).filter(right => ceilings.every(ceiling => ceiling.includes(right)) && this.withinLimits(s, right));
-		if (!s.meta.parentSessionId) return allowed;
-		const parent = this.sessions.get(s.meta.parentSessionId);
-		const link = s.order.map((id) => s.entries.get(id)!).find((e) => e.kind === "harness.parentAuthority");
-		const work = link?.data as { actors?: string[]; jobs?: string[]; rights?: Authority[] } | undefined;
-		return allowed.filter((right) => parent
-			? (work?.rights ?? ["watch"]).includes(right) && this.workRights(parent, work?.actors ?? [], work?.jobs).includes(right)
-			: right === "watch");
-	}
-
-	private actorForJob(s: Session, jobs?: Set<string>): string | undefined {
-		return s.order.map((id) => s.entries.get(id)!).find((e) => e.kind === "jobStarted" && e.jobId && jobs?.has(e.jobId))?.actorId;
-	}
-
-	private workRights(s: Session, actors: Iterable<string>, jobs: Iterable<string> = []): Authority[] {
-		const owners = [...actors].map((id) => this.actorRights(s, id));
-		const recordedJobs = [...jobs].map((jobId) => {
-			const start = s.order.map((id) => s.entries.get(id)!).find((e) => e.jobId === jobId && e.kind === "jobStarted");
-			const kept = s.jobs.get(jobId) ?? (start && this.jobWork.readJob(s, start));
-			return { rights: kept?.rights ?? ["watch"], ancestors: [...new Set([...(kept?.actors ?? []), ...(kept?.job.actorId ? [kept.job.actorId] : [])])].map((id) => this.actorRights(s, id)) };
-		});
-		const scope = this.turnAuthority.getStore();
-		const starting = scope?.sessionId === s.id ? scope.state?.startingRights : undefined;
-		return ALL_AUTHORITY.filter((right) => (!starting || starting.includes(right)) && this.withinLimits(s, right) &&
-			owners.every((owner) => owner.includes(right)) &&
-			recordedJobs.every((job) => job.rights.includes(right) && job.ancestors.every((owner) => owner.includes(right))));
-	}
-
-	private checkScopedWork(s: Session, right: Authority): void {
-		const work = this.turnAuthority.getStore();
-		if (work?.sessionId === s.id && (!work.actors.size && !work.jobs.size || !this.workRights(s, work.actors, work.jobs).includes(right))) {
-			throw failure("forbidden", `Starting work cannot ${right}`);
-		}
-	}
-
-	private rightsOf(s: Session, actorId: string): Authority[] {
-		const context = this.turnAuthority.getStore();
-		return context?.sessionId === s.id
-			? this.workRights(s, [actorId, ...context.actors], context.jobs)
-			: this.actorRights(s, actorId);
-	}
-
-	private setLimit(s: Session, rights: Authority[] | null, actorId: string, writer: string): Promise<void> {
-		return this.admission.admit(s, async () => {
-			this.requireAuthority(s, actorId, "administer");
-			const effective = (s.actors.get(actorId)?.authority ?? []).filter((r) => s.tenant === undefined || this.tenants.get(s.tenant)?.rights.includes(r));
-			if ((rights ?? ALL_AUTHORITY).some((right) => !effective.includes(right))) throw Object.assign(new Error("A limit cannot give a right the administrator lacks"), { code: "forbidden" });
-			await this.historyCommit.commit(s, [{ kind: "limit", writer, actorId, modelVisible: false, data: { rights: rights === null ? null : [...new Set(rights)] } }]);
-			await this.questions.closeRevokedWaits(s);
-			await this.approvals.reconcileApprovals(s);
-		});
-	}
-
-	private async tenantInfo(s: Session): Promise<TenantInfo> {
-		const tenant = s.tenant === undefined ? undefined : this.tenants.get(s.tenant);
-		if (tenant?.tokens === undefined) return { tenant: s.tenant ?? null, rights: tenant?.rights ?? null, tokens: null };
-		const store = this.use<HistoryStore>("history-store");
-		const other = await Promise.all((await store?.list() ?? [])
-			.filter(({ id }) => !this.sessions.has(id)).map(async ({ id }) => (await store!.load(id)).entries));
-		const histories = [...other, ...[...this.sessions.values()].filter((session) => session.tenant === s.tenant)
-			.map((session) => session.order.map((id) => session.entries.get(id)!))];
-		// Count each turn once even across branches and forks. For an interrupted or running turn,
-		// the committed responses are the usage that has not made it into a turnEnd yet.
-		const ends = new Map<string, Usage>();
-		const responses = new Map<string, HistoryEntry>();
-		for (const entries of histories) {
-			if ((entries.find((e) => e.kind === "tenant")?.data as { tenant?: string } | undefined)?.tenant !== s.tenant) continue;
-			for (const e of entries) {
-				if (e.erased || !e.turnId && !e.stepId) continue;
-				if (e.kind === "turnEnd" && e.turnId) {
-					const usage = (e.data as { usage?: Usage }).usage;
-					if (usage) ends.set(e.turnId, usage);
-				} else if (e.kind === "response") responses.set(e.id, e);
-			}
-		}
-		let used = [...ends.values()].reduce((n, u) => n + tokenCount(u), 0);
-		for (const e of responses.values()) {
-			if (!ends.has(e.turnId!) && e.message?.role === "assistant") used += tokenCount(e.message.usage);
-		}
-		return { tenant: s.tenant!, rights: tenant.rights, tokens: { budget: tenant.tokens, used } };
-	}
-
-	private async tenantBudgetReached(s: Session): Promise<boolean> {
-		if (s.tenant === undefined || this.tenants.get(s.tenant)?.tokens === undefined) return false;
-		const { tokens } = await this.tenantInfo(s);
-		return !!tokens && tokens.used >= tokens.budget;
+		return this.authority.withConnectionActor(actor, run);
 	}
 
 	private runtime(): Runtime | undefined {
@@ -1342,40 +1236,9 @@ export class Harness {
 		return out;
 	}
 
-	private originalWorkAllows(s: Session, w: WaitingApproval) {
-		const origin = w.entry.turnId!;
-		const branch = s.branch();
-		const work = branch.filter(e => e.turnId === origin && (e.kind === "input" || e.kind === "turnStart"));
-		if (!work.some(e => e.kind === "turnStart") || work.some(e => e.erased) || !this.turns.recordedTurnRights(branch, origin).includes("tools")) return false;
-		return this.turnAuthority.exit(() => connectionRights.exit(() => {
-			for (const e of work) {
-				const contributors = (e.data as { authorizers?: {sessionId: string; actorId?: string; jobId?: string}[] }).authorizers;
-				if (contributors !== undefined && (!Array.isArray(contributors) || contributors.some(ref => {
-					const owner = ref && this.sessions.get(ref.sessionId);
-					return !owner || owner.tenant !== s.tenant || Boolean(ref.actorId) === Boolean(ref.jobId) ||
-						!this.workRights(owner, ref.actorId ? [ref.actorId] : [], ref.jobId ? [ref.jobId] : []).includes("tools");
-				}))) return false;
-			}
-			return this.workRights(s, this.turns.recordedTurnActors(branch, origin), this.turns.recordedTurnJobs(branch, origin)).includes("tools");
-		}));
-	}
-
 	/** Attach a connection without adding a persistent plugin registration. */
 	connectInterface(part: InterfaceCapability): () => void {
 		return this.questions.connectInterface(part);
-	}
-
-
-	// ---------- jobs ----------
-
-	private workActors(s: Session): string[] {
-		const context = this.turnAuthority.getStore();
-		if (context?.sessionId === s.id) return [...new Set([...context.actors, ...[...context.jobs].flatMap((id) => {
-			const actor = s.order.map((id) => s.entries.get(id)!).find((e) => e.kind === "jobStarted" && e.jobId === id)?.actorId;
-			return actor ? [actor] : [];
-		})])];
-		const actorId = this.tools.toolWork.getStore()?.actorId;
-		return actorId ? [actorId] : [];
 	}
 
 	// ---------- declarations ----------
@@ -1474,19 +1337,6 @@ export function lowerReasoning(value: unknown, model?: ModelInfo): string | unde
 	return thinkingLevels(model).findLast((level) => REASONING_LEVELS.findIndex((known) => known === level) <= index);
 }
 
-function readTenants(json: string | undefined): Map<string, Tenant> {
-	if (json === undefined) return new Map();
-	const value: unknown = JSON.parse(json);
-	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("MODULAR_AGENT_TENANTS must be a JSON object");
-	return new Map(Object.entries(value).map(([name, config]) => {
-		if (!name || !config || !Array.isArray(config.rights) || !config.rights.every((right: unknown) => typeof right === "string") ||
-			(config.tokens !== undefined && (!Number.isSafeInteger(config.tokens) || config.tokens < 0))) {
-			throw new Error(`Invalid tenant configuration for ${name}`);
-		}
-		return [name, { rights: [...new Set<Authority>(config.rights)], tokens: config.tokens }];
-	}));
-}
-
 export function normalizeSetting({ key, value }: { key: string; value: unknown }): { key: string; value: unknown } {
 	if (key === "approvalPolicy" || key === "approval") return { key: "approval", value: ["off", "ask", "all", "never"].includes(String(value)) ? value : "never" };
 	if (key === "thinking") return { key: "reasoning", value };
@@ -1498,10 +1348,6 @@ export function normalizeSetting({ key, value }: { key: string; value: unknown }
 		})) };
 	}
 	return { key, value: value ?? null };
-}
-
-function intersectRights(...ceilings: readonly Authority[][]): Authority[] {
-	return ceilings.length ? ALL_AUTHORITY.filter(right => ceilings.every(ceiling => Array.isArray(ceiling) && ceiling.includes(right))) : [];
 }
 
 export type { GateResult };
