@@ -1,3 +1,4 @@
+import { WorkReservations } from "./work-reservations.js";
 import { HistoryCommit } from "./history-commit.js";
 import { SessionLifecycle, actorJoined } from "./session-lifecycle.js";
 import { InputAdmission } from "./input-admission.js";
@@ -259,6 +260,13 @@ interface TenantInfo { tenant: string | null; rights: Authority[] | null; tokens
  * It runs no turns, calls no models and runs no tools itself.
  */
 export class Harness {
+	private readonly workReservations: WorkReservations = new WorkReservations({
+		use: (...args) => this.use(...args),
+		lifecycle: () => this.lifecycle,
+		reservations: () => this.reservations,
+		jobWork: () => this.jobWork,
+	});
+
 	private readonly historyCommit: HistoryCommit = new HistoryCommit({
 		erasure: () => this.erasure,
 		receiptOperation: () => this.receiptOperation,
@@ -276,7 +284,7 @@ export class Harness {
 
 	private readonly lifecycle: SessionLifecycle = new SessionLifecycle({
 		sessions: () => this.sessions,
-		rebuildReservations: (...args) => this.rebuildReservations(...args),
+		rebuildReservations: (...args) => this.workReservations.rebuildReservations(...args),
 		use: (...args) => this.use(...args),
 		erasure: () => this.erasure,
 		tenants: () => this.tenants,
@@ -329,7 +337,7 @@ export class Harness {
 		modelAccess: (...args) => this.modelAccess(...args),
 		workRights: (...args) => this.workRights(...args),
 		runtime: (...args) => this.runtime(...args),
-		reserveInput: (...args) => this.reserveInput(...args),
+		reserveInput: (...args) => this.workReservations.reserveInput(...args),
 		reservations: () => this.reservations,
 		interfaceTools: () => this.interfaceTools,
 		turns: () => this.turns,
@@ -381,7 +389,7 @@ export class Harness {
 		hooks: () => this.hooks,
 		commit: (...args) => this.historyCommit.commit(...args),
 		emit: (...args) => this.emit(...args),
-		reserveCall: (...args) => this.reserveCall(...args),
+		reserveCall: (...args) => this.workReservations.reserveCall(...args),
 		step: (...args) => this.turns.step(...args),
 	});
 
@@ -407,7 +415,7 @@ export class Harness {
 		questions: () => this.questions,
 		newId: (...args) => this.newId(...args),
 		reservations: () => this.reservations,
-		reserveCall: (...args) => this.reserveCall(...args),
+		reserveCall: (...args) => this.workReservations.reserveCall(...args),
 		problem: (...args) => this.problem(...args),
 		approvalCoversNested: () => this.approvalCoversNested,
 		plugins: (...args) => this.plugins(...args),
@@ -479,7 +487,7 @@ export class Harness {
 		workRights: (...args) => this.workRights(...args),
 		reservations: () => this.reservations,
 		newId: (...args) => this.newId(...args),
-		reserveJob: (...args) => this.reserveJob(...args),
+		reserveJob: (...args) => this.workReservations.reserveJob(...args),
 		commit: (...args) => this.historyCommit.commit(...args),
 		toolWork: () => this.tools.toolWork,
 		emit: (...args) => this.emit(...args),
@@ -501,7 +509,6 @@ export class Harness {
 	private readonly erasure: SessionErasure;
 	private readonly tenants: Map<string, Tenant>;
 	private reservations: Reservations;
-	private reservationScan?: Promise<void>;
 	private listeners: { plugin: string; raw: boolean; fn: (e: AgentEvent) => void }[] = [];
 	private commandTable = new Map<string, Command & { plugin: string }>();
 	private now: () => number;
@@ -1023,61 +1030,7 @@ export class Harness {
 	}
 
 	rebuildReservations(): Promise<void> {
-		return this.reservationScan ??= (async () => {
-			const store = this.use<HistoryStore>("history-store");
-			for (const meta of await store?.list() ?? []) {
-				const s = await this.lifecycle.loadInto(meta.id);
-				if (!s) continue;
-				const entries = s.order.map(id => s.entries.get(id)!);
-				this.reservations.retain(s, entries.reduce((n, entry) => n + resourceBytes(entry), 0), true);
-				for (const q of s.admissions.values()) this.reserveInput(s, q, true);
-				for (const { job } of this.jobWork.runningJobs(s)) this.reserveJob(s, job.id, true);
-				const own = entries.filter(e => !s.copied.has(e.id));
-				const results = new Set(own.filter(e => e.kind === "toolResult").map(e => e.toolCallId));
-				const ended = new Set(own.filter(e => e.kind === "turnEnd").map(e => e.turnId));
-				const answered = new Set(own.filter(e => e.kind === "response").map(e => e.stepId));
-				const closed = new Set(own.filter(e => e.kind === "inputAnswer").map(e => e.requestId));
-				const unit = this.reservations.limits.settlementBytes;
-				for (const e of own) {
-					if (e.kind === "inputRequest" && !e.erased && !closed.has(e.requestId)) {
-						this.reservations.reserve(s, `question:${e.requestId}`, { storageBytes: 3 * unit }, true);
-					}
-					if (e.kind === "turnStart" && e.turnId && !ended.has(e.turnId)) this.reservations.reserve(s, `turn:${e.turnId}`, { storageBytes: 2 * unit }, true);
-					if (e.kind === "modelRequest" && e.stepId && !answered.has(e.stepId) && !ended.has(e.turnId)) {
-						this.reservations.reserve(s, `model:${e.stepId}`, { calls: 1, storageBytes: 2 * unit }, true);
-					}
-				}
-				for (const entry of entries) {
-					if (s.copied.has(entry.id)) continue;
-					if (entry.kind === "response" && entry.message?.role === "assistant") {
-						for (const part of entry.message.content) if (isToolCall(part) && !results.has(part.id)) this.reserveCall(s, part.id, true);
-					}
-					if ((entry.kind === "modular-agent.nestedCall" || entry.kind === "toolStarted") && entry.toolCallId && !results.has(entry.toolCallId)) {
-						this.reserveCall(s, entry.toolCallId, true);
-					}
-				}
-			}
-		})();
-	}
-
-	private reserveInput(s: Session, q: QueuedInput, rebuilding = false, startsNow = false) {
-		const size = resourceBytes(q);
-		const unit = this.reservations.limits.settlementBytes;
-		if (!rebuilding && size + 2048 > this.reservations.limits.entryBytes ||
-			!this.reservations.reserve(s, `input:${q.id}`, { inputs: startsNow ? 0 : 1, bufferedBytes: size, storageBytes: 3 * size + 4 * unit }, rebuilding)) {
-			throw failure("busy", "No capacity for input");
-		}
-	}
-
-	private reserveCall(s: Session, id: string, rebuilding = false) {
-		return this.reservations.reserve(s, `call:${id}`, { calls: 1, storageBytes: 4 * this.reservations.limits.settlementBytes }, rebuilding);
-	}
-
-	private reserveJob(s: Session, id: string, rebuilding = false) {
-		const unit = this.reservations.limits.settlementBytes;
-		if (!this.reservations.reserve(s, `job:${id}`, { jobs: 1, inputs: 1, bufferedBytes: unit, storageBytes: 9 * unit }, rebuilding)) {
-			throw failure("busy", "No capacity for job and its report");
-		}
+		return this.workReservations.rebuildReservations();
 	}
 
 	session(id: string): Session {
