@@ -20,8 +20,6 @@ from .interface_tools import (
 )
 from .output import SEGMENT_BYTES, OutputOverflow, encoded_size, gate, project
 from .reservations import Reservations, size
-
-
 from .waiting_approvals import WaitingApprovals, marked, waiting_entries
 
 
@@ -543,31 +541,28 @@ class Harness(Authority, Erasure, InterfaceTools, WaitingApprovals):
         with ot.span(
             "execute_tool " + tool_name if tool_name else "execute_tool", attributes
         ) as operation:
-            return await self._dispatch_tool(sid, method, data, emit, token, scope, operation)
-
-    async def _dispatch_tool(self, sid, method, data, emit, token, scope, operation):
-        try:
-            result = clone(await method({**data, "dispatch": token}, emit))
-            status = ot.tool_status(result)
-            ot.set_attrs(operation, {"modular_agent.tool.status": status})
-            if status == "failed":
-                ot.error(operation, "tool_failed")
-            return result
-        except asyncio.CancelledError:
-            ot.set_attrs(operation, {"modular_agent.tool.status": "cancelled"})
-            raise
-        except Exception:
-            ot.set_attrs(operation, {"modular_agent.tool.status": "failed"})
-            raise
-        finally:
-            scope["closing"] = True
-            children = list(scope["children"])
-            for task in children:
-                if not task.done() and not task.cancelling():
-                    task.cancel()
-            if children:
-                await asyncio.gather(*children, return_exceptions=True)
-            self.tool_dispatches.pop(token, None)
+            try:
+                result = clone(await method({**data, "dispatch": token}, emit))
+                status = ot.tool_status(result)
+                ot.set_attrs(operation, {"modular_agent.tool.status": status})
+                if status == "failed":
+                    ot.error(operation, "tool_failed")
+                return result
+            except asyncio.CancelledError:
+                ot.set_attrs(operation, {"modular_agent.tool.status": "cancelled"})
+                raise
+            except Exception:
+                ot.set_attrs(operation, {"modular_agent.tool.status": "failed"})
+                raise
+            finally:
+                scope["closing"] = True
+                children = list(scope["children"])
+                for task in children:
+                    if not task.done() and not task.cancelling():
+                        task.cancel()
+                if children:
+                    await asyncio.gather(*children, return_exceptions=True)
+                self.tool_dispatches.pop(token, None)
 
     async def nested_tools(self, token, name=None, arguments=None):
         scope = self.tool_dispatches.get(token)
