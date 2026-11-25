@@ -91,12 +91,30 @@ impl Questions {
             {
                 eprintln!("{prompt}");
             }
+            let shown = prompt.is_none();
             pending.items.push(Pending {
                 id: q.id.clone(),
                 kind: q.kind,
                 prompt,
                 sender,
             });
+            if shown {
+                let options = if q.options.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", serde_json::json!(q.options))
+                };
+                eprintln!(
+                    "Question {}: {}{options}\nUse /answer REQUEST_ID {}",
+                    q.id,
+                    q.question,
+                    if q.kind == QuestionKind::Secret {
+                        "(hidden input)"
+                    } else {
+                        "VALUE"
+                    },
+                );
+            }
             Showing(self.clone(), q.id)
         };
         rx.await.unwrap_or_else(|_| declined("terminal closed"))
