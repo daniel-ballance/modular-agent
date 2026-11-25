@@ -14,6 +14,6 @@ Each guide walks through one task in all four languages. The examples are the AP
 | [Drive an agent over ACP](08-drive-an-agent-over-acp.md) | `serveAcp`, connecting an editor or T3 Code |
 | [Share sessions between agents](09-share-sessions-between-agents.md) | The history service, actor ids, portable sessions |
 
-Every example that needs no real model, network or editor runs as a test in its language; each guide says which examples are shown but not run. Where an SDK lacks something a guide uses, the guide shows what that SDK has today, and an issue with that language's `lang:` label records the gap.
+Every example that needs no real model, network or editor runs as a test in its language; each guide says which examples are shown but not run. Where an SDK lacks something a guide uses, the guide shows what that SDK has today, and one issue with a `lang:` label for each SDK that lacks it records the gap.
 
 The examples use `openai/gpt-6-luna` as the model and `OPENAI_API_KEY` for its key. The model stands for any model the Provider offers: use one from `provider.models()`, since an agent refuses a model no Provider offers. Any Provider and model work the same way.
