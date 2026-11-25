@@ -1,4 +1,5 @@
-import type { Command, PluginApi, parseModel } from "./harness.js";
+import type { parseModel } from "./harness.js";
+import type { Command, PluginApi } from "./plugin-api.js";
 import { SessionAuthority } from "./authority.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
 import { TurnExecution } from "./turn-execution.js";

@@ -1,4 +1,5 @@
-import { parseModel, untilAborted, type Command, type InputOptions } from "./harness.js";
+import { parseModel, untilAborted } from "./harness.js";
+import type { Command, InputOptions } from "./plugin-api.js";
 import { TurnExecution, inputActors } from "./turn-execution.js";
 import { InterfaceToolRoutes } from "./interface-tool-routes.js";
 import { connectionRights, intersectConnectionRights } from "./connection-authority.js";

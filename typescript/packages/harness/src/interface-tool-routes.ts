@@ -1,4 +1,4 @@
-import type { Plugin } from "./harness.js";
+import type { Plugin } from "./plugin-api.js";
 import type { TurnState } from "./turn-state.js";
 import { shapeViolation } from "./result-shape.js";
 import { SessionErasure } from "./session-erasure.js";

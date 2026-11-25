@@ -1,4 +1,5 @@
-import { ALL_AUTHORITY, normalizeSetting, type parseModel, type ListingViewer, type SessionStartOptions, type SessionPrepare, type SessionSummary, type Tenant } from "./harness.js";
+import { ALL_AUTHORITY, normalizeSetting, type parseModel, type Tenant } from "./harness.js";
+import type { ListingViewer, SessionStartOptions, SessionPrepare, SessionSummary } from "./plugin-api.js";
 import { InputAdmission } from "./input-admission.js";
 import { TurnExecution, recordedSnapshot } from "./turn-execution.js";
 import { ToolDispatch } from "./tool-dispatch.js";

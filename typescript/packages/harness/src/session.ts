@@ -1,4 +1,4 @@
-import type { JobHandle } from "./harness.js";
+import type { JobHandle } from "./plugin-api.js";
 import { modelView } from "./view.js";
 import { erasedEntry } from "./types.js";
 import type { Actor, AgentEvent, Answer, ContentPart, HistoryEntry, InputRequest, Job, ModelMessage, StoredSession } from "./types.js";

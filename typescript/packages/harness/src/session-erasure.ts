@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { memoryPendingErasure, type ErasureIntent, type ErasurePlan, type HistoryErasureRegistry, type PendingErasure } from "./erasure.js";
 import { failure } from "./failure.js";
-import type { ErasureReport } from "./harness.js";
+import type { ErasureReport } from "./plugin-api.js";
 import { handoffRecords } from "./interface-tools.js";
 import type { RunReceipts } from "./run-receipts.js";
 import { inputIdOf, type Session } from "./session.js";

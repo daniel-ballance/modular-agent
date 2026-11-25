@@ -1,4 +1,4 @@
-import type { JobHandle } from "./harness.js";
+import type { JobHandle } from "./plugin-api.js";
 import { SessionErasure } from "./session-erasure.js";
 import { failure } from "./failure.js";
 import { AsyncLocalStorage } from "node:async_hooks";
