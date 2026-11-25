@@ -1,6 +1,6 @@
 # Modular Agent in Rust
 
-An agent build and SDK based on [production edition 3](../docs/adr/0021-production-edition.md) and the [edition 4 draft](../docs/adr/0023-edition-4-draft.md). The Rust workspace has three parts:
+An agent build and SDK based on [production edition 3](../docs/adr/0021-production-edition.md) and [edition 4](../docs/adr/0023-edition-4-draft.md), accepted by [ADR 0027](../docs/adr/0027-sdk-0-1-and-edition-4.md). The Rust workspace has three parts:
 
 - **The base.** The Harness, the transient and durable Runtimes, ACP, the plugin host, history stores and the fixtures. This is the clean-room Rust build from the experiment (`modular-agent-rs` at `bc59845`), copied in unchanged and then extended. Its own notes are in [docs/clean-room](docs/clean-room/). Its binary is `modular-agent`, and it still passes every kit.
 - **The standard configuration.** A coding agent in Pi's shape, built on the public Rust SDK and its official plugins. Its binary is `ma`. [ADR 0022](../docs/adr/0022-standard-configuration.md) records the decisions.

@@ -111,7 +111,7 @@ scripts/websocket-kits.sh go
 Tracked in #32.
 
 - `find` uses `git ls-files` where Git can read a worktree and falls back to `find` otherwise. It does not interpret `.gitignore` outside a Git worktree. The existing SDK command environment is required for this tool. Very long command output is held by that environment before being cut and spilled.
-- The SDK's question handler supports in-turn text and choice answers. `auth.json` preserves named answers written by Rust, but this configuration does not store new secret answers. The SDK's question tool keeps its existing definition, which is not word-for-word the Rust question tool.
+- The SDK's question handler supports in-turn text and choice answers. Secret answers are staged and stored in `auth.json` through the SDK's credential store; the terminal reads them on the visible line (#52). The SDK's question tool keeps its existing definition, which is not word-for-word the Rust question tool.
 - Only offline fixtures checked the subscription protocols in this round. ChatGPT and Grok streams honor request cancellation and a response-header timeout; a quiet stream after headers has no independent idle timeout.
 
 ## Findings for docs/reference and docs/sdk

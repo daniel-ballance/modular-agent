@@ -1,6 +1,6 @@
 # modular-agent: the Rust SDK
 
-The Rust SDK for the revised [SDK specification 0.1](../../../docs/sdk/README.md). It wraps the Rust base, including the edition 4 draft's nested calls, plugin binding `/1`, shared data `/1`, and the base ACP Interface. It does not expose the Harness.
+The Rust SDK for the [SDK specification](../../../docs/sdk/README.md). It wraps the Rust base, including edition 4's nested calls, plugin binding `/1`, shared data `/1`, and the base ACP Interface. It does not expose the Harness.
 
 ```rust
 use modular_agent::testing::test_agent;

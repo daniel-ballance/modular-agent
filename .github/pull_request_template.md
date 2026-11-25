@@ -14,4 +14,6 @@
 
 <!-- Each command you ran, with its counts of passed and failed steps or tests. -->
 
+Agent check (the reviewer fills this in): `node scripts/docs-review.mjs` at COMMIT judged N candidates and found N problems.
+
 Closes #
