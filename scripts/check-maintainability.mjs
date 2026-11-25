@@ -67,22 +67,38 @@ function checkSizes(sizes, baseline) {
   return bad;
 }
 
-function checkSubjects() {
+// GitHub's closing keywords, which also act in a squash merge's commit message.
+const closingKeyword = new RegExp(
+  String.raw`\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?[ \t]+` +
+    String.raw`(?:(?:[\w.-]+/[\w.-]+)?#\d+|https?://github\.com/[\w.-]+/[\w.-]+/issues/\d+)\b`,
+  "i",
+);
+
+function checkCommits() {
   const refs = git("for-each-ref", "--format=%(refname)", "refs/heads/main", "refs/remotes/origin/main").split("\n");
   const main = ["refs/remotes/origin/main", "refs/heads/main"].find((ref) => refs.includes(ref));
   if (!main) return 0;
 
-  let base;
   try {
-    base = git("merge-base", main, "HEAD").trim();
+    git("merge-base", main, "HEAD");
   } catch {
     throw new Error(`Cannot find a merge base with ${main}. Fetch the shared history and retry.`);
   }
   let bad = 0;
-  for (const commit of git("log", "--format=%h %s", `${base}..HEAD`).split("\n")) {
-    if (!/^\S+ WIP\b/i.test(commit)) continue;
-    console.error(`${commit}: Rewrite the commit subject before merging into main.`);
-    bad++;
+  // A commit message cannot hold a NUL byte, so NULs separate the fields exactly.
+  const fields = git("log", "-z", "--format=%h%x00%s%x00%B", `${main}..HEAD`).split("\0");
+  for (let i = 0; i + 2 < fields.length; i += 3) {
+    const [hash, subject, body] = fields.slice(i, i + 3);
+    const commit = `${hash} ${subject}`;
+    if (/^WIP\b/i.test(subject)) {
+      console.error(`${commit}: Rewrite the commit subject before merging into main.`);
+      bad++;
+    }
+    const keyword = body.match(closingKeyword);
+    if (keyword) {
+      console.error(`${commit}: "${keyword[0]}". Put Closes #N in the pull request body, not the commit message.`);
+      bad++;
+    }
   }
   return bad;
 }
@@ -95,7 +111,7 @@ try {
     console.log(`Wrote ${entries.length} entries to ${baselineFile}`);
   } else if (args.length === 0) {
     const sizes = sourceSizes();
-    const bad = checkSizes(sizes, readBaseline()) + checkSubjects();
+    const bad = checkSizes(sizes, readBaseline()) + checkCommits();
     console.log(`${sizes.size} tracked source files checked. Failures: ${bad}.`);
     process.exitCode = bad ? 1 : 0;
   } else {

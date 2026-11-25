@@ -3,13 +3,25 @@
 # Usage: scripts/stress.sh N [check.sh options]
 set -euo pipefail
 
+usage='Usage: scripts/stress.sh N [check.sh options] (N must be a positive integer)'
+case "${1:-}" in -h|--help) echo "$usage"; exit 0 ;; esac
 if [[ ! ${1:-} =~ ^[1-9][0-9]{0,8}$ ]]; then
-  echo 'Usage: scripts/stress.sh N [check.sh options] (N must be a positive integer)' >&2
+  echo "$usage" >&2
   exit 2
 fi
 count=$1; shift
+for arg in "$@"; do
+  case "$arg" in
+    --quick|--serial|rust|typescript|go|python) ;;
+    -h|--help) echo "$usage"; exit 0 ;;
+    *) echo "unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo"
+# The runs must overlap to load the machine, so all of them wait for their slots together.
+. scripts/check-slot.sh
+take_check_slots "$count" || exit
 export TMPDIR="${TMPDIR:-$HOME/.cache/ma-std-tmp}"
 mkdir -p "$TMPDIR"
 TMPDIR="$(cd "$TMPDIR" && pwd -P)"
@@ -18,16 +30,19 @@ printf 'Stress logs: %s\n' "$root"
 
 # Copy tracked sources as they are on disk. Each run needs its own build outputs,
 # virtual environment and node_modules (npm ci removes the old tree).
-git ls-files -z | tar -cf "$root/source.tar" --null -T -
-for ((run = 1; run <= count; run++)); do
-  src="$root/$run/src"
-  mkdir -p "$src" "$root/$run/tmp"
-  tar -xf "$root/source.tar" -C "$src"
-  # The link checker uses git ls-files. Only a local index is needed.
-  git -C "$src" init -q
-  git -C "$src" add -f -- .
-done
-rm "$root/source.tar"
+(
+  drop_check_slots
+  git ls-files -z | tar -cf "$root/source.tar" --null -T -
+  for ((run = 1; run <= count; run++)); do
+    src="$root/$run/src"
+    mkdir -p "$src" "$root/$run/tmp"
+    tar -xf "$root/source.tar" -C "$src"
+    # The link checker uses git ls-files. Only a local index is needed.
+    git -C "$src" init -q
+    git -C "$src" add -f -- .
+  done
+  rm "$root/source.tar"
+)
 
 check() {
   local dir="$1" status=0; shift
@@ -43,11 +58,23 @@ check() {
   fi
 }
 
+# Each run gets its own process group, so stopping stress.sh can stop all of
+# a run's processes. Neither the setup nor the runs keep the slot files open.
 pids=()
+stop_runs() { # exit status
+  local pid
+  for pid in "${pids[@]}"; do kill -TERM -- "-$pid" 2>/dev/null || true; done
+  exit "$1"
+}
+trap 'stop_runs 129' HUP
+trap 'stop_runs 130' INT
+trap 'stop_runs 143' TERM
+set -m
 for ((run = 1; run <= count; run++)); do
-  check "$root/$run" "$@" &
+  { drop_check_slots; check "$root/$run" "$@"; } &
   pids+=("$!")
 done
+set +m
 
 shopt -s nullglob
 failed=0

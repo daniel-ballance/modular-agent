@@ -28,6 +28,9 @@ done
 want() { [[ " ${languages[*]} " == *" $1 "* ]]; }
 all=false; [ ${#languages[@]} -eq 4 ] && all=true
 
+. "$repo/scripts/check-slot.sh"
+take_check_slots 1 || exit
+
 # A check run keeps its logs and its steps' scratch on disk, so a full /tmp cannot fail it.
 export TMPDIR="${TMPDIR:-$HOME/.cache/ma-std-tmp}"
 mkdir -p "$TMPDIR" || exit 1
@@ -53,9 +56,9 @@ step() { # lane, name, command...
   local log="$logs/${name//[^A-Za-z0-9]/_}.log" start=$SECONDS pid guard status
   # Hang guard only: the longest step takes about 17 minutes on a normal run.
   # A step that hangs is stopped, so one stuck test cannot hold its lane.
-  ( "$@" ) >"$log" 2>&1 &
+  ( drop_check_slots; "$@" ) >"$log" 2>&1 &
   pid=$!
-  ( sleep "$step_limit"
+  ( drop_check_slots; sleep "$step_limit"
     printf '\nhang guard: stopped after %ss\n' "$step_limit" >>"$log"
     kill_tree "$pid" ) &
   guard=$!
@@ -128,6 +131,7 @@ plan() {
   step docs "docs: state" node scripts/check-docs-state.mjs
   step docs "docs: state tests" node --test scripts/check-docs-state.test.mjs
   step docs "docs: review candidate tests" node --test scripts/docs-review.test.mjs
+  step docs "docs: check slot tests" node --test scripts/check-slot.test.mjs
 
   if $quick; then
     step rust "rust: SDK tests" bash -c "cd rust && mise exec -- cargo test -q -p modular-agent -p standard -- --test-threads=1"
@@ -199,7 +203,7 @@ else
   plan docs
   pids=()
   for language in "${languages[@]}"; do
-    plan "$language" &
+    { drop_check_slots; plan "$language"; } &
     pids+=("$!")
   done
   for i in "${!pids[@]}"; do

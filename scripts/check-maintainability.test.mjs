@@ -140,11 +140,75 @@ test("origin/main wins over a local main that is behind it or ahead of it", (t) 
   assert.doesNotMatch(result.stderr, /WIP landed long ago/);
 });
 
+test("a WIP subject after leading blank lines fails", (t) => {
+  const repo = checkout(t);
+  repo.commit("Start");
+  repo.git("switch", "-q", "-c", "topic");
+  repo.git("commit", "-q", "--allow-empty", "--cleanup=verbatim", "-m", "\n\nWIP: finish the split\n\nThe rest.");
+  const result = repo.check();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /WIP: finish the split: Rewrite the commit subject/);
+});
+
 test("a subject that only begins with the letters wip passes", (t) => {
   const repo = checkout(t);
   repo.commit("Start");
   repo.git("switch", "-q", "-c", "topic");
   repo.commit("Wipe the stale cache");
+  const result = repo.check();
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("a closing keyword anywhere in a branch commit message fails", (t) => {
+  const repo = checkout(t);
+  repo.commit("Fixes #3 on main already");
+  repo.git("switch", "-q", "-c", "topic");
+  repo.commit("Closes #12");
+  repo.commit("Split the module\n\nThe old one was too long.\nRESOLVED: owner/repo#13");
+  repo.commit("Tidy\n\nfixed https://github.com/owner/repo/issues/14");
+  repo.commit("Split the parser\n\nfix\t#15 and more");
+  const result = repo.check();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Closes #12: "Closes #12"\. Put Closes #N in the pull request body, not the commit message\./);
+  assert.match(result.stderr, /Split the module: "RESOLVED: owner\/repo#13"/);
+  assert.match(result.stderr, /Tidy: "fixed https:\/\/github\.com\/owner\/repo\/issues\/14"/);
+  assert.match(result.stderr, /Split the parser: "fix\t#15"/);
+  assert.doesNotMatch(result.stderr, /on main already/);
+  assert.match(result.stdout, /Failures: 4\./);
+});
+
+test("a keyword not followed by an issue reference passes", (t) => {
+  const repo = checkout(t);
+  repo.commit("Start");
+  repo.git("switch", "-q", "-c", "topic");
+  repo.commit("Part of #12\n\nThe flake was fixed in #12 already.\nA prefix #3, an unfixed #4, closes the gap in #5.");
+  repo.commit("Closes the file before #6 opens it");
+  repo.commit("Link the tracker\n\nfixed https://github.com/owner/repo/issues/12abc and fix #7x");
+  const result = repo.check();
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("a control character in a commit message does not hide a later keyword", (t) => {
+  const repo = checkout(t);
+  repo.commit("Start");
+  repo.git("switch", "-q", "-c", "topic");
+  repo.commit("Quote the log\n\nunit\x1fsep record\x1esep\nFixes #12");
+  const result = repo.check();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Quote the log: "Fixes #12"/);
+});
+
+test("after a criss-cross merge only commits missing from main are checked", (t) => {
+  const repo = checkout(t);
+  repo.commit("Start");
+  repo.git("switch", "-q", "-c", "topic");
+  repo.commit("Fixes #1 on the branch, landed through main");
+  repo.git("switch", "-q", "main");
+  repo.commit("Fixes #2 on main");
+  repo.git("merge", "-q", "--no-edit", "--no-ff", "topic~0");
+  repo.git("switch", "-q", "topic");
+  repo.git("merge", "-q", "--no-edit", "--no-ff", "main~1");
+  assert.equal(repo.git("merge-base", "--all", "main", "HEAD").toString().trim().split("\n").length, 2);
   const result = repo.check();
   assert.equal(result.status, 0, result.stderr);
 });
