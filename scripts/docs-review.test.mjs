@@ -122,6 +122,13 @@ test("an underlined (Setext) heading starts a section", (t) => {
   assert.deepEqual(repo.run("--all").at, ["README.md:8"]);
 });
 
+test("front matter is not read, and the lines after it keep their numbers", (t) => {
+  const repo = checkout(t);
+  repo.track("docs/guide.md", "---\r\ntitle: Planned gaps\r\nstatus: proposed\r\n---\r\n\r\nSupport is planned.\r\n");
+  repo.commit("Docs");
+  assert.deepEqual(repo.run("--all").found, ['docs/guide.md:6: status "planned".']);
+});
+
 test("missing parser dependencies give a one-line install instruction", (t) => {
   const cwd = mkdtempSync(join(tmpdir(), "docs-review-no-deps-"));
   t.after(() => rmSync(cwd, { force: true, recursive: true }));

@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const { adrStatus, parseMarkdown, walk } = await import("./markdown.mjs").catch((error) => {
+const { adrStatus, parseMarkdown, walk, withoutFrontMatter } = await import("./markdown.mjs").catch((error) => {
   if (error.code !== "ERR_MODULE_NOT_FOUND") throw error;
   console.error("scripts/docs-review.mjs: Missing parser dependencies. Run npm ci --prefix scripts.");
   process.exit(2);
@@ -79,8 +79,9 @@ const read = (file) => git("show", `HEAD:${file}`);
 const unread = ["code", "inlineCode", "html"];
 const blocks = ["heading", "paragraph", "tableRow"];
 
-// Code, inline code and HTML are blanked in place, not removed, so each line keeps its number.
-function markdown(text) {
+// Code, inline code, HTML and front matter are blanked in place, not removed, so each line keeps its number.
+function markdown(source) {
+  const text = withoutFrontMatter(source);
   let shown = "";
   let at = 0;
   const headings = [];

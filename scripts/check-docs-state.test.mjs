@@ -176,6 +176,12 @@ test("Setext gap headings start a section and any heading ends it", (t) => {
   repo.check(["README.md:1: Gap or finding has no issue"]);
 });
 
+test("front matter is not read as a heading, and the lines after it keep their numbers", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", "---\ntitle: Known gaps\n---\n\n## Findings\n\nNo issue yet.\n");
+  repo.check(["README.md:5: Gap or finding has no issue"]);
+});
+
 test("an indented code block does not supply an issue", (t) => {
   const repo = checkout(t);
   repo.track("README.md", "## Findings\n\n    Tracked in #31.\n");
