@@ -361,6 +361,16 @@ test("many unrelated top-level keys and superseded dependency groups are not kep
   repo.check([`${node}:131: Dependency @modular-agent/demo`], { timeout: 20_000, nodeArgs: ["--max-old-space-size=128"] });
 });
 
+test("a manifest nested two million levels deep is checked within a small heap", (t) => {
+  const repo = checkout(t);
+  const deep = "[".repeat(2_000_000) + "0" + "]".repeat(2_000_000);
+  const cap = { timeout: 30_000, nodeArgs: ["--max-old-space-size=128"] };
+  repo.write(node, `{"metadata": ${deep}}\n`);
+  repo.check([`${node}:1: Package version`], cap);
+  repo.write(node, `{\n  "version": "0.2.0",\n  "metadata": ${deep}\n}\n`);
+  repo.check([`${node}:2: Package version`], cap);
+});
+
 test("Python pins are read from dependency arrays, not from other project strings", (t) => {
   const repo = checkout(t);
   repo.write(python, [

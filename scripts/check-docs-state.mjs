@@ -198,37 +198,40 @@ function checkCargo(file, manifest, version) {
 }
 
 // JSON.parse has no positions, so one pass over the text it accepted records the line of each
-// object key by its path. JSON.parse decodes each key, so "\/" and "\u002f" match "/", and the last
-// of duplicate keys wins, as in JSON.parse. Array elements hold null in the path. Only the wanted paths
-// are kept, each a top-level key or a key directly inside a dependency group, so memory follows the
-// number of diagnostics, not the size of the manifest.
+// wanted key: a top-level key, or a key directly inside a dependency group. JSON.parse decodes each
+// key, so "\/" and "\u002f" match "/", and the last of duplicate keys wins, as in JSON.parse. The
+// pass keeps a depth count and the state of the top two levels only, and stores only wanted lines,
+// so its memory follows the number of diagnostics, not the size or depth of the manifest.
 const nodeGroups = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
 
 function keyLines(text, wanted) {
   const lines = new Map();
-  const path = [];
-  const inObject = [];
+  const isObject = [false, false, false];
+  let depth = 0;
+  let topKey = null;
+  let group = null;
   let line = 1;
   let expectKey = false;
   for (let at = 0; at < text.length; at++) {
     const char = text[at];
     if (char === "\n") line++;
     else if (char === "{" || char === "[") {
-      inObject.push(char === "{");
-      path.push(null);
-      expectKey = char === "{";
+      depth++;
+      if (depth <= 2) isObject[depth] = char === "{";
+      if (depth === 2) group = topKey;
+      expectKey = depth <= 2 && char === "{";
     } else if (char === "}" || char === "]") {
-      inObject.pop();
-      path.pop();
+      depth--;
       expectKey = false;
-    } else if (char === ",") expectKey = inObject.at(-1) === true;
+    } else if (char === ",") expectKey = depth <= 2 && isObject[depth];
     else if (char === '"') {
       let end = at + 1;
       while (text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
-      if (expectKey && (path.length === 1 || (path.length === 2 && nodeGroups.includes(path[0])))) {
-        path[path.length - 1] = JSON.parse(text.slice(at, end + 1));
-        const key = JSON.stringify(path);
-        if (wanted.has(key)) lines.set(key, line);
+      if (expectKey && (depth === 1 || nodeGroups.includes(group))) {
+        const key = JSON.parse(text.slice(at, end + 1));
+        if (depth === 1) topKey = key;
+        const path = JSON.stringify(depth === 1 ? [key] : [group, key]);
+        if (wanted.has(path)) lines.set(path, line);
       }
       expectKey = false;
       at = end;
@@ -255,8 +258,9 @@ function checkNodePackage(file, text, version) {
       if (name.startsWith("@modular-agent/")) check([group, name], pin);
     }
   }
-  if (stale.length === 0) return;
-  const lines = keyLines(text, new Set(stale.map(({ path }) => JSON.stringify(path))));
+  // A missing value is reported at line 1, so only present values need the scan.
+  const located = stale.filter(({ value }) => value !== undefined);
+  const lines = located.length === 0 ? new Map() : keyLines(text, new Set(located.map(({ path }) => JSON.stringify(path))));
   for (const { path, value } of stale) {
     const field = path.length === 1 ? "Package version" : `Dependency ${path[1]}`;
     checkVersion(file, { line: value === undefined ? 1 : lines.get(JSON.stringify(path)) ?? 1, value }, version, field);
