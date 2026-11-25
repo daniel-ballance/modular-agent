@@ -51,7 +51,7 @@ take_check_slots() { # count: wait until this many slots are free, then hold the
         return 2
       fi
       if ! check_slot_locked "$file"; then
-        echo "check-slot: MA_CHECK_SLOT_FD $fd is open on $file, but no process holds its lock" >&2
+        echo "check-slot: MA_CHECK_SLOT_FD $fd is open on $file, but flock could not confirm that a process holds its lock" >&2
         return 2
       fi
       check_slot_fds+=("$fd")
