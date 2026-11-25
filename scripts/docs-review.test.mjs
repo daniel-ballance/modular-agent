@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 
 const script = "scripts/docs-review.mjs";
 const modules = ["docs-review.mjs", "markdown.mjs"];
+// A submodule's commit lives in its own repository, so this one has no object to read for it.
+const submodule = "5".repeat(40);
 
 function checkout(t, branch = "main") {
   const outside = mkdtempSync(join(tmpdir(), "docs-review-"));
@@ -284,8 +286,10 @@ test("a valid name with U+FFFD, an undecodable non-Markdown name and a Markdown 
   const top = repo.git("rev-parse", "--show-toplevel").toString().trim();
   repo.track("valid-\uFFFD.md", "Support is planned.\n");
   writeFileSync(Buffer.concat([Buffer.from(`${top}/notes-`), Buffer.from([0xff]), Buffer.from(".txt")]), "Not Markdown.\n");
-  repo.git("update-index", "--add", "--cacheinfo", `160000,${repo.git("rev-parse", "HEAD").toString().trim()},vendored.md`);
-  repo.commit("Docs");
+  repo.git("add", "-f", "--", ".");
+  repo.git("update-index", "--add", "--cacheinfo", `160000,${submodule},vendored.md`);
+  repo.git("commit", "-q", "-m", "Docs");
+  assert.equal(repo.git("ls-tree", "HEAD", "vendored.md").toString(), `160000 commit ${submodule}\tvendored.md\n`);
   for (const args of [[], ["--all"]]) {
     const result = repo.run(...args);
     assert.equal(result.status, 0, result.stderr);
@@ -323,9 +327,9 @@ test("names that are not UTF-8 stop the review only when it must read them", (t)
   writeFileSync(join(top, "review-renamed.md"), `${filler}\nResume is planned.\n`);
   repo.write("review-control.md", "Support is planned.\n");
   repo.git("add", "-A");
-  const head = repo.git("rev-parse", "HEAD").toString().trim();
-  execFileSync("git", ["update-index", "--index-info"], { cwd: top, input: Buffer.concat([Buffer.from(`160000 commit ${head}\t`), bad("vendored"), Buffer.from("\n")]) });
-  repo.commit("Docs");
+  execFileSync("git", ["update-index", "--index-info"], { cwd: top, input: Buffer.concat([Buffer.from(`160000 commit ${submodule}\t`), bad("vendored"), Buffer.from("\n")]) });
+  repo.git("commit", "-q", "-m", "Docs");
+  assert.ok(repo.git("ls-tree", "-z", "HEAD").includes(Buffer.concat([Buffer.from(`160000 commit ${submodule}\t`), bad("vendored"), Buffer.from([0])])));
   const result = repo.run();
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(result.at, ["review-control.md:1", "review-renamed.md:60"]);
