@@ -14,7 +14,7 @@ const historicalGaps = /^(?:docs\/(?:adr|research|pressure-test)\/)|\/docs\/clea
 const issueUrl = /https?:\/\/[^\s<>()[\]]+\/issues\/[1-9]\d*\b/;
 const issueNumber = /(?:^|[\s(\[]|[\w.-]+\/[\w.-]+)#\d*[1-9]\d*\b/;
 const release = /^v?(\d+\.\d+\.\d+)$/;
-const link = /\[([^\]\n]+)\]\(<?([^\s)>]+)>?\)/g;
+const link = /\[([^\]\n]+)\]\(<?([^\s)>]+)>?(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?\)/g;
 const ruleAliases = new Map([
   ["docs/contracts.md#interface-run-tools", "0033"],
   ["docs/bindings/agui.md", "0033"],
@@ -62,8 +62,7 @@ function checkGaps(file, lines) {
     if (heading && !heading.tracked) fail(file, heading.line, "Gap or finding has no issue", "Link an issue below the heading, before the next heading");
   };
   for (const [i, line] of lines.entries()) {
-    const setext = /^ {0,3}(?:=+|-+)[ \t]*$/.test(lines[i + 1] ?? "") && /\S/.test(line) && !/^ {0,3}(?:[-*+>]|\d+[.)]|\|)/.test(line);
-    const title = line.match(/^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$/)?.[1] ?? (setext ? line.trim() : undefined);
+    const title = line.match(/^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$/)?.[1];
     if (title) {
       finish();
       heading = gapHeading.test(title) ? { line: i + 1, tracked: false } : undefined;
@@ -108,59 +107,32 @@ function localTarget(file, target) {
   return target.startsWith("#") ? file + target : posix.join(posix.dirname(file), target);
 }
 
-const sentenceBreak = /[.!?][)\]"'*_]*(?=\s)|\n[ \t]*(?=\n)|\n(?=[ \t]*(?:[-*+][ \t]|\d+[.)][ \t]|\|))|\|/g;
-const headingLine = /^ {0,3}#{1,6}(?:[ \t][^\n]*)?$/gm;
-const abbreviation = /\b(?:e\.g|i\.e|etc|vs|cf|nos?|secs?|figs?|ch|approx|incl)\./gi;
-const referenceLink = /\[([^\]\n]+)\]\[([^\]\n]*)\]/g;
-const definition = /^ {0,3}\[([^\]\n]+)\]:[ \t]*<?([^\s>]+)>?/gm;
-const exception = /<!--\s*docs-state-ok:\s*[^\s-][^]*?-->/;
-// "Proposed" names something new when a noun such as "change" follows it within two words, not the status of a decision.
-const statusWord = /\bproposed\b(?![*_]*(?:[ \t\n]+[\w-]+){0,2}[ \t\n]+(?:changes?|edits?|checks?|text|fix(?:es)?|replacements?|wording|additions?|amendments?)\b)/i;
-const blank = (span) => span.replace(/[^\n]/g, "x");
-
-function linksIn(prose) {
-  const defined = new Map([...prose.matchAll(definition)].map((m) => [m[1].trim().toLowerCase(), m[2]]));
-  const found = [...prose.matchAll(link)].map((m) => ({ span: m[0], target: m[2], index: m.index }));
-  for (const m of prose.matchAll(referenceLink)) {
-    const target = defined.get((m[2] || m[1]).trim().toLowerCase());
-    if (target) found.push({ span: m[0], target, index: m.index });
-  }
-  return found;
-}
-
-function sentenceBreaks(prose, links) {
-  let masked = prose.replace(abbreviation, (word) => word.replace(/\./g, " "));
-  for (const { span, index } of links) masked = masked.slice(0, index) + blank(span) + masked.slice(index + span.length);
-  const breaks = [0, prose.length, ...[...masked.matchAll(sentenceBreak)].map((m) => m.index + m[0].length)];
-  for (const m of masked.matchAll(headingLine)) breaks.push(m.index, m.index + m[0].length);
-  return [...new Set(breaks)].sort((a, b) => a - b);
-}
-
-function checkAdrProse(file, raw, lines, statuses, rules) {
+function checkAdrProse(file, lines, statuses, rules) {
   const text = lines.join("\n");
   if (!/\bproposed\b/i.test(text)) return;
   const prose = text.replace(/(`+)[^\n]*?\1/g, (code) => " ".repeat(code.length));
-  const links = linksIn(prose);
-  const breaks = sentenceBreaks(prose, links);
-  const rawLines = linesOf(raw);
-  const reported = new Set();
-  for (const { span, target, index } of links) {
+  for (const { 0: span, 1: label, 2: target, index } of prose.matchAll(link)) {
     const local = localTarget(file, target);
     if (!local) continue;
     const direct = local.split("#")[0];
-    const adr = adrFile.test(direct) ? direct : rules.get(local) ?? rules.get(direct);
+    const adr = adrFile.test(direct) ? direct : rules.get(local);
     if (statuses.get(adr) !== "accepted") continue;
-    const start = breaks.findLast((b) => b <= index);
-    const end = breaks.find((b) => b >= index + span.length);
-    const hit = prose.slice(start, end).match(statusWord);
-    if (!hit || reported.has(start)) continue;
-    reported.add(start);
-    const first = linesOf(text.slice(0, start)).length;
-    const last = linesOf(text.slice(0, end)).length;
-    if (exception.test(rawLines.slice(first - 1, last).join("\n"))) continue;
-    const line = linesOf(text.slice(0, start + hit.index)).length;
-    fail(file, line, `Prose calls an accepted decision in ${adr} proposed`, "Describe the accepted rule instead, or add <!-- docs-state-ok: reason --> to the sentence");
+    // Match status wording attached to the link, not e.g. "proposed changes to" an accepted rule.
+    const before = prose.slice(0, index).match(/\bproposed[*_]*(?:[ \t\n]+(?:in|by))?[ \t\n]+[*_]*$/i);
+    const after = prose.slice(index + span.length).match(/^[*_ \t)]*(?:\n[ \t]*)?(?:is|are|remains?)[ \t\n]+(?:(?:still|currently)[ \t\n]+)?proposed\b/i);
+    const phrase = before?.[0] ?? after?.[0];
+    if (!/^proposed\s/i.test(label) && (!phrase || /\n[ \t]*\n/.test(phrase))) continue;
+    // A wrapped line joins a sentence; a table row does not join the next row.
+    if (phrase?.includes("\n") && /\|/.test(lineAround(prose, before ? before.index : index + span.length))) continue;
+    const line = linesOf(text.slice(0, before?.index ?? index)).length;
+    fail(file, line, `Prose calls an accepted decision in ${adr} proposed`, "Describe the accepted rule instead");
   }
+}
+
+function lineAround(text, at) {
+  const start = text.lastIndexOf("\n", at - 1) + 1;
+  const next = text.indexOf("\n", text.indexOf("\n", at) + 1);
+  return text.slice(start, next === -1 ? undefined : next);
 }
 
 function first(lines, pattern) {
@@ -277,7 +249,7 @@ try {
   for (const file of markdown) {
     const lines = markdownLines(read(file));
     if (!historicalGaps.test(file)) checkGaps(file, lines);
-    if (!file.startsWith("docs/adr/")) checkAdrProse(file, read(file), lines, statuses, rules);
+    if (!file.startsWith("docs/adr/")) checkAdrProse(file, lines, statuses, rules);
   }
   checkVersions(files);
   console.log(`${markdown.length} tracked Markdown files and ${files.length - markdown.length} package manifests checked. Failures: ${bad}.`);

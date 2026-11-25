@@ -76,7 +76,7 @@ Keep one concern per module. Split a module by the rule each part enforces, not 
 
 Keep tracked source files at 1,000 lines or fewer. The docs lane runs `scripts/check-maintainability.mjs` to check this. Files listed in `scripts/maintainability-baseline.json` may exceed the limit up to their recorded counts. Lower an entry when its file shrinks. Remove the entry if the file is gone or fits the limit. Adding or raising an entry requires review. Explain why in the PR.
 
-The docs lane checks that sections listing open work link to issues and that ADR status agrees with the records. A sentence that links an accepted decision or its rule must not call it proposed. Where such a sentence is right, for example a quotation, mark it with `<!-- docs-state-ok: REASON -->`. It also checks that package versions and the SDK specification status match the release in `CHANGELOG.md`.
+The docs lane checks that sections listing open work link to issues and that ADR status agrees with the records. Prose must not call an accepted decision or its rule proposed right beside the link, as in `the proposed [rule](...)`, `Proposed in [ADR N](...)` or `[ADR N](...) is still proposed`. Wording further from the link is left to review. It also checks that package versions and the SDK specification status match the release in `CHANGELOG.md`.
 
 Do not merge a commit into `main` if its subject starts with `WIP`, regardless of case.
 

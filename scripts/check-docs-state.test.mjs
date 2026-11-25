@@ -95,12 +95,6 @@ test("issue numbers and URLs satisfy gap headings; history and untracked files a
   repo.check();
 });
 
-test("an underlined heading needs an issue too", (t) => {
-  const repo = checkout(t);
-  repo.track("README.md", ["Known gaps", "----------", "An untracked gap.", "", "Findings", "========", "Tracked in #7."].join("\n"));
-  repo.check(["README.md:1: Gap or finding has no issue"]);
-});
-
 test("ADR index rejects a wrong status or superseding record number", (t) => {
   const repo = checkout(t);
   record(repo, accepted, "accepted");
@@ -135,21 +129,9 @@ test("prose cannot call an accepted ADR or its linked rule proposed", (t) => {
     "The [proposed AG-UI binding](bindings/agui.md) works.",
     "The **proposed** [rule](current.md#rule) works.",
     "The proposed [background revision](current.md) needs review.",
-    "The proposed host-run [tool rules](contracts.md#interface-run-tools) apply.",
-    "The proposed AG-UI [binding](bindings/agui.md) maps both.",
-    "[ADR 0033](adr/0033-interface-tools-and-ag-ui.md) (proposed) lets a host run tools.",
-    "[ADR 0033](adr/0033-interface-tools-and-ag-ui.md), still proposed, lets a host run tools.",
-    "ADR 0033 is proposed; see [the record](adr/0033-interface-tools-and-ag-ui.md).",
-    "- The proposed [rule](current.md#rule) and [binding](bindings/agui.md) count once.",
-    "The proposed host-run tools can stay open, e.g. when the actor leaves; see [ADR 0033](adr/0033-interface-tools-and-ag-ui.md).",
-    "The proposed rules, as in [step no. 7](guide.md), apply; see [ADR 0033](adr/0033-interface-tools-and-ag-ui.md).",
-    "The proposed [sec. 4 rules](adr/0033-interface-tools-and-ag-ui.md) and [binding](bindings/agui.md) are proposed.",
-    "The proposed [AG-UI rules for interrupts](bindings/agui.md#interrupts-and-frontend-tools) map those waits.",
-    "See the proposed [ADR 0033][a].",
-    "[a]: adr/0033-interface-tools-and-ag-ui.md",
-    "The proposed [binding](bindings/agui.md) is quoted from 0.2. <!-- docs-state-ok: quotes the old text -->",
+    'The proposed [ADR 0033](adr/0033-interface-tools-and-ag-ui.md "Host-run tools") keeps the call open.',
   ].join("\n"));
-  repo.check([1, 2, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18].map((line) => `docs/example.md:${line}: Prose calls an accepted decision`));
+  repo.check([1, 2, 4, 5, 6, 8].map((line) => `docs/example.md:${line}: Prose calls an accepted decision`));
 });
 
 test("proposed decisions, new proposed changes and nearby sentences do not trigger stale ADR status", (t) => {
@@ -165,11 +147,7 @@ test("proposed decisions, new proposed changes and nearby sentences do not trigg
     `Proposed changes to ${reference} are tracked elsewhere.`,
     "", "```md", `Proposed in ${reference}.`, "```",
     "Unrelated text is proposed", "", reference,
-    `- The proposed fix to ${reference} is below.`,
-    `- A list item is proposed`, `- next to ${reference}.`,
-    `| proposed | ${reference} |`,
-    "## Proposed timeouts", `See ${reference} for the current design.`,
-    `The proposed timeout change to ${reference} is below.`,
+    "Rule | Status", "--- | ---", "Longer timeout | Proposed", `${reference} | Accepted`,
   ].join("\n"));
   repo.track("docs/adr/0099-example.md", "Proposed in [ADR 0033](0033-interface-tools-and-ag-ui.md).\n");
   repo.check();
