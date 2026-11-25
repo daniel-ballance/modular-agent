@@ -67,22 +67,19 @@ export class SessionErasure {
 		return JSON.stringify(plans.map(plan => plan.intentId));
 	}
 
-	async reconcilePending(s: Session): Promise<void> {
+	async reconcilePending(s: Session): Promise<string> {
 		const remote = this.httpErasure();
 		if (remote && !s.provisional) {
 			const { plans } = await remote.read(s.id);
 			for (const plan of plans) if (plan.copies.some(c => !c.complete)) await this.completeHttpErasure(s, plan);
-			await this.admitHistory(s);
-			return;
+			return this.admitHistory(s);
 		}
-		const registry = this.pendingRegistry();
-		if (!registry) return;
-		for (const intent of registry.intents()) {
+		for (const intent of this.pendingRegistry()?.intents() ?? []) {
 			if (intent.copies.some(copy => copy.sessionId === s.id && !copy.erased)) {
 				await this.reconcileErasure(s, intent.id);
 			}
 		}
-		this.checkPending(s);
+		return this.checkPending(s);
 	}
 
 	checkProviderErasure(s: Session, provider: string): void {

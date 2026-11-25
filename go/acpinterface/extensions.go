@@ -25,23 +25,47 @@ func uniquePairs(pairs []api.EntryPair) []api.EntryPair {
 	return out
 }
 
+type extensionRequest struct {
+	SessionID string          `json:"sessionId"`
+	Meta      json.RawMessage `json:"_meta"`
+	Rights    json.RawMessage `json:"rights"`
+	Present   *bool           `json:"present"`
+	ActorID   string          `json:"actorId"`
+	Actor     json.RawMessage `json:"actor"`
+	After     string          `json:"after"`
+	All       bool            `json:"all"`
+	Content   json.RawMessage `json:"content"`
+	When      string          `json:"when"`
+	Key       string          `json:"key"`
+	RequestID string          `json:"requestId"`
+	Value     json.RawMessage `json:"value"`
+	Declined  bool            `json:"declined"`
+	EntryID   string          `json:"entryId"`
+	Rewind    bool            `json:"rewind"`
+	EntryIDs  []string        `json:"entryIds"`
+	JobID     string          `json:"jobId"`
+	Command   string          `json:"command"`
+	InputID   string          `json:"inputId"`
+	Call      api.Call        `json:"call"`
+}
+
 func (s *server) HandleExtensionMethod(ctx context.Context, method string, b json.RawMessage) (any, error) {
-	var p struct {
-		SessionID string `json:"sessionId"`
+	var p extensionRequest
+	if err := json.Unmarshal(b, &p); err != nil || p.SessionID == "" {
+		return nil, acpError("invalid_params")
 	}
-	_ = json.Unmarshal(b, &p)
 	if host := s.sessionHost(p.SessionID); host != s {
 		return host.HandleExtensionMethod(ctx, method, b)
 	}
 	var epoch int
-	if _, err := s.attached(p.SessionID); err == nil && method != "_modular-agent/erase" {
+	if st, err := s.attached(p.SessionID); err == nil && method != "_modular-agent/erase" {
 		var e error
-		epoch, e = s.erasureEpoch(p.SessionID)
+		epoch, e = s.extensionEpoch(ctx, method, p, st)
 		if e != nil {
 			return nil, outputReplyError(e)
 		}
 	}
-	result, err := s.handleExtensionMethod(ctx, method, b)
+	result, err := s.handleExtensionMethod(ctx, method, p)
 	if err == nil {
 		if st, e := s.attached(p.SessionID); e == nil {
 			if method != "_modular-agent/requests" {
@@ -57,35 +81,49 @@ func (s *server) HandleExtensionMethod(ctx context.Context, method string, b jso
 	return result, outputReplyError(err)
 }
 
-func (s *server) handleExtensionMethod(ctx context.Context, method string, b json.RawMessage) (any, error) {
+func (s *server) extensionEpoch(ctx context.Context, method string, p extensionRequest, st *attachment) (int, error) {
+	epoch, err := s.erasureEpoch(p.SessionID)
+	if !errors.Is(err, api.ErrErasureUnavailable) {
+		return epoch, err
+	}
+	retry, ok := s.a.(interface {
+		RetryPendingErasure(context.Context, string, string) error
+	})
+	if !ok {
+		return 0, err
+	}
+	ctx = s.acting(ctx, p.SessionID, st.actor)
+	right := "watch"
+	switch method {
+	case "_modular-agent/history":
+	case "_modular-agent/input":
+		right = "input"
+		if p.When == "propose" {
+			right = "propose"
+		} else if !validTiming(p.When) {
+			return 0, acpError("invalid_params")
+		}
+		if p.ActorID != "" && p.ActorID != st.actor {
+			if !s.represents[p.ActorID] {
+				return 0, acpError("forbidden")
+			}
+			ctx = api.WithActingVia(api.AsActor(ctx, p.ActorID), st.actor)
+		}
+	default:
+		return 0, err
+	}
+	if err := retry.RetryPendingErasure(ctx, p.SessionID, right); err != nil {
+		if errors.Is(err, api.ErrAuthority) {
+			return 0, acpError("forbidden")
+		}
+		return 0, err
+	}
+	return s.erasureEpoch(p.SessionID)
+}
+
+func (s *server) handleExtensionMethod(ctx context.Context, method string, p extensionRequest) (any, error) {
 	if err := s.ready(); err != nil {
 		return nil, err
-	}
-	var p struct {
-		SessionID string          `json:"sessionId"`
-		Meta      json.RawMessage `json:"_meta"`
-		Rights    json.RawMessage `json:"rights"`
-		Present   *bool           `json:"present"`
-		ActorID   string          `json:"actorId"`
-		Actor     json.RawMessage `json:"actor"`
-		After     string          `json:"after"`
-		All       bool            `json:"all"`
-		Content   json.RawMessage `json:"content"`
-		When      string          `json:"when"`
-		Key       string          `json:"key"`
-		RequestID string          `json:"requestId"`
-		Value     json.RawMessage `json:"value"`
-		Declined  bool            `json:"declined"`
-		EntryID   string          `json:"entryId"`
-		Rewind    bool            `json:"rewind"`
-		EntryIDs  []string        `json:"entryIds"`
-		JobID     string          `json:"jobId"`
-		Command   string          `json:"command"`
-		InputID   string          `json:"inputId"`
-		Call      api.Call        `json:"call"`
-	}
-	if err := json.Unmarshal(b, &p); err != nil || p.SessionID == "" {
-		return nil, acpError("invalid_params")
 	}
 	st, err := s.requireAttachment(p.SessionID)
 	if err != nil {

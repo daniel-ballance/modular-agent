@@ -1,4 +1,4 @@
-use super::{Harness, rewind};
+use super::Harness;
 use agent_api::*;
 use std::{any::Any, path::Path, sync::Arc};
 
@@ -260,17 +260,7 @@ impl AgentApi for Harness {
         Ok(open.journal_uncertain || open.data.unresolved_rewind().is_some())
     }
     fn begin_environment_work(&self, session: &str) -> Result<Box<dyn Send>> {
-        let mut sessions = self.sessions.lock().unwrap();
-        let open = sessions
-            .get_mut(session)
-            .ok_or_else(|| anyhow!("session not open"))?;
-        open.check_rewind()?;
-        self.check_open_writer(open)?;
-        open.environment_work += 1;
-        Ok(Box::new(rewind::EnvironmentWork {
-            harness: self.me.clone(),
-            session: session.into(),
-        }))
+        self.start_environment_work(session, false)
     }
     fn move_position(&self, scope: &Scope, position: Option<String>) -> Result<()> {
         self.move_history_position(scope, position)

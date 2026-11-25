@@ -2,7 +2,7 @@
   "conformance/acp/run.mjs": 2040,
   "conformance/plugin/run.mjs": 1361,
   "python/modular_agent/_agent.py": 1529,
-  "python/packages/acp/ma_acp/__init__.py": 1523,
+  "python/packages/acp/ma_acp/__init__.py": 1512,
   "python/packages/plugin/ma_plugin/host.py": 1543,
   "python/packages/plugin/ma_plugin/runtime_host.py": 1551,
   "python/packages/runtime/ma_runtime/turns.py": 1320,

@@ -305,10 +305,7 @@ class Harness(
                 await self._emit({"time": now(), **d})
             return {}
         if op == "erasure_cutoff":
-            history = self.capabilities.get("history")
-            if history and self.plugins[history[0]].declarations.get("remote_lease"):
-                return await self.erasure_revision(d["session"])
-            return 0
+            return await self.frame_erasure_revision(d)
         if op == "view":
             return await self._view(d)
         s = self._session(d, check_actor=op not in {"append", "authority"})

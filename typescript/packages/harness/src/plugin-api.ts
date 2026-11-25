@@ -124,7 +124,7 @@ export interface PluginApi {
 	checkPending(sessionId: string): Promise<string>;
 	readHistory(sessionId: string, options?: { all?: boolean }): HistoryEntry[] | Promise<HistoryEntry[]>;
 	/** Inspect a fresh snapshot and register any follow-up observer without yielding. */
-	inspectHistory<T>(sessionId: string, options: { all?: boolean }, inspect: (entries: HistoryEntry[]) => T): T | Promise<T>;
+	inspectHistory<T>(sessionId: string, options: { all?: boolean; retryErasure?: boolean }, inspect: (entries: HistoryEntry[]) => T): T | Promise<T>;
 	/** The history as a recipient may see it: every entry passes the output gate for that recipient. */
 	gatedHistory(sessionId: string, options: { recipient: string; all?: boolean }): Promise<HistoryEntry[]>;
 	append(sessionId: string, draft: EntryDraft): Promise<HistoryEntry>;

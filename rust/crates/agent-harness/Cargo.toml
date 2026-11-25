@@ -12,3 +12,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+
+[dev-dependencies]
+history-fs = { path = "../history-fs" }
+tempfile.workspace = true

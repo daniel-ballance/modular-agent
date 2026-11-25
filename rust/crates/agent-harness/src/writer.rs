@@ -1,4 +1,4 @@
-use super::{Harness, OpenSession};
+use super::{Harness, OpenSession, rewind::EnvironmentWork};
 use agent_api::*;
 
 impl Harness {
@@ -60,6 +60,27 @@ impl Harness {
             return Err(LostPart(format!("session writer lost: {error}")).into());
         }
         Ok(())
+    }
+
+    pub(super) fn start_environment_work(
+        &self,
+        session: &str,
+        retry_erasure: bool,
+    ) -> Result<Box<dyn Send>> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let open = sessions
+            .get_mut(session)
+            .ok_or_else(|| anyhow!("session not open"))?;
+        open.check_rewind()?;
+        self.check_open_writer(open)?;
+        if retry_erasure {
+            self.refresh_open_erasure(open)?;
+        }
+        open.environment_work += 1;
+        Ok(Box::new(EnvironmentWork {
+            harness: self.me.clone(),
+            session: session.into(),
+        }))
     }
 
     pub(super) fn writer_interruption_token(&self, session: &str) -> Result<CancellationToken> {

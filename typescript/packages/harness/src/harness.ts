@@ -672,8 +672,7 @@ export class Harness {
 			declaration: (sessionId) => this.declaration(sessionId ? this.session(sessionId) : undefined),
 			gatedHistory: async (sessionId, options) => {
 				const s = this.session(sessionId);
-				await this.erasure.reconcilePending(s);
-				const freshness = await this.erasure.admitHistory(s);
+				const freshness = await this.erasure.reconcilePending(s);
 				const entries = options.all ? s.order.map((id) => s.entries.get(id)!) : s.branch();
 				const out: HistoryEntry[] = [];
 				const follower = new Follower(this.hooks, options.recipient, false, (e) => { if (e.type === "entry") out.push(e.data as HistoryEntry); }, (e) => this.problem("harness", "gated history", e), undefined, undefined,
@@ -863,15 +862,24 @@ export class Harness {
 		this.emit(s, "setting.changed", { key, value, appliesFrom: this.settingsDuringTurn === "nextTurn" ? "next turn" : "next step" }, writer, { actorId });
 	}
 
-	private inspectHistory<T>(id: string, options: { all?: boolean }, inspect: (entries: HistoryEntry[]) => T): T | Promise<T> {
+	private inspectHistory<T>(id: string, options: { all?: boolean; retryErasure?: boolean }, inspect: (entries: HistoryEntry[]) => T): T | Promise<T> {
 		const s = this.session(id);
 		const snapshot = () => {
 			this.authority.checkScopedWork(s, "watch");
 			return inspect(options.all ? s.order.map(id => s.entries.get(id)!) : s.branch());
 		};
+		if (options.retryErasure) return this.inspectAfterErasure(s, snapshot);
 		if (this.erasure.httpErasure() && !s.provisional) return this.erasure.admitHistory(s).then(snapshot);
 		this.erasure.checkPending(s);
 		return snapshot();
+	}
+
+	private async inspectAfterErasure<T>(s: Session, snapshot: () => T): Promise<T> {
+		this.authority.checkScopedWork(s, "watch");
+		const freshness = await this.erasure.reconcilePending(s);
+		const result = await snapshot();
+		if (await this.erasure.admitHistory(s) !== freshness) throw failure("unavailable", "Erasure changed the history view");
+		return result;
 	}
 
 	/** Apply the token ceiling to this connection's operations without rewriting recorded grants. */

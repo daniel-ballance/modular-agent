@@ -38,6 +38,10 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (receipt a
 		in.When = "now"
 	}
 	s.mu.Lock()
+	if !api.SessionScopeAllows(ctx, s.data.Project, s.data.Tenant) || !c.canAdmit(s.data, in) {
+		s.mu.Unlock()
+		return api.Receipt{}, api.ErrAuthority
+	}
 	if err := s.reconcileErasureLocked(); err != nil {
 		s.mu.Unlock()
 		return api.Receipt{}, err
@@ -45,10 +49,6 @@ func (c *client) Submit(ctx context.Context, id string, in api.Input) (receipt a
 	if s.rewindBlocked {
 		s.mu.Unlock()
 		return api.Receipt{}, errRewindUnresolved
-	}
-	if !api.SessionScopeAllows(ctx, s.data.Project, s.data.Tenant) || !c.canAdmit(s.data, in) {
-		s.mu.Unlock()
-		return api.Receipt{}, api.ErrAuthority
 	}
 	if err := s.checkWriterLocked(); err != nil {
 		s.mu.Unlock()

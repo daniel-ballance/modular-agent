@@ -61,15 +61,19 @@ export class InputAdmission {
 
 	private async inputWithin(sessionId: string, options: InputOptions): Promise<InputReceipt & { handled?: boolean; output?: string }> {
 		const s = this.operations.session(sessionId);
+		const right = options.when === "propose" ? "propose" : "input";
+		const authorize = () => {
+			this.operations.checkScopedWork(s, right);
+			if (options.startedBy?.kind !== "job") {
+				this.operations.requireAuthority(s, options.actorId, right);
+				if (options.delegatedBy) this.operations.requireAuthority(s, options.delegatedBy, right);
+			}
+		};
+		authorize();
 		await this.operations.erasure().reconcilePending(s);
 		this.operations.checkWriter(s);
 		if (s.erasing) throw failure("busy", "Erasure is in progress");
-		const right = options.when === "propose" ? "propose" : "input";
-		this.operations.checkScopedWork(s, right);
-		if (options.startedBy?.kind !== "job") {
-			this.operations.requireAuthority(s, options.actorId, right);
-			if (options.delegatedBy) this.operations.requireAuthority(s, options.delegatedBy, right);
-		}
+		authorize();
 		const scoped = options.key && inputKeyScope(options.key, options.actorId, options.delegatedBy);
 		if (scoped) {
 			if (s.erasedKeys.has(scoped)) return { duplicate: true, erased: true } as InputReceipt;

@@ -28,8 +28,8 @@ func (c *client) ViewForOutput(ctx context.Context, id string) (api.Session, err
 }
 
 func (c *client) view(ctx context.Context, id string, gateRemote bool) (api.Session, error) {
-	if !api.ConnectionAllows(ctx, "watch") || !c.Authorize(id, api.Acting(ctx), "watch") {
-		return api.Session{}, errors.New("watch refused")
+	if err := c.RetryPendingErasure(ctx, id, "watch"); err != nil {
+		return api.Session{}, err
 	}
 	epoch, err := c.ErasureEpoch(id)
 	if err != nil {
