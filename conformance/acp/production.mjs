@@ -560,11 +560,19 @@ async function eraseAcrossWriters(kit, cutoff) {
 		if (!firstCopy || !equal(firstCopy.sources, [target.id])) throw Error("first fork did not name the source admission");
 		const copy = before.find((e) => e.kind === "inputAccepted" && contains(e, secret));
 		if (!copy || !equal(copy.sources, [firstCopy.id])) throw Error("fork-of-fork did not name its source admission");
-		stage = "hold the destination and attach the independent reader";
+		const inputFork = proxy ? undefined : (await fork(a, sid, entryId)).sessionId;
+		if (inputFork) {
+			await within(loadMs, load(a, inputFork, project), "attach input fork");
+			await closeSession(a, inputFork);
+		}
+		stage = "hold the destination and attach the independent writer";
 		releaseLease = await holdLease(store, store.path(dst));
-		reader = await startHost("independent reader");
+		reader = await startHost("independent writer");
 		const { a: r } = await reader.peer();
 		await within(loadMs, load(r, first, project), "independent writer attaches first fork");
+		if (inputFork) await within(loadMs, load(r, inputFork, project), "independent writer attaches input fork");
+		const inputCopy = inputFork && (await store.pages(inputFork)).find(e => e.kind === "inputAccepted" && contains(e, secret));
+		if (inputFork && !inputCopy) throw Error("input fork is missing the keyed admission");
 		const erase = (p) => ext(p, "erase", { sessionId: sid, entryIds: [target.id] });
 		const pair = (entries, sessionId, id) => entries?.some((e) => e.sessionId === sessionId && e.id === id);
 		stage = "erase from the source";
@@ -577,6 +585,10 @@ async function eraseAcrossWriters(kit, cutoff) {
 			const report = await within(15000, erase(a), "keep held copies pending");
 			check("held copy is reported pending, not changed", pair(report.pending, dst, copy.id) &&
 				!pair(report.erased, dst, copy.id) && equal(await store.pages(dst), before));
+			check("both idle writers still hold pending copies", pair(report.pending, first, firstCopy.id) &&
+				pair(report.pending, inputFork, inputCopy.id) &&
+				(await store.pages(first)).some(e => e.id === firstCopy.id && !e.erased) &&
+				(await store.pages(inputFork)).some(e => e.id === inputCopy.id && !e.erased));
 		}
 		stage = "crash the eraser and inspect the independent reader";
 		await kit.crash(a);
@@ -585,6 +597,23 @@ async function eraseAcrossWriters(kit, cutoff) {
 		if (connectionLost(visible)) throw visible;
 		check("an attached independent reader does not disclose pending content after initiator loss",
 			(Array.isArray(visible.entries) && !contains(visible, secret)) || refusal(visible, "unavailable"));
+		if (inputFork) {
+			const reconciled = async (sessionId, entryId) => {
+				const saved = await store.pages(sessionId);
+				const { plans } = await store.json(`${store.path(sessionId)}/pending-erasure`);
+				return saved.some(e => e.id === entryId && e.erased === true) && !contains(saved, secret) &&
+					rows("erasure", saved).length === 1 && plans.some(p => p.copies.some(c => c.entryId === entryId && c.complete));
+			};
+			const readDone = await reconciled(first, firstCopy.id);
+			check("an idle current writer reconciles before returning history", Array.isArray(visible.entries) &&
+				!contains(visible, secret) && readDone, `reply code: ${visible.data?.code ?? "none"}; reconciled: ${readDone}`);
+			stage = "resubmit the key to the idle writer of the other fork";
+			const receipt = await input(r, inputFork, secret, key, "now").catch(e => e);
+			if (connectionLost(receipt)) throw receipt;
+			const inputDone = await reconciled(inputFork, inputCopy.id);
+			check("an idle current writer reconciles before returning a keyed receipt", equal(receipt, { duplicate: true, erased: true }) &&
+				inputDone, `reply code: ${receipt.data?.code ?? "none"}; reconciled: ${inputDone}`);
+		}
 		await reader.stop();
 		reader = undefined;
 		// Release the raw test lease only after the reader has checked the cutoff.

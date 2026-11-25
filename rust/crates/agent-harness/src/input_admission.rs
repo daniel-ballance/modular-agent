@@ -145,7 +145,7 @@ impl Harness {
                 wait.run(admission.lock()).await
             }
         };
-        let _workspace = self.begin_environment_work(session)?;
+        let _workspace = self.start_environment_work(session, true)?;
         let submitter = sponsor.unwrap_or(actor);
         if let Some(ref key) = key {
             let data = self.snapshot(session)?;
@@ -568,5 +568,51 @@ impl Harness {
             )?;
         }
         Ok(inputs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use history_fs::HistoryPlugin;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn retry_pending_erasure_after_waiting_for_input_admission() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        let harness = Harness::new();
+        harness
+            .load(Arc::new(HistoryPlugin {
+                root: project.path().join("history"),
+            }))
+            .await?;
+        let session = harness.create(project.path(), json!({})).await?;
+        let key = Some("private-input".into());
+        let first = harness
+            .submit(&session, "user", "erase me", Timing::After, key.clone())
+            .await?;
+
+        let admission = harness.admissions.lock().unwrap()[&session].clone();
+        let gate = admission.lock().await;
+        let retry = harness.submit(&session, "user", "erase me", Timing::After, key);
+        tokio::pin!(retry);
+        tokio::select! {
+            biased;
+            _ = &mut retry => bail!("input did not wait for admission"),
+            _ = std::future::ready(()) => {}
+        }
+        let store = harness.store().unwrap();
+        store.mark_erasure(&session, std::slice::from_ref(&first.input))?;
+        drop(gate);
+
+        let receipt = retry.await?;
+        assert!(receipt.erased && receipt.duplicate);
+        let data = store.load(&session)?;
+        assert!(
+            data.entries
+                .iter()
+                .any(|e| e.id == first.input && e.content.is_none())
+        );
+        Ok(())
     }
 }

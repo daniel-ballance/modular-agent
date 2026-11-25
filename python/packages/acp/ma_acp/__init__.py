@@ -16,7 +16,8 @@ from ma_core import AgentError, Plugin, content, lower_reasoning
 from ma_harness.authority import PERMISSIONS
 
 from . import binding
-from .stdio import MAX_FRAME, REPLY_VIEW, UPDATE_VIEW, Stdio, encode
+from .reply_view import RETRY_ERASURE, frame_revision, guards_frame, prepare_reply_view
+from .stdio import MAX_FRAME, UPDATE_VIEW, Stdio, encode
 
 
 NAMESPACE = "modular-agent"
@@ -101,12 +102,8 @@ def rpc(fn):
         method = "_" + args[0] if fn.__name__ == "ext_method" else methods[fn.__name__]
         try:
             sid = OUTPUT_SESSION.get()
-            if (
-                (prepared := REPLY_VIEW.get()) is not None
-                and sid in self.sessions
-                and self.guards_frame(method)
-            ):
-                prepared[:] = [sid, await self.frame_revision(sid)]
+            if sid in self.sessions and guards_frame(method) and method not in RETRY_ERASURE:
+                await prepare_reply_view(self.api, sid, self.actor)
             result = await fn(self, *args, **kwargs)
             if result is None:
                 return None
@@ -350,7 +347,7 @@ class ACP(Plugin):
     async def update(self, sid, update, *, stream=False):
         # Event-derived updates are already gated, but configuration and other
         # directly constructed protocol updates must pass the same gate too.
-        revision = await self.frame_revision(sid)
+        revision = await frame_revision(self.api, sid, self.actor)
         value = await self.view(
             {
                 "sessionId": sid,
@@ -717,6 +714,7 @@ class ACP(Plugin):
         self.check_key(metadata)
         self.prompts.add(session_id)
         try:
+            await prepare_reply_view(self.api, session_id, self.actor, retry_right="input")
             receipt = await self.api.call(
                 "runtime",
                 "submit",
@@ -1075,6 +1073,10 @@ class ACP(Plugin):
         if operation == "history":
             if "all" in params and not isinstance(params["all"], bool):
                 raise ValueError("all must be boolean")
+            limit = params.get("limit", 500)
+            if type(limit) is not int or not 1 <= limit <= 500:
+                raise protocol_error("invalid_params", "History limit must be 1 to 500")
+            await prepare_reply_view(self.api, sid, self.actor, retry_right="watch")
             entries = (
                 (await self.get(sid))["entries"]
                 if params.get("all", False)
@@ -1086,9 +1088,6 @@ class ACP(Plugin):
                 if index is None:
                     raise acp.RequestError.invalid_params({"reason": "Unknown history entry"})
                 entries = entries[index + 1 :]
-            limit = params.get("limit", 500)
-            if type(limit) is not int or not 1 <= limit <= 500:
-                raise protocol_error("invalid_params", "History limit must be 1 to 500")
             page, size = [], len(b'{"entries":[]}')
             for e in entries[:limit]:
                 if e["kind"] == "question_open":
@@ -1205,6 +1204,12 @@ class ACP(Plugin):
                 raise ValueError("Unknown input timing")
             actor = params.get("actorId", self.actor)
             attribution = await self.attribution(sid, actor)
+            await prepare_reply_view(
+                self.api,
+                sid,
+                **attribution,
+                retry_right="propose" if params["when"] == "propose" else "input",
+            )
             try:
                 rights = await self.api.session("authority", **base)
                 receipt = await self.api.call(
@@ -1435,22 +1440,6 @@ class ACP(Plugin):
             if hasattr(self, "poll_route"):
                 self.api._harness.forget_waits(sid, token=self.name)
 
-    @staticmethod
-    def guards_frame(method):
-        # Replay uses the update boundary. An erase reply reports plan progress.
-        return method not in {
-            "session/new",
-            "session/load",
-            "session/resume",
-            "session/close",
-            "_modular-agent/erase",
-            "_modular-agent/leave",
-            "_modular-agent/interrupted",
-        }
-
-    async def frame_revision(self, sid):
-        return await self.api.session("erasure_cutoff", session=sid, actor=self.actor)
-
     async def authorize_frame(self, sid, method, message, prepared=None):
         if sid is None:
             return
@@ -1484,9 +1473,9 @@ class ACP(Plugin):
         token = OUTPUT_SESSION.set(sid)
         try:
             await self.check_delivery(sid, method)
-            if self.guards_frame(method):
+            if guards_frame(method):
                 try:
-                    revision = await self.frame_revision(sid)
+                    revision = await frame_revision(self.api, sid, self.actor)
                 except AgentError as exc:
                     raise protocol_error("unavailable", str(exc)) from exc
                 if prepared and prepared != [sid, revision]:

@@ -471,53 +471,53 @@ export class AcpInterface implements InterfaceCapability {
 			});
 		};
 		extension("history", async ({ params }) => {
-			const sessionId = open(params.sessionId);
+			const sessionId = open(params.sessionId), limit = params.limit ?? 500;
 			this.requireRight(sessionId, this.actorId, "watch");
-			const limit = params.limit ?? 500;
 			if (!Number.isInteger(limit) || limit < 1 || limit > 500 || (params.all !== undefined && typeof params.all !== "boolean")) throw bindingError("invalid_params");
-			const raw = await this.apiFor(sessionId).readHistory(sessionId, { all: params.all === true });
-			const at = params.after === undefined ? -1 : raw.findIndex((e) => e.id === params.after);
-			if (params.after !== undefined && at < 0) throw bindingError("invalid_params", "Unknown history cursor");
-			const entries: HistoryEntry[] = [];
-			const before = new Map<string, Awaited<ReturnType<AcpInterface["requestView"]>>>();
-			const changed = new Set<string>();
-			const max = 4 * 1024 * 1024;
-			let bytes = Buffer.byteLength('{"entries":[]}');
-			for (let i = at + 1; i < Math.min(raw.length, at + 1 + limit); i++) {
-				const entry = historyForPeer(raw[i]);
-				const request = entry.kind === "inputRequest" ? (entry.data as { request?: InputRequest } | undefined)?.request : undefined;
-				const view = request && await this.requestView(request);
-				const projected = view ? { ...entry, data: { request: view } } : entry;
-				const allowed = await this.apiFor(sessionId).gateOutput(sessionId, this.actorId, "entry", projected);
-				if (!allowed) continue;
-				const nextBytes = i + 1 < raw.length ? Buffer.byteLength(`,"nextEntryId":${JSON.stringify(entry.id)}`) : 0;
-				const estimate = view ? { ...allowed, data: { request: { ...(allowed.data as { request: typeof view }).request, answerable: false } } } : allowed;
-				const size = Buffer.byteLength(JSON.stringify(estimate)) + Number(entries.length > 0);
-				if (bytes + size + nextBytes > max) {
-					if (!entries.length) throw new RequestError(-32000, "History entry does not fit", { code: "result_too_large" });
-					break;
+			return this.apiFor(sessionId).inspectHistory(sessionId, { all: params.all === true, retryErasure: true }, async raw => {
+				const at = params.after === undefined ? -1 : raw.findIndex((e) => e.id === params.after);
+				if (params.after !== undefined && at < 0) throw bindingError("invalid_params", "Unknown history cursor");
+				const entries: HistoryEntry[] = [];
+				const before = new Map<string, Awaited<ReturnType<AcpInterface["requestView"]>>>();
+				const changed = new Set<string>();
+				const max = 4 * 1024 * 1024;
+				let bytes = Buffer.byteLength('{"entries":[]}');
+				for (let i = at + 1; i < Math.min(raw.length, at + 1 + limit); i++) {
+					const entry = historyForPeer(raw[i]);
+					const request = entry.kind === "inputRequest" ? (entry.data as { request?: InputRequest } | undefined)?.request : undefined;
+					const view = request && await this.requestView(request);
+					const projected = view ? { ...entry, data: { request: view } } : entry;
+					const allowed = await this.apiFor(sessionId).gateOutput(sessionId, this.actorId, "entry", projected);
+					if (!allowed) continue;
+					const nextBytes = i + 1 < raw.length ? Buffer.byteLength(`,"nextEntryId":${JSON.stringify(entry.id)}`) : 0;
+					const estimate = view ? { ...allowed, data: { request: { ...(allowed.data as { request: typeof view }).request, answerable: false } } } : allowed;
+					const size = Buffer.byteLength(JSON.stringify(estimate)) + Number(entries.length > 0);
+					if (bytes + size + nextBytes > max) {
+						if (!entries.length) throw new RequestError(-32000, "History entry does not fit", { code: "result_too_large" });
+						break;
+					}
+					if (view) {
+						before.set(entry.id, view);
+						if (!isDeepStrictEqual((allowed.data as { request: typeof view }).request, view)) changed.add(entry.id);
+					}
+					bytes += size;
+					entries.push(allowed);
 				}
-				if (view) {
-					before.set(entry.id, view);
-					if (!isDeepStrictEqual((allowed.data as { request: typeof view }).request, view)) changed.add(entry.id);
-				}
-				bytes += size;
-				entries.push(allowed);
-			}
-			const last = entries.at(-1);
-			const page = await this.gateReply(sessionId, "_modular-agent/history", {
-				entries, ...(last && last.id !== raw.at(-1)?.id ? { nextEntryId: last.id } : {}),
+				const last = entries.at(-1);
+				const page = await this.gateReply(sessionId, "_modular-agent/history", {
+					entries, ...(last && last.id !== raw.at(-1)?.id ? { nextEntryId: last.id } : {}),
+				});
+				page.entries = page.entries.map((entry) => {
+					const original = before.get(entry.id);
+					if (!original) return entry;
+					const { request } = entry.data as { request: typeof original };
+					const exact = !changed.has(entry.id) && isDeepStrictEqual(request, original);
+					const answerable = this.canAnswer(sessionId, request.id) && (request.kind !== "approval" || exact);
+					return { ...entry, data: { request: { ...request, answerable } } };
+				});
+				if (Buffer.byteLength(JSON.stringify(page)) > max) throw new RequestError(-32000, "Gated history page does not fit", { code: "result_too_large" });
+				return page;
 			});
-			page.entries = page.entries.map((entry) => {
-				const original = before.get(entry.id);
-				if (!original) return entry;
-				const { request } = entry.data as { request: typeof original };
-				const exact = !changed.has(entry.id) && isDeepStrictEqual(request, original);
-				const answerable = this.canAnswer(sessionId, request.id) && (request.kind !== "approval" || exact);
-				return { ...entry, data: { request: { ...request, answerable } } };
-			});
-			if (Buffer.byteLength(JSON.stringify(page)) > max) throw new RequestError(-32000, "Gated history page does not fit", { code: "result_too_large" });
-			return page;
 		});
 		extension("input", async ({ params }) => {
 			const sessionId = open(params.sessionId);

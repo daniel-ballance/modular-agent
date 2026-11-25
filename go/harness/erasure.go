@@ -76,6 +76,19 @@ func (c *client) ErasureEpoch(id string) (int, error) {
 	return epoch, err
 }
 
+func (c *client) RetryPendingErasure(ctx context.Context, id, right string) error {
+	s, err := c.find(id)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !c.authorizedBy(s.data, ctx, right) {
+		return api.ErrAuthority
+	}
+	return s.reconcileErasureLocked()
+}
+
 func (c *client) SupportsErasure() bool {
 	v, err := c.Get("history")
 	if err != nil {

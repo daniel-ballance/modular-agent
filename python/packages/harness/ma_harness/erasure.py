@@ -54,7 +54,20 @@ class Erasure:
         if reconcile and sid in self.sessions and await self._pending_erasure(sid):
             if not await self._reconcile_erasure(sid):
                 raise AgentError("Session content is pending erasure", "unavailable")
-        await self.erasure_revision(sid)
+        return await self.erasure_revision(sid)
+
+    async def frame_erasure_revision(self, data):
+        history = self.capabilities.get("history")
+        if not history or not self.plugins[history[0]].declarations.get("remote_lease"):
+            return 0
+        if (right := data.get("retry_right")) is not None:
+            if right not in ("watch", "input", "propose"):
+                raise AgentError("Invalid erasure retry right", "forbidden")
+            state = self._session(data)
+            self.require(state, data["actor"], right)
+            if sponsor := data.get("acting_for"):
+                self.require(state, sponsor, right)
+        return await self.guard_erasure(data["session"], reconcile=right is not None)
 
     async def _reconcile_erasure(self, sid):
         async with self.erasure_locks.setdefault(sid, __import__("asyncio").Lock()):

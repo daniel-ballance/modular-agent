@@ -133,8 +133,10 @@ dependencies = [
  "agent-api",
  "anyhow",
  "async-trait",
+ "history-fs",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
 ]
