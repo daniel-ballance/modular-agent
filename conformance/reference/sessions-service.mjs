@@ -69,7 +69,7 @@ async function copy(url, token, source, id, created, times) {
 }
 
 export async function checkSessionsService(command, invoke, skip, t) {
-  if (!existsSync(serve)) return skip(`the TypeScript history service is not built (${serve})`);
+  if (!existsSync(serve)) return skip(`the TypeScript history service is not built (${serve})`, "check");
   const service = startService(t.dir);
   try {
     const url = await service.started;

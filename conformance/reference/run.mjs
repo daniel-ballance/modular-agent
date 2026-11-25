@@ -590,14 +590,21 @@ async function runCheck(command, check, skip) {
   return failures.map((f) => `${f}${failures.length ? `  [kept ${dir}]` : ""}`);
 }
 
-async function runAgent(name, command, only) {
-  let failed = 0, passed = 0;
+async function runAgent(name, command, only, strict) {
+  let failed = 0, passed = 0, skipped = 0;
   for (const check of checks.filter((c) => !only || only.includes(c.name))) {
-    const failures = await runCheck(command, check, reason => console.log(`SKIP ${name} ${check.name}: ${reason}`));
+    let whole;
+    const skip = (reason, scope) => {
+      if (scope === "check") whole = reason;
+      else console.log(`SKIP ${name} ${check.name}: ${reason}`);
+    };
+    const failures = await runCheck(command, check, skip);
     if (failures.length) { failed++; console.log(`FAIL ${name} ${check.name}: ${check.about}`); for (const f of failures) console.log(`     ${f}`); }
+    else if (whole !== undefined && strict) { failed++; console.log(`FAIL ${name} ${check.name}: skipped where every check must run: ${whole}`); }
+    else if (whole !== undefined) { skipped++; console.log(`SKIP ${name} ${check.name}: ${whole}`); }
     else { passed++; console.log(`PASS ${name} ${check.name}`); }
   }
-  console.log(`${name}: ${passed} passed, ${failed} failed`);
+  console.log(`${name}: ${passed} passed, ${failed} failed${skipped ? `, ${skipped} skipped` : ""}`);
   return failed;
 }
 
@@ -627,7 +634,7 @@ if (dash >= 0) {
       if (pick || require.includes("all") || require.includes(a.language)) { console.log(`FAIL ${why}`); failed++; } else console.log(`SKIP ${why}`);
       continue;
     }
-    failed += await runAgent(a.language, a.command, only);
+    failed += await runAgent(a.language, a.command, only, require.includes("all") || require.includes(a.language));
   }
 } else {
   console.error("usage: node run.mjs [--only NAMES] (-- <ma command...> | --agent LANGUAGE | --all)");
