@@ -130,8 +130,13 @@ test("prose cannot call an accepted ADR or its linked rule proposed", (t) => {
     "The **proposed** [rule](current.md#rule) works.",
     "The proposed [background revision](current.md) needs review.",
     'The proposed [ADR 0033](adr/0033-interface-tools-and-ag-ui.md "Host-run tools") keeps the call open.',
+    'The proposed [ADR 0033](adr/0033-interface-tools-and-ag-ui.md "Host-run tools" ) keeps the call open.',
+    "The proposed [ADR 0033](adr/0033-interface-tools-and-ag-ui.md", '  "Host-run tools") keeps the call open.',
+    "The proposed [AG-UI interrupts](bindings/agui.md#interrupts-and-frontend-tools) bind the transport.",
+    "See [Proposed: ADR 0033](adr/0033-interface-tools-and-ag-ui.md) and [Proposed](adr/0033-interface-tools-and-ag-ui.md).",
+    "A timeout change is proposed", "", "[ADR 0033](adr/0033-interface-tools-and-ag-ui.md) is still proposed.",
   ].join("\n"));
-  repo.check([1, 2, 4, 5, 6, 8].map((line) => `docs/example.md:${line}: Prose calls an accepted decision`));
+  repo.check([1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 16].map((line) => `docs/example.md:${line}: Prose calls an accepted decision`));
 });
 
 test("proposed decisions, new proposed changes and nearby sentences do not trigger stale ADR status", (t) => {
@@ -148,6 +153,7 @@ test("proposed decisions, new proposed changes and nearby sentences do not trigg
     "", "```md", `Proposed in ${reference}.`, "```",
     "Unrelated text is proposed", "", reference,
     "Rule | Status", "--- | ---", "Longer timeout | Proposed", `${reference} | Accepted`,
+    "## Changes proposed", `${reference} records the accepted rules.`,
   ].join("\n"));
   repo.track("docs/adr/0099-example.md", "Proposed in [ADR 0033](0033-interface-tools-and-ag-ui.md).\n");
   repo.check();

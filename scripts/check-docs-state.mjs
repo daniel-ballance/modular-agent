@@ -14,7 +14,7 @@ const historicalGaps = /^(?:docs\/(?:adr|research|pressure-test)\/)|\/docs\/clea
 const issueUrl = /https?:\/\/[^\s<>()[\]]+\/issues\/[1-9]\d*\b/;
 const issueNumber = /(?:^|[\s(\[]|[\w.-]+\/[\w.-]+)#\d*[1-9]\d*\b/;
 const release = /^v?(\d+\.\d+\.\d+)$/;
-const link = /\[([^\]\n]+)\]\(<?([^\s)>]+)>?(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?\)/g;
+const link = /\[([^\]\n]+)\]\(<?([^\s)>]+)>?(?:[ \t]*\n?[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?[ \t]*\)/g;
 const ruleAliases = new Map([
   ["docs/contracts.md#interface-run-tools", "0033"],
   ["docs/bindings/agui.md", "0033"],
@@ -111,22 +111,34 @@ function checkAdrProse(file, lines, statuses, rules) {
   const text = lines.join("\n");
   if (!/\bproposed\b/i.test(text)) return;
   const prose = text.replace(/(`+)[^\n]*?\1/g, (code) => " ".repeat(code.length));
+  const reported = new Set();
   for (const { 0: span, 1: label, 2: target, index } of prose.matchAll(link)) {
     const local = localTarget(file, target);
     if (!local) continue;
     const direct = local.split("#")[0];
-    const adr = adrFile.test(direct) ? direct : rules.get(local);
+    const adr = adrFile.test(direct) ? direct : rules.get(local) ?? rules.get(direct);
     if (statuses.get(adr) !== "accepted") continue;
     // Match status wording attached to the link, not e.g. "proposed changes to" an accepted rule.
     const before = prose.slice(0, index).match(/\bproposed[*_]*(?:[ \t\n]+(?:in|by))?[ \t\n]+[*_]*$/i);
     const after = prose.slice(index + span.length).match(/^[*_ \t)]*(?:\n[ \t]*)?(?:is|are|remains?)[ \t\n]+(?:(?:still|currently)[ \t\n]+)?proposed\b/i);
-    const phrase = before?.[0] ?? after?.[0];
-    if (!/^proposed\s/i.test(label) && (!phrase || /\n[ \t]*\n/.test(phrase))) continue;
-    // A wrapped line joins a sentence; a table row does not join the next row.
-    if (phrase?.includes("\n") && /\|/.test(lineAround(prose, before ? before.index : index + span.length))) continue;
-    const line = linesOf(text.slice(0, before?.index ?? index)).length;
+    const hits = [
+      before && joined(prose, before[0], before.index) && before.index,
+      after && joined(prose, after[0], index + span.length) && index,
+      /^proposed\b/i.test(label) && index,
+    ].filter((at) => typeof at === "number");
+    const line = hits.length && linesOf(text.slice(0, Math.min(...hits))).length;
+    if (!line || reported.has(line)) continue;
+    reported.add(line);
     fail(file, line, `Prose calls an accepted decision in ${adr} proposed`, "Describe the accepted rule instead");
   }
+}
+
+// A wrapped line joins a sentence. A blank line, a table row or a heading does not.
+function joined(prose, phrase, at) {
+  if (!phrase.includes("\n")) return true;
+  if (/\n[ \t]*\n/.test(phrase)) return false;
+  const pair = lineAround(prose, at);
+  return !/\|/.test(pair) && !/^ {0,3}#/m.test(pair);
 }
 
 function lineAround(text, at) {
