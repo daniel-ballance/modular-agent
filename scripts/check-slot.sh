@@ -1,6 +1,6 @@
 # Sourced by check.sh and stress.sh. Heavy runs share MA_CHECK_SLOTS slots on
 # this machine (default 3, 0 turns the limit off). A slot is a flock on a file in
-# a fixed directory, so a run killed in any way gives its slot back.
+# a fixed directory, held until every process with the file open has exited.
 #
 # A wrapper that takes a slot itself hands it over by exporting
 # MA_CHECK_SLOT_HELD=1 and MA_CHECK_SLOT_FD=<descriptor holding the lock>, then
@@ -12,7 +12,7 @@ check_slot_number() { # value max: print value as a decimal, or fail if it is no
   [[ $1 =~ ^[0-9]{1,9}$ ]] && (( 10#$1 <= $2 )) && echo $((10#$1))
 }
 
-check_slot_file() { # fd slots dir: succeed if fd is open on one of the slot files
+check_slot_file() { # fd count dir: succeed if fd is open on one of the first count slot files
   local i
   for ((i = 1; i <= $2; i++)); do
     [ "/dev/fd/$1" -ef "$3/slot-$i.lock" ] && return 0
@@ -28,11 +28,6 @@ take_check_slots() { # count: wait until this many slots are free, then hold the
     echo "check-slot: MA_CHECK_SLOTS must be a whole number from 0 to 64, not '$MA_CHECK_SLOTS'" >&2
     return 2
   fi
-  (( slots == 0 )) && return 0
-  if (( want > slots )); then
-    echo "check-slot: $want slots wanted, but MA_CHECK_SLOTS is $slots. Run fewer at once, or set MA_CHECK_SLOTS=0 on a machine no one else is using." >&2
-    return 2
-  fi
   if [ -n "${MA_CHECK_SLOT_HELD:-}" ]; then
     # A run that waits while it holds a slot can deadlock with another one doing
     # the same, so a caller's slot is the only one its runs may use.
@@ -41,13 +36,18 @@ take_check_slots() { # count: wait until this many slots are free, then hold the
       return 2
     fi
     if [ -n "${MA_CHECK_SLOT_FD:-}" ]; then
-      if ! fd=$(check_slot_number "$MA_CHECK_SLOT_FD" 999999999) || ! check_slot_file "$fd" "$slots" "$dir"; then
+      if ! fd=$(check_slot_number "$MA_CHECK_SLOT_FD" 999999999) || ! check_slot_file "$fd" 64 "$dir"; then
         echo "check-slot: MA_CHECK_SLOT_FD must be the number of an open descriptor on a slot file in $dir, not '$MA_CHECK_SLOT_FD'" >&2
         return 2
       fi
       check_slot_fds+=("$fd")
     fi
     return 0
+  fi
+  (( slots == 0 )) && return 0
+  if (( want > slots )); then
+    echo "check-slot: $want slots wanted, but MA_CHECK_SLOTS is $slots. Run fewer at once, or set MA_CHECK_SLOTS=0 on a machine no one else is using." >&2
+    return 2
   fi
   command -v flock >/dev/null || { echo "check-slot: flock (util-linux) is not installed" >&2; return 2; }
   mkdir -p "$dir" || return 2

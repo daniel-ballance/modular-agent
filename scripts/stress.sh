@@ -30,16 +30,19 @@ printf 'Stress logs: %s\n' "$root"
 
 # Copy tracked sources as they are on disk. Each run needs its own build outputs,
 # virtual environment and node_modules (npm ci removes the old tree).
-git ls-files -z | tar -cf "$root/source.tar" --null -T -
-for ((run = 1; run <= count; run++)); do
-  src="$root/$run/src"
-  mkdir -p "$src" "$root/$run/tmp"
-  tar -xf "$root/source.tar" -C "$src"
-  # The link checker uses git ls-files. Only a local index is needed.
-  git -C "$src" init -q
-  git -C "$src" add -f -- .
-done
-rm "$root/source.tar"
+(
+  drop_check_slots
+  git ls-files -z | tar -cf "$root/source.tar" --null -T -
+  for ((run = 1; run <= count; run++)); do
+    src="$root/$run/src"
+    mkdir -p "$src" "$root/$run/tmp"
+    tar -xf "$root/source.tar" -C "$src"
+    # The link checker uses git ls-files. Only a local index is needed.
+    git -C "$src" init -q
+    git -C "$src" add -f -- .
+  done
+  rm "$root/source.tar"
+)
 
 check() {
   local dir="$1" status=0; shift
@@ -56,8 +59,7 @@ check() {
 }
 
 # Each run gets its own process group, so stopping stress.sh can stop all of
-# a run's processes. The runs do not hold the slot files, so if stress.sh is
-# killed outright its slots come free, though its runs carry on.
+# a run's processes. Neither the setup nor the runs keep the slot files open.
 pids=()
 stop_runs() { # exit status
   local pid

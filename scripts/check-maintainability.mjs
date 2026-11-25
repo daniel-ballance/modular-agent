@@ -85,16 +85,16 @@ function checkCommits() {
     throw new Error(`Cannot find a merge base with ${main}. Fetch the shared history and retry.`);
   }
   let bad = 0;
-  // A commit message cannot hold a NUL byte, so -z separates the records exactly.
-  for (const record of git("log", "-z", "--format=%h%n%B", `${main}..HEAD`).split("\0")) {
-    if (!record) continue;
-    const [hash, ...lines] = record.split("\n");
-    const commit = `${hash} ${lines[0]}`;
-    if (/^WIP\b/i.test(lines[0])) {
+  // A commit message cannot hold a NUL byte, so NULs separate the fields exactly.
+  const fields = git("log", "-z", "--format=%h%x00%s%x00%B", `${main}..HEAD`).split("\0");
+  for (let i = 0; i + 2 < fields.length; i += 3) {
+    const [hash, subject, body] = fields.slice(i, i + 3);
+    const commit = `${hash} ${subject}`;
+    if (/^WIP\b/i.test(subject)) {
       console.error(`${commit}: Rewrite the commit subject before merging into main.`);
       bad++;
     }
-    const keyword = lines.join("\n").match(closingKeyword);
+    const keyword = body.match(closingKeyword);
     if (keyword) {
       console.error(`${commit}: "${keyword[0]}". Put Closes #N in the pull request body, not the commit message.`);
       bad++;

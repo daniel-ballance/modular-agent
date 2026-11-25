@@ -162,6 +162,18 @@ test("a process left behind by a step does not keep the slot a wrapper handed ov
   assert.match(left.out, /fd=unset/);
 });
 
+test("a child under MA_CHECK_SLOTS=0 does not keep the slot a wrapper handed over", async (t) => {
+  const box = machine(t, 1);
+  const run = `. "$0"; take_check_slots 1 || exit
+    ( drop_check_slots; exec sleep 60 >/dev/null ) 2>/dev/null & echo started`;
+  const left = box.start("bash", ["-c", wrapper, "wrapper", "bash", "-c", run, library], { MA_CHECK_SLOTS: "0" });
+  await left.done;
+  assert.match(left.out, /started/);
+  const next = box.run("take_check_slots 1");
+  assert.equal(next.status, 0, next.stderr);
+  assert.match(next.stderr, /took slot 1 of 1 at .* after 0s/);
+});
+
 test("a handed-over MA_CHECK_SLOT_FD must name an open descriptor", (t) => {
   const box = machine(t, 1);
   for (const fd of ["9", "0", "x", "18446744073709551616"]) {
@@ -243,7 +255,7 @@ function fakeStress(t, box) {
     }
     return stress;
   };
-  return { start, pids };
+  return { start, pids, dir };
 }
 
 const alive = (pid) => {
@@ -280,6 +292,36 @@ test("stress.sh killed outright frees its slots", async (t) => {
   assert.equal(next.status, 0, next.stderr);
   assert.match(next.stderr, /after 0s/);
 });
+
+test("stress.sh for two runs inside a slot wrapper exits 2, even under MA_CHECK_SLOTS=0", async (t) => {
+  const box = machine(t, 1);
+  const fake = fakeStress(t, box);
+  const stress = box.start("bash", ["-c", wrapper, "wrapper", join(fake.dir, "scripts/stress.sh"), "2"], { MA_CHECK_SLOTS: "0" });
+  assert.equal(await Promise.race([stress.done, delay(10_000)]), 2, stress.out + stress.err);
+  assert.match(stress.err, /already holds a check slot \(MA_CHECK_SLOT_HELD\), so it cannot wait for 1 more/);
+  assert.doesNotMatch(stress.out, /Stress logs/);
+});
+
+for (const [phase, flag] of [["archives the sources", "c"], ["extracts a run's sources", "x"]]) {
+  test(`stress.sh killed while it ${phase} frees its slot`, async (t) => {
+    const box = machine(t, 1);
+    const fake = fakeStress(t, box);
+    const tar = spawnSync("bash", ["-c", "command -v tar"], { encoding: "utf8" }).stdout.trim();
+    const bin = join(fake.dir, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "tar"), `#!/bin/sh\ncase "$1" in -${flag}*) touch "${bin}/started"; exec sleep 60 ;; esac\nexec "${tar}" "$@"\n`, { mode: 0o755 });
+    const stress = box.start(join(fake.dir, "scripts/stress.sh"), ["1"], { PATH: `${bin}:${process.env.PATH}` });
+    for (let waited = 0; !existsSync(join(bin, "started")); waited += 50) {
+      if (waited > 10_000) assert.fail(`tar -${flag} did not start: ${stress.out}${stress.err}`);
+      await delay(50);
+    }
+    process.kill(stress.pid, "SIGKILL");
+    await stress.exited;
+    const next = box.run("take_check_slots 1");
+    assert.equal(next.status, 0, next.stderr);
+    assert.match(next.stderr, /took slot 1 of 1 at .* after 0s/);
+  });
+}
 
 test("stress.sh takes one slot per run and refuses more runs than slots", (t) => {
   const { env } = machine(t, 2);

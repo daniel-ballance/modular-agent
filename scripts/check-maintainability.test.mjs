@@ -140,6 +140,16 @@ test("origin/main wins over a local main that is behind it or ahead of it", (t) 
   assert.doesNotMatch(result.stderr, /WIP landed long ago/);
 });
 
+test("a WIP subject after leading blank lines fails", (t) => {
+  const repo = checkout(t);
+  repo.commit("Start");
+  repo.git("switch", "-q", "-c", "topic");
+  repo.git("commit", "-q", "--allow-empty", "--cleanup=verbatim", "-m", "\n\nWIP: finish the split\n\nThe rest.");
+  const result = repo.check();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /WIP: finish the split: Rewrite the commit subject/);
+});
+
 test("a subject that only begins with the letters wip passes", (t) => {
   const repo = checkout(t);
   repo.commit("Start");
