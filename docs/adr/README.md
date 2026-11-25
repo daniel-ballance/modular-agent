@@ -39,3 +39,4 @@ The records keep the original decisions and evidence. [Contracts](../contracts.m
 | [0033](0033-interface-tools-and-ag-ui.md) | Interface-run tools and AG-UI over HTTP and SSE | Accepted | [AG-UI binding](../bindings/agui.md) |
 | [0034](0034-approvals-that-wait.md) | Let a session keep an unstarted call for a later approval, with a deadline | Accepted | [Approval policy](../contracts.md#approval-policy) |
 | [0035](0035-host-limits-from-the-ops-desk.md) | Report wait closures and run receipts per thread; authenticate named callers at a plugin listener | Accepted | Today: [AG-UI reconnect](../bindings/agui.md#output-gate-errors-and-reconnect), [plugin services](../sdk/placement.md#services) |
+| [0036](0036-four-languages-in-lockstep.md) | Keep the four SDKs and the four `ma` programs in lockstep; a temporary gap is an issue with its `lang:` label | Accepted | [How work moves through the layers](../../CONTRIBUTING.md#how-work-moves-through-the-layers) |
