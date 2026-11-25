@@ -1144,7 +1144,7 @@ pub(super) fn next_interface_continuation(data: &SessionData) -> Result<Option<C
                 };
                 sources.push(source.id.clone());
                 if !settled {
-                    if !super::pending_questions(&branch, source) {
+                    if !super::continuation::pending_questions(&branch, source) {
                         complete = false;
                         break;
                     }
