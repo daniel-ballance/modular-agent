@@ -5,24 +5,42 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::sync::Notify;
+/// Questions, and the `ask_user` tool through which a model asks one.
 #[derive(Default)]
 pub struct QuestionsPlugin;
+/// Questions without a tool of their own. A model asks only through the tools
+/// an app gives it. The SDK composes this one.
+#[derive(Default)]
+pub struct QuestionsWithoutToolPlugin;
 #[derive(Default)]
 struct Questions {
     lock: Mutex<()>,
     present: Mutex<std::collections::BTreeMap<(String, String, String), bool>>,
     notify: Notify,
 }
+fn install_questions(r: &mut Registrar<'_>, ask_user: bool) -> Result<()> {
+    let service = Arc::new(Questions::default());
+    r.provide::<dyn InputRequests>("input.requests", service.clone())?;
+    if ask_user {
+        r.provide::<dyn ToolSource>("tools.questions", service)?;
+    }
+    r.declare(json!({"questions_outlast_turn":true,"input_requests":["approval","choice","text","secret"]}));
+    Ok(())
+}
 impl Plugin for QuestionsPlugin {
     fn name(&self) -> &str {
         "feature.questions"
     }
     fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
-        let service = Arc::new(Questions::default());
-        r.provide::<dyn InputRequests>("input.requests", service.clone())?;
-        r.provide::<dyn ToolSource>("tools.questions", service)?;
-        r.declare(json!({"questions_outlast_turn":true,"input_requests":["approval","choice","text","secret"]}));
-        Ok(())
+        install_questions(r, true)
+    }
+}
+impl Plugin for QuestionsWithoutToolPlugin {
+    fn name(&self) -> &str {
+        "feature.questions"
+    }
+    fn install(&self, r: &mut Registrar<'_>) -> Result<()> {
+        install_questions(r, false)
     }
 }
 fn question_deadline(data: &SessionData, q: &Question) -> Option<u64> {

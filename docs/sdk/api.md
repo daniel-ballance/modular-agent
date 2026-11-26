@@ -196,6 +196,8 @@ A slow reader never blocks the agent. The SDK bounds each stream. If a reader fa
 
 A question handler receives a **Question** and returns an **Answer**:
 
+Questions come from the agent's features, such as approval, and from tools that call [`ask`](#tools). The SDK gives the model no tool of its own for asking one. An app that wants the model to ask gives it a tool that calls `ask`.
+
 ```
 onQuestion(question: Question, context) -> Answer
 ```

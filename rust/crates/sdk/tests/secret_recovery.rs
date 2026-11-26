@@ -1,7 +1,7 @@
 use modular_agent::testing::scripted_provider;
 use modular_agent::{
-    Activation, Agent, Answer, CredentialStore, Durability, Result, SecretRequest, StagingReceipt,
-    Timing, file_credentials,
+    Activation, Agent, Answer, Ask, CredentialStore, Durability, Result, SecretRequest,
+    StagingReceipt, Timing, Tool, ToolContext, file_credentials,
 };
 use serde_json::json;
 use std::{path::Path, time::Duration};
@@ -42,9 +42,20 @@ impl<S: CredentialStore> CredentialStore for CrashStore<S> {
     }
 }
 fn build(root: &Path) -> modular_agent::AgentBuilder {
-    Agent::builder().project(root).data_dir(root.join("data")).durability(Durability::Kept)
+    // The SDK offers the model no question tool, so the app gives it one.
+    let ask = Tool::new("ask_secret", "Ask for a secret.").run(
+        |_: serde_json::Value, cx: ToolContext| async move {
+            cx.ask(Ask::secret("Token?", "service")).await?;
+            Ok("asked")
+        },
+    );
+    Agent::builder()
+        .project(root)
+        .data_dir(root.join("data"))
+        .durability(Durability::Kept)
+        .tool(ask)
         .provider(scripted_provider(json!([
-            {"toolCalls":[{"name":"ask_user","input":{"kind":"secret","question":"Token?","credential":"service"}}]},
+            {"toolCalls":[{"name":"ask_secret","input":{}}]},
             {"text":"Done"}
         ])))
 }
