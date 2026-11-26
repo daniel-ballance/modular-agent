@@ -170,3 +170,31 @@ test("the guide stream yields live text and ends with turnEnded", async t => {
   assert.ok(events.includes("text"));
   assert.equal(events.at(-1), "turnEnded");
 });
+
+test("promptStream yields a tool's questionOpened event with its turn and call IDs", async t => {
+  const ask = tool({
+    name: "question", description: "Ask something", input,
+    async run(_, cx) {
+      await cx.ask({ kind: "text", question: "Name?" });
+      return "Done asking.";
+    },
+  });
+  const agent = await testAgent({
+    script: request("question"), tools: [ask], onQuestion: () => ({ declined: true }),
+  });
+  t.after(() => agent.close());
+  const session = await agent.session();
+  const events = [];
+  for await (const event of session.promptStream("Ask.")) events.push(event);
+
+  const opened = events.filter(event => event.type === "questionOpened");
+  assert.equal(opened.length, 1);
+  const [question] = opened;
+  const ended = events.at(-1);
+  assert.equal(ended?.type, "turnEnded");
+  assert.ok(ended.turnId);
+  assert.equal(question.turnId, ended.turnId);
+  assert.equal(question.data.request.question, "Name?");
+  assert.ok(question.toolCallId);
+  assert.equal(question.toolCallId, events.find(event => event.type === "toolCall")?.data.call.id);
+});

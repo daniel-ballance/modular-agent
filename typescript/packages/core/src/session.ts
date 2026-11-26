@@ -72,7 +72,7 @@ const names: Record<string, StandardEvent> = {
   "session.interrupted": "sessionInterrupted", "session.left": "actorLeft", "input.accepted": "inputAccepted", "input.withdrawn": "inputWithdrawn",
   "turn.started": "turnStarted", "step.started": "stepStarted", "step.ended": "stepEnded",
   "tool.call": "toolCall", "tool.started": "toolStarted", "tool.progress": "toolOutput",
-  "tool.result.delivered": "toolResult", "input.request.opened": "questionOpened", "input.request.closed": "questionClosed",
+  "tool.result.delivered": "toolResult", "input.request.closed": "questionClosed",
   "input.request.answered": "questionAnswered", "input.request.unanswerable": "questionNoLongerAnswerable",
   "job.started": "jobStarted", "job.progress": "jobProgress", "job.ended": "jobEnded",
   "position.moved": "positionMoved", "entries.erased": "entriesErased", "setting.changed": "settingChanged", "input.handedBack": "inputHandedBack",
@@ -88,6 +88,7 @@ function eventOf(e: AgentEvent): Event | undefined {
   if (type === "tool.progress" && toolCallId) return { ...scope, type: "toolOutput", data: { toolCallId, chunk: textOf(data.content), content: data.content } };
   if (type === "entry" || type === "entry.added") return { ...scope, type: "entry", data };
   if (type === "turn.ended" && turnId) return { ...scope, type: "turnEnded", data: { turnId, outcome: data.outcome, result: data.result } };
+  if (type === "input.request.opened") return { ...scope, turnId: turnId ?? data?.request?.turnId, type: "questionOpened", data };
   if (type === "session.joined" && data.actor) {
     const { authority, ...actor } = data.actor;
     return { ...scope, type: "actorJoined", data: { actor: { ...actor, rights: authority } } };
@@ -297,12 +298,12 @@ export class Session {
         .find(e => e.kind === "input" && inputIdOf(e) === admission)?.turnId;
       if (turn) {
         for (const e of queue.splice(0)) {
-          if (e.turnId !== turn && !((e.type === "entry" || e.type === "entry.added") && e.data?.turnId === turn)) continue;
           const event = eventOf(e);
+          if (!event || (event.turnId !== turn && !(event.type === "entry" && event.data?.turnId === turn))) continue;
           if (overflow) throw new AgentError("lost", "Prompt event reader fell behind", { fromEntry: cursor });
-          if (event?.type === "entry") cursor = event.data.id;
-          if (event?.type === "turnEnded") terminal = event;
-          else if (event) { await this.#api.checkPending(this.id); yield event; }
+          if (event.type === "entry") cursor = event.data.id;
+          if (event.type === "turnEnded") terminal = event;
+          else { await this.#api.checkPending(this.id); yield event; }
         }
       } else if (settled) break;
       if (!settled && (!turn || !queue.length)) await new Promise<void>(r => { wake = r; });
