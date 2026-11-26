@@ -2,7 +2,8 @@
 // It starts the TypeScript build's service (docs/bindings/history-http.md) on loopback, makes
 // sessions with `ma`, then writes copies of them straight to the service with chosen IDs and
 // entry times. That gives a session whose newest appended entry has an earlier time than an
-// older entry, and two sessions whose last entries have the same time.
+// older entry, and two sessions whose last entries have the same time. Last, it erases one
+// session's last entry through the service, which leaves that session no last activity.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -121,6 +122,18 @@ export async function checkSessionsService(command, invoke, skip, t) {
     await listing(["sessions"], ordered);
     await listing(["sessions", "--all"], [...ordered, [elsewhere, otherProject]]);
     assert.equal(await session("-c", "-p", "fifth"), low, "-c reopens the top listed session");
+
+    // Erasing low's last entry leaves a tombstone with no time, so low has no last activity
+    // and comes after every session that has one.
+    const tail = (await read(url, service.token, low)).entries.at(-1);
+    assert.ok(typeof tail.time === "number" && !tail.erased, "low's last entry has a time");
+    const { erased } = await wire(url, service.token, "POST", `/v1/sessions/${low}/erase`, { entryIds: [tail.id] });
+    assert.deepEqual(erased, [tail.id]);
+    const after = (await read(url, service.token, low)).entries.at(-1);
+    assert.ok(after.id === tail.id && after.erased === true && after.time === undefined, "low ends in a tombstone");
+    const rest = [[high, project], [steady, project], [skewed, project], [first, project], [third, project]];
+    await listing(["sessions"], [...rest, [low, project]]);
+    await listing(["sessions", "--all"], [...rest, [elsewhere, otherProject], [low, project]]);
   } finally {
     service.stop();
   }

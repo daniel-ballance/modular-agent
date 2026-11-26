@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { JsonlHistoryStore } from "@modular-agent/history-jsonl";
 import { createAgent, type Provider } from "../src/index.js";
 
 const provider: Provider = { id: "a", supports: { keepsState: false, safeToRepeat: true },
@@ -42,4 +43,38 @@ test("sessions() gives a session with no entries no last activity", async t => {
   const listed = new Map((await second.sessions()).map(s => [s.id, s.updated]));
   assert.equal(listed.get(empty), 0);
   assert.ok((listed.get(session.id) ?? 0) > 0);
+});
+
+// An erased entry has no time, so a session whose last entry is erased has no last
+// activity and lists with the sessions that have no entries. The store erases in
+// place, with no erasure record after the entry.
+test("sessions() gives a session whose last entry is erased no last activity", async t => {
+  const project = await mkdtemp(join(tmpdir(), "ma-list-"));
+  t.after(() => rm(project, { recursive: true, force: true }));
+  const options = { project, dataDir: project, durability: "kept" as const, model: "a/test", providers: [provider] };
+  const first = await createAgent(options);
+  const older = await first.session();
+  await older.prompt("First");
+  await older.waitIdle();
+  await new Promise(resolve => setTimeout(resolve, 5));
+  const newer = await first.session();
+  await newer.prompt("Second");
+  await newer.waitIdle();
+  await first.close();
+
+  const file = await find(project, `${newer.id}.jsonl`);
+  assert.ok(file, "the session is kept in a file");
+  const store = new JsonlHistoryStore(dirname(dirname(file)));
+  const last = (await store.load(newer.id)).entries.at(-1)!;
+  assert.ok(last.time > 0);
+  await store.erase(newer.id, [last.id]);
+  const tail = (await store.load(newer.id)).entries.at(-1)!;
+  assert.equal(tail.id, last.id);
+  assert.equal(tail.erased, true);
+
+  const second = await createAgent(options);
+  t.after(() => second.close());
+  const listed = new Map((await second.sessions()).map(s => [s.id, s.updated]));
+  assert.equal(listed.get(newer.id), 0);
+  assert.ok((listed.get(older.id) ?? 0) > 0);
 });
