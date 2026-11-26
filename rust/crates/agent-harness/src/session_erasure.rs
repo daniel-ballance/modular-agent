@@ -18,10 +18,10 @@ impl Harness {
                 || open.environment_work > 0
                 || open.rewinding
                 || open.lease.is_none()
+                || self.check_open_writer(open).is_err()
             {
                 return Err(error);
             }
-            self.check_open_writer(open)?;
             let Some((data, _)) = store.reconcile_erasure(&open.data.id)? else {
                 return Err(error);
             };

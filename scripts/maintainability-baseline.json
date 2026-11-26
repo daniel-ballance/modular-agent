@@ -13,7 +13,7 @@
   "rust/crates/sdk/src/agent.rs": 1068,
   "rust/crates/sdk/src/agui/run.rs": 1055,
   "rust/crates/sdk/src/plugin.rs": 1089,
-  "rust/crates/sdk/src/session.rs": 1483,
+  "rust/crates/sdk/src/session.rs": 1480,
   "typescript/packages/interface-acp/src/index.ts": 1196,
   "typescript/packages/plugin-wire/src/host.ts": 1091
 }

@@ -28,6 +28,15 @@ impl std::fmt::Display for OperationError {
 
 impl std::error::Error for OperationError {}
 
+#[derive(Debug)]
+pub struct SessionNotOpen;
+impl std::fmt::Display for SessionNotOpen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("session is not open")
+    }
+}
+impl std::error::Error for SessionNotOpen {}
+
 /// A portable session is held longer than this open can wait.
 #[derive(Debug)]
 pub struct HistoryHeld {

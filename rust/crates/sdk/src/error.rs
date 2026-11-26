@@ -154,6 +154,8 @@ impl From<anyhow::Error> for Error {
             Code::NotSupported
         } else if error.downcast_ref::<agent_api::LostPart>().is_some() {
             Code::Lost
+        } else if error.downcast_ref::<agent_api::SessionNotOpen>().is_some() {
+            Code::NotOpen
         } else if agent_api::is_file_not_found(&error) {
             Code::NotFound
         } else {
