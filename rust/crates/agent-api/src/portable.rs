@@ -494,6 +494,9 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
             let r: TurnResult = serde_json::from_value(c.clone())?;
             let mut end = turn_outcome(&r);
             end["usage"] = usage(&r.usage);
+            if let Some(id) = optional(c, "inputId") {
+                end["inputId"] = id.clone();
+            }
             end
         }
         "summary" if copied => {
@@ -909,7 +912,11 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                     .iter()
                     .filter(|(turn, _): &&(Option<String>, Option<String>)| *turn == e.scope.turn)
                     .count();
-                ("turn.end", json!(r))
+                let mut end = json!(r);
+                if let Some(id) = optional(d, "inputId") {
+                    end["inputId"] = id.clone();
+                }
+                ("turn.end", end)
             }
             "summary" => {
                 if copied && let Some(summarizes) = d.get("summarizes") {

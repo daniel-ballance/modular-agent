@@ -104,6 +104,7 @@ impl SessionData {
                 }
                 "input" => pending
                     .retain(|(id, _)| *id != input && !entry.copies.iter().any(|copy| copy == *id)),
+                "turn.end" if v["inputId"].is_string() => pending.retain(|(id, _)| *id != input),
                 "input.returned" | "input.withdrawn" => pending.retain(|(id, _)| {
                     v["input"] != *id
                         && !v["inputIds"]

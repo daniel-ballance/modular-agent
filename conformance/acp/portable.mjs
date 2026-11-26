@@ -41,7 +41,7 @@ const valid = {
 	inputAnswer: (e, d) => id(e.requestId) && opt(d, "actorId", id),
 	// Shared data: Standard kinds.
 	resultFeedback: (e, d) => id(e.turnId) && e.modelVisible === true && typeof d.reason === "string",
-	turnEnd: (e, d) => id(e.turnId) && outcome(d.outcome) && ids(d.result?.openToolCalls) && usage(d.usage),
+	turnEnd: (e, d) => id(e.turnId) && outcome(d.outcome) && ids(d.result?.openToolCalls) && usage(d.usage) && opt(d, "inputId", id),
 	summary: (e, d) => ids(e.sources) && e.sources.length > 0 && typeof d.summary === "string",
 	setting: (_, d) => id(d.key) && Object.hasOwn(d, "value") && (d.key !== "model" || model(d.value)),
 	actorJoined: (_, d) => validActor(d.actor),
@@ -120,7 +120,9 @@ export function portableProblems(sessionId, entries) {
 		if (e.kind === "turnStart") {
 			if (turns.has(e.turnId)) say(e, "duplicate turn start");
 			turns.add(e.turnId);
-		} else if (e.turnId !== undefined && !turns.has(e.turnId)) say(e, "unknown turn");
+		} else if (e.turnId !== undefined && !turns.has(e.turnId)) {
+			if (!(e.kind === "turnEnd" && ["failed", "cancelled"].includes(d.outcome?.kind) && admitted.has(d.inputId))) say(e, "unknown turn");
+		}
 		if (e.kind === "modelRequest") {
 			if (attempts.has(e.stepId)) say(e, "reused step ID");
 			attempts.set(e.stepId, e);

@@ -52,7 +52,7 @@ const fixtureEnv = (kit, role, options) => ({ MODULAR_AGENT_PLUGINS: JSON.string
 
 // The listener deliberately has several credentials. For stdio, a new process
 // loads the next profile over the same trusted data directory.
-async function host(kit, scopes, { extraEnv = {}, dir, which = kit.command, limits, captureStderr = false } = {}) {
+async function host(kit, scopes, { extraEnv = {}, dir, which = kit.command, limits } = {}) {
 	const peers = [];
 	const tokens = [];
 	const actors = kit.network && scopes.map((scope) => {
@@ -64,7 +64,7 @@ async function host(kit, scopes, { extraEnv = {}, dir, which = kit.command, limi
 	});
 	const env = kit.profile({ stdio: scopes[0], ...(actors ? { actors } : {}), limits }, extraEnv, dir);
 	const directory = env.MODULAR_AGENT_DATA_DIR;
-	const listener = kit.network && kit.managed.variant(env, { captureStderr });
+	const listener = kit.network && kit.managed.variant(env);
 	return {
 		directory, listener, tokens,
 		async processes() {
@@ -520,7 +520,7 @@ async function eraseAcrossWriters(kit, cutoff, ttlMs) {
 	});
 	const hosts = [];
 	const startHost = async (role, options) => {
-		const profile = await host(kit, [scope], { ...options, captureStderr: true });
+		const profile = await host(kit, [scope], options);
 		hosts.push({ role, profile });
 		return profile;
 	};

@@ -10,7 +10,7 @@ import { createInterface } from "node:readline";
 import { client, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import { historyService } from "./history.mjs";
 import { portableProblems, validActor } from "./portable.mjs";
-import { manageServices, trackProcess } from "./service.mjs";
+import { finishAgents, manageServices, trackProcess } from "./service.mjs";
 import { capacity, erasure, isolation } from "./production.mjs";
 import { coveredApproval } from "./covered.mjs";
 import { waitingChecks } from "./waiting.mjs";
@@ -198,16 +198,15 @@ async function attempt(name, fn) {
 }
 
 const agentEnv = (which, extraEnv) => ({ ...env, ...(observer ? { MODULAR_AGENT_HISTORY_URL: observer.url } : {}), HOME: home, XDG_CONFIG_HOME: home, XDG_DATA_HOME: home, LANG: "C.UTF-8", ...pluginEnv, ...(!network && portablePair ? { MODULAR_AGENT_ACTOR: portableActor } : {}), MODULAR_AGENT_TENANTS: TENANTS, MODULAR_AGENT_CONFORMANCE: "1", MODULAR_AGENT_DATA_DIR: which === command ? dataDir : dataDir2, ...extraEnv });
-const managed = serviceCommand && manageServices(network, serviceCommand, project, (extraEnv) => agentEnv(command, extraEnv), verbose);
+const managed = serviceCommand && manageServices(network, serviceCommand, project, (extraEnv) => agentEnv(command, extraEnv), verbose, children);
 
-function spawnAgent(which, extraEnv, captureStderr = false) {
+function spawnAgent(which, extraEnv) {
 	const child = spawn(which[0], which.slice(1), {
 		cwd: project,
-		stdio: ["pipe", "pipe", captureStderr ? "pipe" : verbose ? "inherit" : "ignore"],
+		stdio: ["pipe", "pipe", "pipe"],
 		env: agentEnv(which, extraEnv),
 	});
-	children.push(child);
-	return trackProcess(child, verbose);
+	return trackProcess(child, verbose, children);
 }
 
 // A managed fixture starts a fresh agent, not just a WebSocket handshake.
@@ -251,7 +250,7 @@ function webTransport(service, token) {
 
 /** Connect the official ACP client to a process or service. */
 function connect(which = command, extraEnv = {}, token = network?.token, sharedListener) {
-	const spawned = network ? null : spawnAgent(which, extraEnv, group === "erasure");
+	const spawned = network ? null : spawnAgent(which, extraEnv);
 	const child = spawned?.child;
 	const variant = !sharedListener && !!managed && Object.keys(extraEnv).length > 0;
 	const service = sharedListener ?? (variant ? managed.variant(extraEnv) : Promise.resolve(managed ? managed.primary() : null));
@@ -2005,8 +2004,8 @@ async function runProduction() {
 	};
 	const invalid = async (policy) => {
 		const extraEnv = profile(policy);
-		const service = network && await managed.variant(extraEnv, { captureStderr: true });
-		const { child, exited, closed, status } = service || spawnAgent(command, extraEnv, true);
+		const service = network && await managed.variant(extraEnv);
+		const { child, exited, closed, status } = service || spawnAgent(command, extraEnv);
 		const successfulInit = !service && new Promise((resolve) => {
 			const lines = createInterface({ input: child.stdout });
 			lines.on("line", (line) => {
@@ -2030,11 +2029,11 @@ async function runProduction() {
 }
 
 async function finish() {
+	const failed = results.filter((r) => !r.ok);
 	await managed?.stopAll();
 	observer?.stop();
-	for (const c of children) if (c.exitCode === null && c.signalCode === null) c.kill("SIGKILL");
+	await finishAgents(children, failed.length && !verbose);
 	for (const dir of new Set([dataDir, dataDir2, probeDir, project, home])) rmSync(dir, { recursive: true, force: true });
-	const failed = results.filter((r) => !r.ok);
 	console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
 	process.exit(failed.length ? 1 : 0);
 }
