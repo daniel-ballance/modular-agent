@@ -15,9 +15,41 @@ use std::{
 };
 use tokio::{
     sync::mpsc,
-    time::{Duration, timeout},
+    time::{Duration, Instant, timeout},
 };
 use tokio_util::sync::CancellationToken;
+
+struct Stages {
+    pending: &'static str,
+    since: Instant,
+    completed: Vec<(&'static str, Duration)>,
+}
+
+impl Stages {
+    fn new(pending: &'static str) -> Self {
+        Self {
+            pending,
+            since: Instant::now(),
+            completed: Vec::new(),
+        }
+    }
+
+    fn stage(&mut self, pending: &'static str) {
+        let now = Instant::now();
+        self.completed.push((self.pending, now - self.since));
+        self.pending = pending;
+        self.since = now;
+    }
+
+    fn diagnostic(&self) -> String {
+        format!(
+            "pending {} for {:?}; completed {:?}",
+            self.pending,
+            self.since.elapsed(),
+            self.completed
+        )
+    }
+}
 
 struct Store {
     native: history_fs::FileHistory,
@@ -126,14 +158,17 @@ impl Fixture {
             return_from_tool,
         })
     }
-    async fn recover(&self, id: &str) -> Result<()> {
+    async fn recover(&self, id: &str, stages: &mut Stages) -> Result<()> {
+        stages.stage("reopen interrupted session");
         self.fault.reject.store(false, Ordering::SeqCst);
         let reopened = self.agent.open_session(id).await?;
+        stages.stage("read recovered turn");
         let turn = reopened
             .last_turn()
             .await?
             .expect("interrupted work settled on reopen");
         assert_eq!(turn.tool_results()[0].status, ToolStatus::OutcomeUnknown);
+        stages.stage("read recovered history");
         assert!(
             !reopened
                 .history()
@@ -141,25 +176,36 @@ impl Fixture {
                 .iter()
                 .any(|entry| entry["kind"] == "sessionInterrupted")
         );
+        stages.stage("close recovered agent");
         self.agent.close().await
     }
 }
 
 #[tokio::test]
 async fn both_interruptions_reach_followers_and_settle_waiters() -> Result<()> {
+    let mut stages = Stages::new("start");
     timeout(Duration::from_secs(5), async {
-        for reason in ["writerLost", "commitFailed"] {
+        for (reason, build) in [
+            ("writerLost", "build writerLost fixture"),
+            ("commitFailed", "build commitFailed fixture"),
+        ] {
+            stages.stage(build);
             let mut f = Fixture::build().await?;
+            stages.stage("create session");
             let session = f.agent.session().await?;
             let id = session.id().to_owned();
             let mut follow = session.events(None)?;
             let mut agent_follow = f.agent.events();
             let other = session.clone();
             let prompting = tokio::spawn(async move { other.prompt("start").await });
+            stages.stage("wait for tool entry");
             let cancelled = f.entered.recv().await.unwrap();
+            stages.stage("queue streaming prompt");
             let mut streaming = session.prompt_stream("queued").await?;
             f.fault.trigger(reason, &f.return_from_tool);
+            stages.stage("wait for prompt to fail with lost");
             assert_eq!(prompting.await.unwrap().unwrap_err().code(), Code::Lost);
+            stages.stage("wait for stream to fail with lost");
             let stream_error = loop {
                 if let Err(error) = streaming
                     .next()
@@ -170,8 +216,13 @@ async fn both_interruptions_reach_followers_and_settle_waiters() -> Result<()> {
                 }
             };
             assert_eq!(stream_error.code(), Code::Lost);
+            stages.stage("observe tool cancellation");
             cancelled.cancelled().await;
-            for stream in [&mut follow, &mut agent_follow] {
+            for (stage, stream) in [
+                ("observe session follower interruption", &mut follow),
+                ("observe agent follower interruption", &mut agent_follow),
+            ] {
+                stages.stage(stage);
                 loop {
                     let event = stream.next().await.unwrap()?;
                     if matches!(event, modular_agent::Event::SessionInterrupted(_)) {
@@ -180,6 +231,7 @@ async fn both_interruptions_reach_followers_and_settle_waiters() -> Result<()> {
                     }
                 }
             }
+            stages.stage("reject input after interruption");
             assert_eq!(
                 session
                     .send("no more effects", modular_agent::Timing::Now)
@@ -188,19 +240,25 @@ async fn both_interruptions_reach_followers_and_settle_waiters() -> Result<()> {
                     .code(),
                 Code::Lost
             );
+            stages.stage("close interrupted session");
             session.close().await?;
-            f.recover(&id).await?;
+            f.recover(&id, &mut stages).await?;
         }
         Ok(())
     })
     .await
-    .expect("interruption was not observed")
+    .unwrap_or_else(|_| panic!("SDK interruption test timed out: {}", stages.diagnostic()))
 }
 
 #[tokio::test]
 async fn acp_receives_both_interruptions_and_lost_prompt_errors() -> Result<()> {
+    let mut stages = Stages::new("start");
     timeout(Duration::from_secs(5), async {
-        for reason in ["writerLost", "commitFailed"] {
+        for (reason, build) in [
+            ("writerLost", "build writerLost fixture"),
+            ("commitFailed", "build commitFailed fixture"),
+        ] {
+            stages.stage(build);
             let mut f = Fixture::build().await?;
             let token = f.project.path().join("token");
             std::fs::OpenOptions::new()
@@ -209,6 +267,7 @@ async fn acp_receives_both_interruptions_and_lost_prompt_errors() -> Result<()> 
                 .mode(0o600)
                 .open(&token)?
                 .write_all(b"9bb7a90490c023d02c87f9123ef55837")?;
+            stages.stage("start ACP listener");
             let service = f
                 .agent
                 .serve_acp_websocket(
@@ -231,6 +290,7 @@ async fn acp_receives_both_interruptions_and_lost_prompt_errors() -> Result<()> 
                     },
                 )
                 .await?;
+            stages.stage("connect ACP socket");
             let socket =
                 transport_websocket::connect(&service.url, &token, transport_websocket::ACP)
                     .await?;
@@ -244,6 +304,7 @@ async fn acp_receives_both_interruptions_and_lost_prompt_errors() -> Result<()> 
                     ..
                 } = &mut f;
                 let id = &mut id;
+                let stages = &mut stages;
                 async move {
                     let send = |id, method, params| {
                         conn.outgoing.send(
@@ -251,9 +312,11 @@ async fn acp_receives_both_interruptions_and_lost_prompt_errors() -> Result<()> 
                                 .to_string(),
                         )
                     };
+                    stages.stage("send ACP initialize");
                     send(1, "initialize", json!({"protocolVersion": 2}))
                         .await
                         .unwrap();
+                    stages.stage("send ACP session/new");
                     send(
                         2,
                         "session/new",
@@ -261,14 +324,19 @@ async fn acp_receives_both_interruptions_and_lost_prompt_errors() -> Result<()> 
                     )
                     .await
                     .unwrap();
+                    stages.stage("receive ACP session/new reply (initialize not observed)");
                     loop {
                         let v: Value =
                             serde_json::from_str(&conn.incoming.recv().await.unwrap()).unwrap();
+                        if v["id"] == 1 {
+                            stages.stage("receive ACP session/new reply");
+                        }
                         if v["id"] == 2 {
                             *id = v["result"]["sessionId"].as_str().unwrap().to_owned();
                             break;
                         }
                     }
+                    stages.stage("send ACP session/prompt");
                     send(
                         3,
                         "session/prompt",
@@ -276,31 +344,42 @@ async fn acp_receives_both_interruptions_and_lost_prompt_errors() -> Result<()> 
                     )
                     .await
                     .unwrap();
+                    stages.stage("wait for tool entry");
                     let cancelled = entered.recv().await.unwrap();
                     fault.trigger(reason, return_from_tool);
                     let (mut replied, mut notified) = (false, false);
+                    stages.stage("receive ACP lost reply and interrupted notification");
                     while !replied || !notified {
                         let v: Value =
                             serde_json::from_str(&conn.incoming.recv().await.unwrap()).unwrap();
                         if v["id"] == 3 {
                             assert_eq!(v["error"]["data"]["code"], "lost", "{v}");
                             replied = true;
+                            if !notified {
+                                stages.stage("receive ACP interrupted notification");
+                            }
                         }
                         if v["method"] == "_modular-agent/interrupted" {
                             assert_eq!(v["params"]["sessionId"], *id);
                             assert_eq!(v["params"]["reason"], reason);
                             notified = true;
+                            if !replied {
+                                stages.stage("receive ACP lost reply");
+                            }
                         }
                     }
+                    stages.stage("observe tool cancellation");
                     cancelled.cancelled().await;
+                    stages.stage("close ACP WebSocket");
                 }
             })
             .await;
+            stages.stage("close ACP service");
             service.close().await;
-            f.recover(&id).await?;
+            f.recover(&id, &mut stages).await?;
         }
         Ok(())
     })
     .await
-    .expect("ACP interruption was not observed")
+    .unwrap_or_else(|_| panic!("ACP interruption test timed out: {}", stages.diagnostic()))
 }

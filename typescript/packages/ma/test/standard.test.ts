@@ -662,25 +662,60 @@ test("ACP attaches a client MCP server to its own project and honors project set
 });
 
 for (const remote of [false, true]) test(`ma ACP session/new is provisional with ${remote ? "HTTP" : "local file"} history`, { timeout: 10_000 }, async t => {
+  let pending = "prepare project";
+  let since = performance.now();
+  const completed: string[] = [];
+  function stage(next: string) {
+    const now = performance.now();
+    completed.push(`${pending} (${(now - since).toFixed(1)} ms)`);
+    pending = next;
+    since = now;
+  }
+  t.signal.addEventListener("abort", () => {
+    if (pending) t.diagnostic(`pending ${pending} for ${(performance.now() - since).toFixed(1)} ms; completed: ${completed.join(", ") || "none"}`);
+  }, { once: true });
   const p = await project(t);
   const token = randomBytes(32).toString("hex");
   const tokenFile = join(p.dir, "history-token");
+  stage("write history token");
   await writeFile(tokenFile, token, { mode: 0o600 });
+  if (remote) stage("start history listener");
   const service = remote ? await serveHistory(fileHistory(join(p.dir, "history")), { address: "127.0.0.1:0", tokenFile }) : undefined;
   const env = { ...p.env, MODULAR_AGENT_CONFORMANCE: "1", TMPDIR: process.env.TMPDIR,
     MODULAR_AGENT_TENANTS: JSON.stringify({ demo: { rights: ["watch", "input", "settings"] } }),
     ...(service && { MODULAR_AGENT_HISTORY_URL: service.url, MODULAR_AGENT_HISTORY_TOKEN_FILE: tokenFile,
       MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS: process.env.MODULAR_AGENT_HISTORY_LEASE_MARGIN_MS }) };
+  stage("start ma child");
   const child = spawn(process.execPath, [cli, "--acp"], { cwd: p.work, env, stdio: ["pipe", "pipe", "inherit"] });
-  const done = once(child, "exit");
+  const done = once(child, "close");
+  void done.catch(() => undefined);
+  t.signal.addEventListener("abort", () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }, { once: true });
   const lines = createInterface({ input: child.stdout });
   const replies = lines[Symbol.asyncIterator]();
+  let cleanup: Promise<void> | undefined;
+  async function stop() {
+    stage("reap ma child");
+    lines.close();
+    child.kill();
+    try {
+      await done;
+    } finally {
+      if (service) {
+        stage("close history service");
+        await service.close();
+      }
+    }
+  }
+  t.after(() => cleanup ??= stop());
   let id = 0;
   async function request(method: string, params: object) {
+    stage(`ACP ${method} reply #${id + 1}`);
     child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: ++id, method, params }) + "\n");
     for (;;) {
       const line = await replies.next();
-      assert.ok(!line.done, `ACP disconnected during ${method}`);
+      assert.ok(!line.done, `ma closed its ACP output while waiting for ${method}`);
       const message = JSON.parse(line.value);
       if (message.id !== id) continue;
       assert.equal(message.error, undefined, JSON.stringify(message));
@@ -691,8 +726,10 @@ for (const remote of [false, true]) test(`ma ACP session/new is provisional with
     const listed = await request("session/list", { cwd: p.work });
     assert.deepEqual(listed.sessions, []);
     if (service) {
-      const response = await fetch(`${service.url}/v1/sessions/${sessionId}`, { headers: { authorization: `Bearer ${token}` } });
+      stage("read unpublished session over HTTP");
+      const response = await fetch(`${service.url}/v1/sessions/${sessionId}`, { headers: { authorization: `Bearer ${token}` }, signal: t.signal });
       assert.equal(response.status, 404, "a metadata-only record would return 200");
+      stage("consume unpublished response body");
       await response.arrayBuffer();
     }
   }
@@ -717,11 +754,9 @@ for (const remote of [false, true]) test(`ma ACP session/new is provisional with
     assert.deepEqual(kept.slice(0, initial.length), initial);
     assert.deepEqual(kept.slice(initial.length, initial.length + 3).map(e => e.kind), ["inputAccepted", "turnStart", "input"]);
   } finally {
-    lines.close();
-    child.kill();
-    await done;
-    await service?.close();
+    await (cleanup ??= stop());
   }
+  pending = "";
 });
 
 test("ma uses public SDK entry points and keeps OTLP dependencies in its telemetry setup", async () => {

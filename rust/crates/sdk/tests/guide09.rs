@@ -1,10 +1,46 @@
-use std::{net::SocketAddr, path::Path, time::Duration};
+use std::{
+    net::SocketAddr,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use modular_agent::{
     Agent, Durability, Result, ServeHistoryOptions, file_history, http_history, serve_history,
     testing::scripted_provider,
 };
 use serde_json::json;
+
+struct Stages {
+    pending: &'static str,
+    since: Instant,
+    completed: Vec<(&'static str, Duration)>,
+}
+
+impl Stages {
+    fn new(pending: &'static str) -> Self {
+        Self {
+            pending,
+            since: Instant::now(),
+            completed: Vec::new(),
+        }
+    }
+
+    fn stage(&mut self, pending: &'static str) {
+        let now = Instant::now();
+        self.completed.push((self.pending, now - self.since));
+        self.pending = pending;
+        self.since = now;
+    }
+
+    fn diagnostic(&self) -> String {
+        format!(
+            "pending {} for {:?}; completed {:?}",
+            self.pending,
+            self.since.elapsed(),
+            self.completed
+        )
+    }
+}
 
 async fn serve_store(address: SocketAddr, store_dir: &Path, token_file: &Path) -> Result<()> {
     let options = ServeHistoryOptions::new(address, token_file);
@@ -36,20 +72,30 @@ async fn handoff(
     reader_dir: &Path,
     url: &str,
     token_file: &Path,
+    stages: &mut Stages,
 ) -> Result<()> {
+    stages.stage("build writer");
     let writer = connect_history(project, writer_dir, url, token_file).await?;
+    stages.stage("create writer session");
     let first = writer.session().await?;
+    stages.stage("prompt writer");
     assert_eq!(first.prompt("Name a harbour.").await?.text, "Whitby.");
     let id = first.id().to_owned();
+    stages.stage("close writer");
     writer.close().await?; // Give up the writer lease.
 
+    stages.stage("build reader");
     let reader = connect_history(project, reader_dir, url, token_file).await?;
+    stages.stage("open session on reader");
     let reopened = reader.open_session(&id).await?;
+    stages.stage("read replayed turn");
     assert_eq!(reopened.last_turn().await?.unwrap().text, "Whitby.");
+    stages.stage("prompt reader");
     assert_eq!(
         reopened.prompt("When is high tide there?").await?.text,
         "14:02."
     );
+    stages.stage("read durable history");
     let history = reopened.history().await?;
     let actors: Vec<_> = history
         .iter()
@@ -57,6 +103,7 @@ async fn handoff(
         .map(|entry| entry["actorId"].as_str())
         .collect();
     assert_eq!(actors, [Some("user"), Some("user")]);
+    stages.stage("close reader");
     reader.close().await
 }
 
@@ -84,27 +131,29 @@ async fn hands_off_a_session_over_http() -> Result<()> {
     let mut service = tokio::task::JoinSet::new();
     let server_token_file = token_file.clone();
     service.spawn(async move { serve_store(address, &store_dir, &server_token_file).await });
-    let run = async {
-        while tokio::net::TcpStream::connect(address).await.is_err() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        handoff(
-            project.path(),
-            &tmp.path().join("writer"),
-            &tmp.path().join("reader"),
-            &format!("http://{address}"),
-            &token_file,
-        )
-        .await
-    };
+    let mut stages = Stages::new("history listener readiness");
     let result = tokio::time::timeout(Duration::from_secs(10), async {
+        let run = async {
+            while tokio::net::TcpStream::connect(address).await.is_err() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            handoff(
+                project.path(),
+                &tmp.path().join("writer"),
+                &tmp.path().join("reader"),
+                &format!("http://{address}"),
+                &token_file,
+                &mut stages,
+            )
+            .await
+        };
         tokio::select! {
             result = service.join_next() => panic!("history service exited early: {result:?}"),
             result = run => result,
         }
     })
     .await
-    .expect("history handoff timed out");
+    .unwrap_or_else(|_| panic!("history handoff timed out: {}", stages.diagnostic()));
     service.shutdown().await;
     result
 }
