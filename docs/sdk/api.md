@@ -61,7 +61,7 @@ There is no `createAgent` switch to turn tracing on or off. Without an OpenTelem
 |---|---|
 | `session(options?)` | a new Session. Options: `settings`, `tenant`, `actors`. |
 | `openSession(id)` | an existing Session, reopened. It installs interrupted work for recovery, as the Runtime declares, before admitting fresh work. An embedded agent MAY wait for the recovered work before returning; `serveAcp` MUST NOT, as [ACP](../bindings/acp.md#sessions) requires. |
-| `sessions(filter?)` | stored sessions, without opening them or starting recovery: id, canonical project, selected model, title if any, last activity |
+| `sessions(filter?)` | stored sessions, without opening them or starting recovery: id, canonical project, selected model, title if any, last activity. Last activity is the time of the last stored entry. A session has none when it has no entries or its last entry is erased, because a [tombstone](../bindings/data.md#entry-fields-and-tombstones) has no time. |
 | `sessionSummary(id, viewer)` | Read a kept session without opening it. Return its id, canonical project, last change time and per-viewer waiting summary, or no result for an inaccessible or missing session. Apply the viewer's scope, grant, rights ceiling and executor route. Do not register presence or start recovery. |
 | `sessionInfo(id)` | one stored session's project, settings, creation time and last activity, without opening it or starting recovery |
 | `declaration()` | what this agent supports, as a [Declaration](../contracts.md#declaration) |

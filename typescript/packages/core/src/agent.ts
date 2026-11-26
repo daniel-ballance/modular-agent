@@ -549,7 +549,8 @@ export class Agent {
       const stored = await this.#api.listSessions(filter?.project ? await realpath(filter.project) : null);
       return Promise.all(stored.map(async ({ id }) => {
         const { project, settings, lastEntry } = await this.#savedSession(id);
-        // Last activity is the last entry's time in append order; a session with no entries has none.
+        // Last activity is the last entry's time in append order. A session with no entries has none,
+        // and so does one whose last entry is erased: a tombstone has no time.
         return { id, project, updated: lastEntry ?? 0, model: parseModel(settings.model), title: typeof settings.title === "string" ? settings.title : undefined };
       }));
     });

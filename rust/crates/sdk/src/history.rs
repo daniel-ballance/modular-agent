@@ -223,7 +223,13 @@ impl From<base::SessionData> for SessionInfo {
             project: data.project,
             settings,
             created_at: data.entries.first().map_or(0, |e| e.at),
-            last_active: data.entries.last().map_or(0, |e| e.at),
+            // A tombstone has no time (docs/bindings/data.md), though a native
+            // store keeps `at` on an erased entry: an erased last entry gives none.
+            last_active: data
+                .entries
+                .last()
+                .filter(|e| e.content.is_some())
+                .map_or(0, |e| e.at),
         }
     }
 }
