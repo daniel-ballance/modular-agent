@@ -114,6 +114,8 @@ Rust also offers and lists `/tool` until [#134](https://github.com/daniel-ballan
 
 **Print mode** (`-p`) runs one prompt and prints the final answer's text to stdout, followed by a newline. Exit status is 0 for a completed turn and 1 otherwise. Without [approval](#approval) configured, print mode never waits for a person. With it, print mode has no one to answer, so a call that needs approval is refused, as the [approval policy](../contracts.md#approval-policy) requires.
 
+Print mode declines non-approval questions raised by tools without reading input. The asking tool receives a [decline](../sdk/api.md#contexts) with the reason `print mode cannot answer questions` and handles it as it would any other decline. Plain print mode shows the usual call diagnostics on stderr and omits question prompts. With `--json`, it prints the question and the recorded decline as history entry events on stdout. A decline leaves the turn free to finish, with the same exit status rules.
+
 ## Files
 
 | File, under the configuration folder | Purpose |

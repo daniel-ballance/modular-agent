@@ -685,8 +685,19 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
         b = b.model(model);
     }
     let questions = Questions::new(std::io::IsTerminal::is_terminal(&std::io::stdin()));
-    if terminal.prompt.is_none() && !inspecting {
-        b = questions.install(b);
+    if !inspecting {
+        b = if terminal.prompt.is_some() {
+            b.on_question(|question| async move {
+                if question.approval_wait.is_some() {
+                    std::future::pending::<()>().await;
+                }
+                sdk::Answer::Declined {
+                    reason: Some("print mode cannot answer questions".into()),
+                }
+            })
+        } else {
+            questions.install(b)
+        };
     }
     let agent = b.build().await?;
     let result = standard::terminal::run(&agent, terminal, questions).await;

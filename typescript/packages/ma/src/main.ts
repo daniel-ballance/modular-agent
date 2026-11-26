@@ -237,9 +237,17 @@ async function main(argv: string[]) {
       name: "provider.claude", setup: r => r.provider(claudeProvider), stop: claudeProvider.close,
     }));
     else claudeProvider?.close();
+    const printMode = !serving && !inspecting && opts.prompt !== undefined;
     return createAgent({ ...base, project: cwd, settings, credentials: auth.credentials(), model: opts.command === "models" ? undefined : model, providers, plugins,
       compaction: !conformance, conformance, questionsOutlastTurns: true, jobReportsStartTurns: true, settingsDuringTurn: "refused",
       approval, approvalCoversNested: approval !== undefined, maxApprovalWaitMs,
+      onQuestion: printMode ? async (question, { cancelled }) => {
+        if (question.approvalWait) {
+          await new Promise<void>(resolve => cancelled.addEventListener("abort", () => resolve(), { once: true }));
+          return;
+        }
+        return { declined: true, reason: "print mode cannot answer questions" };
+      } : undefined,
       pluginHost: serving });
   };
   const scoped = opts.listen ? policy.actors?.some(actor => actor.projects !== undefined) : policy.stdio?.projects !== undefined;
@@ -291,7 +299,6 @@ async function main(argv: string[]) {
       if (opts.settings.reasoning !== undefined) await session.setSetting("thinking", opts.settings.reasoning);
     }
     if (opts.prompt === undefined) return line(agent, session, !!opts.json, !!opts.verbose);
-    // A print run has no answer route. Do not close a previous run's parked call just to print.
     if (maxApprovalWaitMs !== undefined && session.settings().approvalWait === "untilDeadline") {
       if ((await session.questions()).some(q => q.approvalWait)) throw new Error("This session has a waiting approval. Answer it before using print mode.");
       await session.setSetting("approvalWait", "live");

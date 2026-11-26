@@ -40,6 +40,12 @@ const CODEMODE_VALUES = [
 ];
 const SIX = ["read", "exec", "edit", "write", "find", "list"];
 const approvalRead = { toolCalls: [{ name: "read", input: { path: "hello.txt" } }] };
+const printQuestionCode = "tools.test_ask_secret(question='Deploy key?', credential='deploy')";
+const printQuestionScript = [
+  codemode(printQuestionCode),
+  { toolCalls: [{ name: "test_ask_secret", input: { credential: "other", question: "Other key?" } }] },
+  { text: "Done." },
+];
 
 const checks = [
   {
@@ -100,6 +106,47 @@ const checks = [
     },
   },
   {
+    name: "print-questions",
+    about: "Print mode declines nested and direct tool questions and finishes in plain and JSON modes.",
+    files: { "data/settings.json": JSON.stringify({ model_tools: null }) },
+    script: printQuestionScript,
+    async run(command, invoke, _skip, t) {
+      const plain = await invoke(command, { args: ["-p", "Ask"] });
+      assert.ok(!plain.timeoutDetail, `plain print timed out: ${plain.timeoutDetail}\n${plain.stderr}`);
+      assert.equal(plain.exit, 0, plain.stderr);
+      assert.equal(plain.stdout, "Done.\n");
+      assert.equal(plain.stderr.replace(/^Session \S+\n/, "Session ID\n"),
+        `Session ID\ncodemode\n  | ${printQuestionCode}\ntest_ask_secret(credential="other", question="Other key?")\n`);
+
+      const json = await invoke(command, { args: ["--json", "-p", "Ask"] });
+      assert.ok(!json.timeoutDetail, `JSON print timed out: ${json.timeoutDetail}\n${json.stderr}`);
+      assert.equal(json.exit, 0, json.stderr);
+      assert.equal(json.stderr, "");
+      const events = json.stdout.trimEnd().split("\n").map(line => JSON.parse(line));
+      const entries = events.filter(e => e.type === "entry").map(e => e.data.entry ?? e.data);
+      const questions = entries.filter(e => e.kind === "inputRequest");
+      assert.deepEqual(questions.map(e => e.data.request.question), ["Deploy key?", "Other key?"]);
+      const decisions = entries.filter(e => e.kind === "inputAnswer").map(({ data: { requestId, declined, reason } }) =>
+        ({ requestId, declined, reason }));
+      assert.deepEqual(decisions, questions.map(e => ({
+        requestId: e.requestId, declined: true, reason: "print mode cannot answer questions",
+      })));
+      assert.equal(events.filter(e => e.type === "questionAnswered" && e.data.declined === true).length, 2);
+      const end = events.find(e => e.type === "turnEnded");
+      assert.equal(end?.data.outcome.kind, "completed");
+      assert.equal(end.data.result.text, "Done.");
+
+      const requests = readFileSync(t.logFile, "utf8").trimEnd().split("\n").map(line => JSON.parse(line));
+      assert.equal(requests.length, 6);
+      for (const request of [requests[2], requests[5]]) {
+        const results = request.messages.filter(m => m.role === "toolResult");
+        assert.deepEqual(results.map(m => [m.name, m.text]), [
+          ["codemode", "declined"], ["test_ask_secret", "declined"],
+        ]);
+      }
+    },
+  },
+  {
     name: "client-identity",
     about: "MA_CLIENT_IDENTITY must be 1 to 64 of A-Z a-z 0-9 . _ -; ma refuses to start otherwise, and accepts a valid one.",
     script: [{ text: "Hello." }, { text: "Hello." }],
@@ -113,7 +160,7 @@ const checks = [
     name: "approval-covers-script",
     about: "A live or waiting allow covers both writes in this script, once. A refusal writes neither file.",
     script: [codemode(approvalScript), { text: "Done." }],
-    run: (command, _invoke, _skip, t) => checkApprovalCoversScript(command, t, environment(t)),
+    run: (command, invoke, _skip, t) => checkApprovalCoversScript(command, invoke, t, environment(t)),
   },
   {
     name: "reopen-approval",
