@@ -70,21 +70,20 @@ const checks = [
   },
   {
     name: "interactive-commands",
-    about: "/commands prints the exact terminal list; /questions and /quit work without asking the model.",
+    about: "/commands prints the exact terminal list; /tool is rejected and /questions and /quit work without asking the model.",
     script: [{ text: "Unexpected model request." }],
-    async run(command, invoke, _skip, _t, name) {
-      let language = name;
-      if (name === "ma") {
-        const version = await invoke(command, { args: ["--version"] });
-        assert.equal(version.exit, 0, version.stderr);
-        language = version.stdout.match(/ \((rust|typescript)\)\n$/)?.[1];
-        assert.ok(language, `ma --version did not name a supported language: ${version.stdout}`);
-      }
+    async run(command, invoke) {
       const expected = standardBlock("`/commands` prints the terminal commands");
-      const result = await invoke(command, { args: ["--approval", "ask"], input: "/commands\n/questions\n/quit\nUnexpected user prompt.\n" });
+      const result = await invoke(command, {
+        args: ["--approval", "ask"],
+        input: "/commands\n/tool {}\n/questions\n/quit\nUnexpected user prompt.\n",
+      });
       assert.equal(result.exit, 0, result.stderr);
-      assert.equal(result.stdout, expected + (language === "rust" ? "/tool\n" : "") + "[]\n");
-      assert.match(result.stderr, /^Session \S+\n$/);
+      assert.equal(result.stdout, expected + "[]\n");
+      const diagnostics = result.stderr.trimEnd().split("\n").sort();
+      assert.equal(diagnostics.length, 2, result.stderr);
+      assert.match(diagnostics[0], /^Session \S+$/);
+      assert.match(diagnostics[1], /^unknown command \/?tool$/i);
     },
     log: (log, ok) => ok(log.length === 0, "no model request", log.length),
   },

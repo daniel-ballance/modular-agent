@@ -8,7 +8,8 @@ The two SDKs and `ma` share one project version. The [SDK specification](docs/sd
 - Rust and TypeScript `ma -p` decline tool questions so the turn can finish without input.
 - Fixed a TypeScript input race that could leave a committed follow-up stuck in the queue when the preceding turn ended during admission.
 - The Rust and TypeScript `ma --help` option lines now match. `--trust-project` help names only `.mcp.json`, the project file that can start programs.
-- Both terminals list sorted slash names with `/commands`. TypeScript adds `/questions` to list open question IDs and `/quit` to cancel and exit. Rust no longer offers its undocumented SDK commands `/erase`, `/fork`, `/move`, `/sessions` and `/settings` in `ma`'s terminal. `/tool` stays Rust-only for now ([#134](https://github.com/daniel-ballance/modular-agent/issues/134)).
+- Both terminals list sorted slash names with `/commands`. TypeScript adds `/questions` to list open question IDs and `/quit` to cancel and exit. Rust no longer offers its undocumented SDK commands `/erase`, `/fork`, `/move`, `/sessions` and `/settings` in `ma`'s terminal.
+- Removed Rust's undocumented `/tool` terminal command, which blocked input when a tool asked a question ([#134](https://github.com/daniel-ballance/modular-agent/issues/134)).
 - An open terminal approval replies `Answer y or n.` to blank lines and other slash commands, including `/quit`. Use `/cancel` to stop the turn.
 - Removed TypeScript's `/approvals` command from the terminal and ACP's advertised commands. `--approval`, the `approval` setting and ACP and AG-UI policy changes still work.
 - Rust `ma -c --history` no longer records an `approval` setting while printing a session that started without one. Like TypeScript, it prints history without applying `--model` or `--thinking`.

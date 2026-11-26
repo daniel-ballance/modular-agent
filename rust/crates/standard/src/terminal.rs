@@ -410,12 +410,6 @@ async fn input(
                 .map(|p| &p.id)
                 .collect::<Vec<_>>(),
         )?);
-    } else if let Some(args) = line.strip_prefix("/tool ") {
-        let v: Value = serde_json::from_str(args)?;
-        let name = v["name"]
-            .as_str()
-            .ok_or_else(|| anyhow!("tool name required"))?;
-        display(session.call_tool(name, v["input"].clone()).await?.text());
     } else if let Some(text) = line.strip_prefix("/after ") {
         session.send(text, Timing::After).await?;
     } else if line == "/commands" {
@@ -427,7 +421,6 @@ async fn input(
             "questions",
             "quit",
             "skill:NAME",
-            "tool",
         ]
         .to_vec();
         commands.extend(SESSION_COMMANDS);
