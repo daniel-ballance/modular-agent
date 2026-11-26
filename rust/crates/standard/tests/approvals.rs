@@ -177,3 +177,33 @@ fn the_terminal_displays_the_script_and_reads_one_decision() {
         assert_eq!(dir.path().join("project/effect").exists(), exists);
     }
 }
+
+#[test]
+fn printing_history_records_no_approval_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let script = dir.join("hello");
+    fs::write(&script, json!([{"text":"hello"}]).to_string()).unwrap();
+    let started = ma(dir)
+        .env("MODULAR_AGENT_SCRIPT", &script)
+        .args(["-p", "Hello"])
+        .output()
+        .unwrap();
+    assert!(started.status.success(), "{:?}", started);
+    for _ in 0..2 {
+        let history = ma(dir)
+            .env("MODULAR_AGENT_SCRIPT", &script)
+            .args(["-c", "--history"])
+            .output()
+            .unwrap();
+        assert!(history.status.success(), "{:?}", history);
+        let entries: Vec<Value> = serde_json::from_slice(&history.stdout).unwrap();
+        let settings: Vec<&Value> = entries.iter().filter(|e| e["kind"] == "setting").collect();
+        assert!(
+            settings
+                .iter()
+                .all(|e| !e.to_string().contains("\"approval\"")),
+            "printing history recorded an approval policy: {settings:?}"
+        );
+    }
+}
