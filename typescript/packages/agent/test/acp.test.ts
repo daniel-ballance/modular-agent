@@ -155,14 +155,19 @@ test("ACP: session/load replays the history; the session's cwd is where tools ru
 });
 
 test("ACP: a slash command is handled without the model", async () => {
-	const { d, harness, ctx, updates, connection } = await setup([]);
+	const { d, harness, ctx, updates, connection } = await setup([], { plugins: [{
+		name: "test-command",
+		setup(api) { api.registerCommand("hello", { description: "Say hello", run: () => "Hello from the command." }); },
+	}] });
 	await ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
 	const { sessionId } = await ctx.request(methods.agent.session.new, { cwd: d.project, mcpServers: [] });
-	const response = await ctx.request(methods.agent.session.prompt, { sessionId, prompt: [{ type: "text", text: "/approvals" }] });
+	const response = await ctx.request(methods.agent.session.prompt, { sessionId, prompt: [{ type: "text", text: "/hello" }] });
 	assert.equal(response.stopReason, "end_turn");
 	await new Promise((r) => setTimeout(r, 10));
-	assert.ok(updates.some((u) => u.update.sessionUpdate === "available_commands_update"));
-	assert.ok(updates.some((u) => u.update.sessionUpdate === "agent_message_chunk" && /Approval policy: ask/.test((u.update as { content: { text: string } }).content.text)));
+	const available = updates.flatMap(({ update }) => update.sessionUpdate === "available_commands_update" ? update.availableCommands.map(c => c.name) : []);
+	assert.ok(available.includes("hello"));
+	assert.ok(!available.includes("approvals"));
+	assert.ok(updates.some(({ update }) => update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" && update.content.text === "Hello from the command."));
 	connection.close();
 	await harness.stop();
 });

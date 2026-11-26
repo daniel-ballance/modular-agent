@@ -33,7 +33,7 @@ Options:
   --session ID          reopen a session
   -c, --continue        reopen this folder's most recent session
   --project DIR         work in DIR instead of the current folder
-  --trust-project       let this project's own .modular-agent.json and .mcp.json start programs
+  --trust-project       let this project's .mcp.json start programs
   --runtime KIND        durable (default: a turn cut off by a crash carries on) or transient
   -v, --verbose         also show each call the code makes and what commands print
   --json                print every event as a JSON line

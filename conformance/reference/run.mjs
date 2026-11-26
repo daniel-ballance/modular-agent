@@ -14,6 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { code as approvalScript, checkApprovalCoversScript } from "./approval-covers-script.mjs";
+import { checkTerminalApproval } from "./terminal-approval.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "../..");
@@ -42,11 +43,50 @@ const approvalRead = { toolCalls: [{ name: "read", input: { path: "hello.txt" } 
 
 const checks = [
   {
+    name: "help-options",
+    about: "Both builds print the exact option lines from the standard configuration.",
+    script: [],
+    async run(command, invoke, skip, _t, name) {
+      const expected = standardBlock("`ma --help` prints these exact option lines");
+      async function checkOptions(label, cmd) {
+        const result = await invoke(cmd, { args: ["--help"] });
+        assert.equal(result.exit, 0, `${label} ma --help: ${result.stderr}`);
+        const lines = result.stdout.match(/^Options:\n((?:[^\n]+\n)+)\n/m)?.[1];
+        assert.equal(lines, expected);
+      }
+      await checkOptions(name, command);
+      if (name === "ma") return;
+      for (const peer of agents().filter(a => a.language !== name)) {
+        if (peer.missing.length) return skip(`${peer.language} not built; build with: ${peer.build}`, "check");
+        await checkOptions(peer.language, peer.command);
+      }
+    },
+  },
+  {
     name: "interactive-commands",
-    about: "/commands lists /compact without asking the model.",
+    about: "/commands prints the exact terminal list; /questions and /quit work without asking the model.",
     script: [{ text: "Unexpected model request." }],
-    runs: [{ args: [], input: "/commands\n", expect: { exit: 0, stdoutMatches: /^\/compact(?: .*)?$/m, stderrLacks: "command is not registered" } }],
+    async run(command, invoke, _skip, _t, name) {
+      let language = name;
+      if (name === "ma") {
+        const version = await invoke(command, { args: ["--version"] });
+        assert.equal(version.exit, 0, version.stderr);
+        language = version.stdout.match(/ \((rust|typescript)\)\n$/)?.[1];
+        assert.ok(language, `ma --version did not name a supported language: ${version.stdout}`);
+      }
+      const expected = standardBlock("`/commands` prints the terminal commands");
+      const result = await invoke(command, { args: ["--approval", "ask"], input: "/commands\n/questions\n/quit\nUnexpected user prompt.\n" });
+      assert.equal(result.exit, 0, result.stderr);
+      assert.equal(result.stdout, expected + (language === "rust" ? "/tool\n" : "") + "[]\n");
+      assert.match(result.stderr, /^Session \S+\n$/);
+    },
     log: (log, ok) => ok(log.length === 0, "no model request", log.length),
+  },
+  {
+    name: "terminal-approval",
+    about: "The (y/n) approval prompt refuses other lines without running their commands.",
+    script: [codemode(approvalScript), { text: "Done." }],
+    run: (command, _invoke, _skip, t) => checkTerminalApproval(command, t, environment(t)),
   },
   {
     name: "print",
@@ -505,6 +545,16 @@ const checks = [
 
 // ---------- running ----------
 
+function standardBlock(start) {
+  const spec = readFileSync(join(repo, "docs/reference/standard-configuration.md"), "utf8");
+  const fence = "\n\n```text\n";
+  const line = spec.split("\n").find(line => line.startsWith(start));
+  assert.ok(line && spec.includes(line + fence), `standard configuration: no text block after ${start}`);
+  const content = spec.split(line + fence)[1].split("\n```\n")[0];
+  assert.ok(content);
+  return content + "\n";
+}
+
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const gitOut = (dir, args) => { const r = spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" }); return r.status === 0 ? r.stdout.trim() : ""; };
 const last = (req, role) => (req?.messages ?? []).filter((m) => m.role === role).at(-1);
@@ -570,7 +620,7 @@ function runOnce(command, t, run) {
   });
 }
 
-async function runCheck(command, check, skip) {
+async function runCheck(name, command, check, skip) {
   const dir = mkdtempSync(join(process.env.TMPDIR || tmpdir(), "ma-ref-"));
   const t = { dir, home: join(dir, "home"), data: join(dir, "data"), project: join(dir, "project"), scriptFile: join(dir, "script.json"), logFile: join(dir, "requests.jsonl") };
   for (const d of [t.home, t.data, t.project]) mkdirSync(d, { recursive: true });
@@ -583,7 +633,7 @@ async function runCheck(command, check, skip) {
   const failures = [];
   const ok = (cond, what, got) => { if (!cond) failures.push(got === undefined ? what : `${what}: got ${JSON.stringify(got)}`); };
   if (check.run) {
-    try { await check.run(command, (cmd, run) => runOnce(cmd, t, run), skip, t); }
+    try { await check.run(command, (cmd, run) => runOnce(cmd, t, run), skip, t, name); }
     catch (error) { failures.push(error.message); }
   }
   for (const [i, run] of (check.runs ?? []).entries()) {
@@ -626,7 +676,7 @@ async function runAgent(name, command, only, strict) {
       if (scope === "check") whole = reason;
       else console.log(`SKIP ${name} ${check.name}: ${reason}`);
     };
-    const failures = await runCheck(command, check, skip);
+    const failures = await runCheck(name, command, check, skip);
     if (failures.length) { failed++; console.log(`FAIL ${name} ${check.name}: ${check.about}`); for (const f of failures) console.log(`     ${f}`); }
     else if (whole !== undefined && strict) { failed++; console.log(`FAIL ${name} ${check.name}: skipped where every check must run: ${whole}`); }
     else if (whole !== undefined) { skipped++; console.log(`SKIP ${name} ${check.name}: ${whole}`); }
