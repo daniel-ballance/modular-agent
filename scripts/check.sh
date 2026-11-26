@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Run the local checks. See CONTRIBUTING.md for the tools and how to start a long run.
 #
-#   scripts/check.sh [--quick] [--serial] [rust|typescript|go|python ...]
+#   scripts/check.sh [--quick] [--serial] [rust|typescript ...]
 #   --quick    Builds, lint, SDK suites and cross-language checks; skips the full binding kits.
 #   --serial   Run one step at a time in the original order.
 #
-# With no language arguments, run all four. Cross-language checks need all four.
+# With no language arguments, run both languages. Cross-language checks need both.
 set -uo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,15 +18,15 @@ for arg in "$@"; do
   case "$arg" in
     --quick) quick=true ;;
     --serial) serial=true ;;
-    rust|typescript|go|python)
+    rust|typescript)
       [[ " ${languages[*]} " == *" $arg "* ]] || languages+=("$arg") ;;
     -h|--help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print } /^set / { exit }' "$0"; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
-[ ${#languages[@]} -eq 0 ] && languages=(rust typescript go python)
+[ ${#languages[@]} -eq 0 ] && languages=(rust typescript)
 want() { [[ " ${languages[*]} " == *" $1 "* ]]; }
-all=false; [ ${#languages[@]} -eq 4 ] && all=true
+both=false; if want rust && want typescript; then both=true; fi
 
 . "$repo/scripts/check-slot.sh"
 take_check_slots 1 || exit
@@ -93,12 +93,6 @@ telemetry_kit() { # language, scope (empty for every placement)
       fi
       adapter=("$repo/rust/target/debug/scenario-agent") ;;
     typescript) adapter=(node typescript/packages/fixtures/dist/src/scenario-agent.js) ;;
-    go)
-      if [ "$scope" != --peers ]; then
-        (cd go && mise exec -- go test -c -o .bin/telemetry-scenarios ./modular/scenarios) || return
-      fi
-      adapter=(go/.bin/telemetry-scenarios -test.run=^TestTelemetryScenario$) ;;
-    python) adapter=("$repo/python/.venv/bin/python" -m modular_agent._scenarios) ;;
   esac
   node conformance/telemetry/run.mjs "$language" "${filters[@]}" -- "${adapter[@]}"
 }
@@ -106,21 +100,20 @@ telemetry_kit() { # language, scope (empty for every placement)
 # Language suites may discover peer fixture builds. Leave those placements for
 # the shared phase, where all builds are ready and nobody is rewriting them.
 only_lane_fixtures() {
-  rust_shared=() go_shared=() ts_options="${NODE_OPTIONS:-}"
+  rust_shared=() ts_options="${NODE_OPTIONS:-}"
   if ! $serial; then
     rust_shared=(--skip served_by_every_sdk --skip services_from_other_sdks)
-    go_shared=(-skip '^TestShared$')
-    ts_options+=' --test-skip-pattern=/[(](process|service):(rust|go|python)[)]$/'
+    ts_options+=' --test-skip-pattern=/[(](process|service):rust[)]$/'
   fi
 }
 
 # The plan keeps the serial order. Each parallel worker follows only its own entries.
 plan() {
-  local selection="$1" runtime binding language label group scope=--in-process telemetry_label=in-process
+  local selection="$1" language label group scope=--in-process telemetry_label=in-process
   local -a matrix_options=()
   if $serial; then
     matrix_options+=(--serial)
-    if $all; then scope=; telemetry_label='every placement'; fi
+    if $both; then scope=; telemetry_label='every placement'; fi
   fi
   # The reference checks use the telemetry kit's receiver, so --quick needs it too.
   step setup "kits: npm ci (acp, tools, telemetry)" bash -c 'for kit in acp tools telemetry; do npm ci --silent --prefix "conformance/$kit" || exit; done'
@@ -129,12 +122,8 @@ plan() {
 
   step rust "rust: build ma and fixture program" bash -c "cd rust && mise exec -- cargo build -q -p standard --bin ma && mise exec -- cargo build -q -p agent-base && mise exec -- cargo build -q -p sdk-scenarios --bin modular-agent-fixtures && mise exec -- cargo build -q -p sdk-scenarios --example named_callers"
   step typescript "typescript: npm ci and build" bash -c "cd typescript && npm ci --silent && rm -rf packages/*/dist && npm run -s build"
-  step go "go: build ma and fixture program" bash -c "cd go && ./scripts/build-monty.sh && mise exec -- go build -o .bin/ma ./cmd/ma && mise exec -- go build -o .bin/modular ./cmd/modular && mise exec -- go build -o .bin/modular-agent-fixtures ./modular/cmd/fixtures"
-  step python "python: uv sync" bash -c "cd python && uv sync --python 3.13 -q"
 
   step rust "rust: fmt and clippy" bash -c "cd rust && mise exec -- cargo fmt --all -- --check && mise exec -- cargo clippy -q --workspace --all-targets -- -D warnings"
-  step go "go: vet and gofmt" bash -c 'cd go && mise exec -- go vet ./... && test -z "$(mise exec -- gofmt -l .)"'
-  step python "python: ruff and strict mypy" bash -c "cd python && uv run --offline ruff check . && uv run --offline ruff format --check . && uv run --offline mypy"
   step docs "docs: relative links resolve" node scripts/check-links.mjs
   step docs "docs: maintainability" node scripts/check-maintainability.mjs
   step docs "docs: maintainability tests" node --test scripts/check-maintainability.test.mjs
@@ -147,59 +136,45 @@ plan() {
   if $quick; then
     step rust "rust: SDK tests" bash -c "cd rust && mise exec -- cargo test -q -p modular-agent -p standard -- --test-threads=1"
     step typescript "typescript: tests" bash -c 'cd typescript && NODE_OPTIONS="$1" npm test' _ "$ts_options"
-    step go "go: SDK and ma tests" bash -c 'cd go && mise exec -- go test -count=1 "$@" ./modular/... ./cmd/ma/...' _ "${go_shared[@]}"
-    step python "python: tests (transient)" bash -c "cd python && uv run --offline pytest -q --runtime transient"
   else
     step rust "rust: workspace tests" bash -c 'cd rust && mise exec -- cargo test -q --workspace --no-fail-fast -- --test-threads=1 "$@"' _ "${rust_shared[@]}"
     step typescript "typescript: tests" bash -c 'cd typescript && NODE_OPTIONS="$1" npm test' _ "$ts_options"
     step typescript "typescript: tests with remote parts" bash -c 'cd typescript && NODE_OPTIONS="$1" MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test' _ "$ts_options"
     step typescript "typescript: Claude sidecar tests" bash -c "cd typescript && npm test --workspace @modular-agent/claude"
     step typescript "AG-UI kit: TypeScript ma and SDK fixture" typescript/scripts/check-agui.sh
-    step go "AG-UI kit: Go ma and SDK fixture" go/scripts/check-agui.sh
-    step go "go: all tests" bash -c 'cd go && mise exec -- go test -count=1 "$@" ./...' _ "${go_shared[@]}"
-    step go "go: race detector on SDK and ma" bash -c 'cd go && mise exec -- go test -race -count=1 "$@" ./modular/... ./cmd/ma/...' _ "${go_shared[@]}"
-    for runtime in transient durable; do
-      for binding in local process; do
-        step python "python: tests ($runtime, $binding)" bash -c "cd python && uv run --offline pytest -q --runtime $runtime --binding $binding"
-      done
-    done
   fi
 
-  if $all; then
-    for language in rust typescript go python; do
+  if $both; then
+    for language in rust typescript; do
       step "$language" "ACP kit: $language stdio rights" scripts/acp-kit.sh "$language" stdio-rights
     done
     step shared "scenarios: Rust runner, every placement" bash -c "cd rust && MODULAR_AGENT_SDK_REQUIRE=all mise exec -- cargo test -q -p sdk-scenarios --test shared -- --test-threads=1"
     step shared "scenarios: TypeScript runner, every placement" bash -c "cd typescript && MODULAR_AGENT_SDK_REQUIRE=all node --test packages/fixtures/dist/test/shared.test.js"
-    step shared "scenarios: Go runner, every placement" bash -c "cd go && MODULAR_AGENT_SDK_REQUIRE=all mise exec -- go test -count=1 ./modular/scenarios/"
-    step shared "scenarios: Python runner, every placement" bash -c "cd python && MODULAR_AGENT_SDK_REQUIRE=all uv run --offline python -m modular_agent._scenarios"
-    step shared "reference checks: all four ma" env MODULAR_AGENT_REF_REQUIRE=all node conformance/reference/run.mjs --all
+    step shared "reference checks: both ma builds" env MODULAR_AGENT_REF_REQUIRE=all node conformance/reference/run.mjs --all
     step shared "demo: project notes, including crash recovery" bash -c 'demos/project-notes/build.sh --sdk-built && demos/project-notes/run.py'
     step shared "demo: ops desk, three scripted agents" bash -c 'demos/ops-desk/build.sh --sdk-built && python3 demos/ops-desk/run.py'
   fi
 
   if ! $quick; then
-    for label in Rust TypeScript Go Python; do
+    for label in Rust TypeScript; do
       step "${label,,}" "telemetry: $label runner, $telemetry_label" telemetry_kit "${label,,}" "$scope"
     done
     step rust "AG-UI kit: Rust ma and SDK fixture" conformance/agui/rust.sh
-    step python "AG-UI kit: Python ma and scripted service" python/scripts/agui-kit.sh
     step rust "rust: build history service example" bash -c "cd rust && mise exec -- cargo build -q -p modular-agent --example history_service"
-    step go "go: build history service" bash -c "cd go && mise exec -- go build -o .bin/modular-service ./cmd/modular-service"
-    for language in rust typescript go python; do
+    for language in rust typescript; do
       for group in core covered waiting; do
         step "$language" "ACP kit: $language $group" scripts/acp-kit.sh "$language" "$group"
       done
       step "$language" "kits over WebSocket: $language plugin and ma" scripts/websocket-kits.sh "$language"
       step "$language" "ADR 0030 kits: $language ACP and history" scripts/production-kits.sh "$language"
     done
-    if $all; then
+    if $both; then
       if ! $serial; then
-        for label in Rust TypeScript Go Python; do
+        for label in Rust TypeScript; do
           step shared "telemetry: $label runner, peer placements" telemetry_kit "${label,,}" --peers
         done
       fi
-      step shared "ADR 0030: erasure across languages (12 pairings)" scripts/erasure-matrix.sh "${matrix_options[@]}"
+      step shared "ADR 0030: erasure across languages (2 pairings)" scripts/erasure-matrix.sh "${matrix_options[@]}"
     fi
   fi
   return 0
@@ -223,8 +198,8 @@ else
   plan shared
 fi
 selection=serial step shared "tests: no environment refs in the enclosing repository" check_test_refs
-if ! $all; then
-  echo "(cross-language steps skipped: they need all four languages)"
+if ! $both; then
+  echo "(cross-language steps skipped: they need both languages)"
 fi
 shopt -s nullglob
 for results in "$logs"/failed-*.tsv; do

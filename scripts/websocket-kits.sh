@@ -4,22 +4,18 @@
 # its named-caller fixture (one listener, several tokens; ADR 0035),
 # and `ma --acp --listen` with two actors and a shared history service.
 #
-#   scripts/websocket-kits.sh rust|typescript|go|python
+#   scripts/websocket-kits.sh rust|typescript
 #
 # Needs that language built as scripts/check.sh builds it, and npm ci in conformance/acp.
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-language="${1:?usage: websocket-kits.sh rust|typescript|go|python}"
+language="${1:?usage: websocket-kits.sh rust|typescript}"
 case "$language" in
   rust) plugin=("$repo/rust/target/debug/modular-agent" --serve-plugin)
     named=("$repo/rust/target/debug/examples/named_callers") ;;
   typescript) plugin=(node "$repo/typescript/packages/plugin-wire/dist/src/serve-cli.js")
     named=("$(command -v node)" "$repo/typescript/scripts/named-callers.mjs") ;;
-  go) plugin=("$repo/go/.bin/modular" --serve-plugin)
-    named=("$repo/go/.bin/modular-agent-fixtures" named-callers) ;;
-  python) plugin=("$repo/python/.venv/bin/modular-agent-plugin")
-    named=("$repo/python/.venv/bin/python" "$repo/python/scripts/named_caller_fixture.py") ;;
   *) echo "unknown language: $language" >&2; exit 2 ;;
 esac
 ma=()

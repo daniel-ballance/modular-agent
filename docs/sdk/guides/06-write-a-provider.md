@@ -96,89 +96,17 @@ const beacon: Provider = {
 };
 ```
 
-**Go**
-
-```go
-var beacon = modular.Provider{
-	ID: "beacon",
-	Models: func() []modular.ModelInfo {
-		return []modular.ModelInfo{{
-			ModelRef:      modular.ModelRef{Provider: "beacon", ID: "demo"},
-			ContextWindow: 4096, MaxOutput: 256, Input: []string{"text"},
-		}}
-	},
-	Available: func() bool { return true },
-	Supports:  modular.ProviderSupport{SafeToRepeat: true},
-	Request: func(_ context.Context, _ modular.ModelRef, _ modular.ModelRequest, cx *modular.ProviderContext) (modular.AssistantMessage, error) {
-		key, err := cx.Credential()
-		if err != nil || key != "offline-key" {
-			return modular.AssistantMessage{}, &modular.ModelError{
-				Kind: modular.Credentials, Message: "Key unavailable or rejected",
-			}
-		}
-		cx.Piece("text", "Beacon ")
-		cx.Piece("text", "ready.")
-		return modular.AssistantMessage{Content: modular.Text("Beacon ready."), Stop: "finished"}, nil
-	},
-}
-```
-
-**Python**
-
-```python
-from modular_agent import (
-    ModelFailure,
-    ModelInfo,
-    ModelRef,
-    ProviderContext,
-    ProviderSupports,
-    create_agent,
-)
-from modular_agent import JsonObject
-
-
-class Beacon:
-    id = "beacon"
-    supports = ProviderSupports(safe_to_repeat=True)
-
-    def models(self) -> list[ModelInfo]:
-        return [
-            {
-                "provider": self.id,
-                "id": "demo",
-                "contextWindow": 4096,
-                "maxOutput": 256,
-                "input": ["text"],
-                "reasoning": False,
-            }
-        ]
-
-    async def request(
-        self, _model: ModelRef, _request: JsonObject, cx: ProviderContext
-    ) -> JsonObject:
-        key = cx.credential()
-        if key != "offline-key":
-            raise ModelFailure({"kind": "credentials", "message": "Key unavailable or rejected"})
-        await cx.piece("text", "Beacon ")
-        await cx.piece("text", "ready.")
-        return {
-            "role": "assistant",
-            "stop": "finished",
-            "content": [{"type": "text", "text": "Beacon ready."}],
-        }
-```
-
 ## Stream pieces and settle the attempt
 
 Call `piece` as output arrives. A text piece is a delta, not the whole answer so far; a tool-input piece also names its tool call id. Return a complete [AssistantMessage](../../bindings/data.md#messages) even when you already streamed all its text: the pieces are live output, not history. If the model asks for tools, include the complete tool calls in the message and use stop `toolUse`. The agent, not this Provider, decides which calls can run.
 
-An admitted model failure is an AssistantMessage with stop `failed` and a ModelError. Use the kind that describes the failure: `temporary`, `contextTooLarge`, `credentials`, `refused` or `other`. Rust's `ModelError::failed()` constructs the message; TypeScript and Python turn `ModelFailure` into it, and Go does the same for a returned `*ModelError`. An untyped error after admission is recorded as kind `other`. An unknown model is instead refused before the request is admitted. Keep secrets out of pieces, results, errors and logs; tell the operator what failed without quoting the key or raw upstream response.
+An admitted model failure is an AssistantMessage with stop `failed` and a ModelError. Use the kind that describes the failure: `temporary`, `contextTooLarge`, `credentials`, `refused` or `other`. Rust's `ModelError::failed()` constructs the message; TypeScript turns `ModelFailure` into it. An untyped error after admission is recorded as kind `other`. An unknown model is instead refused before the request is admitted. Keep secrets out of pieces, results, errors and logs; tell the operator what failed without quoting the key or raw upstream response.
 
 `keepsState` is false because the Provider keeps nothing between requests. `safeToRepeat` is true only because this simulated request has no side effects. It means an interrupted request can be repeated with the same prepared input under the [recovery rules](../../contracts.md#recovery-and-repeating-work). Stateless does not mean repeatable: a real request can disclose data, charge money or leave a record at the service. Leave the flag false unless repeating is safe. See the [Provider API](../api.md#providers) and [model request and response contract](../../contracts.md#model-request-and-response).
 
 ## Test a scripted request
 
-Send a fixed prompt through a fresh session, then repeat in a separate session with a rejected key. Check the live deltas separately from the recorded answer. For the rejected key, check the failed **turn** and its recorded **model attempt**; there is no input error. These tests exercise the Provider you just wrote, not a real service. In Go, put both blocks in a `package modular_test` file and import `context`, `encoding/json`, `slices`, `testing`, and the SDK's `modular` and `modulartest` packages. In Python, add `import pytest`.
+Send a fixed prompt through a fresh session, then repeat in a separate session with a rejected key. Check the live deltas separately from the recorded answer. For the rejected key, check the failed **turn** and its recorded **model attempt**; there is no input error. These tests exercise the Provider you just wrote, not a real service.
 
 **Rust**
 
@@ -270,96 +198,13 @@ test("beacon streams and records failures", async t => {
 });
 ```
 
-**Go**
-
-```go
-func TestBeaconStreamsAndRecordsFailures(t *testing.T) {
-	for _, key := range []string{"offline-key", "rejected"} {
-		t.Run(key, func(t *testing.T) {
-			t.Setenv("BEACON_API_KEY", key)
-			ctx := t.Context()
-			agent := modulartest.Agent(t, modular.WithProvider(beacon), modular.WithModel("beacon/demo"))
-			session, err := agent.Session(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var pieces []string
-			for event, err := range session.PromptStream(ctx, "Check the beacon.") {
-				if err != nil {
-					t.Fatal(err)
-				}
-				if text, ok := event.(modular.TextEvent); ok {
-					pieces = append(pieces, text.Delta)
-				}
-			}
-			turn, err := session.LastTurn(ctx)
-			if err != nil || turn == nil {
-				t.Fatalf("last turn: %+v, %v", turn, err)
-			}
-			if key == "offline-key" {
-				if !slices.Equal(pieces, []string{"Beacon ", "ready."}) || turn.Text != "Beacon ready." {
-					t.Fatalf("pieces %q, final text %q", pieces, turn.Text)
-				}
-				return
-			}
-			if len(pieces) != 0 || turn.Outcome == nil || turn.Outcome.Kind != "failed" {
-				t.Fatalf("pieces %q, outcome %+v", pieces, turn.Outcome)
-			}
-			history, err := session.History(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !slices.ContainsFunc(history, func(entry modular.HistoryEntry) bool {
-				var message modular.AssistantMessage
-				data, _ := json.Marshal(entry["message"])
-				return entry["kind"] == "response" && json.Unmarshal(data, &message) == nil &&
-					message.Stop == "failed" && message.Error != nil && message.Error.Kind == modular.Credentials
-			}) {
-				t.Fatal("no recorded credentials failure")
-			}
-		})
-	}
-}
-```
-
-**Python**
-
-```python
-@pytest.mark.parametrize("key", ["offline-key", "rejected"])
-async def test_beacon_streams_and_records_failures(
-    key: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("BEACON_API_KEY", key)
-    async with create_agent(providers=[Beacon()]) as agent:
-        assert (await agent.models())[0]["id"] == "demo"
-        session = await agent.session()
-        pieces = [
-            event.data.delta
-            async for event in session.prompt_stream("Check the beacon.")
-            if event.type == "text"
-        ]
-        turn = await session.last_turn()
-        assert turn is not None
-        if key == "offline-key":
-            assert pieces == ["Beacon ", "ready."]
-            assert turn.text == "Beacon ready."
-        else:
-            assert pieces == []
-            assert turn.outcome.kind == "failed"
-            response = next(
-                entry for entry in await session.history() if entry["kind"] == "response"
-            )
-            assert response["message"]["stop"] == "failed"
-            assert response["message"]["error"]["kind"] == "credentials"
-```
-
 ## Serve it from another process
 
 Wrap a request/response Provider in a plugin, register it at setup, and run `serve` on stdio, just as for [a tool in another process](03-tool-in-another-process.md). The host loads the program as a process plugin and selects a model from its catalog. Keep stdout for the binding. Choose the executable and arguments yourself; model output and project files should not choose what you launch.
 
 Use the same credential context call in either placement. For a served Provider, the SDK reads the Provider's own credential through the host's `host/credentials/read` callback; it does not use plugin configuration to pass the key. See [Placement](../placement.md#a-plugin-in-another-process) and [the Provider binding](../../bindings/plugin.md#the-host-asks-a-provider).
 
-These offline process tests use the testing kit's keyless scripted Provider. Rust's existing fixture program reads the script from registrar config, calls `r.provider(scripted_provider(script))` in setup, then runs `modular_agent::serve(plugin).await`. In TypeScript the test gives Node the plugin program inline; in Go the same test executable runs the plugin in a separate process. Add `fmt` and `os` to the Go imports for this block.
+These offline process tests use the testing kit's keyless scripted Provider. Rust's existing fixture program reads the script from registrar config, calls `r.provider(scripted_provider(script))` in setup, then runs `modular_agent::serve(plugin).await`. In TypeScript the test gives Node the plugin program inline.
 
 **Rust**
 
@@ -408,51 +253,4 @@ test("loads a Provider from another process", async () => {
     await agent.close();
   }
 });
-```
-
-**Go**
-
-```go
-// The test executable doubles as the plugin program.
-func TestBeaconPluginProgram(t *testing.T) {
-	if os.Getenv("BEACON_PLUGIN_TEST") != "1" {
-		t.Skip("only run in the plugin child")
-	}
-	p := modulartest.ScriptedProvider([]modulartest.Reply{{Text: "Beacon ready."}})
-	plugin := modular.Plugin{Name: "beacon-demo", Setup: func(r *modular.Registrar) error {
-		return r.Provider(p)
-	}}
-	if err := modular.Serve(t.Context(), plugin); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	os.Exit(0)
-}
-
-func TestLoadServedBeaconProvider(t *testing.T) {
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("MODULAR_AGENT_PLUGINS", "")
-	ctx := t.Context()
-	agent, err := modular.New(ctx,
-		modular.WithProcessPlugin(modular.ProcessPlugin{
-			Command: []string{exe, "-test.run=^TestBeaconPluginProgram$"},
-			Env:     map[string]string{"BEACON_PLUGIN_TEST": "1"},
-		}),
-		modular.WithModel("scripted/script"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer agent.Close(ctx)
-	session, err := agent.Session(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	turn, err := session.Prompt(ctx, "Check the beacon.")
-	if err != nil || turn.Text != "Beacon ready." {
-		t.Fatalf("turn: %+v, %v", turn, err)
-	}
-}
 ```

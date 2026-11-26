@@ -1,6 +1,6 @@
 # Guides
 
-Each guide walks through one task in all four languages. The examples are the API the SDKs must offer: once an SDK exists, every example in these guides is compiled and run as one of its tests ([How the SDKs are checked](../README.md#how-the-sdks-are-checked)). An example that cannot be written as shown means the guide or the [API](../api.md) changes first.
+Each guide walks through one task in both languages. The examples are the API the SDKs must offer: once an SDK exists, every example in these guides is compiled and run as one of its tests ([How the SDKs are checked](../README.md#how-the-sdks-are-checked)). An example that cannot be written as shown means the guide or the [API](../api.md) changes first.
 
 | Guide | Covers |
 |---|---|

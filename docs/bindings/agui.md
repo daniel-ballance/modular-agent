@@ -1,6 +1,6 @@
 # AG-UI binding: `modular-agent-agui/1`
 
-This binding, accepted in [ADR 0033](../adr/0033-interface-tools-and-ag-ui.md) and implemented by all four SDKs and `ma`, serves an agent to an application over [AG-UI 1.0 HTTP + SSE](https://docs.ag-ui.com/spec/1.0/basic/transports/http-sse). A thread is a session. A run follows one turn or delivers answers or results that continue one. AG-UI's wire rules apply; this page defines which operations this agent offers. See [ADR 0033](../adr/0033-interface-tools-and-ag-ui.md) and the [upstream research](../research/ag-ui.md).
+This binding, accepted in [ADR 0033](../adr/0033-interface-tools-and-ag-ui.md) and implemented by both SDKs and `ma`, serves an agent to an application over [AG-UI 1.0 HTTP + SSE](https://docs.ag-ui.com/spec/1.0/basic/transports/http-sse). A thread is a session. A run follows one turn or delivers answers or results that continue one. AG-UI's wire rules apply; this page defines which operations this agent offers. See [ADR 0033](../adr/0033-interface-tools-and-ag-ui.md) and the [upstream research](../research/ag-ui.md).
 
 ## Listener and authentication
 

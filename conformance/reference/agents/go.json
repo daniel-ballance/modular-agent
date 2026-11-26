@@ -1,5 +1,0 @@
-{
-  "language": "go",
-  "build": "cd go && ./scripts/build-monty.sh && mise exec -- go build -o .bin/ma ./cmd/ma",
-  "command": ["{repo}/go/.bin/ma"]
-}

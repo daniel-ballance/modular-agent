@@ -1,8 +1,10 @@
 # Changelog
 
-The four SDKs and `ma` share one project version. The [SDK specification](docs/sdk/README.md) has its own revision. Nothing is published to a registry; a version names a commit on `main`.
+The two SDKs and `ma` share one project version. The [SDK specification](docs/sdk/README.md) has its own revision. Nothing is published to a registry; a version names a commit on `main`.
 
 ## Unreleased
+
+- Removed the Go and Python SDKs and `ma` builds from `main`. Rust and TypeScript stay in lockstep ([ADR 0037](docs/adr/0037-two-languages.md)). The [`four-languages`](https://github.com/daniel-ballance/modular-agent/tree/four-languages) tag preserves both removed builds and their results.
 
 - The [project notes](demos/project-notes/README.md) and [ops desk](demos/ops-desk/README.md) demos now use only the Rust and TypeScript SDKs. Their scripted runs use the same process and service placements and still need no sign-in.
 - Go and Python `ma` sessions that previously recorded `off` without loading the approval feature keep that policy. Load the feature and change the policy with the ACP or AG-UI `approval` setting, or with `/approval` in Go's terminal.

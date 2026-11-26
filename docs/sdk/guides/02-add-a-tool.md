@@ -43,36 +43,6 @@ export const tide = tool({
 });
 ```
 
-**Go**
-
-```go
-type TideInput struct {
-	Harbour string `json:"harbour" jsonschema:"The harbour to look up."`
-}
-
-var Tide = modular.NewTool("tide", "Today's high tide at a harbour.",
-	func(ctx context.Context, in TideInput, tc *modular.ToolContext) (string, error) {
-		return fmt.Sprintf("High tide at %s is 14:02.", in.Harbour), nil
-	},
-	modular.ReadOnly())
-```
-
-**Python**
-
-```python
-from modular_agent import tool
-
-
-@tool(read_only=True)
-async def tide(harbour: str) -> str:
-    """Today's high tide at a harbour.
-
-    Args:
-        harbour: The harbour to look up.
-    """
-    return f"High tide at {harbour} is 14:02."
-```
-
 Marking the tool read-only tells the agent it changes nothing. An approval policy of `ask` then lets it run without asking. Leave it off for any tool that writes, sends or spends; the [defaults](../api.md#tools) assume a tool is destructive and reaches outside the project.
 
 The function returns text, so the result is `completed` with that text as its content. Raising an error makes it `failed` with the error's message; `cx.refuse(reason)` makes it `refused`. See [Tools](../api.md#tools) for structured results.
@@ -94,21 +64,6 @@ let agent = Agent::builder()
 
 ```ts
 const agent = await createAgent({ providers: [openai()], model: "openai/gpt-6-luna", tools: [tide] });
-```
-
-**Go**
-
-```go
-agent, err := modular.New(ctx,
-	modular.WithProvider(openai.New()),
-	modular.WithModel("openai/gpt-6-luna"),
-	modular.WithTool(Tide))
-```
-
-**Python**
-
-```python
-agent = await create_agent(providers=[openai()], model="openai/gpt-6-luna", tools=[tide])
 ```
 
 Ask "When is high tide at Whitby?" and the model can call `tide` before it answers.
@@ -156,46 +111,6 @@ test("looks up the tide", async () => {
   assert.equal(result.status, "completed");
   assert.equal(result.text(), "High tide at Whitby is 14:02.");
 });
-```
-
-**Go**
-
-```go
-func TestLooksUpTheTide(t *testing.T) {
-	ctx := context.Background()
-	agent := modulartest.Agent(t,
-		modular.WithTool(Tide),
-		modulartest.Script(`[
-			{"toolCalls": [{"name": "tide", "input": {"harbour": "Whitby"}}]},
-			{"text": "High tide is at 14:02."}
-		]`))
-	session, _ := agent.Session(ctx)
-	turn, err := session.Prompt(ctx, "When is high tide at Whitby?")
-	if err != nil {
-		t.Fatal(err)
-	}
-	results := turn.ToolResults()
-	if turn.Text != "High tide is at 14:02." || results[0].Status != modular.Completed ||
-		results[0].Text() != "High tide at Whitby is 14:02." {
-		t.Fatalf("got %q and %+v", turn.Text, results)
-	}
-}
-```
-
-**Python**
-
-```python
-async def test_looks_up_the_tide() -> None:
-    script = [
-        {"toolCalls": [{"name": "tide", "input": {"harbour": "Whitby"}}]},
-        {"text": "High tide is at 14:02."},
-    ]
-    async with test_agent(tools=[tide], script=script) as agent:
-        turn = await (await agent.session()).prompt("When is high tide at Whitby?")
-        assert turn.text == "High tide is at 14:02."
-        [result] = turn.tool_results()
-        assert result.status == "completed"
-        assert result.text() == "High tide at Whitby is 14:02."
 ```
 
 `tool_results()` reads the turn's recorded results from history, in the order the calls were made.

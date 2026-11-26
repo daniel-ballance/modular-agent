@@ -1,5 +1,0 @@
-{
-  "sdk": "python",
-  "build": "cd python && uv sync --python 3.13",
-  "command": ["{repo}/python/.venv/bin/python", "-m", "modular_agent.fixtures"]
-}

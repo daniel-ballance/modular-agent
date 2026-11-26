@@ -9,9 +9,10 @@ import { fileURLToPath } from "node:url";
 import { caseMatrix, runCase, sdks } from "./runner.mjs";
 import { readWire } from "./wire.mjs";
 
-test("matrix covers all four hosts and each cross-language peer", () => {
+test("matrix covers both hosts and each cross-language peer", () => {
   const cases = sdks.flatMap(caseMatrix);
-  assert.equal(cases.length, 88);
+  assert.deepEqual(sdks, ["rust", "typescript"]);
+  assert.equal(cases.length, 36);
   assert.equal(new Set(cases.map(JSON.stringify)).size, cases.length);
   for (const host of sdks) {
     const own = caseMatrix(host);

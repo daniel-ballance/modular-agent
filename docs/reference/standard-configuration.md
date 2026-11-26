@@ -1,15 +1,15 @@
 # The standard configuration
 
-**Status: 0.1.** All four implementations exist and pass the [reference checks](../../conformance/reference/README.md): [Rust](../../rust/README.md), [TypeScript](../../typescript/packages/ma/README.md), [Go](../../go/cmd/ma/README.md) and [Python](../../python/packages/ma/README.md). [ADR 0026](../adr/0026-one-reference-product.md) records why there is one product. Where an implementation must guess, the guess becomes a change here first.
+**Status: 0.1.** Both implementations pass the [reference checks](../../conformance/reference/README.md): [Rust](../../rust/README.md) and [TypeScript](../../typescript/packages/ma/README.md). [ADR 0026](../adr/0026-one-reference-product.md) records why there is one product. Where an implementation must guess, the guess becomes a change here first.
 
-The standard configuration is the reference implementation of layer 4 ([ADR 0024](../adr/0024-five-layers.md)): a coding agent with Pi's feature set, for everyday use. There is one product and four implementations of it, one per language. A person can install any one of them and get the same program: the same commands, files, tools, prompt and behavior. Each is written the way its language is written.
+The standard configuration is the reference implementation of layer 4 ([ADR 0024](../adr/0024-five-layers.md)): a coding agent with Pi's feature set, for everyday use. There is one product and two implementations of it, one per language. A person can install any one of them and get the same program: the same commands, files, tools, prompt and behavior. Each is written the way its language is written.
 
 ## Rules for every implementation
 
 - **Built only on its language's SDK.** It uses the public API of that SDK ([`docs/sdk`](../sdk/README.md)) and nothing else from the base build. When it needs something the SDK cannot give, the SDK gains it first, then the SDK specification records it.
-- **One language.** It is written in its own language. Rust and Go load the [TypeScript Claude Provider](../../typescript/packages/claude/README.md) as a process plugin. TypeScript and Python can use their native Claude Agent SDKs.
-- **The same product.** Commands, options, file names and formats, tool names, inputs, descriptions and limits, the prompt's structure and wording, and error messages a person reads are the same in all four. The Rust implementation's texts are the reference: the tool definitions in `rust/crates/tools-files` and `rust/crates/tools-code`, the prompt in `rust/crates/standard/src/prompt.rs` and the skills listing in `rust/crates/standard/src/skills.rs`. A difference is a bug in one of them, fixed by changing this page or the code that is wrong.
-- **Shared configuration, separate state.** All four read the same configuration folder, so a person can switch implementation without setting anything up again. Each keeps its sessions in its own state folder, because their native session files differ.
+- **One language.** It is written in its own language. Rust loads the [TypeScript Claude Provider](../../typescript/packages/claude/README.md) as a process plugin. TypeScript uses Anthropic's Claude Agent SDK in process.
+- **The same product.** Commands, options, file names and formats, tool names, inputs, descriptions and limits, the prompt's structure and wording, and error messages a person reads are the same in both. The Rust implementation's texts are the reference: the tool definitions in `rust/crates/tools-files` and `rust/crates/tools-code`, the prompt in `rust/crates/standard/src/prompt.rs` and the skills listing in `rust/crates/standard/src/skills.rs`. A difference is a bug in one of them, fixed by changing this page or the code that is wrong.
+- **Shared configuration, separate state.** Both read the same configuration folder, so a person can switch implementation without setting anything up again. Each keeps its sessions in its own state folder, because their native session files differ.
 
 ## The program
 
@@ -96,7 +96,7 @@ $ ma sessions --all
 `~/.agents/skills/` holds more skills for every project.
 
 - **The configuration folder** is `$XDG_CONFIG_HOME/modular-agent`, or `~/.config/modular-agent`.
-- **The state folder** is `$XDG_STATE_HOME/modular-agent/<language>`, or `~/.local/state/modular-agent/<language>`, where `<language>` is `rust`, `typescript`, `go` or `python`. It holds sessions, command state and the full output of commands whose output was cut.
+- **The state folder** is `$XDG_STATE_HOME/modular-agent/<language>`, or `~/.local/state/modular-agent/<language>`, where `<language>` is `rust` or `typescript`. It holds sessions, command state and the full output of commands whose output was cut.
 - **`MODULAR_AGENT_DATA_DIR`** puts both in that one folder, as the ACP binding requires of a host that isolates an agent: the configuration files directly in it, and the state in `state/` under it. It affects only `ma`, not other programs reading `XDG_CONFIG_HOME` or `XDG_STATE_HOME`.
 
 **`auth.json`** is `{"logins": {PROVIDER: LOGIN}, "answers": {NAME: VALUE}}`. A login is `{"type": "oauth", "access", "refresh", "expires", "account"?}`, with `expires` in milliseconds since the epoch already brought forward by the refresh margin, or `{"type": "api_key", "key"}`. Every implementation writes it with mode 0600 and, while refreshing a token, holds an exclusive lock on `auth.lock` beside it, so two agents in any languages never spend one refresh token.
@@ -161,7 +161,7 @@ The model is offered one tool, `codemode`, which runs Python in a [Monty](https:
 
 The inputs, limits and wording are Pi's, as the Rust `tools-files` crate has them. In the sandbox:
 
-- The Python is Monty's, at the same pinned version in every implementation, so a script behaves the same in all four.
+- The Python is Monty's, at the same pinned version in every implementation, so a script behaves the same in both.
 - `tools` is there without an import. `import tools` gives the same functions, though not necessarily the identical module object. Functions are values: `f = tools.read` then `f(path='a.txt')` makes the same call as `tools.read(path='a.txt')`. A tool is reached only through `tools`: a bare `read(...)` raises `NameError`.
 - Arguments go by keyword, or by position: the schema's `required` fields in that array's order, then its other fields in alphabetical order, since JSON gives an object's members no order every language keeps. The prompt's signatures list them in the same order, such as `read(path, limit=None, offset=None)`. A single dict as the only argument supplies the arguments by name, unless the first parameter itself takes an object. Passing `None` for an argument omits it. Too many arguments, or a missing required one, raises `TypeError`, and so does an argument the agent cannot carry exactly as JSON, such as an integer beyond what the host's JSON numbers hold; the call is then not made.
 - A function returns the result's structured value if it has one, otherwise its text. A call that fails, is refused or is cancelled raises `RuntimeError` with the result's text; this includes an `exec` that times out. An `exec` that ran to a non-zero exit returns its dict rather than raising.
@@ -244,7 +244,7 @@ The same values go out on every path, subject to the binding's projection for th
 
 ## Hooks for testing
 
-Each implementation honors these environment variables, so one set of [checks](../../conformance/reference/README.md) can drive all four without a model:
+Each implementation honors these environment variables, so one set of [checks](../../conformance/reference/README.md) can drive both without a model:
 
 | Variable | Effect |
 |---|---|

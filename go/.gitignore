@@ -1,6 +1,0 @@
-/bin/
-*.key
-.env
-node_modules/
-
-/.bin/

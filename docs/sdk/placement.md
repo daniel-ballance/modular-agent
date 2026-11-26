@@ -30,7 +30,7 @@ Process separation is not a sandbox. A plugin in another process still runs with
 A plugin moves into its own process without changing its code:
 
 1. **Serve it.** A plugin program's entry point calls `serve(plugin)`. That one call speaks the binding on stdio: it answers the handshake with the plugin's registration, routes requests to its tools, Provider, hooks and the rest, and passes each request's context through as host callbacks. `serve` refuses an [in-process-only plugin](api.md#plugins) with `not_supported`.
-2. **Load it.** The agent names the program in `processPlugins`: `{ command: ["python", "tides.py"], env?, config? }`. The command is an argument vector, never a shell line. The program can be written with any SDK, or without one.
+2. **Load it.** The agent names the program in `processPlugins`: `{ command: ["/usr/bin/node", "/srv/tides/tides.js"], env?, config? }`. The command is an argument vector, never a shell line. The program can be written with any SDK, or without one.
 
 A child process starts with the minimal environment the binding requires, plus the `env` the developer approved; it does not inherit the agent's. Trace context crosses this boundary only on trusted [work operations](../telemetry.md#context-on-the-wire). A plugin that exports spans installs its own OpenTelemetry SDK and exporter. Starting it does not copy the host's exporter settings.
 
@@ -76,7 +76,7 @@ Omit `tenants` to allow only sessions without a tenant. Include `null` in an exp
 
 ### Serving AG-UI
 
-All four SDKs implement this binding; the [AG-UI kit](../../conformance/agui/README.md) checks each.
+Both SDKs implement this binding; the [AG-UI kit](../../conformance/agui/README.md) checks each.
 
 Call `agent.serveAgui({ listen, actors, tls?, tenant?, acp?, origins? })` instead of `serveAcp` when the app speaks AG-UI. Set `acp: true` to serve ACP WebSocket upgrades at the same address. Do not start a second listener on that address. The listener handle has `url` (the HTTP origin) and `close()`. Closing it detaches streams; it does not erase sessions or confirm cancellation of external calls.
 

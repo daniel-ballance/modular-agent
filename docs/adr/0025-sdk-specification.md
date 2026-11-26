@@ -3,7 +3,7 @@ status: accepted
 date: 2026-11-19
 ---
 
-**Current rule:** accepted as SDK specification 0.1 by [ADR 0027](0027-sdk-0-1-and-edition-4.md).
+**Current rule:** accepted as SDK specification 0.1 by [ADR 0027](0027-sdk-0-1-and-edition-4.md). [ADR 0037](0037-two-languages.md) keeps two SDKs, Rust and TypeScript. Where this record says four SDKs, read two. Go and Python are kept at the tag `four-languages`.
 
 # The SDK specification, draft 0.1
 

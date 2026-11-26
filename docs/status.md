@@ -1,10 +1,14 @@
 # Status: the description against the code
 
+## Current builds
+
+Rust and TypeScript are the two maintained SDKs and `ma` builds ([ADR 0037](adr/0037-two-languages.md)). Go and Python were removed from `main` after the [`four-languages`](https://github.com/daniel-ballance/modular-agent/tree/four-languages) tag. Their code and results stand as evidence at that tag.
+
 ## Production gaps
 
 Remaining ADR 0030 work is tracked in #19.
 
-[ADR 0021](adr/0021-production-edition.md) listed four gaps. [Secret staging and recovery](contracts.md#secrets) shipped first. [ADR 0029](adr/0029-sdk-decisions-after-four-builds.md) settled ACP service token scope and rights ceilings, and [ADR 0030](adr/0030-production-gaps.md) set the rules for the other three. All four SDKs and `ma` now implement them, checked on 2026-11-21 by the opt-in kit checks that `scripts/check.sh` runs through `scripts/production-kits.sh` and `scripts/erasure-matrix.sh`:
+[ADR 0021](adr/0021-production-edition.md) listed four gaps. [Secret staging and recovery](contracts.md#secrets) shipped first. [ADR 0029](adr/0029-sdk-decisions-after-four-builds.md) settled ACP service token scope and rights ceilings, and [ADR 0030](adr/0030-production-gaps.md) set the rules for the other three. All four SDKs and `ma` passed checks for them on 2026-11-21, using the opt-in kits run through `scripts/production-kits.sh` and `scripts/erasure-matrix.sh`:
 
 | Gap | Rules | Checked |
 |---|---|---|
@@ -48,7 +52,7 @@ Recorded on 2026-11-23 for the commit tagged `v0.2.0`, from `scripts/check.sh` o
 
 Each language's agents passed the erasure checks on every other language's history service: 12 of 12 pairings. The [project notes demo](../demos/project-notes/README.md) passed with its crash run, and the [ops desk](../demos/ops-desk/README.md) passed its six scripted checks. Every result above used scripted models. With real models, the ops desk ran three times on the owner's subscriptions (Grok triage, Claude coder, ChatGPT verifier), and each run fixed its bug on the first try.
 
-[ADR 0034](adr/0034-approvals-that-wait.md) is accepted but not implemented; no result above covers it.
+[ADR 0034](adr/0034-approvals-that-wait.md) had been accepted but was not yet implemented at v0.2.0; no result in this section covers it.
 
 ## 0.1.0
 

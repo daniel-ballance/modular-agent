@@ -39,59 +39,6 @@ console.log(turn.text);
 await agent.close();
 ```
 
-**Go**
-
-```go
-package main
-
-import (
-	"context"
-	"fmt"
-	"log"
-
-	"github.com/daniel-ballance/modular-agent/go/modular"
-	"github.com/daniel-ballance/modular-agent/go/modular/openai"
-)
-
-func main() {
-	ctx := context.Background()
-	agent, err := modular.New(ctx,
-		modular.WithProvider(openai.New()),
-		modular.WithModel("openai/gpt-6-luna"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer agent.Close(ctx)
-
-	session, err := agent.Session(ctx)
-	if err != nil {
-		log.Fatal(err)
-	}
-	turn, err := session.Prompt(ctx, "Name a harbour in Yorkshire.")
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println(turn.Text)
-}
-```
-
-**Python**
-
-```python
-from modular_agent import create_agent, run
-from modular_agent.openai import openai
-
-
-async def main() -> None:
-    async with create_agent(providers=[openai()], model="openai/gpt-6-luna") as agent:
-        session = await agent.session()
-        turn = await session.prompt("Name a harbour in Yorkshire.")
-        print(turn.text)
-
-
-run(main())
-```
-
 What happened:
 
 - The agent started with its [defaults](../concepts.md#defaults): history in memory, the transient Runtime, a local working environment rooted at the current directory and no approval plugin.
@@ -122,27 +69,6 @@ while let Some(event) = events.next().await {
 for await (const event of session.promptStream("Describe Whitby harbour in two sentences.")) {
   if (event.type === "text") process.stdout.write(event.data.delta);
 }
-```
-
-**Go**
-
-```go
-for event, err := range session.PromptStream(ctx, "Describe Whitby harbour in two sentences.") {
-	if err != nil {
-		log.Fatal(err)
-	}
-	if text, ok := event.(modular.TextEvent); ok {
-		fmt.Print(text.Delta)
-	}
-}
-```
-
-**Python**
-
-```python
-async for event in session.prompt_stream("Describe Whitby harbour in two sentences."):
-    if event.type == "text":
-        print(event.data.delta, end="", flush=True)
 ```
 
 The stream ends with the turn's `turnEnded` event, which carries the same outcome `prompt` returns.
@@ -178,38 +104,6 @@ test("says hello", async () => {
   const turn = await (await agent.session()).prompt("Say hello.");
   assert.equal(turn.text, "Hello.");
 });
-```
-
-**Go**
-
-```go
-func TestSaysHello(t *testing.T) {
-	ctx := context.Background()
-	agent := modulartest.Agent(t, modulartest.Script(`[{"text": "Hello."}]`))
-	session, err := agent.Session(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	turn, err := session.Prompt(ctx, "Say hello.")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if turn.Text != "Hello." {
-		t.Fatalf("got %q", turn.Text)
-	}
-}
-```
-
-**Python**
-
-```python
-from modular_agent.testing import test_agent
-
-
-async def test_says_hello() -> None:
-    async with test_agent(script=[{"text": "Hello."}]) as agent:
-        turn = await (await agent.session()).prompt("Say hello.")
-        assert turn.text == "Hello."
 ```
 
 `modulartest.Agent` closes the agent when the test ends.

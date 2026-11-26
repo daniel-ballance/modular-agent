@@ -4,8 +4,8 @@ Build AI agents from interchangeable parts: model Providers, tools, the working 
 
 This repository holds three things:
 
-- **SDKs in Rust, TypeScript, Go and Python.** One SDK in four languages, with the same concepts and names in each.
-- **`ma`, a coding agent** with Pi's feature set, built on each SDK: the same program in all four languages.
+- **SDKs in Rust and TypeScript.** One SDK in two languages, with the same concepts and names in each.
+- **`ma`, a coding agent** with Pi's feature set, built on each SDK: the same program in both languages.
 - **The specification** they are built from, with kits that check a build against it.
 
 Status: **0.3.0, for developers to try, on Linux and macOS.** Nothing is published to a package registry; use the code from this repository as shown below. It is not production software: see [Known gaps](#known-gaps).
@@ -31,36 +31,6 @@ async fn main() -> modular_agent::Result<()> {
 }
 ```
 
-**Go.** `go get github.com/daniel-ballance/modular-agent/go@main`, then `go mod tidy`.
-
-```go
-agent, err := modular.New(ctx, modular.WithProvider(
-	modulartest.ScriptedProvider([]modulartest.Reply{{Text: "Hello."}})))
-if err != nil {
-	log.Fatal(err)
-}
-defer agent.Close(ctx)
-session, _ := agent.Session(ctx)
-turn, _ := session.Prompt(ctx, "Say hello.")
-fmt.Println(turn.Text)
-```
-
-**Python.** `uv add "modular-agent @ git+https://github.com/daniel-ballance/modular-agent#subdirectory=python"`. Python 3.13.
-
-```python
-from modular_agent import create_agent, run
-from modular_agent.testing import scripted_provider
-
-
-async def main() -> None:
-    async with create_agent(providers=[scripted_provider([{"text": "Hello."}])]) as agent:
-        turn = await (await agent.session()).prompt("Say hello.")
-        print(turn.text)
-
-
-run(main())
-```
-
 **TypeScript.** The packages are not on npm. Clone this repository, build it, and install the SDK's folders into your app. Node.js 22 or later.
 
 ```sh
@@ -83,14 +53,14 @@ Then read on:
 
 | Read | To learn |
 |---|---|
-| [Guides](docs/sdk/guides/README.md) | Task by task, in all four languages: a first agent, tools, plugins in other processes, questions and approvals, durability, Providers, hooks, ACP, shared sessions |
+| [Guides](docs/sdk/guides/README.md) | Task by task, in both languages: a first agent, tools, plugins in other processes, questions and approvals, durability, Providers, hooks, ACP, shared sessions |
 | [SDK specification](docs/sdk/README.md) | The concepts, the API in language-neutral terms, placement and durability, testing |
 | [API reference](docs/sdk/reference.md) | How to build each language's reference from source |
-| Each SDK's README | What it implements and what it lacks: [Rust](rust/crates/sdk/README.md), [TypeScript](typescript/packages/core/README.md), [Go](go/modular/README.md), [Python](python/SDK.md) |
+| Each SDK's README | What it implements and what it lacks: [Rust](rust/crates/sdk/README.md), [TypeScript](typescript/packages/core/README.md) |
 
 ## Use `ma`
 
-`ma` is a coding agent for everyday use: one `codemode` tool that runs Python in a [Monty](https://github.com/pydantic/monty) sandbox and reaches files, commands and MCP servers through it; Agent Skills; Providers for ChatGPT, Grok and Claude subscriptions; a line-based terminal, ACP for editors and hosts such as T3 Code, and AG-UI for web apps. The [standard configuration](docs/reference/standard-configuration.md) describes it; all four implementations pass the same [reference checks](conformance/reference/README.md).
+`ma` is a coding agent for everyday use: one `codemode` tool that runs Python in a [Monty](https://github.com/pydantic/monty) sandbox and reaches files, commands and MCP servers through it; Agent Skills; Providers for ChatGPT, Grok and Claude subscriptions; a line-based terminal, ACP for editors and hosts such as T3 Code, and AG-UI for web apps. The [standard configuration](docs/reference/standard-configuration.md) describes it; both implementations pass the same [reference checks](conformance/reference/README.md).
 
 ```sh
 git clone https://github.com/daniel-ballance/modular-agent.git && cd modular-agent
@@ -99,16 +69,16 @@ ma login chatgpt             # or grok, or claude (uses your Claude Code sign-in
 ma                           # in a project folder
 ```
 
-The other languages' builds are in [`typescript/packages/ma`](typescript/packages/ma/README.md), [`go/cmd/ma`](go/cmd/ma/README.md) and [`python/packages/ma`](python/packages/ma/README.md).
+The TypeScript build is in [`typescript/packages/ma`](typescript/packages/ma/README.md).
 
 ## Known gaps
 
 Tracked in #30. Real Provider use is tracked in #20.
 
-- **Command containment varies by OS.** Linux uses namespaces, ptrace and cgroups. macOS (Apple silicon; checked with `scripts/macos-check.sh`, where all four SDKs and `ma` builds pass their suites, the reference checks and the ACP kit) uses process-group containment, not strong containment: a process that leaves its command's group is not stopped, so a command interrupted by a crash is never repeated there. Windows is unsupported.
-- **Few real requests.** The test suites use scripted models and local fakes. The ChatGPT, Grok and Claude subscription Providers have answered real requests through all four `ma` builds, each reading a file through `codemode`, and the `openai` and `anthropic` API-key Providers pass the [live checks](docs/sdk/testing.md#live-checks) in all four SDKs.
+- **Command containment varies by OS.** Linux uses namespaces, ptrace and cgroups. macOS (Apple silicon; checked with `scripts/macos-check.sh`, which runs both language suites, reference checks and the ACP kit) uses process-group containment, not strong containment: a process that leaves its command's group is not stopped, so a command interrupted by a crash is never repeated there. Windows is unsupported.
+- **Few real requests.** The test suites use scripted models and local fakes. The ChatGPT, Grok and Claude subscription Providers have answered real requests through both `ma` builds, each reading a file through `codemode`, and the `openai` and `anthropic` API-key Providers pass the [live checks](docs/sdk/testing.md#live-checks) in both SDKs.
 - **`ma` turns off several actors, session limits and tenants.** The SDKs offer them as options.
-- **Parts as network services are new.** All four SDKs serve plugins and agents over the [WebSocket transport](docs/bindings/websocket.md), and the kits check each one, but only on loopback in tests; nothing has run across machines yet.
+- **Parts as network services are new.** Both SDKs serve plugins and agents over the [WebSocket transport](docs/bindings/websocket.md), and the kits check each one, but only on loopback in tests; nothing has run across machines yet.
 
 Each SDK's README lists its own gaps.
 
@@ -116,7 +86,7 @@ Each SDK's README lists its own gaps.
 
 The specification says **what** each part does, what passes between the parts, and what must always hold, not how a part works inside. Optional **bindings** fix the wire where two builds work together: ACP for hosts, [AG-UI](docs/bindings/agui.md) for applications, a plugin protocol, and an HTTP history service. Implement the current normative documents and run the kits from the same revision.
 
-It was proven before any SDK existed. Five builds were made from the documents alone, four of them clean-room builds in Rust, Python, Go and Elixir. In the final swap round every build ran with every other build's parts and reopened every other build's sessions, through real `kill -9` crashes: 125 of 125 pairings passed ([status](docs/status.md#production-edition-3), [build notes](docs/build-notes.md#round-seven)). The SDKs and the four `ma` builds now repeat that check on every change: each SDK runs the [shared scenarios](conformance/sdk/README.md) with parts served by every other SDK.
+It was proven before any SDK existed. Five builds were made from the documents alone, four of them clean-room builds in Rust, Python, Go and Elixir. In the final swap round every build ran with every other build's parts and reopened every other build's sessions, through real `kill -9` crashes: 125 of 125 pairings passed ([status](docs/status.md#production-edition-3), [build notes](docs/build-notes.md#round-seven)). The Rust and TypeScript SDKs now repeat that check on every change: each runs the [shared scenarios](conformance/sdk/README.md) with parts served by both SDKs. The [`four-languages`](https://github.com/daniel-ballance/modular-agent/tree/four-languages) tag preserves the Go and Python builds and their results ([ADR 0037](docs/adr/0037-two-languages.md)).
 
 | Read | To learn | Status |
 |---|---|---|
@@ -145,13 +115,13 @@ The project has five layers, each made only from the layers below it; a gap foun
 |---|---|---|
 | 1. Specification | What every agent and part must do, and the wire | [`docs/`](docs/conformance.md#the-documents), [kits](conformance/) |
 | 2. SDK specification | What a developer sees, in each language | [`docs/sdk/`](docs/sdk/README.md); [shared scenarios](conformance/sdk/) |
-| 3. SDKs | One SDK in Rust, TypeScript, Go and Python | each language's directory |
+| 3. SDKs | One SDK in Rust and TypeScript | each language's directory |
 | 4. Reference implementations | `ma`, the same coding agent in each language | [`docs/reference/`](docs/reference/README.md); [reference checks](conformance/reference/) |
 | 5. Demonstrative implementations | Agents that combine SDKs and placements | [`demos/`](demos/) |
 
 The [project notes demo](demos/project-notes/README.md) runs one agent with Rust and TypeScript parts in four placements (in process, stdio, WebSocket and HTTP) and reopens its session after a crash.
 
-Each language is a peer directory with its own toolchain: [`rust/`](rust/README.md), [`typescript/`](typescript/README.md), [`go/`](go/README.md) and [`python/`](python/README.md). Each also holds the clean-room build its SDK wraps. Background, such as the research and pressure tests that shaped the design, is in [`docs/research/`](docs/research/), [`docs/pressure-test/`](docs/pressure-test/), [`docs/build-notes.md`](docs/build-notes.md) and [`docs/one-pager.html`](docs/one-pager.html).
+Each language is a peer directory with its own toolchain: [`rust/`](rust/README.md) and [`typescript/`](typescript/README.md). Each also holds the clean-room build its SDK wraps. Background, such as the research and pressure tests that shaped the design, is in [`docs/research/`](docs/research/), [`docs/pressure-test/`](docs/pressure-test/), [`docs/build-notes.md`](docs/build-notes.md) and [`docs/one-pager.html`](docs/one-pager.html).
 
 To change anything, read [CONTRIBUTING.md](CONTRIBUTING.md). There is no hosted CI: [`scripts/check.sh`](scripts/check.sh) runs every check locally.
 

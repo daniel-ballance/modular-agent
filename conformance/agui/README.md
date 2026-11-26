@@ -80,17 +80,7 @@ Use the same `hold`, `barrier`, `release`, `inspect` and `erase` controls as abo
 The fixture is an SDK app, not a replacement adapter. Use the real listener, Harness, Runtime, output gate and history store. See [Serving AG-UI](../../docs/sdk/placement.md#serving-ag-ui). Each launcher uses `ma` for ordinary conversations and an SDK fixture for operator-only setup. From the repository root:
 
 - TypeScript: build the workspace, then run `node conformance/agui/run.mjs -- "$(command -v node)" "$PWD/typescript/scripts/agui-ma.mjs"`.
-- Go: `go/scripts/check-agui.sh` builds `ma` and the fixture, installs the kit dependencies in scratch and runs the cases through `go.mjs`.
 - Rust: `conformance/agui/rust.sh` builds `ma` and the `sdk-scenarios` example `agui_fixture` and runs the cases through `rust-launch.mjs`.
-
-To run the Python implementation, run `(cd python && uv sync --python 3.13)` and `npm ci --prefix conformance/agui` from the repository root, then run:
-
-```sh
-node conformance/agui/run.mjs -- "$PWD/python/.venv/bin/python" "$PWD/python/scripts/agui_fixture.py"
-```
-
-The launcher uses the Python `ma --agui --acp` command for history, encoding and the stock conversation. For the other cases it starts a scripted SDK agent with the kit's actors, plugin, controls and disposable TLS files. Both use the SDK listener and the standard configuration's scripted Provider.
-
 
 The kit starts the command in a new process group, with a fresh home, working directory and data directory, and without the inherited environment except `PATH`. It sets:
 

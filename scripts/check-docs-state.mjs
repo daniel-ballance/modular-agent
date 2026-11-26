@@ -19,7 +19,6 @@ if (args.length && (args.length !== 2 || args[0] !== "--root" || !args[1])) {
 const root = args.length ? resolve(args[1]) : fileURLToPath(new URL("..", import.meta.url));
 const adrIndex = "docs/adr/README.md";
 const sdkIndex = "docs/sdk/README.md";
-const goVersion = "go/api/api.go";
 const adrFile = /^docs\/adr\/\d{4}-[^/]+\.md$/;
 const gapHeading = /^(?:known gaps|gaps|findings)\b|\b(?:gaps|findings)$|^remaining$|^remaining\b.*\b(?:work|gaps)$|^proposed\b.*\btext\b|^proposed, not yet written$/i;
 const historicalGaps = /^(?:docs\/(?:adr|research|pressure-test)\/)|\/docs\/clean-room\//;
@@ -275,42 +274,6 @@ function checkNodePackage(file, text, version) {
   }
 }
 
-const pythonName = (name) => name.toLowerCase().replace(/[-_.]+/g, "-");
-
-function* pythonPins(requirement) {
-  if (typeof requirement !== "string") return;
-  const match = requirement.split(";", 1)[0].trim().match(/^([a-z\d](?:[a-z\d._-]*[a-z\d])?)(?:\s*\[[^\]]*\])?\s*(.*)$/is);
-  if (!match || match[2].startsWith("@")) return;
-  const [, name, specifiers] = match;
-  for (const specifier of specifiers.replace(/^\((.*)\)$/s, "$1").split(",")) {
-    const pin = specifier.trim().match(/^===?\s*([^=\s]\S*)$/);
-    if (pin) yield { name, value: pin[1] };
-  }
-}
-
-function checkPython(packages, version) {
-  const names = new Set([...packages.values()].map(({ data }) => data.project?.name).filter((name) => typeof name === "string").map(pythonName));
-  for (const [file, manifest] of packages) {
-    checkTomlVersion(file, manifest, ["project", "version"], version, "Python project version");
-    const { data } = manifest;
-    const optionals = Object.keys(data.project?.["optional-dependencies"] ?? {});
-    const groups = Object.keys(data["dependency-groups"] ?? {});
-    const arrays = [["project", "dependencies"], ...optionals.map((group) => ["project", "optional-dependencies", group]), ...groups.map((group) => ["dependency-groups", group])];
-    for (const path of arrays) {
-      const dependencies = atPath(data, path);
-      if (!Array.isArray(dependencies)) continue;
-      for (const [i, requirement] of dependencies.entries()) {
-        for (const { name, value } of pythonPins(requirement)) {
-          if (value !== version && names.has(pythonName(name))) {
-            const line = tomlLine(manifest, [...path, i], requirement);
-            checkVersion(file, { line, value }, version, `Dependency ${name}`);
-          }
-        }
-      }
-    }
-  }
-}
-
 function checkVersions(files) {
   const changelog = read("CHANGELOG.md");
   const releaseLine = /^ {0,3}##\s+(\[?v?\d+[^\s]*)/;
@@ -323,22 +286,17 @@ function checkVersions(files) {
     return;
   }
   checkVersion(sdkIndex, first(linesOf(read(sdkIndex)), /^\*\*Status:\s*([^,\s*]+)/), version.split(".").slice(0, 2).join("."), "SDK specification version");
-  checkVersion(goVersion, first(linesOf(read(goVersion)), /^\s*const\s+ImplementationVersion\s*=\s*"([^"]+)"/), version, "Go implementation version");
-  const python = new Map();
   for (const file of files) {
     if (file.endsWith("package.json")) checkNodePackage(file, read(file), version);
-    else if (!file.endsWith(".md")) {
+    else if (file.endsWith("Cargo.toml")) {
       const manifest = parseManifest(file);
-      if (!manifest) continue;
-      if (file.endsWith("Cargo.toml")) checkCargo(file, manifest, version);
-      else python.set(file, manifest);
+      if (manifest) checkCargo(file, manifest, version);
     }
   }
-  checkPython(python, version);
 }
 
 try {
-  const files = git("ls-files", "-z", "--", "*.md", "Cargo.toml", "*/Cargo.toml", ":(glob)typescript/packages/*/package.json", ":(glob)python/**/pyproject.toml")
+  const files = git("ls-files", "-z", "--", "*.md", "Cargo.toml", "*/Cargo.toml", ":(glob)typescript/packages/*/package.json")
     .split("\0").filter(Boolean);
   const markdown = files.filter((file) => file.endsWith(".md"));
   const statuses = new Map(markdown.filter((file) => adrFile.test(file)).map((file) => [file, adrStatus(read(file))]));

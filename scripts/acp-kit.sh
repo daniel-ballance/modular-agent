@@ -3,7 +3,7 @@
 set -euo pipefail
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 language="${1:?language required}"
-case "$language" in rust|typescript|go|python) ;; *) echo "unknown language: $language" >&2; exit 2 ;; esac
+case "$language" in rust|typescript) ;; *) echo "unknown language: $language" >&2; exit 2 ;; esac
 group="${2:?ACP group required}"
 flags=(--group "$group")
 case "$group" in

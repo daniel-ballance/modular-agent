@@ -2,11 +2,11 @@
 
 **Status: 0.3, accepted.** [ADR 0027](../adr/0027-sdk-0-1-and-edition-4.md) accepted the first revision.
 
-All four SDKs implement the specification: [Rust](../../rust/crates/sdk/README.md), [TypeScript](../../typescript/packages/core/README.md), [Go](../../go/modular/README.md) and [Python](../../python/SDK.md). Each SDK runs the [shared scenarios](../../conformance/sdk/README.md) in process and served by every SDK. See [Status](../status.md) for release results. Each SDK runs the [guide examples](guides/README.md) as tests.
+Both SDKs implement the specification: [Rust](../../rust/crates/sdk/README.md) and [TypeScript](../../typescript/packages/core/README.md). Each SDK runs the [shared scenarios](../../conformance/sdk/README.md) in process and served by every SDK. See [Status](../status.md) for release results. Each SDK runs the [guide examples](guides/README.md) as tests.
 
 ADR 0025 records the [first](../adr/0025-sdk-specification.md#the-first-build-round) and [second](../adr/0025-sdk-specification.md#the-second-build-round) rounds of building the SDKs.
 
-This is layer 2 of the [five layers](../adr/0024-five-layers.md). The [specification](../conformance.md#the-documents) says what an agent and its parts must do and what crosses the wire. It deliberately says nothing about the API a developer writes against. This document set does. It describes one SDK, expressed in four languages, so that someone who has built an agent in one language can build one in another without learning a new model.
+This is layer 2 of the [five layers](../adr/0024-five-layers.md). The [specification](../conformance.md#the-documents) says what an agent and its parts must do and what crosses the wire. It deliberately says nothing about the API a developer writes against. This document set does. It describes one SDK, expressed in two languages, so that someone who has built an agent in one language can build one in another without learning a new model.
 
 An agent builds each SDK from these documents and the specification. Where it has to guess, the guess becomes a change here first.
 
@@ -22,7 +22,7 @@ An agent builds each SDK from these documents and the specification. Where it ha
 | [Testing](testing.md) | The testing kit each SDK ships, and the shared scenarios that check the SDKs against each other |
 | [API reference](reference.md) | How to build each language's generated reference |
 | [Languages](languages.md) | How each language expresses the API, and the package names |
-| [Guides](guides/README.md) | Task-by-task walkthroughs in all four languages. Their examples become tests. |
+| [Guides](guides/README.md) | Task-by-task walkthroughs in both languages. Their examples become tests. |
 
 ## What the SDK is for
 
@@ -47,7 +47,7 @@ The SDK serves all three with one model. A developer meets the parts of the spec
 
 ## How the SDKs are checked
 
-The SDK specification sets requirements for the four SDKs. It does not change what conformance means: an agent built without an SDK still conforms if it meets the specification.
+The SDK specification sets requirements for both SDKs. It does not change what conformance means: an agent built without an SDK still conforms if it meets the specification.
 
 Requirements use the [keywords](../conformance.md#keywords) of the specification. An SDK passes when:
 
@@ -60,6 +60,6 @@ The third check is the swap matrix of the experiment, made part of every SDK's t
 
 ## Versioning
 
-The four SDKs share one version number, the revision of this specification. SDK 0.3 in any language implements SDK specification 0.3. Patch releases are each SDK's own. Implement the current normative documents and SDK scenarios from the same revision. Report the commit or tag tested and the binding versions implemented.
+Both SDKs share one version number, the revision of this specification. SDK 0.3 in any language implements SDK specification 0.3. Patch releases are each SDK's own. Implement the current normative documents and SDK scenarios from the same revision. Report the commit or tag tested and the binding versions implemented.
 
-Until 1.0, a minor version can break the API. From 1.0, a breaking change needs a major version in all four.
+Until 1.0, a minor version can break the API. From 1.0, a breaking change needs a major version in both.

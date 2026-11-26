@@ -20,23 +20,7 @@ history_service() { # Language and store directory; sets history_url and tracks 
       }))' "$dir")
       service=(node "$repo/typescript/packages/services/dist/src/serve.js" history "$settings")
       ;;
-    go)
-      service=("$repo/go/.bin/modular-service" --role history --listen "$address" --token-file "$dir/token" --state "$dir/store" --history-ttl 2500ms)
-      ;;
-    python)
-      service=("$repo/python/.venv/bin/python" -c '
-import signal
-import sys
-from pathlib import Path
-from modular_agent import file_history, serve_history
-
-root = Path(sys.argv[1])
-listener = serve_history(file_history(root / "store"), address=("127.0.0.1", 0),
-                         token_file=root / "token", witness=root / "witness", lease_ttl=2.5)
-print(listener.url, flush=True)
-signal.pause()
-' "$dir")
-      ;;
+    *) echo "unknown history language: $history_language" >&2; return 2 ;;
   esac
   HOME="$work" "${service[@]}" >"$dir/url" 2>"$dir/service.log" &
   local pid=$!
