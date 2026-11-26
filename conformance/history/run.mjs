@@ -8,6 +8,8 @@ import { request as httpsRequest } from "node:https";
 import { isDeepStrictEqual as equal } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import { runErasureRegistry } from "./erasure-registry.mjs";
+import { tracedReply } from "./http-trace.mjs";
+import { leaseFixtures } from "./lease-fixture.mjs";
 
 const [url, tokenFile, ...options] = process.argv.slice(2);
 const registryChecks = options[0] === "--erasure-registry-checks";
@@ -29,16 +31,30 @@ if (!safe(base) || (isolation && (!safe(otherBase) || otherBase.origin === base.
 }
 const token = readFileSync(tokenFile, "utf8").trim();
 const results = [];
-const check = (name, ok) => { results.push(!!ok); console.log(`${ok ? "PASS" : "FAIL"}  ${name}`); };
-const run = async (name, fn) => {
-	try { await fn(); } catch (e) { check(`${name}: ${e.message}`, false); }
+let trace;
+const check = (name, ok) => {
+	results.push(!!ok);
+	console.log(`${ok ? "PASS" : "FAIL"}  ${name}`);
+	if (!ok && trace) {
+		for (const request of trace) console.log(`      HTTP ${JSON.stringify(request)}`);
+	}
 };
-const req = async (method, path, body, { auth = token, raw = false, media = "application/json", endpoint = base, headers = {} } = {}) => {
-	const res = await fetch(endpoint.href.replace(/\/$/, "") + path, {
-		method, redirect: "error", signal: AbortSignal.timeout(15000),
+const run = async (name, fn, requests) => {
+	trace = requests;
+	try { await fn(); } catch (e) { check(`${name}: ${e.message.replace(/\r?\n/g, "\\n")}`, false); }
+	finally {
+		await leases.close();
+		trace = undefined;
+	}
+};
+const req = async (method, path, body, { auth = token, raw = false, media = "application/json", endpoint = base, headers = {}, record = trace, signal = AbortSignal.timeout(15000) } = {}) => {
+	const send = () => fetch(endpoint.href.replace(/\/$/, "") + path, {
+		method, redirect: "error", signal,
 		headers: { ...(auth ? { authorization: `Bearer ${auth}` } : {}), ...(body !== undefined ? { "content-type": media } : {}), ...headers },
 		body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
 	});
+	if (record) return tracedReply(method, path, send, record);
+	const res = await send();
 	return { status: res.status, headers: res.headers, body: await res.json().catch(() => null) };
 };
 // fetch normalizes dot segments before sending them. Send the request target verbatim.
@@ -66,10 +82,26 @@ const project = `/tmp/${id()}/+%`;
 const path = (id) => `/v1/sessions/${encodeURIComponent(id)}`;
 const put = (sid, meta) => req("PUT", path(sid), meta);
 const acquire = (sid, owner) => req("POST", `${path(sid)}/lease`, { owner });
-const renew = (sid, lease) => req("POST", `${path(sid)}/lease/${encodeURIComponent(lease)}/renew`);
-const release = (sid, lease) => req("DELETE", `${path(sid)}/lease/${encodeURIComponent(lease)}`);
-const append = (sid, lease, entries) => req("POST", `${path(sid)}/entries`, { lease, entries });
-const erase = (sid, lease, entryIds) => req("POST", `${path(sid)}/erase`, { lease, entryIds });
+const renew = (sid, lease, signal) => req("POST", `${path(sid)}/lease/${encodeURIComponent(lease)}/renew`, undefined, { signal });
+const leases = leaseFixtures(renew);
+const keepAcquire = async (sid, owner) => {
+	const sentAt = performance.now();
+	const r = await acquire(sid, owner);
+	if (r.status === 200 && typeof r.body?.lease === "string" && positive(r.body.ttlMs)) leases.keep(sid, r.body, sentAt);
+	return r;
+};
+const release = async (sid, lease) => {
+	await leases.stop(lease);
+	return req("DELETE", `${path(sid)}/lease/${encodeURIComponent(lease)}`);
+};
+const append = async (sid, lease, entries) => {
+	await leases.ready(lease);
+	return req("POST", `${path(sid)}/entries`, { lease, entries });
+};
+const erase = async (sid, lease, entryIds) => {
+	await leases.ready(lease);
+	return req("POST", `${path(sid)}/erase`, { lease, entryIds });
+};
 const read = (sid, query = "") => req("GET", path(sid) + query);
 const pageCap = 4 * 1024 * 1024;
 let ttl, service;
@@ -79,12 +111,18 @@ async function startService(phase = "initial") {
 		child.once("exit", resolve);
 		child.once("error", resolve);
 	}) };
+	const probe = trace ? [] : undefined;
 	for (let i = 0; i < 300; i++) {
 		if (!child.pid || child.exitCode !== null || child.signalCode !== null) break;
-		const r = await req("GET", "/v1", undefined, { headers: { Connection: "close" } }).catch(() => null);
-		if (r?.status === 200) return r;
+		if (probe) probe.length = 0;
+		const r = await req("GET", "/v1", undefined, { headers: { Connection: "close" }, record: probe }).catch(() => null);
+		if (r?.status === 200) {
+			if (probe) trace.push(...probe);
+			return r;
+		}
 		await sleep(50);
 	}
+	if (probe) trace.push(...probe);
 	throw Error("fixture service did not start");
 }
 async function stopService() {
@@ -124,11 +162,13 @@ await run("session lifecycle", async () => {
 	check("session: changed metadata conflicts", err(await put(sid, { ...meta, fixture: { n: 2 } }), 409, "conflict"));
 	await put(empty, meta);
 	const owner = id();
-	const a = await acquire(sid, owner);
+	const a = await keepAcquire(sid, owner);
 	const lease = a.body?.lease;
 	check("lease: acquire and same-owner resend", a.status === 200 && typeof lease === "string" && lease.length > 0 && a.body.ttlMs === ttl && ok(await acquire(sid, owner), a.body));
 	check("Writing: one writer at a time: the lease uses 1 to 128 base64url characters", typeof lease === "string" && lease.length >= 1 && lease.length <= 128 && !/[^A-Za-z0-9_-]/.test(lease));
+	await leases.ready(lease);
 	check("lease: a different owner gets held with retryAfterMs", held(await acquire(sid, id()), ttl));
+	await leases.ready(lease);
 	check("lease: renewal reports the declared TTL", ok(await renew(sid, lease), { ttlMs: ttl }));
 	const usage = { input: 5, output: 2, cacheRead: 0, cacheWrite: 1, cost: 0.25 };
 	const batch = [
@@ -141,6 +181,7 @@ await run("session lifecycle", async () => {
 	check("append: equal same-batch duplicates do not count twice", ok(await append(sid, lease, [batch[0], ...batch]), { kept: batch.length }));
 	check("append: resend and empty batch keep nothing", ok(await append(sid, lease, batch), { kept: 0 }) && ok(await append(sid, lease, []), { kept: 0 }));
 	const numeric = JSON.stringify({ lease, entries: [batch[0]] }).replace('"b":2,"a":1', '"a":1.0,"b":2');
+	await leases.ready(lease);
 	check("append: numbers compare by value and object order is ignored", ok(await req("POST", `${path(sid)}/entries`, numeric, { raw: true }), { kept: 0 }));
 	const third = { id: id(), parentId: batch[1].id };
 	check("append: conflicting staged duplicate rejects the entire batch", err(await append(sid, lease, [third, { ...third, unknown: false }]), 409, "conflict"));
@@ -151,7 +192,7 @@ await run("session lifecycle", async () => {
 	check("read: bad and repeated query values are refused", err(await read(sid, "?limit=501"), 400, "invalid_request") && err(await read(sid, "?limit=1&limit=2"), 400, "invalid_request"));
 	for (const [s, m] of [[other, { ...meta, project: `${project}-other` }], [newer, { ...meta, created: meta.created + 1 }]]) {
 		await put(s, m);
-		const l = (await acquire(s, id())).body?.lease;
+		const l = (await keepAcquire(s, id())).body?.lease;
 		await append(s, l, [{ id: id(), parentId: null }]);
 		await release(s, l);
 	}
@@ -160,6 +201,7 @@ await run("session lifecycle", async () => {
 	check("list: exact project filter, newest first, unused absent", ok(listed, { sessions: [{ ...meta, created: meta.created + 1, id: newer }, session] }));
 	check("list: filter precedes cursor selection", err(await req("GET", `/v1/sessions${filter}&after=${other}`), 404, "unknown_session"));
 	const targets = [batch[1].id, id(), batch[0].id, batch[1].id, ...batch.slice(2).map((e) => e.id)];
+	await leases.ready(lease);
 	check("erase: held or wrong generation leaves payloads intact", held(await erase(sid, undefined, targets), ttl) && err(await erase(sid, id(), targets), 409, "lost") && ok(await read(sid), { session, entries: batch }));
 	const erased = { erased: [...new Set(targets.filter((target) => batch.some((e) => e.id === target)))] };
 	check("erase: ordered distinct known IDs, also on same-lease retry", ok(await erase(sid, lease, targets), erased) && ok(await erase(sid, lease, targets), erased));
@@ -173,20 +215,20 @@ await run("session lifecycle", async () => {
 	check("Erasure / Entry fields and tombstones: exact associations, sources, usage and keyed job owner survive", ok(await read(sid), { session, entries: tombstones }));
 	check("erase: an erased id cannot regain its payload", err(await append(sid, lease, batch), 409, "conflict"));
 	check("lease: release and release retry", ok(await release(sid, lease), {}) && ok(await release(sid, lease), {}));
-	const fresh = await acquire(sid, owner);
+	const fresh = await keepAcquire(sid, owner);
 	const l2 = fresh.body?.lease;
 	check("lease: same owner gets a fresh generation after release", fresh.status === 200 && typeof l2 === "string" && l2 !== lease);
 	const race = await Promise.all([release(sid, lease), append(sid, lease, [third]), erase(sid, lease, targets), renew(sid, lease), append(sid, l2, [third])]);
 	check("lease: delayed stale release, append, erase and renew cannot fence the new writer", ok(race[0], {}) && race.slice(1, 4).every((r) => err(r, 409, "lost")) && ok(race[4], { kept: 1 }) && ok(await read(sid), { session, entries: [...tombstones, third] }));
 	await release(sid, l2);
 	check("erase: no lease is needed without a writer", ok(await erase(sid, undefined, [third.id]), { erased: [third.id] }));
-});
+}, []);
 
 // History HTTP: Erasure; Shared data: Entry fields and tombstones. Opaque rows isolate the projection.
 await run("envelope associations", async () => {
 	const sid = id(), meta = { project, created: Date.now() };
 	await put(sid, meta);
-	const { body: { lease } } = await acquire(sid, id());
+	const { body: { lease } } = await keepAcquire(sid, id());
 	const cases = [
 		[{ kind: "input", inputId: "input" }, { inputId: "input" }],
 		[{ kind: "inputAccepted", data: { inputId: "nested" } }, {}],
@@ -209,7 +251,7 @@ await run("envelope associations", async () => {
 	const next = (await acquire(sid, id())).body.lease;
 	check("Erasure: a new writer sees the same identities", !!next && ok(await read(sid), { session: { id: sid, ...meta }, entries: expected }));
 	await release(sid, next);
-});
+}, []);
 
 // History HTTP: The basics (path segments are validated before normalization).
 await run("dot segments", async () => {
@@ -229,7 +271,7 @@ await run("validation and paging", async () => {
 	check("validation: malformed JSON and wrong media type", err(await req("PUT", path(sid), "{", { raw: true }), 400, "invalid_request") && err(await req("PUT", path(sid), meta, { media: "text/plain" }), 415, "unsupported_media_type"));
 	check("validation: unknown session on read, append, erase, renew and release", (await Promise.all([read(missing), append(missing, id(), []), erase(missing, undefined, []), renew(missing, id()), release(missing, id())])).every((r) => err(r, 404, "unknown_session")));
 	await put(sid, meta);
-	const lease = (await acquire(sid, id())).body?.lease;
+	const lease = (await keepAcquire(sid, id())).body?.lease;
 	const entry = (i, payload) => ({ id: `${sid}-${i}`, parentId: null, ...(payload === undefined ? {} : { payload }) });
 	const tooBig = entry("oversize", "x".repeat(pageCap));
 	check("paging: oversized entry rejects the whole append", err(await append(sid, lease, [entry("staged"), tooBig]), 413, "entry_too_large") && ok(await read(sid), { session: { id: sid, ...meta }, entries: [] }));
@@ -252,7 +294,7 @@ await run("validation and paging", async () => {
 await run("The basics: JSON nesting", async () => {
 	const sid = id(), meta = { project, created: Date.now() };
 	await put(sid, meta);
-	const { body: { lease } } = await acquire(sid, id());
+	const { body: { lease } } = await keepAcquire(sid, id());
 	try {
 		const opaque = Array.from({ length: 61 }).reduce((inner) => [inner], 1);
 		const entry = { id: id(), parentId: null, kind: "kit.depth", opaque };
@@ -313,7 +355,7 @@ if (restartFlag) {
 	});
 	if (registryChecks) {
 		await run("pending-erasure registry", () => runErasureRegistry({
-			url: base.href, tokenFile, project, check, ttl,
+			url: base.href, tokenFile, project, check, ttl, trace,
 			req: (method, path, body, opts) => req(method, path, body, {
 				...opts, headers: { ...opts?.headers, Connection: "close" },
 			}),
@@ -321,7 +363,7 @@ if (restartFlag) {
 				await stopService();
 				return await startService("restart");
 			},
-		}));
+		}), []);
 	}
 	await stopService();
 } else console.log("SKIP  restart hold (use --restart with a disposable service command)");
