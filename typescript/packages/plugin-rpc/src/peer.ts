@@ -101,7 +101,9 @@ export class Peer {
 		return answer;
 	}
 
+	// A closed connection may have no stream left to write to, so a late answer is dropped.
 	private post(m: Message): void {
+		if (this.closedWith) return;
 		this.write(JSON.stringify(m));
 	}
 
