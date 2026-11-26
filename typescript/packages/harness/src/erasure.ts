@@ -49,6 +49,7 @@ export function memoryPendingErasure(): PendingErasure {
 	};
 }
 
+const BUSY_TIMEOUT_MS = 5000;
 const fileRegistries = new Map<string, PendingErasure>();
 
 /** The registry is beside the history, not a per-agent cache. SQLite fences publications across processes. */
@@ -59,7 +60,7 @@ export function filePendingErasure(dir: string): PendingErasure {
 	if (existing) return existing;
 	const init = new DatabaseSync(path);
 	try {
-		init.exec("PRAGMA busy_timeout = 5000; PRAGMA synchronous = FULL; CREATE TABLE IF NOT EXISTS erasure (id TEXT PRIMARY KEY, intent TEXT NOT NULL)");
+		init.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}; PRAGMA synchronous = FULL; CREATE TABLE IF NOT EXISTS erasure (id TEXT PRIMARY KEY, intent TEXT NOT NULL)`);
 	} finally { init.close(); }
 	const current = new AsyncLocalStorage<{ db: DatabaseSync; active: boolean }>();
 	let tail = Promise.resolve();
@@ -70,7 +71,10 @@ export function filePendingErasure(dir: string): PendingErasure {
 				const scope = current.getStore();
 				if (scope?.active) return read(scope.db);
 				const reader = new DatabaseSync(path, { readOnly: true });
-				try { return read(reader); } finally { reader.close(); }
+				try {
+					reader.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+					return read(reader);
+				} finally { reader.close(); }
 			} catch (error) { throw unavailable(error); }
 		},
 		exclusive<T>(work: () => Promise<T>) {
@@ -78,7 +82,7 @@ export function filePendingErasure(dir: string): PendingErasure {
 				const db = new DatabaseSync(path);
 				const scope = { db, active: true };
 				try {
-					try { db.exec("PRAGMA busy_timeout = 5000; PRAGMA synchronous = FULL; BEGIN IMMEDIATE"); }
+					try { db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}; PRAGMA synchronous = FULL; BEGIN IMMEDIATE`); }
 					catch (error) { throw unavailable(error); }
 					const result = await current.run(scope, work);
 					try { db.exec("COMMIT"); } catch (error) { throw unavailable(error); }

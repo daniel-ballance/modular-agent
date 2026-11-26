@@ -1,12 +1,16 @@
+/// <reference lib="es2024.sharedmemory" />
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
+import { once } from "node:events";
 import { cp, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { test } from "node:test";
+import { Worker } from "node:worker_threads";
 import { createAgent, definePlugin, fileHistory, httpHistory, serveHistory } from "@modular-agent/core";
 import { memoryEnvironment, testAgent } from "@modular-agent/core/testing";
+import { filePendingErasure } from "@modular-agent/harness";
 import { historyService } from "@modular-agent/services";
 
 test("pending marks follow forks across held writers and survive restart", async t => {
@@ -252,4 +256,88 @@ test("loss of the local freshness source fails closed", async t => {
     await assert.rejects(session.history(), { code: "unavailable" });
     await assert.rejects(session.send("Try another input", "now"), { code: "unavailable" });
   } finally { await rename(join(dir, "saved-registry"), join(dir, "history", "pending-erasure.sqlite")); }
+});
+
+// The reader must ask SQLite for its lock while the writer still holds it. A test cannot see that
+// request. So the reader takes a timestamp just before it calls intents(), the writer takes one just
+// before COMMIT, and an attempt counts only if the reader's came at least MARGIN_MS earlier; it is
+// retried otherwise. Without the busy timeout such an attempt throws unless the reader stalled for
+// MARGIN_MS between its timestamp and its lock request. The lock-timeout test below holds the lock
+// throughout and shows the wait on its own.
+const HOLD_MS = 2_000;
+const MARGIN_MS = 1_500;
+
+async function readDuringWriteLock(expected: { id: string }) {
+  const dir = await mkdtemp(join(tmpdir(), "sdk-erasure-lock-wait-"));
+  const state = new Int32Array(new SharedArrayBuffer(8));
+  filePendingErasure(dir);
+  const worker = new Worker(new URL("./fixtures/erasure-reader.js", import.meta.url), {
+    workerData: { dir, state },
+  });
+  try {
+    const replyPromise = once(worker, "message");
+    assert.notEqual(await Atomics.waitAsync(state, 1, 0, 10_000).value, "timed-out", "reader worker did not become ready");
+    const locker = new DatabaseSync(join(dir, "pending-erasure.sqlite"));
+    let commitAt: number;
+    try {
+      locker.exec("BEGIN EXCLUSIVE");
+      locker.prepare("INSERT INTO erasure VALUES (?, ?)").run(expected.id, JSON.stringify(expected));
+      Atomics.store(state, 0, 1);
+      Atomics.notify(state, 0);
+      await new Promise(resolve => setTimeout(resolve, HOLD_MS));
+      commitAt = performance.timeOrigin + performance.now();
+      locker.exec("COMMIT");
+    } finally {
+      try { if (locker.isTransaction) locker.exec("ROLLBACK"); } finally { locker.close(); }
+    }
+    const [reply] = await replyPromise as [{ ok: boolean; intents?: unknown; startedAt: number }];
+    return { reply, lead: commitAt - reply.startedAt };
+  } finally {
+    Atomics.store(state, 0, 1);
+    Atomics.notify(state, 0);
+    await worker.terminate();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+test("filePendingErasure reader waits for a held write lock and returns committed intents", { timeout: 60_000 }, async () => {
+  const expected = {
+    id: "intent-1",
+    sessionId: "session-1",
+    actorId: "actor-1",
+    targets: ["entry-1"],
+    copies: [{ sessionId: "session-1", id: "entry-1", erased: false }],
+  };
+  const leads: number[] = [];
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { reply, lead } = await readDuringWriteLock(expected);
+    assert.deepEqual({ ...reply, startedAt: undefined }, { ok: true, intents: [expected], startedAt: undefined }, "intents() failed instead of waiting for the write lock");
+    if (lead >= MARGIN_MS) return;
+    leads.push(Math.round(lead));
+  }
+  assert.fail(`the reader never called intents() ${MARGIN_MS}ms before the commit; leads were ${leads.join(", ")}ms`);
+});
+
+test("filePendingErasure reader fails with unavailable when a write lock outlives the busy timeout", { timeout: 30_000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), "sdk-erasure-lock-timeout-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const registry = filePendingErasure(dir);
+  const locker = new DatabaseSync(join(dir, "pending-erasure.sqlite"));
+  locker.exec("BEGIN EXCLUSIVE");
+  const started = performance.now();
+  try {
+    assert.throws(
+      () => registry.intents(),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.equal((error as { code?: string }).code, "unavailable");
+        assert.equal((error.cause as { errcode?: number } | undefined)?.errcode, 5);
+        return true;
+      },
+    );
+  } finally {
+    try { locker.exec("ROLLBACK"); } finally { locker.close(); }
+  }
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed >= 4_500, `expected reader to wait for busy_timeout before failing, failed after ${Math.round(elapsed)}ms`);
 });
