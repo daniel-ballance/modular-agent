@@ -165,12 +165,15 @@ async function poll(read, what, { attempts = Infinity, delay = 50, recheck, time
 	});
 }
 
-async function cancelPending(agent, sessionId, pending) {
+async function cancelPending(agent, sessionId, pending, lifetime) {
 	// A settled prompt wins the race. The sentinel wins only while it is pending.
 	const outstanding = Symbol();
 	if (await Promise.race([pending, outstanding]).catch(() => undefined) !== outstanding) return;
 	await agent.ctx.notify(methods.agent.session.cancel, { sessionId }).catch(() => undefined);
-	await within(10000, pending, "cancelled prompt").catch(() => undefined);
+	// A command that still launches would block opening the pipe's write end; keep a reader ready.
+	const reader = lifetime && setInterval(() => lifetime.opened(), 50);
+	try { await within(10000, pending, "cancelled prompt").catch(() => undefined); }
+	finally { if (reader) clearInterval(reader); }
 }
 
 function commandLifetime(marker, declaration) {
@@ -821,7 +824,7 @@ await attempt("cancel", async () => {
 	try {
 		const pending = bash(agent, sessionId, `${lifetime?.start ?? ""}echo started > ${name}; sleep 6; echo finished >> ${name}`);
 		await poll(() => (!lifetime || lifetime.opened()) && markerState() === "started", "cancel fixture command start",
-			{ attempts: 100, recheck: true, pending, cleanup: () => cancelPending(agent, sessionId, pending) });
+			{ attempts: 100, recheck: true, pending, cleanup: () => cancelPending(agent, sessionId, pending, lifetime) });
 		startedMs = Math.round(performance.now() - sent);
 		check("cancel: fixture command actually started", true);
 		t0 = performance.now();
@@ -1516,7 +1519,7 @@ if (crashChecks) {
 		try {
 			const pending = bash(agent, sid, `${lifetime?.start ?? ""}echo start >> ${name}; sleep 4; echo end >> ${name}`);
 			const error = await poll(() => (!lifetime || lifetime.opened()) && existsSync(marker) && readFileSync(marker, "utf8").includes("start"),
-				"crash fixture command start", { attempts: 200, recheck: true, pending, cleanup: () => cancelPending(agent, sid, pending) })
+				"crash fixture command start", { attempts: 200, recheck: true, pending, cleanup: () => cancelPending(agent, sid, pending, lifetime) })
 				.then(() => null, (error) => error);
 			if (!check("crash: the bash call started", !error, error?.message)) return;
 			await crash(agent);
