@@ -258,21 +258,47 @@ test("loss of the local freshness source fails closed", async t => {
   } finally { await rename(join(dir, "saved-registry"), join(dir, "history", "pending-erasure.sqlite")); }
 });
 
-test("filePendingErasure reader waits for a held write lock and returns committed intents", { timeout: 30_000 }, async t => {
+// The reader must ask SQLite for its lock while the writer still holds it. A test cannot see that
+// request, so an attempt counts only if intents() began at least MARGIN_MS before the commit, and
+// is retried otherwise. Without the busy timeout such an attempt throws unless the reader stalled
+// for MARGIN_MS between entering intents() and asking for the lock.
+const HOLD_MS = 2_000;
+const MARGIN_MS = 1_500;
+
+async function readDuringWriteLock(expected: { id: string }) {
   const dir = await mkdtemp(join(tmpdir(), "sdk-erasure-lock-wait-"));
   const state = new Int32Array(new SharedArrayBuffer(8));
   filePendingErasure(dir);
   const worker = new Worker(new URL("./fixtures/erasure-reader.js", import.meta.url), {
     workerData: { dir, state },
   });
-  const replyPromise = once(worker, "message");
-  t.after(async () => {
+  try {
+    const replyPromise = once(worker, "message");
+    assert.notEqual(await Atomics.waitAsync(state, 1, 0, 10_000).value, "timed-out", "reader worker did not become ready");
+    const locker = new DatabaseSync(join(dir, "pending-erasure.sqlite"));
+    let releasedAt: number;
+    try {
+      locker.exec("BEGIN EXCLUSIVE");
+      locker.prepare("INSERT INTO erasure VALUES (?, ?)").run(expected.id, JSON.stringify(expected));
+      Atomics.store(state, 0, 1);
+      Atomics.notify(state, 0);
+      await new Promise(resolve => setTimeout(resolve, HOLD_MS));
+      locker.exec("COMMIT");
+      releasedAt = performance.timeOrigin + performance.now();
+    } finally {
+      try { if (locker.isTransaction) locker.exec("ROLLBACK"); } finally { locker.close(); }
+    }
+    const [reply] = await replyPromise as [{ ok: boolean; intents?: unknown; startedAt: number }];
+    return { reply, lead: releasedAt - reply.startedAt };
+  } finally {
     Atomics.store(state, 0, 1);
     Atomics.notify(state, 0);
     await worker.terminate();
     await rm(dir, { recursive: true, force: true });
-  });
-  assert.notEqual(await Atomics.waitAsync(state, 1, 0, 10_000).value, "timed-out", "reader worker did not become ready");
+  }
+}
+
+test("filePendingErasure reader waits for a held write lock and returns committed intents", { timeout: 60_000 }, async () => {
   const expected = {
     id: "intent-1",
     sessionId: "session-1",
@@ -280,24 +306,14 @@ test("filePendingErasure reader waits for a held write lock and returns committe
     targets: ["entry-1"],
     copies: [{ sessionId: "session-1", id: "entry-1", erased: false }],
   };
-  const locker = new DatabaseSync(join(dir, "pending-erasure.sqlite"));
-  let committed = false;
-  let settledEarly: "ok" | "not-equal" | "timed-out";
-  try {
-    locker.exec("BEGIN EXCLUSIVE");
-    locker.prepare("INSERT INTO erasure VALUES (?, ?)").run(expected.id, JSON.stringify(expected));
-    Atomics.store(state, 0, 1);
-    Atomics.notify(state, 0);
-    assert.notEqual(await Atomics.waitAsync(state, 1, 1, 10_000).value, "timed-out", "reader worker did not enter intents()");
-    settledEarly = await Atomics.waitAsync(state, 1, 2, 100).value;
-    locker.exec("COMMIT");
-    committed = true;
-  } finally {
-    try { if (!committed && locker.isTransaction) locker.exec("ROLLBACK"); } finally { locker.close(); }
+  const leads: number[] = [];
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { reply, lead } = await readDuringWriteLock(expected);
+    assert.deepEqual({ ...reply, startedAt: undefined }, { ok: true, intents: [expected], startedAt: undefined }, "intents() failed instead of waiting for the write lock");
+    if (lead >= MARGIN_MS) return;
+    leads.push(Math.round(lead));
   }
-  const [reply] = await replyPromise;
-  assert.deepEqual(reply, { ok: true, intents: [expected] });
-  assert.equal(settledEarly, "timed-out", "intents() settled before the write lock was released");
+  assert.fail(`intents() never began ${MARGIN_MS}ms before the commit; leads were ${leads.join(", ")}ms`);
 });
 
 test("filePendingErasure reader fails with unavailable when a write lock outlives the busy timeout", { timeout: 30_000 }, async t => {

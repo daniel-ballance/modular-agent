@@ -10,14 +10,10 @@ registry.intents();
 Atomics.store(state, 1, 1);
 Atomics.notify(state, 1);
 Atomics.wait(state, 0, 0);
-Atomics.store(state, 1, 2);
-Atomics.notify(state, 1);
+const startedAt = performance.timeOrigin + performance.now();
 try {
-  parentPort!.postMessage({ ok: true, intents: registry.intents() });
+  parentPort!.postMessage({ ok: true, intents: registry.intents(), startedAt });
 } catch (error) {
   const err = error as Error & { code?: string; cause?: { errcode?: number } };
-  parentPort!.postMessage({ ok: false, code: err.code, errcode: err.cause?.errcode, message: err.message });
-} finally {
-  Atomics.store(state, 1, 3);
-  Atomics.notify(state, 1);
+  parentPort!.postMessage({ ok: false, code: err.code, errcode: err.cause?.errcode, message: err.message, startedAt });
 }
