@@ -142,9 +142,12 @@ test("an agent killed but not yet reaped (a zombie) counts as dead, so its lefto
 	const home = mkdtempSync(join(tmpdir(), "ma-h-"));
 	const run = join(home, "run");
 	mkdirSync(run);
-	// `sleep 0` exits and its parent execs into `sleep 5`, which never reaps it: a zombie.
-	const holder = spawn("sh", ["-c", "sleep 0 & echo $!; exec sleep 5"], { stdio: ["ignore", "pipe", "ignore"] });
+	// The shell starts a child, then execs into `sleep`, which never reaps. The child dies only once the exec is seen,
+	// so the shell cannot reap it first: it stays a zombie.
+	const holder = spawn("sh", ["-c", "sleep 30 & echo $!; exec sleep 30"], { stdio: ["ignore", "pipe", "ignore"] });
 	const zombie = Number(await new Promise<string>((r) => holder.stdout.once("data", (d) => r(String(d)))));
+	assert.ok(await until(() => readFileSync(`/proc/${holder.pid}/comm`, "latin1") === "sleep\n"), "the holder has exec'd");
+	process.kill(zombie, "SIGKILL");
 	assert.ok(await until(() => readFileSync(`/proc/${zombie}/stat`, "latin1").split(") ")[1]?.startsWith("Z")), "the agent pid is a zombie");
 	const runId = "zombie-test-run";
 	const leftover = spawn("sleep", ["60"], { env: { ...process.env, MODULAR_AGENT_RUN: runId }, stdio: "ignore" });
