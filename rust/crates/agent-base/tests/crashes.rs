@@ -115,8 +115,10 @@ async fn crash_process_helper() {
     )
     .await
     .unwrap();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
     h.load(Arc::new(Probes {
-        root: root.clone(),
+        root: project.clone(),
         parallel: case == "parallel",
     }))
     .await
@@ -134,7 +136,7 @@ async fn crash_process_helper() {
         h.close(&id).await.unwrap();
     } else {
         let id = h
-            .create(&root, json!({"model":"fake","approval":"off"}))
+            .create(&project, json!({"model":"fake","approval":"off"}))
             .await
             .unwrap();
         std::fs::write(root.join("session"), &id).unwrap();
@@ -201,6 +203,7 @@ async fn sigkill_mid_tool_proves_both_recovery_policies_and_setsid_containment()
     for runtime in ["transient", "durable"] {
         for case in ["unsafe", "safe", "parallel", "model"] {
             let root = TempDir::new().unwrap();
+            let project = root.path().join("project");
             let mut child = process(root.path(), runtime, case, "start");
             wait_for(|| {
                 assert!(
@@ -213,7 +216,7 @@ async fn sigkill_mid_tool_proves_both_recovery_policies_and_setsid_containment()
                 if case == "model" {
                     return data.entries.iter().any(|e| e.kind == "model.request");
                 }
-                root.path().join("ready").exists()
+                project.join("ready").exists()
                     && (case != "parallel" || data.entries.iter().any(|e| e.kind == "tool.result"))
             })
             .await;
@@ -221,7 +224,7 @@ async fn sigkill_mid_tool_proves_both_recovery_policies_and_setsid_containment()
                 ["shell", "escaped"]
                     .iter()
                     .map(|name| {
-                        std::fs::read_to_string(root.path().join(name))
+                        std::fs::read_to_string(project.join(name))
                             .unwrap()
                             .trim()
                             .parse::<i32>()
@@ -311,13 +314,13 @@ async fn sigkill_mid_tool_proves_both_recovery_policies_and_setsid_containment()
             }
             if case == "safe" || case == "parallel" {
                 assert_eq!(
-                    std::fs::read_to_string(root.path().join("safe")).unwrap(),
+                    std::fs::read_to_string(project.join("safe")).unwrap(),
                     if runtime == "durable" { "2" } else { "1" }
                 );
             }
             if case == "unsafe" || case == "parallel" {
                 assert_eq!(
-                    std::fs::read_to_string(root.path().join("finished")).unwrap(),
+                    std::fs::read_to_string(project.join("finished")).unwrap(),
                     "1",
                     "completed tool repeated"
                 );

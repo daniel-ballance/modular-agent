@@ -336,22 +336,10 @@ async fn cancelling_bash_records_one_cancelled_result_and_stops_the_command() {
     use std::{io::Read, os::unix::fs::OpenOptionsExt};
     let rig = Rig::new(vec![calls(vec![ToolCall::new(
         "bash",
-        json!({"command":"exec 3>lifetime; sleep 60 & printf ready; wait"}),
+        json!({"command":"mkfifo lifetime && exec 3>lifetime; sleep 60 & printf ready; wait"}),
     )])])
     .await;
     let lifetime = rig.project.path().join("lifetime");
-    assert!(
-        std::process::Command::new("mkfifo")
-            .arg(&lifetime)
-            .status()
-            .unwrap()
-            .success()
-    );
-    let mut reader = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(lifetime)
-        .unwrap();
     rig.h
         .submit(&rig.id, "user", "run", Timing::Now, None)
         .await
@@ -359,6 +347,19 @@ async fn cancelling_bash_records_one_cancelled_result_and_stops_the_command() {
     let h = rig.h.clone();
     let id = rig.id.clone();
     let task = tokio::spawn(async move { h.run_next(&id).await });
+    // The shell creates the FIFO after the point has been saved.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !lifetime.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut reader = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(lifetime)
+        .unwrap();
     rig.events.wait("tool.progress").await;
     rig.h.cancel(&rig.id).await.unwrap();
     assert_eq!(

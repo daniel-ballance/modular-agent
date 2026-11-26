@@ -7,6 +7,8 @@ use tokio::{
 #[tokio::test]
 async fn terminal_secret_answers_bypass_ordinary_history_and_event_input() {
     let root = tempfile::TempDir::new().unwrap();
+    let project = root.path().join("project");
+    std::fs::create_dir(&project).unwrap();
     let script = root.path().join("script.json");
     std::fs::write(
         &script,
@@ -25,7 +27,7 @@ async fn terminal_secret_answers_bypass_ordinary_history_and_event_input() {
         .arg("--data-dir")
         .arg(root.path())
         .arg("--project")
-        .arg(root.path())
+        .arg(&project)
         .arg("--global-config")
         .arg(root.path().join("no-settings"))
         .arg("--credential-file")
@@ -106,6 +108,8 @@ async fn terminal_secret_answers_bypass_ordinary_history_and_event_input() {
 #[tokio::test]
 async fn terminal_eof_cancels_unanswerable_questions_without_hanging() {
     let root = tempfile::TempDir::new().unwrap();
+    let project = root.path().join("project");
+    std::fs::create_dir(&project).unwrap();
     let script = root.path().join("script.json");
     std::fs::write(
         &script,
@@ -121,7 +125,7 @@ async fn terminal_eof_cancels_unanswerable_questions_without_hanging() {
         .arg("--data-dir")
         .arg(root.path())
         .arg("--project")
-        .arg(root.path())
+        .arg(&project)
         .arg("--global-config")
         .arg(root.path().join("no-settings"))
         .arg("--fake-script")
