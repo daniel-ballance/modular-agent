@@ -65,6 +65,8 @@ export function remotePlugin(plugin: Pick<Plugin, "name" | "spawn" | "replaces" 
 			keepAlive(false);
 			const p = peer;
 			lines(proc.stdout!, (line) => p.receive(line), () => p.close(new Error(`The process running ${plugin.name} ended`)));
+			// A child that dies first breaks the pipe: that ends the connection, it doesn't crash this process.
+			proc.stdin!.on("error", () => p.close(new Error(`The process running ${plugin.name} ended`)));
 			proc.on("exit", (code, signal) => {
 				p.close(new Error(`The process running ${plugin.name} ended`));
 				if (code !== 0 && signal !== "SIGTERM") api.reportProblem("process", new Error(`exited with ${signal ?? code}`));
@@ -85,6 +87,8 @@ export function remotePlugin(plugin: Pick<Plugin, "name" | "spawn" | "replaces" 
 		async stop() {
 			if (!peer || !child) return;
 			await peer.request("stop").catch(() => undefined);
+			// Close the connection before its stream: an answer still being worked out then has nowhere to go.
+			peer.close(new Error(`${plugin.name} stopped`));
 			child.stdin?.end();
 			const timer = setTimeout(() => child?.kill("SIGTERM"), 2000);
 			await exited;

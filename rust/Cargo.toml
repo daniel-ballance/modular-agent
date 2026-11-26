@@ -23,3 +23,13 @@ libc = "0.2"
 reqwest = { version = "0.13.5", features = ["json", "stream"] }
 futures-util = "0.3"
 opentelemetry = { version = "0.33.1", default-features = false, features = ["trace", "metrics"] }
+
+# Debug builds keep line tables, so backtraces still name files and lines, and
+# dependencies carry no debug info. With full debug info one `cargo test --workspace`
+# build wrote 54 GB; three at once in `scripts/stress.sh 3` stalled file system
+# calls for seconds and failed the TypeScript suite beside them (#154).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

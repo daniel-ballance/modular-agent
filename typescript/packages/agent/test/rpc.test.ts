@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { getEventListeners } from "node:events";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AgentEvent } from "@modular-agent/harness";
-import { remotePlugin } from "@modular-agent/plugin-rpc";
+import { Peer, remotePlugin } from "@modular-agent/plugin-rpc";
 import { createAgent } from "../src/index.js";
 import type { Scripted } from "./fixtures/faux-provider.js";
 
@@ -86,4 +87,24 @@ test("RPC: a plugin in another process that dies takes its calls with it, and th
 	assert.equal(turn.result.text, "after", "the turn carried on, with the failure as the call's result");
 	await h.stop(); // Wait for the exit event as well as EOF on the RPC pipe.
 	assert.ok(h.problems.some((p) => p.plugin === "env-crashing" && p.where === "process"), "the Harness reports the lost plugin");
+});
+
+test("RPC: an answer finished after the connection closed is not written, nor turned into handles", async () => {
+	let finish!: (v: unknown) => void;
+	const wrote: string[] = [];
+	let closed = false;
+	const answering = new Peer((line) => {
+		if (closed) throw new Error("write after end");
+		wrote.push(line);
+	}, { slow: () => new Promise((r) => (finish = r)) });
+	answering.receive(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "slow", params: [] }));
+	await new Promise((r) => setImmediate(r));
+	answering.close(new Error("stopped"));
+	closed = true;
+	// A late answer that holds a signal, like a history store's writer signal, must not keep a listener for the closed peer.
+	const signal = new AbortController().signal;
+	finish({ signal });
+	await new Promise((r) => setImmediate(r));
+	assert.deepEqual(wrote, []);
+	assert.equal(getEventListeners(signal, "abort").length, 0);
 });

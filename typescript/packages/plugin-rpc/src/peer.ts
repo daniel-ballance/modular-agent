@@ -101,7 +101,9 @@ export class Peer {
 		return answer;
 	}
 
+	// A closed connection may have no stream left to write to, so a late answer is dropped.
 	private post(m: Message): void {
+		if (this.closedWith) return;
 		this.write(JSON.stringify(m));
 	}
 
@@ -127,7 +129,8 @@ export class Peer {
 				if (!fn) throw new Error(`Unknown method ${m.method}`);
 				result = await fn(...(this.fromWire(m.params) as unknown[]));
 			}
-			if (m.id !== undefined) this.post({ jsonrpc: "2.0", id: m.id, result: this.toWire(result) });
+			// Turning the result into handles would export them from a closed peer, so check first.
+			if (m.id !== undefined && !this.closedWith) this.post({ jsonrpc: "2.0", id: m.id, result: this.toWire(result) });
 		} catch (error) {
 			const e = error instanceof Error ? error : new Error(String(error));
 			if (m.id !== undefined) this.post({ jsonrpc: "2.0", id: m.id, error: { message: e.message, name: e.name } });
