@@ -248,6 +248,18 @@ test("services: when the history service's answers are lost, appends are sent ag
 });
 
 test("services: an interrupted writer delivers an unrecorded SSE event and ends the stream", { timeout: 10_000 }, async t => {
+	let pending = "initialize failing history client";
+	let since = performance.now();
+	const completed: string[] = [];
+	function stage(next: string) {
+		const now = performance.now();
+		completed.push(`${pending} (${(now - since).toFixed(1)} ms)`);
+		pending = next;
+		since = now;
+	}
+	t.signal.addEventListener("abort", () => {
+		if (pending) t.diagnostic(`pending ${pending} for ${(performance.now() - since).toFixed(1)} ms; completed: ${completed.join(", ") || "none"}`);
+	}, { once: true });
 	let failAppend = false;
 	class FailingStore extends HttpHistoryStore {
 		override async append(id: string, batch: HistoryEntry[]) {
@@ -255,31 +267,51 @@ test("services: an interrupted writer delivers an unrecorded SSE event and ends 
 			await super.append(id, batch);
 		}
 	}
+	async function following(stream: ReturnType<typeof events>) {
+		await Promise.race([
+			stream.following,
+			stream.done.then(() => { throw new Error(`SSE ended during ${pending}`); }),
+		]);
+	}
 	const store = new FailingStore(history);
 	await store.initialize();
+	stage("build HTTP agent");
 	const a = await agent({ store });
+	stage("create session");
 	const { sessionId } = await http(a, "POST", "/sessions");
 	const stream = events(a, sessionId);
 	t.after(() => stream.close());
-	await stream.following;
+	stage("subscribe to original SSE stream");
+	await following(stream);
+	stage("start the interrupted turn");
 	await http(a, "POST", `/sessions/${sessionId}/input`, { content: "sleep a long time" });
+	stage("observe tool start on original stream");
 	await stream.until(e => e.type === "tool.started");
 	failAppend = true;
+	stage("submit input that fails to commit");
 	await assert.rejects(http(a, "POST", `/sessions/${sessionId}/input`, { content: "say goodbye", when: "after" }), /Session was interrupted/);
+	stage("observe original SSE stream ending");
 	await stream.done;
 	const interrupted = stream.seen.filter(e => e.type === "session.interrupted");
 	assert.equal(interrupted.length, 1);
 	assert.deepEqual(interrupted[0].data, { reason: "commitFailed" });
 	assert.equal(interrupted[0].eventId, undefined);
+	stage("read interrupted session history");
 	assert.ok(!(await storedEntries(sessionId)).some(e => e.kind === "turnEnd"));
+	stage("reopen interrupted session");
 	await http(a, "POST", `/sessions/${sessionId}/open`);
 	const recovered = events(a, sessionId, stream.seen.findLast(e => e.eventId)?.eventId);
 	t.after(() => recovered.close());
-	await recovered.following;
+	stage("subscribe to recovered SSE stream");
+	await following(recovered);
+	stage("start a turn after reopening");
 	await http(a, "POST", `/sessions/${sessionId}/input`, { content: "say hello" });
+	stage("observe recovered turn completion");
 	await recovered.until(e => e.type === "turn.ended" && e.data.outcome.kind === "completed");
 	assert.ok(!recovered.seen.some(e => e.type === "session.interrupted"));
+	stage("stop HTTP agent");
 	await a.h.stop();
+	pending = "";
 });
 
 test("services: cancelling over HTTP stops the command in the sandbox", async () => {
