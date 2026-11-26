@@ -196,24 +196,259 @@ function checkCargo(file, manifest, version) {
   }
 }
 
-// JSON.parse has no positions, so one pass over the text it accepted records the line of each
-// wanted key: a top-level key, or a key directly inside a dependency group. Keys it reads are decoded
-// with JSON.parse, so "\/" and "\u002f" match "/", and the last of duplicate keys wins, as in
-// JSON.parse. The pass keeps a depth count and the state of the top two levels only. A JSON string
-// spends at most six characters per decoded one, so a key longer than that bound for every wanted
-// name and group is skipped undecoded. A key within the bound may be decoded and serialized for a
-// moment before it is rejected, so the pass copies at most one bounded key at a time.
+// JSON.parse keeps every value, and it has no positions. The capped test's source string is
+// external memory; the old-space cost was the parse. On Node 26.13.1 (V8 14.6) 750,000 unrelated
+// keys left about 80 MB of the V8 heap live, and 128 superseded dependency groups promoted
+// short-lived key strings until the committed heap passed 200 MB. A full GC dropped that case
+// back to the source string, so the groups were not retained. Under load the promotion still
+// reached the 128 MB old-space cap before that GC ran. This pass keeps only the last "version"
+// span and the last span of each dependency group, and skips every other value without copying
+// it. A superseded group is never parsed. On the same Node the capped checker stays within
+// 17 MB of committed heap, about 110 MB under the cap. The line pass compares a raw key in
+// place and decodes only an escaped key short enough to be a wanted name, so "\/" and "\u002f"
+// still match "/". Duplicate keys keep the last value, as in JSON.parse. The line pass keeps
+// a depth count and the state of the top two levels only.
 const nodeGroups = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
+const groupKeyLimit = 6 * "optionalDependencies".length;
+
+function invalidPackage() {
+  throw new SyntaxError("Invalid package JSON");
+}
+
+function isHex(char) {
+  return (char >= "0" && char <= "9") || (char >= "a" && char <= "f") || (char >= "A" && char <= "F");
+}
+
+function skipWs(text, at) {
+  while (text[at] === " " || text[at] === "\n" || text[at] === "\r" || text[at] === "\t") at++;
+  return at;
+}
+
+function skipString(text, at) {
+  if (text[at] !== '"') invalidPackage();
+  let i = at + 1;
+  while (i < text.length) {
+    const char = text[i];
+    if (char === '"') return i + 1;
+    if (char === "\\") {
+      const next = text[i + 1];
+      if (next === '"' || next === "\\" || next === "/" || next === "b" || next === "f" || next === "n" || next === "r" || next === "t") {
+        i += 2;
+        continue;
+      }
+      if (next === "u" && isHex(text[i + 2]) && isHex(text[i + 3]) && isHex(text[i + 4]) && isHex(text[i + 5])) {
+        i += 6;
+        continue;
+      }
+      invalidPackage();
+    }
+    if (char < " ") invalidPackage();
+    i++;
+  }
+  invalidPackage();
+}
+
+function skipWord(text, at, word) {
+  for (let i = 0; i < word.length; i++) if (text[at + i] !== word[i]) invalidPackage();
+  return at + word.length;
+}
+
+function skipDigits(text, i) {
+  while (text[i] >= "0" && text[i] <= "9") i++;
+  return i;
+}
+
+function skipNumber(text, at) {
+  let i = at;
+  if (text[i] === "-") i++;
+  if (text[i] === "0") i++;
+  else if (text[i] >= "1" && text[i] <= "9") i = skipDigits(text, i + 1);
+  else invalidPackage();
+  if (text[i] === ".") {
+    i++;
+    if (text[i] < "0" || text[i] > "9") invalidPackage();
+    i = skipDigits(text, i + 1);
+  }
+  if (text[i] === "e" || text[i] === "E") {
+    i++;
+    if (text[i] === "+" || text[i] === "-") i++;
+    if (text[i] < "0" || text[i] > "9") invalidPackage();
+    i = skipDigits(text, i + 1);
+  }
+  return i;
+}
+
+// One byte per nesting level, reused so a value nested millions deep does not allocate a frame
+// per level. 1 array value or end, 8 value required, 2 comma or end; 3 object key or end,
+// 7 key required, 5 value, 6 comma or end.
+let nest = new Uint8Array(64);
+
+function growNest() {
+  const grown = new Uint8Array(nest.length * 2);
+  grown.set(nest);
+  nest = grown;
+}
+
+function closeContainer(text, at, depth) {
+  depth--;
+  at = skipWs(text, at + 1);
+  if (depth === 0) return { at, depth };
+  const parent = nest[depth - 1];
+  nest[depth - 1] = parent === 1 || parent === 8 ? 2 : 6;
+  return { at, depth };
+}
+
+// End index of one JSON value. Throws the same SyntaxError on text JSON.parse rejects.
+function skipValue(text, at) {
+  let depth = 0;
+  at = skipWs(text, at);
+  for (;;) {
+    const state = depth === 0 ? 0 : nest[depth - 1];
+    if ((state === 1 && text[at] === "]") || (state === 3 && text[at] === "}")) {
+      ({ at, depth } = closeContainer(text, at, depth));
+      if (depth === 0) return at;
+      continue;
+    }
+    if (state === 2 || state === 6) {
+      if (text[at] === (state === 2 ? "]" : "}")) {
+        ({ at, depth } = closeContainer(text, at, depth));
+        if (depth === 0) return at;
+        continue;
+      }
+      if (text[at] !== ",") invalidPackage();
+      at = skipWs(text, at + 1);
+      nest[depth - 1] = state === 2 ? 8 : 7;
+      continue;
+    }
+    if (state === 3 || state === 7) {
+      at = skipString(text, at);
+      at = skipWs(text, at);
+      if (text[at] !== ":") invalidPackage();
+      at = skipWs(text, at + 1);
+      nest[depth - 1] = 5;
+      continue;
+    }
+    const char = text[at];
+    if (char === "{" || char === "[") {
+      if (depth === nest.length) growNest();
+      nest[depth++] = char === "[" ? 1 : 3;
+      at = skipWs(text, at + 1);
+      continue;
+    }
+    if (char === '"') at = skipString(text, at);
+    else if (char === "t") at = skipWord(text, at, "true");
+    else if (char === "f") at = skipWord(text, at, "false");
+    else if (char === "n") at = skipWord(text, at, "null");
+    else if (char === "-" || (char >= "0" && char <= "9")) at = skipNumber(text, at);
+    else invalidPackage();
+    at = skipWs(text, at);
+    if (depth === 0) return at;
+    const parent = nest[depth - 1];
+    if (parent !== 1 && parent !== 8 && parent !== 5) invalidPackage();
+    nest[depth - 1] = parent === 5 ? 6 : 2;
+  }
+}
+
+function rawKeyEquals(text, open, close, name) {
+  if (close - open - 1 !== name.length) return false;
+  for (let i = 0; i < name.length; i++) if (text[open + 1 + i] !== name[i]) return false;
+  return true;
+}
+
+function classifyKey(text, open, close) {
+  const raw = close - open - 1;
+  if (raw > groupKeyLimit) return { group: "", version: false };
+  let escaped = false;
+  if (raw >= "version".length) {
+    for (let i = open + 1; i < close; i++) if (text[i] === "\\") { escaped = true; break; }
+  }
+  if (escaped) {
+    const key = JSON.parse(text.slice(open, close + 1));
+    return { group: nodeGroups.includes(key) ? key : "", version: key === "version" };
+  }
+  let group = "";
+  for (const name of nodeGroups) {
+    if (raw === name.length && rawKeyEquals(text, open, close, name)) { group = name; break; }
+  }
+  return { group, version: !group && raw === "version".length && rawKeyEquals(text, open, close, "version") };
+}
+
+function pinsIn(slice) {
+  const pins = Object.create(null);
+  for (const [name, pin] of Object.entries(JSON.parse(slice) ?? {})) {
+    if (name.startsWith("@modular-agent/")) pins[name] = pin;
+  }
+  return pins;
+}
+
+function nodeManifest(text) {
+  let at = skipWs(text, 0);
+  if (text[at] !== "{") {
+    if (at >= text.length) invalidPackage();
+    at = skipValue(text, at);
+    if (skipWs(text, at) !== text.length) invalidPackage();
+    return Object.create(null);
+  }
+  const spans = Object.create(null);
+  let versionAt = -1;
+  let versionEnd = -1;
+  at = skipWs(text, at + 1);
+  if (text[at] !== "}") {
+    for (;;) {
+      if (text[at] !== '"') invalidPackage();
+      const open = at;
+      at = skipString(text, at);
+      const { group, version } = classifyKey(text, open, at - 1);
+      at = skipWs(text, at);
+      if (text[at] !== ":") invalidPackage();
+      at = skipWs(text, at + 1);
+      const start = at;
+      at = skipValue(text, at);
+      if (group) {
+        const span = spans[group] ?? { start: 0, end: 0 };
+        span.start = start;
+        span.end = at;
+        spans[group] = span;
+      } else if (version) {
+        versionAt = start;
+        versionEnd = at;
+      }
+      at = skipWs(text, at);
+      if (text[at] === "}") { at++; break; }
+      if (text[at] !== ",") invalidPackage();
+      at = skipWs(text, at + 1);
+    }
+  } else at++;
+  if (skipWs(text, at) !== text.length) invalidPackage();
+  const pkg = Object.create(null);
+  if (versionAt >= 0) pkg.version = JSON.parse(text.slice(versionAt, versionEnd));
+  for (const group of nodeGroups) {
+    const span = spans[group];
+    if (span) pkg[group] = pinsIn(text.slice(span.start, span.end));
+  }
+  return pkg;
+}
 
 function keyLines(text, paths) {
-  const wanted = new Set(paths.map((path) => JSON.stringify(path)));
+  const top = new Map();
+  const pinsOf = new Map();
   let longest = 0;
-  for (const name of [...nodeGroups, ...paths.flat()]) longest = Math.max(longest, name.length);
+  for (const name of nodeGroups) longest = Math.max(longest, name.length);
+  for (const path of paths) {
+    for (const name of path) longest = Math.max(longest, name.length);
+    const id = JSON.stringify(path);
+    if (path.length === 1) top.set(path[0], id);
+    else {
+      let pins = pinsOf.get(path[0]);
+      if (!pins) pinsOf.set(path[0], pins = new Map());
+      pins.set(path[1], id);
+    }
+  }
   const limit = 6 * longest + 2;
   const lines = new Map();
   const isObject = [false, false, false];
   let depth = 0;
-  let topKey = null;
+  let pendingGroup = null;
   let group = null;
   let line = 1;
   let expectKey = false;
@@ -223,7 +458,7 @@ function keyLines(text, paths) {
     else if (char === "{" || char === "[") {
       depth++;
       if (depth <= 2) isObject[depth] = char === "{";
-      if (depth === 2) group = topKey;
+      if (depth === 2) group = pendingGroup;
       expectKey = depth <= 2 && char === "{";
     } else if (char === "}" || char === "]") {
       depth--;
@@ -231,17 +466,37 @@ function keyLines(text, paths) {
     } else if (char === ",") expectKey = depth <= 2 && isObject[depth];
     else if (char === '"') {
       let end = at + 1;
-      while (text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
-      if (expectKey && end + 1 - at > limit) {
-        if (depth === 1) topKey = null;
-      } else if (expectKey && (depth === 1 || nodeGroups.includes(group))) {
-        const key = JSON.parse(text.slice(at, end + 1));
-        if (depth === 1) topKey = key;
-        const path = JSON.stringify(depth === 1 ? [key] : [group, key]);
-        if (wanted.has(path)) lines.set(path, line);
+      let escaped = false;
+      while (end < text.length && text[end] !== '"') {
+        if (text[end] === "\\") { escaped = true; end += 2; }
+        else end++;
+      }
+      if (expectKey && depth === 1) {
+        pendingGroup = null;
+        if (end < text.length && end + 1 - at <= limit) {
+          if (!escaped) {
+            for (const name of nodeGroups) if (rawKeyEquals(text, at, end, name)) { pendingGroup = name; break; }
+            for (const [name, id] of top) if (rawKeyEquals(text, at, end, name)) lines.set(id, line);
+          } else {
+            const key = JSON.parse(text.slice(at, end + 1));
+            if (nodeGroups.includes(key)) pendingGroup = key;
+            const id = top.get(key);
+            if (id) lines.set(id, line);
+          }
+        }
+      } else if (expectKey && depth === 2 && group && end < text.length && end + 1 - at <= limit) {
+        const wanted = pinsOf.get(group);
+        if (wanted) {
+          if (!escaped) {
+            for (const [name, id] of wanted) if (rawKeyEquals(text, at, end, name)) lines.set(id, line);
+          } else {
+            const id = wanted.get(JSON.parse(text.slice(at, end + 1)));
+            if (id) lines.set(id, line);
+          }
+        }
       }
       expectKey = false;
-      at = end;
+      if (end < text.length) at = end;
     }
   }
   return lines;
@@ -250,8 +505,9 @@ function keyLines(text, paths) {
 function checkNodePackage(file, text, version) {
   let pkg;
   try {
-    pkg = JSON.parse(text);
-  } catch {
+    pkg = nodeManifest(text);
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
     fail(file, 1, "Invalid package JSON", "Restore a valid package manifest");
     return;
   }
