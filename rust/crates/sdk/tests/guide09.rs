@@ -45,6 +45,25 @@ impl Stages {
     }
 }
 
+/// One stage keeps the limit the whole handoff used to share. Under load,
+/// `prompt reader` finished in about eight seconds (still inside this limit)
+/// and the shared budget then expired on `close reader`, which had only just
+/// started. A stage that itself hangs still fails at ten seconds.
+const HANDOFF_STAGE: Duration = Duration::from_secs(10);
+
+async fn bound<T>(
+    stages: &Stages,
+    service: &mut tokio::task::JoinSet<Result<()>>,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    tokio::select! {
+        biased;
+        result = service.join_next() => panic!("history service exited early: {result:?}"),
+        result = tokio::time::timeout(HANDOFF_STAGE, work) => result
+            .unwrap_or_else(|_| panic!("history handoff timed out: {}", stages.diagnostic())),
+    }
+}
+
 async fn serve_store(address: SocketAddr, store_dir: &Path, token_file: &Path) -> Result<()> {
     let options = ServeHistoryOptions::new(address, token_file);
     serve_history(file_history(store_dir)?, options).await
@@ -76,30 +95,41 @@ async fn handoff(
     url: &str,
     token_file: &Path,
     stages: &mut Stages,
+    service: &mut tokio::task::JoinSet<Result<()>>,
 ) -> Result<()> {
     stages.stage("build writer");
-    let writer = connect_history(project, writer_dir, url, token_file).await?;
+    let writer = bound(
+        stages,
+        service,
+        connect_history(project, writer_dir, url, token_file),
+    )
+    .await?;
     stages.stage("create writer session");
-    let first = writer.session().await?;
+    let first = bound(stages, service, writer.session()).await?;
     stages.stage("prompt writer");
-    assert_eq!(first.prompt("Name a harbour.").await?.text, "Whitby.");
+    let prompted = bound(stages, service, first.prompt("Name a harbour.")).await?;
+    assert_eq!(prompted.text, "Whitby.");
     let id = first.id().to_owned();
     stages.stage("close writer");
-    writer.close().await?; // Give up the writer lease.
+    bound(stages, service, writer.close()).await?; // Give up the writer lease.
 
     stages.stage("build reader");
-    let reader = connect_history(project, reader_dir, url, token_file).await?;
+    let reader = bound(
+        stages,
+        service,
+        connect_history(project, reader_dir, url, token_file),
+    )
+    .await?;
     stages.stage("open session on reader");
-    let reopened = reader.open_session(&id).await?;
+    let reopened = bound(stages, service, reader.open_session(&id)).await?;
     stages.stage("read replayed turn");
-    assert_eq!(reopened.last_turn().await?.unwrap().text, "Whitby.");
+    let replayed = bound(stages, service, reopened.last_turn()).await?;
+    assert_eq!(replayed.unwrap().text, "Whitby.");
     stages.stage("prompt reader");
-    assert_eq!(
-        reopened.prompt("When is high tide there?").await?.text,
-        "14:02."
-    );
+    let prompted = bound(stages, service, reopened.prompt("When is high tide there?")).await?;
+    assert_eq!(prompted.text, "14:02.");
     stages.stage("read durable history");
-    let history = reopened.history().await?;
+    let history = bound(stages, service, reopened.history()).await?;
     let actors: Vec<_> = history
         .iter()
         .filter(|entry| entry["kind"] == "input")
@@ -107,7 +137,7 @@ async fn handoff(
         .collect();
     assert_eq!(actors, [Some("user"), Some("user")]);
     stages.stage("close reader");
-    reader.close().await
+    bound(stages, service, reader.close()).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -135,28 +165,25 @@ async fn hands_off_a_session_over_http() -> Result<()> {
     let server_token_file = token_file.clone();
     service.spawn(async move { serve_store(address, &store_dir, &server_token_file).await });
     let mut stages = Stages::new("history listener readiness");
-    let result = tokio::time::timeout(Duration::from_secs(10), async {
-        let run = async {
+    let result = async {
+        bound(&stages, &mut service, async {
             while tokio::net::TcpStream::connect(address).await.is_err() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            handoff(
-                project.path(),
-                &tmp.path().join("writer"),
-                &tmp.path().join("reader"),
-                &format!("http://{address}"),
-                &token_file,
-                &mut stages,
-            )
-            .await
-        };
-        tokio::select! {
-            result = service.join_next() => panic!("history service exited early: {result:?}"),
-            result = run => result,
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("history handoff timed out: {}", stages.diagnostic()));
+        })
+        .await;
+        handoff(
+            project.path(),
+            &tmp.path().join("writer"),
+            &tmp.path().join("reader"),
+            &format!("http://{address}"),
+            &token_file,
+            &mut stages,
+            &mut service,
+        )
+        .await
+    }
+    .await;
     service.shutdown().await;
     if let Err(error) = &result {
         panic!("history handoff failed: {error:?}; {}", stages.diagnostic());
