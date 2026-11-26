@@ -151,7 +151,8 @@ async fn a_failed_point_save_fails_the_turn_before_model_dispatch() {
     );
     assert_eq!(*env.events.lock().unwrap(), ["save"]);
     assert!(rig.probe.requests.lock().unwrap().is_empty());
-    let entries = rig.data().entries;
+    let data = rig.data();
+    let entries = &data.entries;
     let end = entries.last().unwrap();
     assert_eq!(end.kind, "turn.end");
     assert!(
@@ -159,6 +160,12 @@ async fn a_failed_point_save_fails_the_turn_before_model_dispatch() {
             .iter()
             .any(|e| e.kind == "turn.start" && e.scope.turn == end.scope.turn)
     );
+    let released = portable::entry(&entries[entries.len() - 2], &data).unwrap();
+    let failed = portable::entry(end, &data).unwrap();
+    assert_eq!(released["kind"], "inputHandedBack");
+    assert_eq!(released["data"]["reason"], "turnEnded");
+    assert!(released.get("turnId").is_none());
+    assert_eq!(released["inputId"], failed["data"]["inputId"]);
     rig.h.rewind(&Scope::session(&rig.id), mark).await.unwrap();
 }
 

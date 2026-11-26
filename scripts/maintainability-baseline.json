@@ -1,7 +1,7 @@
 {
   "conformance/acp/run.mjs": 2039,
   "conformance/plugin/run.mjs": 1361,
-  "rust/crates/agent-api/src/portable.rs": 1105,
+  "rust/crates/agent-api/src/portable.rs": 1110,
   "rust/crates/agent-base/tests/plugin_binding.rs": 1998,
   "rust/crates/agent-harness/src/interface_tools.rs": 1268,
   "rust/crates/history-http/src/lib.rs": 1286,

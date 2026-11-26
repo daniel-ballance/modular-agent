@@ -327,7 +327,21 @@ impl Harness {
                     let mut end = json!(r);
                     end["inputId"] = json!(admitted_input);
                     let _span = invocation.as_ref().map(Operation::enter);
-                    self.append(&scope, "harness", Draft::new("turn.end", false, end))?;
+                    let end = Draft::new("turn.end", false, end);
+                    if data
+                        .pending_inputs()
+                        .iter()
+                        .any(|(id, _)| *id == admitted_input)
+                    {
+                        let returned = Draft::new(
+                            "input.returned",
+                            false,
+                            json!({"input":admitted_input,"reason":"turnEnded"}),
+                        );
+                        self.publish(&scope, "harness", vec![returned, end], None, None)?;
+                    } else {
+                        self.append(&scope, "harness", end)?;
+                    }
                 }
                 r
             }

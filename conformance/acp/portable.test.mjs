@@ -23,9 +23,11 @@ test('a preparation failure can settle an admitted input without starting a turn
   const data = { inputId: 'input', outcome: { kind: 'failed', error: 'cannot save point' },
     result: { openToolCalls: [] }, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } };
   const end = (change = {}) => entry('turnEnd', { turnId: 'turn' }, { ...data, ...change });
-  assert.deepEqual(problems(admission, end()), []);
+  const settlement = { ...returned, data: { reason: 'turnEnded' } };
+  assert.deepEqual(problems(admission, settlement, end()), []);
+  assert.ok(problems(admission, end()).length);
   assert.ok(problems(end()).length);
-  assert.ok(problems(admission, end({ outcome: { kind: 'completed' } })).length);
+  assert.ok(problems(admission, settlement, end({ outcome: { kind: 'completed' } })).length);
 });
 test('job report admission must match the recorded end', () => {
   const jobId = 'job';

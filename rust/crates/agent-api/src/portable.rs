@@ -308,13 +308,18 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
             value
         }
         "input.returned" | "input.withdrawn" => {
-            if let Some(ids) = c["inputIds"].as_array() {
+            let mut returned = if let Some(ids) = c["inputIds"].as_array() {
                 v["inputIds"] = json!(ids);
                 json!({"inputIds":ids})
             } else {
                 v["inputId"] = c["input"].clone();
                 json!({"inputIds":[c["input"]]})
+            };
+            if let Some(reason) = optional(c, "reason") {
+                returned["reason"] = reason.clone();
+                v.as_object_mut().unwrap().remove("turnId");
             }
+            returned
         }
         "model.request" => {
             let model = optional(c, "model")
@@ -768,10 +773,10 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
             "inputHandedBack" => (
                 "input.returned",
                 if let Some(id) = v["inputId"].as_str().or_else(|| d["inputId"].as_str()) {
-                    json!({"input":id})
+                    json!({"input":id,"reason":d["reason"]})
                 } else {
                     let ids = v.get("inputIds").unwrap_or(&d["inputIds"]);
-                    json!({"inputIds":ids,"input":ids[0]})
+                    json!({"inputIds":ids,"input":ids[0],"reason":d["reason"]})
                 },
             ),
             "modelRequest" => ("model.request", d.clone()),

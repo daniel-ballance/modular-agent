@@ -61,6 +61,7 @@ export function portableProblems(sessionId, entries) {
 	const out = [];
 	const say = (e, message) => out.push(`${e.kind ?? "?"} ${String(e.id).slice(0, 8)}: ${message}`);
 	const byId = new Map(), turns = new Set(), attempts = new Map(), replies = new Set(), tools = new Set(), jobs = new Set(), admitted = new Map();
+	const endedAdmissions = new Set();
 	const terminals = new Map([["turnEnd", new Set()], ["toolResult", new Set()], ["jobEnded", new Set()]]);
 	const questions = new Map(), pending = new Map(), decisions = new Set();
 	const sameScope = (a, b) => a && b && ["turnId", "stepId", "toolCallId"].every((k) => a[k] === b[k]);
@@ -116,12 +117,13 @@ export function portableProblems(sessionId, entries) {
 			admitted.set(e.inputId, e);
 		}
 		if (["input", "inputHandedBack"].includes(e.kind) && !admitted.has(e.inputId)) say(e, "no earlier admission");
+		if (e.kind === "inputHandedBack" && d.reason === "turnEnded" && admitted.has(e.inputId)) endedAdmissions.add(e.inputId);
 		if (e.continuesTurnId !== undefined && e.kind === "turnStart" && !turns.has(e.continuesTurnId)) say(e, "unknown continuation origin");
 		if (e.kind === "turnStart") {
 			if (turns.has(e.turnId)) say(e, "duplicate turn start");
 			turns.add(e.turnId);
 		} else if (e.turnId !== undefined && !turns.has(e.turnId)) {
-			if (!(e.kind === "turnEnd" && ["failed", "cancelled"].includes(d.outcome?.kind) && admitted.has(d.inputId))) say(e, "unknown turn");
+			if (!(e.kind === "turnEnd" && ["failed", "cancelled"].includes(d.outcome?.kind) && endedAdmissions.delete(d.inputId))) say(e, "unknown turn");
 		}
 		if (e.kind === "modelRequest") {
 			if (attempts.has(e.stepId)) say(e, "reused step ID");
