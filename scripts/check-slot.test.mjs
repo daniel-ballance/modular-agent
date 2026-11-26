@@ -67,6 +67,15 @@ test("a run waits while every slot is taken and starts when one frees", async (t
   await waitFor(third, /check-slot: took slot 1 of 2 at .* after \d+s/);
 });
 
+test("a run that takes its slots at once reports after 0s even when SECONDS ticks while it takes them", (t) => {
+  const box = machine(t, 2);
+  // Each flock moves SECONDS on by 5, as a second boundary crossed during the first pass would.
+  const run = box.run('flock() { SECONDS=$((SECONDS + 5)); command flock "$@"; }; take_check_slots 2');
+  assert.equal(run.status, 0, run.stderr);
+  assert.doesNotMatch(run.stderr, /waiting/);
+  assert.match(run.stderr, /took slot 1 2 of 2 at .* after 0s/);
+});
+
 test("a nested run uses its caller's slot instead of waiting for another", (t) => {
   const box = machine(t, 1);
   const result = box.run(`take_check_slots 1 && bash -c '. "$0"; take_check_slots 1 && echo nested ran' "$0"`);
