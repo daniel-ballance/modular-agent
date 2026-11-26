@@ -186,20 +186,6 @@ Tracked in #37.
 - **Terminal:** line-based, with no markdown rendering. Embedded reopening waits for recovery before reading another terminal line. ACP installs recovery before returning the session and does not wait for the recovered turn to finish.
 - **Credential staging:** the Rust base stores a named answer directly; it does not implement the full staged-secret transaction.
 
-## Findings for docs/reference and docs/sdk
-
-Tracked in #16.
-
-These are proposed edits; the shared documents are unchanged in this branch.
-
-- **[`docs/reference`, Tools](../docs/reference/standard-configuration.md#tools):** Replace “256 MiB of memory (Monty's `max_memory`, which counts what the interpreter allocates)” with “256 MiB of memory (Monty's `max_memory`, which counts live allocations against the worker's baseline, not the worker's resident memory)”. Monty 1.6.0 also counts compiled code and interpreter internals in worker mode.
-- **ACP declarations:** `interface-acp` dispatched proposed input, actor joins, session limits and tenant queries without consulting the SDK factory's session declaration. It now refuses disabled operations with `not_supported`, without changing the declarations or gating `proposals`, `release` or `withdraw`, which also serve parked job reports. The base declares all three features true and still passes the positive checks.
-- **[`docs/reference`, Checks](../docs/reference/standard-configuration.md#checks):** Replace the ACP-kit bullet with: “the ACP kit against `MODULAR_AGENT_CONFORMANCE=1 ma --acp` with `--crash-checks --probe-checks --job-checks`, including refusal of operations disabled by the session declaration;”
-- **[`docs/sdk`, Building an agent](../docs/sdk/api.md#building-an-agent):** Add: “A builder may accept file-backed configuration and an explicit project trust ledger, a local credential store, deployment tenant configuration, and an option to replace the default prompt. SDK adapters may use the base's direct credential-write contract where staged secrets are not implemented, and must document that limitation.”
-- **[`docs/sdk`, The agent](../docs/sdk/api.md#the-agent):** Replace the ACP options description with: “`compose(project, reopeningId?)` builds an Agent for the canonical project. The saved session id, when present, lets the factory select Providers and other launch parts before recovery. `projectSettings(project)` supplies settings for new sessions. `projectMcp` attaches the project’s trusted sources; client-supplied server specifications still follow the ACP binding’s separate `hostMcpServers` policy. A multi-project host supplies a shared history index and an explicit trust operation.”
-- **[`docs/sdk`, Hooks](../docs/sdk/api.md#hooks):** Add to `turn.before`: “A contribution may name the history entry ids it used in `sources`. An empty list means the contribution did not use session history. When omitted, the agent conservatively treats the contribution as derived from the current history.”
-- **[`docs/sdk`, Working environment](../docs/sdk/api.md#contexts):** Add: “The tool environment exposes byte reads and writes, directory listing and a command timeout. Command output includes exit code, status and whether it timed out. A native ignore-aware file walk is optional and in-process only; a served file tool may fall back to a command. Shared content parts, including images, are preserved in ToolOutput and ToolResult.”
-
 <a id="where-the-specification-was-silent"></a>
 
 ## Rules added in edition 4
