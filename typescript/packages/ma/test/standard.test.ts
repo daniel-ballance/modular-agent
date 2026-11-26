@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import assert from "node:assert/strict";
 import { createAgent, defaultAcpActor, fileHistory, serveHistory, tool, type HistoryEntry } from "@modular-agent/core";
-import { scriptedProvider } from "@modular-agent/core/testing";
+import { scriptedProvider, testResources } from "@modular-agent/core/testing";
 import { standardFileTools } from "@modular-agent/tools-files/sdk";
 import { codemode } from "../src/codemode.js";
 import { PRINT_BYTES, PrintedOutput } from "../src/codemode-output.js";
@@ -23,15 +23,16 @@ const exec = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "../../../../../");
 const cli = join(here, "../src/main.js");
-async function project(t: TestContext) {
-  const dir = await mkdtemp(join(tmpdir(), "ma-ts-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+async function project(t: TestContext, start = testResources(t)) {
+  const dir = await start(() => mkdtemp(join(tmpdir(), "ma-ts-")), dir => rm(dir, { recursive: true, force: true }));
   const home = join(dir, "home"), config = join(dir, "config"), work = join(dir, "project"), script = join(dir, "script.json"), log = join(dir, "requests.jsonl");
   await Promise.all([home, config, work].map(d => mkdir(d)));
   const put = async (path: string, content: string) => { await mkdir(dirname(path), { recursive: true }); await writeFile(path, content); };
   await put(script, '[{"text":"ok"}]');
+  t.signal.throwIfAborted();
   const env = { PATH: process.env.PATH, HOME: home, MODULAR_AGENT_DATA_DIR: config, MODULAR_AGENT_SCRIPT: script, MODULAR_AGENT_SCRIPT_LOG: log };
-  return { dir, home, config, work, script, log, env, put, run: (...args: string[]) => exec(process.execPath, [cli, ...args], { cwd: work, env }) };
+  return { dir, home, config, work, script, log, env, put,
+    run: (...args: string[]) => exec(process.execPath, [cli, ...args], { cwd: work, env, signal: t.signal }) };
 }
 test("approval is global, the command line wins, and print has no answerer", async t => {
   const p = await project(t), declare = async (...args: string[]) => JSON.parse((await p.run(...args, "--declaration")).stdout);
@@ -110,6 +111,7 @@ for (const runtime of ["durable", "transient"] as const) {
     await writeFile(tokenFile, token, {mode:0o600});
     await p.put(p.script, JSON.stringify([{toolCalls:[{name:"mark",input:{}}]}, {text:"carried on"}]));
     const env = {...p.env, TMPDIR:process.env.TMPDIR};
+    t.signal.throwIfAborted();
     const writer = fork(new URL("./fixtures/resume-open.js", import.meta.url), [p.work, dataDir], {env, execArgv:[]});
     const died = once(writer, "exit");
     const kill = async () => { writer.kill("SIGKILL"); await died; };
@@ -117,6 +119,7 @@ for (const runtime of ["durable", "transient"] as const) {
     const [{sessionId:id}] = await Promise.race([once(writer, "message"), died.then(() => {throw new Error("tool did not dispatch");})]);
 
     const serve = async (...flags:string[]) => {
+      t.signal.throwIfAborted();
       const child = spawn(process.execPath, [cli, "--agui", "--listen", "127.0.0.1:0", "--token-file", tokenFile, "--runtime",runtime, ...flags],
         {cwd:p.work, env, stdio:["ignore","pipe","pipe"]});
       const closed = once(child, "close");
@@ -528,13 +531,15 @@ tools.read(path='icon.png')`);
 test("line mode drains /after on EOF and writes verbose command output to stderr", { timeout: 10_000 }, async t => {
   const p = await project(t);
   await p.put(p.script, JSON.stringify([...scripted("tools.exec('printf progress')"), { text: "followed" }]));
+  t.signal.throwIfAborted();
   const child = spawn(process.execPath, [cli, "--verbose"], { cwd: p.work, env: p.env, stdio: ["pipe", "pipe", "pipe"] });
-  t.after(() => { child.kill(); });
+  const closed = once(child, "close");
+  t.after(async () => { child.kill(); await closed; });
   let stdout = "", stderr = "";
   child.stdout.setEncoding("utf8").on("data", chunk => { stdout += chunk; });
   child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
   child.stdin.end("first\n/after second\n");
-  const [status] = await once(child, "close");
+  const [status] = await closed;
   assert.equal(status, 0, stderr);
   assert.equal(stdout, "done\nfollowed\n");
   assert.match(stderr, /-> exec\(command="printf progress"\)/);
@@ -585,7 +590,8 @@ test("project MCP only loads after trust, and the setting persists beside global
 });
 
 test("Streamable HTTP MCP expands config values and skips a whole invalid catalog", { timeout: 10_000 }, async t => {
-  const p = await project(t);
+  const start = testResources(t);
+  const p = await project(t, start);
   const calls: string[] = [];
   const schema = { type: "object", properties: { text: { type: "string" } }, required: ["text"] };
   const server = createServer(async (req, res) => {
@@ -600,9 +606,15 @@ test("Streamable HTTP MCP expands config values and skips a whole invalid catalo
       : { content: [{ type: "text", text: `echo: ${msg.params.arguments.text}` }] };
     res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }));
   });
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  t.after(() => { server.close(); server.closeAllConnections(); });
+  await start(async () => {
+    const listening = once(server, "listening");
+    server.listen(0, "127.0.0.1");
+    await listening;
+    return server;
+  }, server => new Promise<void>(resolve => {
+    server.close(() => resolve());
+    server.closeAllConnections();
+  }));
   const address = server.address();
   assert.ok(address && typeof address !== "string");
   const url = `http://127.0.0.1:${address.port}`;
@@ -627,8 +639,10 @@ test("ACP attaches a client MCP server to its own project and honors project set
   await p.put(join(untrusted, ".modular-agent.json"), '{"model_tools":null}');
   await p.run("--project", work, "--trust-project", "mcp");
   await p.put(p.script, JSON.stringify([{ toolCalls: [{ name: "mcp_host__echo", input: { text: "tides" } }] }, { text: "ok" }]));
+  t.signal.throwIfAborted();
   const child = spawn(process.execPath, [cli, "--acp"], { cwd: p.work, env: p.env, stdio: ["pipe", "pipe", "pipe"] });
-  t.after(() => { child.stdin.end(); child.kill(); });
+  const closed = once(child, "close");
+  t.after(async () => { child.stdin.end(); child.kill(); await closed; });
   const lines = createInterface({ input: child.stdout });
   const pending = new Map<number, (m: Record<string, unknown>) => void>();
   lines.on("line", line => {
@@ -674,13 +688,18 @@ for (const remote of [false, true]) test(`ma ACP session/new is provisional with
   t.signal.addEventListener("abort", () => {
     if (pending) t.diagnostic(`pending ${pending} for ${(performance.now() - since).toFixed(1)} ms; completed: ${completed.join(", ") || "none"}`);
   }, { once: true });
-  const p = await project(t);
+  const start = testResources(t);
+  const p = await project(t, start);
   const token = randomBytes(32).toString("hex");
   const tokenFile = join(p.dir, "history-token");
   stage("write history token");
   await writeFile(tokenFile, token, { mode: 0o600 });
   if (remote) stage("start history listener");
-  const service = remote ? await serveHistory(fileHistory(join(p.dir, "history")), { address: "127.0.0.1:0", tokenFile }) : undefined;
+  const service = remote ? await start(
+    () => serveHistory(fileHistory(join(p.dir, "history")), { address: "127.0.0.1:0", tokenFile }),
+    service => service.close(),
+  ) : undefined;
+  t.signal.throwIfAborted();
   const env = { ...p.env, MODULAR_AGENT_CONFORMANCE: "1", TMPDIR: process.env.TMPDIR,
     MODULAR_AGENT_TENANTS: JSON.stringify({ demo: { rights: ["watch", "input", "settings"] } }),
     ...(service && { MODULAR_AGENT_HISTORY_URL: service.url, MODULAR_AGENT_HISTORY_TOKEN_FILE: tokenFile,
@@ -699,16 +718,9 @@ for (const remote of [false, true]) test(`ma ACP session/new is provisional with
     stage("reap ma child");
     lines.close();
     child.kill();
-    try {
-      await done;
-    } finally {
-      if (service) {
-        stage("close history service");
-        await service.close();
-      }
-    }
+    await done;
   }
-  t.after(() => cleanup ??= stop());
+  await start(() => child, () => cleanup ??= stop());
   let id = 0;
   async function request(method: string, params: object) {
     stage(`ACP ${method} reply #${id + 1}`);

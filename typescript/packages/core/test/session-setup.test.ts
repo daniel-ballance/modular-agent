@@ -10,19 +10,43 @@ import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { fileHistory, serveHistory, type Actor, type Agent, type HistoryEntry } from "@modular-agent/core";
+import { testResources } from "@modular-agent/core/testing";
 import { composition, recordingStore } from "./fixtures/session-setup.js";
 
+test("test cleanup waits for a late resource and stops setup after abort", async () => {
+  const controller = new AbortController();
+  let cleanup!: () => Promise<void>;
+  const start = testResources({
+    signal: controller.signal,
+    after(fn) { cleanup = () => Promise.resolve(fn()); },
+  });
+  const closed: string[] = [];
+  await start(() => "first", resource => { closed.push(resource); });
+  let ready!: (resource: string) => void;
+  const opening = start(() => new Promise<string>(resolve => { ready = resolve; }), resource => { closed.push(resource); });
+  controller.abort();
+  const disposed = cleanup();
+  await assert.rejects(start(() => assert.fail("started after abort"), () => {}), { name: "AbortError" });
+  assert.deepEqual(closed, []);
+  ready("second");
+  await assert.rejects(opening, { name: "AbortError" });
+  await disposed;
+  assert.deepEqual(closed, ["second", "first"]);
+});
+
 async function httpFixture(root: string, signal: AbortSignal, stage: (name: string) => void,
-  onClose: (close: () => Promise<void>) => void) {
+  start: ReturnType<typeof testResources>) {
   const token = randomBytes(32).toString("hex");
   const tokenFile = join(root, "token");
   stage("write history token");
   await writeFile(tokenFile, token, { mode: 0o600 });
   stage("start history listener");
-  const service = await serveHistory(fileHistory(join(root, "service")), { address: "127.0.0.1:0", tokenFile });
+  const service = await start(
+    () => serveHistory(fileHistory(join(root, "service")), { address: "127.0.0.1:0", tokenFile }),
+    service => service.close(),
+  );
   // Observe the real client's mutation boundaries on the wire, forwarding to the real service.
   const writes: { method: string; path: string; body: { entries?: HistoryEntry[] } }[] = [];
-  onClose(() => service.close());
   const proxy = createServer(async (req, res) => {
     try {
       const chunks: Buffer[] = [];
@@ -31,15 +55,21 @@ async function httpFixture(root: string, signal: AbortSignal, stage: (name: stri
       if (req.method !== "GET") writes.push({ method: req.method!, path: req.url!, body: body ? JSON.parse(body) : {} });
       const response = await fetch(`${service.url}${req.url}`, {
         method: req.method, headers: { authorization: req.headers.authorization ?? "", "content-type": "application/json" },
-        body: body || undefined,
+        body: body || undefined, signal,
       });
       res.writeHead(response.status, { "content-type": "application/json" }).end(await response.text());
     } catch (error) { res.destroy(error as Error); }
   });
   stage("start history recording proxy");
-  proxy.listen(0, "127.0.0.1");
-  onClose(() => new Promise<void>(resolve => proxy.close(() => resolve())));
-  await once(proxy, "listening", { signal });
+  await start(async () => {
+    const listening = once(proxy, "listening");
+    proxy.listen(0, "127.0.0.1");
+    await listening;
+    return proxy;
+  }, proxy => new Promise<void>(resolve => {
+    proxy.close(() => resolve());
+    proxy.closeAllConnections();
+  }));
   const address = proxy.address();
   assert.ok(address && typeof address !== "string");
   return {
@@ -64,28 +94,33 @@ for (const selection of ["file", "http", "custom"] as const) {
       t.signal.addEventListener("abort", () => {
         if (pending) t.diagnostic(`pending ${pending} for ${(performance.now() - since).toFixed(1)} ms; completed: ${completed.join(", ") || "none"}`);
       }, { once: true });
-      const root = await mkdtemp(join(tmpdir(), "sdk-session-setup-"));
-      let dispose = () => rm(root, { recursive: true, force: true });
-      function onClose(close: () => Promise<void>) {
-        const next = dispose;
-        dispose = async () => {
-          try { await close(); }
-          finally { await next(); }
-        };
-      }
-      t.after(() => dispose());
+      const start = testResources(t);
+      const root = await start(() => mkdtemp(join(tmpdir(), "sdk-session-setup-")), root => rm(root, { recursive: true, force: true }));
       await exercise(root);
       pending = "";
 
       async function exercise(root: string) {
-        const http = selection === "http" ? await httpFixture(root, t.signal, stage, onClose) : undefined;
+        const http = selection === "http" ? await httpFixture(root, t.signal, stage, start) : undefined;
+        t.signal.throwIfAborted();
         const custom = selection === "custom" ? recordingStore(join(root, "history")) : undefined;
         const url = http?.url ?? "";
         const worker = fileURLToPath(new URL("./fixtures/session-setup.js", import.meta.url));
         stage("start worker and await its provisional session ID");
-        const child = spawn(process.execPath, [worker, root, selection, placement, url], { stdio: ["pipe", "pipe", "inherit"] });
-        const exited = once(child, "exit");
-        const lines = createInterface({ input: child.stdout });
+        const { exited, lines, stop } = await start(() => {
+          const child = spawn(process.execPath, [worker, root, selection, placement, url], { stdio: ["pipe", "pipe", "inherit"] });
+          const exited = once(child, "close");
+          const lines = createInterface({ input: child.stdout });
+          let stopped: Promise<unknown[]> | undefined;
+          function stop() {
+            if (!stopped) {
+              child.kill("SIGKILL");
+              lines.close();
+              stopped = exited;
+            }
+            return stopped;
+          }
+          return { exited, lines, stop };
+        }, worker => worker.stop());
         let crashed: string;
         try {
           const [id] = await Promise.race([
@@ -96,18 +131,14 @@ for (const selection of ["file", "http", "custom"] as const) {
           crashed = id;
         } finally {
           stage("kill and reap provisional worker");
-          child.kill("SIGKILL");
-          lines.close();
-          await exited;
+          await stop();
         }
 
         assert.deepEqual(await exited, [null, "SIGKILL"]);
         stage("build writer agent");
-        const agent = await composition(root, selection, placement, url);
-        onClose(() => agent.close());
+        const agent = await start(() => composition(root, selection, placement, url), agent => agent.close());
         stage("build reader agent");
-        const reader = await composition(root, selection, "local", url);
-        onClose(() => reader.close());
+        const reader = await start(() => composition(root, selection, "local", url), reader => reader.close());
         async function unpublished(reader: Agent, id: string) {
           stage("list sessions before admission");
           assert.ok(!(await reader.sessions()).some(row => row.id === id));

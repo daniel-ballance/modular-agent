@@ -7,6 +7,26 @@ import type { Answer, Content, ModelError, Question, QuestionHandler, Usage } fr
 import { AgentError } from "./errors.js";
 import type { Provider } from "./provider.js";
 
+export function testResources(t: { after(cleanup: () => Promise<void>): void; signal: AbortSignal }) {
+  let dispose: () => Promise<void> = async () => {};
+  t.after(() => dispose());
+  return async function start<T>(open: () => T | Promise<T>, close: (resource: T) => unknown): Promise<T> {
+    t.signal.throwIfAborted();
+    const opened = Promise.resolve(open());
+    const previous = dispose;
+    dispose = async () => {
+      try {
+        await opened.then(close, () => undefined);
+      } finally {
+        await previous();
+      }
+    };
+    const resource = await opened;
+    t.signal.throwIfAborted();
+    return resource;
+  };
+}
+
 export interface ScriptStep {
   text?: string;
   reasoning?: string;

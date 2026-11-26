@@ -9,6 +9,7 @@ import { Worker } from "node:worker_threads";
 
 import { HistoryArchive, historyService } from "@modular-agent/services";
 import { fileHistory, serveHistory } from "../src/index.js";
+import { testResources } from "../src/testing.js";
 
 async function fixture(t: TestContext) {
   const dir = await mkdtemp(join(tmpdir(), "sdk-history-lease-"));
@@ -39,14 +40,14 @@ for (const { name, options: leaseOptions, ttlMs } of [
 }
 
 async function commitFixture(t: TestContext, leaseClock?: BigInt64Array<SharedArrayBuffer>) {
-  const dir = await mkdtemp(join(tmpdir(), "sdk-history-commit-"));
+  const start = testResources(t);
+  const dir = await start(() => mkdtemp(join(tmpdir(), "sdk-history-commit-")), dir => rm(dir, { recursive: true, force: true }));
   const state = new Int32Array(new SharedArrayBuffer(4));
   const token = "fixture-history-token", ttlMs = 15_000;
-  const worker = new Worker(new URL("./fixtures/history-renewal.js", import.meta.url), {
+  const worker = await start(() => new Worker(new URL("./fixtures/history-renewal.js", import.meta.url), {
     workerData: { dir, token, ttlMs, controls: { commitGate: { sessionId: "writing", state }, leaseClock } },
-  });
-  t.after(async () => { await worker.terminate(); await rm(dir, { recursive: true, force: true }); });
-  const [url] = await once(worker, "message");
+  }), worker => worker.terminate());
+  const [url] = await once(worker, "message", { signal: t.signal });
   const request = (path: string, method: string, body?: object, signal?: AbortSignal) => fetch(`${url}/v1/sessions/${path}`, {
     method, signal, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
