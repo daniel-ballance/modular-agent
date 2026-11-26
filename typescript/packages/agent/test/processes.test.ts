@@ -138,24 +138,32 @@ test("if the watcher dies too, the next agent to start cleans up", { skip: proce
 	assert.deepEqual(readdirSync(join(home, "run")), []);
 });
 
-test("an agent killed but not yet reaped (a zombie) counts as dead, so its leftovers are swept", { skip: process.platform !== "linux" && "reads /proc" }, async () => {
+test("an agent killed but not yet reaped (a zombie) counts as dead, so its leftovers are swept", { skip: process.platform !== "linux" && "reads /proc" }, async (t) => {
 	const home = mkdtempSync(join(tmpdir(), "ma-h-"));
 	const run = join(home, "run");
 	mkdirSync(run);
 	// The shell starts a child, then execs into `sleep`, which never reaps. The child dies only once the exec is seen,
 	// so the shell cannot reap it first: it stays a zombie.
 	const holder = spawn("sh", ["-c", "sleep 30 & echo $!; exec sleep 30"], { stdio: ["ignore", "pipe", "ignore"] });
-	const zombie = Number(await new Promise<string>((r) => holder.stdout.once("data", (d) => r(String(d)))));
+	let zombie = 0;
+	t.after(() => {
+		// The child first, while its parent still holds it, so its pid cannot have been reused.
+		for (const pid of [zombie, holder.pid]) if (pid) try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+	});
+	zombie = Number(await new Promise<string>((resolve, reject) => {
+		holder.stdout.once("data", (d) => resolve(String(d)));
+		holder.stdout.once("close", () => reject(new Error("the holder closed its output without writing the child's pid")));
+	}));
 	assert.ok(await until(() => readFileSync(`/proc/${holder.pid}/comm`, "latin1") === "sleep\n"), "the holder has exec'd");
 	process.kill(zombie, "SIGKILL");
 	assert.ok(await until(() => readFileSync(`/proc/${zombie}/stat`, "latin1").split(") ")[1]?.startsWith("Z")), "the agent pid is a zombie");
 	const runId = "zombie-test-run";
 	const leftover = spawn("sleep", ["60"], { env: { ...process.env, MODULAR_AGENT_RUN: runId }, stdio: "ignore" });
+	t.after(() => leftover.kill("SIGKILL"));
 	await until(() => readFileSync(`/proc/${leftover.pid}/environ`, "latin1").includes(`MODULAR_AGENT_RUN=${runId}\0`));
 	writeFileSync(join(run, "1-zombie.json"), JSON.stringify({ agentPid: zombie, runId, groups: [] }));
 	const { ProcessTracker } = await import(envLocal);
 	new ProcessTracker(run);
 	assert.ok(await until(() => leftover.exitCode !== null || leftover.signalCode !== null), "the leftover was killed");
 	assert.deepEqual(readdirSync(run), []);
-	holder.kill("SIGKILL");
 });
