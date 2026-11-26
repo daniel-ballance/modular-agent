@@ -102,7 +102,9 @@ async fn ui_tool_calls_do_not_need_a_provider_or_model_selection() {
     .await
     .unwrap();
     h.load(Arc::new(tools_builtin::BuiltinTools)).await.unwrap();
-    let id = h.create(root.path(), json!({})).await.unwrap();
+    let project = root.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let id = h.create(&project, json!({})).await.unwrap();
     let rt: Arc<dyn Runtime> = capability(h.as_ref(), "runtime").unwrap();
     let result = rt
         .tool(
@@ -114,7 +116,7 @@ async fn ui_tool_calls_do_not_need_a_provider_or_model_selection() {
         .unwrap();
     assert_eq!(result.status, ToolStatus::Completed);
     assert_eq!(
-        std::fs::read_to_string(root.path().join("ui.txt")).unwrap(),
+        std::fs::read_to_string(project.join("ui.txt")).unwrap(),
         "no model"
     );
     assert!(h.capability_names("provider.").is_empty());

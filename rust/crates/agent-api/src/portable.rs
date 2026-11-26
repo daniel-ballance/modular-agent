@@ -308,13 +308,18 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
             value
         }
         "input.returned" | "input.withdrawn" => {
-            if let Some(ids) = c["inputIds"].as_array() {
+            let mut returned = if let Some(ids) = c["inputIds"].as_array() {
                 v["inputIds"] = json!(ids);
                 json!({"inputIds":ids})
             } else {
                 v["inputId"] = c["input"].clone();
                 json!({"inputIds":[c["input"]]})
+            };
+            if let Some(reason) = optional(c, "reason") {
+                returned["reason"] = reason.clone();
+                v.as_object_mut().unwrap().remove("turnId");
             }
+            returned
         }
         "model.request" => {
             let model = optional(c, "model")
@@ -494,6 +499,9 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
             let r: TurnResult = serde_json::from_value(c.clone())?;
             let mut end = turn_outcome(&r);
             end["usage"] = usage(&r.usage);
+            if let Some(id) = optional(c, "inputId") {
+                end["inputId"] = id.clone();
+            }
             end
         }
         "summary" if copied => {
@@ -765,10 +773,10 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
             "inputHandedBack" => (
                 "input.returned",
                 if let Some(id) = v["inputId"].as_str().or_else(|| d["inputId"].as_str()) {
-                    json!({"input":id})
+                    json!({"input":id,"reason":d["reason"]})
                 } else {
                     let ids = v.get("inputIds").unwrap_or(&d["inputIds"]);
-                    json!({"inputIds":ids,"input":ids[0]})
+                    json!({"inputIds":ids,"input":ids[0],"reason":d["reason"]})
                 },
             ),
             "modelRequest" => ("model.request", d.clone()),
@@ -909,7 +917,11 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                     .iter()
                     .filter(|(turn, _): &&(Option<String>, Option<String>)| *turn == e.scope.turn)
                     .count();
-                ("turn.end", json!(r))
+                let mut end = json!(r);
+                if let Some(id) = optional(d, "inputId") {
+                    end["inputId"] = id.clone();
+                }
+                ("turn.end", end)
             }
             "summary" => {
                 if copied && let Some(summarizes) = d.get("summarizes") {

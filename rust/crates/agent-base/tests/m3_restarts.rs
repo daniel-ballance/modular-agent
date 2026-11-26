@@ -189,7 +189,9 @@ async fn m3_process_helper() {
         std::fs::write(root.join("report"), serde_json::to_vec(&json!({"data":h.snapshot(&id).unwrap(),"events":*events.values.lock().unwrap(),"requests":*fake.probe.requests.lock().unwrap(),"questions":svc.visible(h.as_ref(), &id, "user").unwrap()})).unwrap()).unwrap();
         h.close(&id).await.unwrap();
     } else {
-        let id = h.create(&root, json!({"model":"fake","approval":if case == "revoked" { "ask_always" } else { "off" }})).await.unwrap();
+        let project = root.join("project");
+        std::fs::create_dir(&project).unwrap();
+        let id = h.create(&project, json!({"model":"fake","approval":if case == "revoked" { "ask_always" } else { "off" }})).await.unwrap();
         std::fs::write(root.join("session"), &id).unwrap();
         svc.presence(&id, "user", true);
         if is_job {
@@ -379,7 +381,7 @@ async fn sigkill_saved_answer_is_reused_but_revoked_approval_is_not() {
                 .iter()
                 .any(|e| e["kind"] == "request.opened")
         );
-        assert!(!root.path().join("forbidden").exists());
+        assert!(!root.path().join("project/forbidden").exists());
         assert_eq!(
             data.entries
                 .iter()

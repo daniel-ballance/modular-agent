@@ -327,7 +327,21 @@ impl Harness {
                     let mut end = json!(r);
                     end["inputId"] = json!(admitted_input);
                     let _span = invocation.as_ref().map(Operation::enter);
-                    self.append(&scope, "harness", Draft::new("turn.end", false, end))?;
+                    let end = Draft::new("turn.end", false, end);
+                    if data
+                        .pending_inputs()
+                        .iter()
+                        .any(|(id, _)| *id == admitted_input)
+                    {
+                        let returned = Draft::new(
+                            "input.returned",
+                            false,
+                            json!({"input":admitted_input,"reason":"turnEnded"}),
+                        );
+                        self.publish(&scope, "harness", vec![returned, end], None, None)?;
+                    } else {
+                        self.append(&scope, "harness", end)?;
+                    }
                 }
                 r
             }
@@ -390,6 +404,16 @@ impl Harness {
             }
         }
         let budget_reached = self.tenant_budget_reached(&scope.session)?;
+        let env: Arc<dyn WorkingEnvironment> = capability(self, "environment")?;
+        let point = if env.keeps_points(&data.project) {
+            Some(
+                env.save_point(&scope.session, &data.project)
+                    .await
+                    .map_err(|error| anyhow!("cannot save turn point: {error:#}"))?,
+            )
+        } else {
+            None
+        };
         let selector: Arc<dyn ModelSelection> = capability(self, "model.selection")?;
         let selected = selector.select(self.api(), scope).await;
         let info = selected
@@ -478,7 +502,6 @@ impl Harness {
         } else {
             json!({"kind":"actor","id":scope.actor})
         };
-        let env: Arc<dyn WorkingEnvironment> = capability(self, "environment")?;
         let mut settings = data.settings.clone();
         // Keep the requested level until the Runtime prepares a step against
         // the refreshed Provider catalog. An absent setting stays absent.
@@ -503,11 +526,8 @@ impl Harness {
         {
             start["continuesTurnId"] = json!(origin);
         }
-        if env.keeps_points(&data.project) {
-            match env.save_point(&scope.session, &data.project).await {
-                Ok(point) => start["point"] = json!(point),
-                Err(error) => eprintln!("turn has no saved point: {error}"),
-            }
+        if let Some(point) = point {
+            start["point"] = json!(point);
         }
         let mut entries = vec![];
         let input_id =

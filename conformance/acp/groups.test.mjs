@@ -28,6 +28,17 @@ test('a selected erasure group needs an HTTP service before launching an agent',
   await assert.rejects(run('--group', 'erasure', '--', process.execPath, '-e', 'process.exit(45)'),
     e => e.code === 2 && /disposable service settings/.test(e.stderr));
 });
+
+test('a failed stdio check reports the tail of agent stderr', async () => {
+  const agent = 'require("node:fs").writeSync(2, "old diagnostic\\n" + "x".repeat(9000) + "\\npoint save failed\\n"); process.exit(45)';
+  await assert.rejects(run('--group', 'stdio-rights', '--', process.execPath, '-e', agent), e => {
+    assert.equal(e.code, 1);
+    assert.match(e.stdout, /FAIL  stdio rights/);
+    assert.match(e.stderr, /point save failed/);
+    assert.doesNotMatch(e.stderr, /old diagnostic/);
+    return true;
+  });
+});
 test('erasure reports stderr and exit status when a stdio or managed WebSocket agent dies', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'acp-erasure-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

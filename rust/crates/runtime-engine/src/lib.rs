@@ -616,15 +616,14 @@ impl Engine {
                 {
                     start["approvalCoveredBy"] = json!(cover);
                 }
-                if scope.turn.is_none()
-                    && environment.keeps_points(&api.snapshot(&scope.session)?.project)
-                {
-                    match environment
-                        .save_point(&scope.session, &api.snapshot(&scope.session)?.project)
-                        .await
-                    {
+                let project = &session.project;
+                if scope.turn.is_none() && environment.keeps_points(project) {
+                    match environment.save_point(&scope.session, project).await {
                         Ok(point) => start["point"] = json!(point),
-                        Err(error) => eprintln!("tool call has no saved point: {error}"),
+                        Err(error) => {
+                            let text = format!("cannot save tool point: {error:#}");
+                            return Ok(ToolResult::new(call, ToolStatus::Failed, text));
+                        }
                     }
                 }
                 let current = || -> Result<bool> {

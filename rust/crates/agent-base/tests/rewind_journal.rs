@@ -12,6 +12,7 @@ struct Fixture {
     events: Mutex<Vec<String>>,
     missing: Option<&'static str>,
     fail_restore: bool,
+    fail_save: std::sync::atomic::AtomicBool,
     fail_undo: std::sync::atomic::AtomicBool,
     restore_entered: tokio::sync::Notify,
     resume_restore: Option<tokio::sync::Notify>,
@@ -39,6 +40,10 @@ impl WorkingEnvironment for Fixture {
     }
     async fn save_point(&self, _: &str, _: &Path) -> Result<String> {
         self.events.lock().unwrap().push("save".into());
+        ensure!(
+            !self.fail_save.load(std::sync::atomic::Ordering::SeqCst),
+            "snapshot storage unavailable"
+        );
         Ok("undo".into())
     }
     async fn restore_point(&self, _: &str, project: &Path, point: &str) -> Result<()> {
@@ -58,11 +63,12 @@ impl WorkingEnvironment for Fixture {
         }
         Ok(())
     }
-    async fn read(&self, _: &Path, _: &str) -> Result<String> {
-        unreachable!()
+    async fn read(&self, project: &Path, path: &str) -> Result<String> {
+        Ok(std::fs::read_to_string(project.join(path))?)
     }
-    async fn write(&self, _: &Path, _: &str, _: &str) -> Result<()> {
-        unreachable!()
+    async fn write(&self, project: &Path, path: &str, content: &str) -> Result<()> {
+        std::fs::write(project.join(path), content)?;
+        Ok(())
     }
     async fn edit(&self, _: &Path, _: &str, _: &str, _: &str) -> Result<()> {
         unreachable!()
@@ -88,15 +94,16 @@ async fn fixture(
         events: Mutex::default(),
         missing,
         fail_restore,
+        fail_save: Default::default(),
         fail_undo: Default::default(),
         restore_entered: Default::default(),
         resume_restore: pause.then(Default::default),
     });
     let rig = Rig::with(
-        vec![],
+        vec![text("model ran")],
         vec![Arc::new(TestEnvironment(env.clone()))],
         vec![],
-        json!({}),
+        json!({"approval":"off"}),
     )
     .await;
     let mark = rig.data().position.unwrap();
@@ -126,6 +133,66 @@ async fn fixture(
     }
     std::fs::write(rig.project.path().join("file.txt"), "current").unwrap();
     (rig, env, mark)
+}
+
+#[tokio::test]
+async fn a_failed_point_save_fails_the_turn_before_model_dispatch() {
+    let (rig, env, _) = fixture(None, false, false).await;
+    let mark = rig.data().position.unwrap();
+    env.fail_save
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let result = rig.run("test").await;
+    assert_eq!(result.outcome, Outcome::Failed);
+    assert!(
+        result
+            .error
+            .unwrap()
+            .contains("snapshot storage unavailable")
+    );
+    assert_eq!(*env.events.lock().unwrap(), ["save"]);
+    assert!(rig.probe.requests.lock().unwrap().is_empty());
+    let data = rig.data();
+    let entries = &data.entries;
+    let end = entries.last().unwrap();
+    assert_eq!(end.kind, "turn.end");
+    assert!(
+        !entries
+            .iter()
+            .any(|e| e.kind == "turn.start" && e.scope.turn == end.scope.turn)
+    );
+    let released = portable::entry(&entries[entries.len() - 2], &data).unwrap();
+    let failed = portable::entry(end, &data).unwrap();
+    assert_eq!(released["kind"], "inputHandedBack");
+    assert_eq!(released["data"]["reason"], "turnEnded");
+    assert!(released.get("turnId").is_none());
+    assert_eq!(released["inputId"], failed["data"]["inputId"]);
+    rig.h.rewind(&Scope::session(&rig.id), mark).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_point_save_blocks_an_out_of_turn_tool() {
+    let (rig, env, _) = fixture(None, false, false).await;
+    let mark = rig.data().position.unwrap();
+    env.fail_save
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let runtime: Arc<dyn Runtime> = capability(rig.h.as_ref(), "runtime").unwrap();
+    let result = runtime
+        .tool(
+            rig.h.clone(),
+            Scope::session(&rig.id),
+            ToolCall::new("write", json!({"path":"file.txt","content":"changed"})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.status, ToolStatus::Failed);
+    assert!(result.text.contains("snapshot storage unavailable"));
+    assert_eq!(*env.events.lock().unwrap(), ["save"]);
+    assert!(!rig.data().entries.iter().any(|e| e.kind == "tool.started"));
+    assert_eq!(
+        std::fs::read_to_string(rig.project.path().join("file.txt")).unwrap(),
+        "current"
+    );
+    rig.h.rewind(&Scope::session(&rig.id), mark).await.unwrap();
 }
 
 #[tokio::test]
@@ -346,6 +413,45 @@ async fn a_served_environment_checks_point_scope_without_restoring() {
     rig.h.close(&a).await.unwrap();
     rig.h.close(&b).await.unwrap();
     plugin.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn acp_reports_the_point_save_error_for_the_original_prompt_and_its_retry() {
+    let rig = support::acp::Rig::new(json!(["the model should not run"]));
+    let project = rig.project.path().to_owned();
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(project.join("unsupported-fifo"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    rig.client(None, false, async move |cx| {
+        let session = cx
+            .send_request(NewSessionRequest::new(project))
+            .block_task()
+            .await?
+            .session_id;
+        let args = json!({
+            "sessionId":session,
+            "prompt":[{"type":"text","text":"test"}],
+            "_meta":{"modular-agent":{"key":"failed-save"}}
+        });
+        let reply = rpc(&cx, "session/prompt", args.clone()).await?;
+        let outcome = &reply["_meta"]["modular-agent"]["outcome"];
+        assert_eq!(outcome["kind"], "failed");
+        assert!(
+            outcome["error"]
+                .as_str()
+                .unwrap()
+                .contains("unsupported-fifo")
+        );
+        let duplicate = rpc(&cx, "session/prompt", args).await?;
+        assert_eq!(duplicate["_meta"]["modular-agent"]["duplicate"], true);
+        assert_eq!(&duplicate["_meta"]["modular-agent"]["outcome"], outcome);
+        Ok(())
+    })
+    .await;
 }
 
 #[tokio::test]

@@ -214,25 +214,21 @@ pub(crate) fn text_content(content: &Value) -> Result<String> {
         .map(|v| v.join("\n"))
 }
 pub(crate) fn has_result(data: &SessionData, input: &str) -> bool {
-    data.entries.iter().any(|e| {
-        e.kind == "input"
-            && e.copies.iter().any(|id| id == input)
-            && data
-                .entries
-                .iter()
-                .any(|end| end.kind == "turn.end" && end.scope.turn == e.scope.turn)
-    })
+    turn_end_for_input(data, input).is_some()
 }
-pub(crate) fn prompt_response(data: &SessionData, receipt: &Receipt) -> Result<Value> {
+fn turn_end_for_input<'a>(data: &'a SessionData, input: &str) -> Option<&'a Entry> {
     let taken = data
         .entries
         .iter()
-        .find(|e| e.kind == "input" && e.copies.contains(&receipt.input));
-    let end = taken.and_then(|input| {
-        data.entries
-            .iter()
-            .find(|e| e.kind == "turn.end" && e.scope.turn == input.scope.turn)
-    });
+        .find(|e| e.kind == "input" && e.copies.iter().any(|id| id == input));
+    data.entries.iter().find(|e| {
+        e.kind == "turn.end"
+            && (taken.is_some_and(|entry| entry.scope.turn == e.scope.turn)
+                || e.content.as_ref().is_some_and(|c| c["inputId"] == input))
+    })
+}
+pub(crate) fn prompt_response(data: &SessionData, receipt: &Receipt) -> Result<Value> {
+    let end = turn_end_for_input(data, &receipt.input);
     ensure!(
         end.is_some() || receipt.command.is_some(),
         "original input has no finished turn"
@@ -246,7 +242,7 @@ pub(crate) fn prompt_response(data: &SessionData, receipt: &Receipt) -> Result<V
     let mut meta = json!({"inputId":receipt.input,"duplicate":receipt.duplicate,"outcome":outcome,
         "openToolCalls":result.open_calls.iter().map(|c| &c.id).collect::<Vec<_>>()});
     if result.outcome == Outcome::Cancelled {
-        let turn = taken.and_then(|e| e.scope.turn.as_ref());
+        let turn = end.and_then(|e| e.scope.turn.as_ref());
         let returned: Vec<_> = data.entries.iter()
             .filter(|e|e.kind == "acp.input.returned" && e.scope.turn.as_ref() == turn)
             .filter_map(|e|e.content.as_ref().and_then(|c|c["inputs"].as_array()))
