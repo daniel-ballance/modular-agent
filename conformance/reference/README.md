@@ -1,6 +1,6 @@
 # Reference checks
 
-The 36 checks test whether an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs, its ACP and AG-UI responses and the telemetry it exports. So one set of checks covers both implementations.
+The 37 checks test whether an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs, its ACP and AG-UI responses and the telemetry it exports. So one set of checks covers both implementations.
 
 Install the shared OTLP receiver's dependencies from this directory: `npm ci --prefix ../telemetry`.
 
@@ -33,6 +33,7 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 | `codemode-values` | How the last value, a `TypeError` and an uncaught error are given back |
 | `sandbox-memory` | Code that outgrows the 256 MiB sandbox limit fails with `MemoryError`; the agent carries on and the next run works |
 | `one-offer` | A direct call to a tool not offered does not run |
+| `tool-catalog` | With `model_tools: null` the model is offered exactly `codemode`, the six tools and `test_ask_secret`. Neither the prompt nor `codemode`'s `tools` has `ask_user` |
 | `model-tools-null` | `model_tools: null` offers the six tools directly |
 | `instructions` | Global and project `AGENTS.md` reach the prompt, global first, with the working folder |
 | `skills` | A project skill is listed, and `/skill:NAME` puts its body in the input |

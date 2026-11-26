@@ -351,6 +351,19 @@ const checks = [
     },
   },
   {
+    name: "tool-catalog",
+    about: "The model and codemode get exactly the six tools and the scripted test tool, with no ask_user.",
+    files: { "data/settings.json": JSON.stringify({ model_tools: null }) },
+    script: [codemode("try:\n    tools.ask_user\n    found = 'ask_user offered'\nexcept AttributeError:\n    found = 'no ask_user'\nfound"), { text: "ok" }],
+    runs: [{ args: ["-p", "Ask me."], expect: { stdout: "ok", exit: 0 } }],
+    log: (log, ok) => {
+      const tools = [...(log[0]?.tools ?? [])].sort();
+      ok(eq(tools, ["codemode", ...SIX, "test_ask_secret"].sort()), "the model is offered codemode, the six tools and test_ask_secret", tools);
+      ok(!(log[0]?.system ?? "").includes("ask_user"), "the prompt lists no ask_user function");
+      ok(last(log[1], "toolResult")?.text === "no ask_user", "codemode has no ask_user function", last(log[1], "toolResult")?.text);
+    },
+  },
+  {
     name: "instructions",
     about: "Global and project AGENTS.md reach the prompt, global first, with the working folder.",
     files: { "data/AGENTS.md": "GLOBAL-RULE-7\n", "project/AGENTS.md": "PROJECT-RULE-9\n" },

@@ -200,6 +200,8 @@ The model is offered one tool, `codemode`, which runs Python in a [Monty](https:
 | `list` | `path?`, `limit?` | Lists a folder |
 | `mcp_SERVER__TOOL` | the server's schema | Calls an MCP server's tool |
 
+The table lists every function. As in Pi, there is no `ask_user` or other function through which the model asks the person a question; the model asks in its reply. Under a script, the [hooks for testing](#hooks-for-testing) add `test_ask_secret`.
+
 The inputs, limits and wording are Pi's, as the Rust `tools-files` crate has them. In the sandbox:
 
 - The Python is Monty's, at the same pinned version in every implementation, so a script behaves the same in both.

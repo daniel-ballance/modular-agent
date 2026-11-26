@@ -6,6 +6,7 @@ The two SDKs and `ma` share one project version. The [SDK specification](docs/sd
 
 - The Rust and TypeScript SDKs report `unavailable` when an HTTP history freshness check fails during a session handoff.
 - Rust and TypeScript `ma -p` decline tool questions so the turn can finish without input.
+- Rust `ma` no longer offers the model `ask_user`, so both builds offer the same tools. The Rust SDK no longer gives the model `ask_user` either, as TypeScript already did not. An app that wants the model to ask gives it a tool that calls `ask`.
 - Fixed a TypeScript input race that could leave a committed follow-up stuck in the queue when the preceding turn ended during admission.
 - The Rust and TypeScript `ma --help` option lines now match. `--trust-project` help names only `.mcp.json`, the project file that can start programs.
 - Both terminals list sorted slash names with `/commands`. TypeScript adds `/questions` to list open question IDs and `/quit` to cancel and exit. Rust no longer offers its undocumented SDK commands `/erase`, `/fork`, `/move`, `/sessions` and `/settings` in `ma`'s terminal.

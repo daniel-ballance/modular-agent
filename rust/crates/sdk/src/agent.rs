@@ -721,7 +721,7 @@ impl AgentBuilder {
             },
             runtime,
             Arc::new(crate::core::SdkJobs(self.job_reports_start_turns)),
-            Arc::new(feature_questions::QuestionsPlugin),
+            Arc::new(feature_questions::QuestionsWithoutToolPlugin),
         ];
         if self.approval.is_some() {
             plugins.push(Arc::new(feature_approval::ApprovalPlugin {
