@@ -144,13 +144,16 @@ test("an agent killed but not yet reaped (a zombie) counts as dead, so its lefto
 	mkdirSync(run);
 	// The shell starts a child, then execs into `sleep`, which never reaps. The child dies only once the exec is seen,
 	// so the shell cannot reap it first: it stays a zombie.
-	const holder = spawn("sh", ["-c", "sleep 30 & echo $!; exec sleep 30"], { stdio: ["ignore", "pipe", "ignore"] });
-	let zombie = 0;
+	// It leads its own process group, so cleanup stops the child too, even before its pid has been read.
+	const holder = spawn("sh", ["-c", "sleep 30 & echo $!; exec sleep 30"], { detached: true, stdio: ["ignore", "pipe", "ignore"] });
 	t.after(() => {
-		// The child first, while its parent still holds it, so its pid cannot have been reused.
-		for (const pid of [zombie, holder.pid]) if (pid) try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+		try {
+			process.kill(-(holder.pid as number), "SIGKILL");
+		} catch {
+			/* already gone */
+		}
 	});
-	zombie = Number(await new Promise<string>((resolve, reject) => {
+	const zombie = Number(await new Promise<string>((resolve, reject) => {
 		holder.stdout.once("data", (d) => resolve(String(d)));
 		holder.stdout.once("close", () => reject(new Error("the holder closed its output without writing the child's pid")));
 	}));
