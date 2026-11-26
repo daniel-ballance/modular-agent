@@ -11,6 +11,7 @@ The two SDKs and `ma` share one project version. The [SDK specification](docs/sd
 - Both terminals list sorted slash names with `/commands`. TypeScript adds `/questions` to list open question IDs and `/quit` to cancel and exit. Rust no longer offers its undocumented SDK commands `/erase`, `/fork`, `/move`, `/sessions` and `/settings` in `ma`'s terminal. `/tool` stays Rust-only for now ([#134](https://github.com/daniel-ballance/modular-agent/issues/134)).
 - An open terminal approval replies `Answer y or n.` to blank lines and other slash commands, including `/quit`. Use `/cancel` to stop the turn.
 - Removed TypeScript's `/approvals` command from the terminal and ACP's advertised commands. `--approval`, the `approval` setting and ACP and AG-UI policy changes still work.
+- Rust `ma -c --history` no longer records an `approval` setting while printing a session that started without one. Like TypeScript, it prints history without applying `--model` or `--thinking`.
 - Removed the Go and Python SDKs and `ma` builds from `main`. Rust and TypeScript stay in lockstep ([ADR 0037](docs/adr/0037-two-languages.md)). The [`four-languages`](https://github.com/daniel-ballance/modular-agent/tree/four-languages) tag preserves both removed builds and their results.
 
 - The [project notes](demos/project-notes/README.md) and [ops desk](demos/ops-desk/README.md) demos now use only the Rust and TypeScript SDKs. Their scripted runs use the same process and service placements and still need no sign-in.

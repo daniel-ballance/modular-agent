@@ -213,7 +213,9 @@ pub async fn run(agent: &Agent, options: TerminalOptions, questions: Questions) 
             Some(id) => agent.open_session(id).await?,
             None => agent.session().await?,
         };
-        {
+        // Printing history only reads: it applies no settings, so it cannot
+        // record a policy the session did not have.
+        if !history {
             for key in ["model", "thinking"] {
                 if (id.is_some() || key == "thinking")
                     && let Some(value) = settings.get(key)
