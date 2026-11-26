@@ -20,9 +20,15 @@ const timeout = (ms: number) => AbortSignal.timeout(Math.max(1, Math.min(2 ** 31
 const bodyCap = 64 * 1024 * 1024;
 // A request that failed on the way, such as one past its deadline, has no binding code.
 // Give it one, so a caller sees lost writer access or an unavailable service rather than
-// an unclassified error (which ACP reports as invalid_params).
-const coded = (error: unknown, code: "lost" | "unavailable") => error instanceof ServiceError || typeof (error as { code?: unknown } | undefined)?.code === "string" ? error
-	: Object.assign(new ServiceError(code === "lost" ? 409 : 503, `History service request failed: ${error instanceof Error ? error.message : String(error)}`, code), { cause: error });
+// an unclassified error (which ACP reports as invalid_params). "lost" is for a failure
+// that ended writer access: it replaces any other code and keeps the failure as the cause.
+const coded = (error: unknown, code: "lost" | "unavailable") => {
+	const own = (error as { code?: unknown } | undefined)?.code;
+	if (code === "lost" ? own === "lost" : error instanceof ServiceError || typeof own === "string") return error;
+	const message = error instanceof Error ? error.message : String(error);
+	return Object.assign(code === "lost" ? new ServiceError(409, `Session is not open for writing: ${message}`, "lost")
+		: new ServiceError(503, `History service request failed: ${message}`, "unavailable"), { cause: error });
+};
 
 // The first field in Linux /proc/uptime includes suspension and is truncated
 // to centiseconds. Reserve a tick against local deadlines.

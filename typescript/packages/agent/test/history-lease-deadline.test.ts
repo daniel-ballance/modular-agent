@@ -14,7 +14,7 @@ const sid = "slow-session";
 const entry = (id: string, kind: string, parentId: string | null): HistoryEntry =>
 	({ id, parentId, sessionId: sid, kind, time: 0, writer: "harness", modelVisible: false, data: { key: id } }) as unknown as HistoryEntry;
 
-type Behaviour = { commitMs?: number; renew?: "answer" | "hang"; read?: "answer" | "drop" };
+type Behaviour = { commitMs?: number; renew?: "answer" | "hang"; read?: "answer" | "drop"; commit?: "answer" | "drop"; pendingErasure?: true };
 
 async function fakeService(t: TestContext, behaviour: Behaviour) {
 	const seen = { commits: 0, renewals: 0 };
@@ -27,7 +27,8 @@ async function fakeService(t: TestContext, behaviour: Behaviour) {
 		req.resume();
 		req.on("end", () => {
 			const path = req.url ?? "";
-			if (path === "/v1") return reply(res, { binding: "modular-agent-history/1", ttlMs });
+			if (path === "/v1") return reply(res, { binding: "modular-agent-history/1", ttlMs, ...(behaviour.pendingErasure && { pendingErasure: 1 }) });
+			if (path.includes("/pending-erasure")) return reply(res, { revision: "revision-1", plans: [] });
 			if (req.method === "PUT") return reply(res, {});
 			if (path.endsWith("/lease")) return reply(res, { lease: "lease-1", ttlMs });
 			if (path.endsWith("/renew")) {
@@ -37,6 +38,7 @@ async function fakeService(t: TestContext, behaviour: Behaviour) {
 			}
 			if (path.endsWith("/entries")) {
 				seen.commits++;
+				if (behaviour.commit === "drop") { res.destroy(); return; }
 				setTimeout(() => { if (!res.destroyed) reply(res, {}); }, behaviour.commitMs ?? 0);
 				return;
 			}
@@ -87,4 +89,14 @@ test("a history read that fails on the way is reported as unavailable", async t 
 	const { store } = await fakeService(t, { read: "drop" });
 	await assert.rejects(store.load(sid), (error: { code?: unknown; message?: string }) =>
 		error.code === "unavailable" && /History service request failed/.test(error.message ?? ""));
+});
+
+test("a guarded append whose reconciliation read fails reports lost writer access, with the read failure as its cause", async t => {
+	const { store, seen } = await fakeService(t, { pendingErasure: true, commit: "drop", read: "drop" });
+	try {
+		await assert.rejects(publishAndCommit(store), (error: { code?: unknown; cause?: { code?: unknown } }) =>
+			error.code === "lost" && error.cause?.code === "unavailable");
+		assert.ok(seen.renewals >= 1, "renewals continued, so only the failed reconciliation ended writer access");
+		assert.throws(() => store.checkWriter(sid), (error: { code?: unknown }) => error.code === "lost");
+	} finally { await store.close(sid); }
 });
