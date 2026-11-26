@@ -16,7 +16,7 @@ export const code = `for path in ["first.txt", "second.txt"]:
     tools.write(path=path, content=before + "x")`;
 const meta = r => r?._meta?.["modular-agent"];
 
-export async function checkApprovalCoversScript(command, t, env) {
+export async function checkApprovalCoversScript(command, invoke, t, env) {
   const files = () => paths.map(path => existsSync(join(t.project, path)) ? readFileSync(join(t.project, path), "utf8") : null);
   async function writer(label, decision, run) {
     const err = openSync(join(t.dir, label + ".stderr"), "w", 0o600);
@@ -105,6 +105,9 @@ export async function checkApprovalCoversScript(command, t, env) {
     assert.ok(!es.some(e => e.kind === "toolStarted"));
     assert.deepEqual(files(), [null, null]);
   });
+  const batch = await invoke(command, { args: ["--approval", "ask", "--session", sid, "-p", "Write both files."] });
+  assert.equal(batch.exit, 1, batch.timeoutDetail ?? batch.stderr);
+  assert.match(batch.stderr, /This session has a waiting approval\. Answer it before using print mode\./);
   await writer("continue", null, async (rpc, _, signal) => {
     await open(rpc, sid);
     const { requests } = await rpc("_modular-agent/requests", { sessionId: sid });

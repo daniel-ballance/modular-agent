@@ -1,6 +1,6 @@
 # Reference checks
 
-The 35 checks test whether an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs, its ACP and AG-UI responses and the telemetry it exports. So one set of checks covers both implementations.
+The 36 checks test whether an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs, its ACP and AG-UI responses and the telemetry it exports. So one set of checks covers both implementations.
 
 Install the shared OTLP receiver's dependencies from this directory: `npm ci --prefix ../telemetry`.
 
@@ -21,6 +21,7 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 | `interactive-commands` | `/commands` prints exactly the specified sorted names, with `/tool` only in Rust ([#134](https://github.com/daniel-ballance/modular-agent/issues/134)). `/questions` lists open IDs and `/quit` exits without a model request. |
 | `terminal-approval` | The terminal shows `Allow? (y/n)` and replies `Answer y or n.` to other inputs, including `/quit`, without running them. A subsequent `Y` allows the script. |
 | `print` | Print mode prints the final answer; the model is offered only `codemode` |
+| `print-questions` | Plain and JSON print mode decline questions from nested and direct tool calls and finish the turn |
 | `client-identity` | `MA_CLIENT_IDENTITY` is checked at startup: an invalid value stops `ma` with status 1, a valid one is accepted |
 | `approval-covers-script` | Refusal leaves both files untouched. A live allow or an allow after restart runs both writes once, with the parent call and request on each start. |
 | `reopen-approval` | A new default does not replace a recorded `off` policy. With the approval feature loaded, a session with no recorded policy reopens with `all`, including a session started without `--approval`. The check also uses `python3` to remove a policy from saved history. |
