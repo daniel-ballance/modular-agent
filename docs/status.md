@@ -20,7 +20,7 @@ Remaining ADR 0030 work is tracked in #19.
 
 ## 0.4.0
 
-Recorded on 2026-11-26 for the release commit, from `scripts/check.sh` on Linux (Fedora 44, x86-64, 32 logical CPUs; 44 steps in 988 s). The first release in two languages, Rust and TypeScript ([ADR 0037](adr/0037-two-languages.md)). The full check ran on the version bump, `03d0d9aed`, before `CHANGELOG.md` gained this release, so its docs-state step failed on the version mismatch and the other 43 passed. The release commit changes only documents after it, and `scripts/check.sh --quick` passed on it, docs-state included. `scripts/macos-check.sh` has not yet been run for 0.4.0.
+Recorded on 2026-11-26 for the release commit, from `scripts/check.sh` on Linux (Fedora 44, x86-64, 32 logical CPUs; 44 steps, all passed). The first release in two languages, Rust and TypeScript ([ADR 0037](adr/0037-two-languages.md)). `scripts/macos-check.sh` has not yet been run on macOS for 0.4.0.
 
 | Check | Rust | TypeScript |
 |---|---|---|
