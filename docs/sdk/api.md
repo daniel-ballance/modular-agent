@@ -278,7 +278,7 @@ A plugin replaces an earlier plugin's item by registering its own item of the sa
 - two plugins register the same item and the later one does not list it: an unlisted collision, including a second Runtime, working environment, history store, credential store or Configuration;
 - a process plugin lists an item that another process plugin registered.
 
-The SDK supplies a history store, credential store and Configuration before explicit plugins, using defaults unless given in `createAgent` options. To replace them, register `historyStore`, `credentialStore` or `configuration` and list `history`, `credentials` or `configuration`, respectively. Each is a singleton. A listed replacement changes only that item. These parts and their selectors are in-process only.
+The SDK supplies a history store, credential store and Configuration before explicit plugins. A history store or credential store uses the default unless `createAgent` names one. Rust takes a Configuration in those options, through `AgentBuilder::configuration` ([Languages](languages.md#rust)). TypeScript uses the default Configuration unless a plugin replaces it. To replace one of these parts, register `historyStore`, `credentialStore` or `configuration` and list `history`, `credentials` or `configuration`. Each is a singleton. A listed replacement changes only that item. These parts and their items are in-process only.
 
 ## Contexts
 
