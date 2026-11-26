@@ -898,10 +898,7 @@ impl Session {
     }
 
     fn snapshot(&self) -> Result<base::SessionData> {
-        self.inner
-            .harness
-            .snapshot(&self.id)
-            .map_err(|_| Error::new(Code::NotOpen, "session is not open"))
+        Ok(self.inner.harness.snapshot(&self.id)?)
     }
 
     fn result(&self, id: &str) -> Result<Option<PromptResult>> {

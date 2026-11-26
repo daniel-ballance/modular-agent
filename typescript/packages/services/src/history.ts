@@ -301,7 +301,9 @@ class HistoryWriter implements HistoryStore {
 				after = page.next as string | undefined;
 			} while (after !== undefined);
 			return { revision: revision!, plans };
-		} catch (error) { throw unavailable("Pending erasure state is unavailable", error); }
+		} catch (cause) {
+			throw Object.assign(new Error("Pending erasure state is unavailable", { cause }), { code: "unavailable" });
+		}
 	}
 	private async guardedAppend(id: string, lease: Lease, batch: HistoryEntry[], forkSource?: string, forkErasureView?: string) {
 		const sources = new Set(batch.flatMap(entry => entry.sources ?? []));

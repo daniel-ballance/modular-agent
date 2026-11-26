@@ -10,6 +10,9 @@ use modular_agent::{
 };
 use serde_json::json;
 
+#[path = "guide09/handoff_faults.rs"]
+mod handoff_faults;
+
 struct Stages {
     pending: &'static str,
     since: Instant,
@@ -155,5 +158,8 @@ async fn hands_off_a_session_over_http() -> Result<()> {
     .await
     .unwrap_or_else(|_| panic!("history handoff timed out: {}", stages.diagnostic()));
     service.shutdown().await;
+    if let Err(error) = &result {
+        panic!("history handoff failed: {error:?}; {}", stages.diagnostic());
+    }
     result
 }

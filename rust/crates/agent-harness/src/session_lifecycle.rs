@@ -457,9 +457,7 @@ impl Harness {
 
     pub(super) fn session_snapshot(&self, session: &str) -> Result<SessionData> {
         let mut sessions = self.sessions.lock().unwrap();
-        let open = sessions
-            .get_mut(session)
-            .ok_or_else(|| anyhow!("session not open"))?;
+        let open = sessions.get_mut(session).ok_or(SessionNotOpen)?;
         self.refresh_open_erasure(open)?;
         Ok(open.data.clone())
     }

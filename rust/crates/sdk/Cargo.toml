@@ -58,6 +58,7 @@ runtime-durable = { path = "../runtime-durable" }
 runtime-transient = { path = "../runtime-transient" }
 
 [dev-dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 opentelemetry.workspace = true
 opentelemetry_sdk = { version = "0.33.1", features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
