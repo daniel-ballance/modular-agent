@@ -12,9 +12,19 @@ import re
 
 import pytest
 
-from modular_agent import Session, Tool, create_agent, file_credentials, subscription_logins
+from modular_agent import (
+    AcpPolicy,
+    Answer,
+    Session,
+    Tool,
+    ToolStatus,
+    create_agent,
+    file_credentials,
+    subscription_logins,
+)
 from modular_agent.testing import scripted_provider
 from ma_standard import cli
+from ma_standard.config import Paths
 
 
 class Keyboard:
@@ -123,3 +133,53 @@ async def test_a_secret_on_the_answer_line_is_refused_and_getpass_reads_it(
     assert term.results == ["stored"]
     assert stored(term.auth) == "typed"
     assert "typed-in-view" not in term.auth.read_text()
+
+
+async def test_ask_secret_hook_is_unreachable_without_modular_agent_script(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "config"
+    state = tmp_path / "state"
+    project = tmp_path / "project"
+    for folder in (config, state, project):
+        folder.mkdir()
+    script_file = tmp_path / "script.json"
+    script_file.write_text('[{"text": "ok"}]', encoding="utf-8")
+
+    def make_args() -> argparse.Namespace:
+        args = cli._parser().parse_args(
+            ["--project", str(project), "--runtime", "transient", "--declaration"]
+        )
+        args.client_identity = "test-client"
+        args.operator_policy = AcpPolicy(config / "policy.json", required=False)
+        return args
+
+    monkeypatch.delenv("MODULAR_AGENT_CONFORMANCE", raising=False)
+    monkeypatch.delenv("MODULAR_AGENT_HISTORY_URL", raising=False)
+    monkeypatch.delenv("MODULAR_AGENT_HISTORY_TOKEN_FILE", raising=False)
+    monkeypatch.setenv("MODULAR_AGENT_SCRIPT", str(script_file))
+    async with await cli._agent(Paths(config, state), project, make_args()) as scripted:
+        session = await scripted.session()
+        await session.on_question(lambda _q, _ctx: Answer("decline"))
+        await session.prompt("init")
+        session_id = session.id
+        direct = await session.call_tool(
+            "test_ask_secret", {"question": "Key?", "credential": "deploy"}
+        )
+        assert direct.status is ToolStatus.COMPLETED
+        assert direct.text() == "declined"
+
+    monkeypatch.delenv("MODULAR_AGENT_SCRIPT", raising=False)
+    async with await cli._agent(Paths(config, state), project, make_args()) as unscripted:
+        session = await unscripted.open_session(session_id)
+        direct = await session.call_tool(
+            "test_ask_secret", {"question": "Key?", "credential": "deploy"}
+        )
+        assert direct.status is ToolStatus.FAILED
+        assert "Unknown tool: test_ask_secret" in direct.text()
+        nested = await session.call_tool(
+            "codemode",
+            {"code": "tools.test_ask_secret(question='Key?', credential='deploy')"},
+        )
+        assert nested.status is ToolStatus.FAILED
+        assert "AttributeError" in nested.text()

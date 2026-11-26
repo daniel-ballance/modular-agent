@@ -5,11 +5,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { createAgent, defaultAcpActor, httpHistory, definePlugin, type Agent, type Approval, type Settings } from "@modular-agent/core";
-import { standardFileTools } from "@modular-agent/tools-files/sdk";
-import { standardMcpTools } from "@modular-agent/tools-mcp/sdk";
 import { paths, settingsFor, skillsFor, standardSettings, mcpServers, optionalJson, trusted } from "./configuration.js";
-import { standardPrompt } from "./prompt.js";
-import { codemode } from "./codemode.js";
+import { standardPlugins } from "./compose.js";
 import { loadScript } from "./script.js";
 import { startTelemetry } from "./telemetry.js";
 import { line, print } from "./terminal.js";
@@ -235,8 +232,7 @@ async function main(argv: string[]) {
       chatgpt({ logins: auth, ...identity, modelOverrides: chatgptOverrides }),
       grok({ logins: auth, ...identity, modelOverrides: grokOverrides }),
     ];
-    const plugins = [standardFileTools({ spill: join(p.state, "output") }), codemode(), standardPrompt(p)];
-    if (!serving) plugins.push(standardMcpTools({ servers: projectMcp }));
+    const plugins = standardPlugins({ paths: p, serving, projectMcp, script });
     if (claudeProvider && (model?.startsWith("claude/") || opts.command === "models")) plugins.push(definePlugin({
       name: "provider.claude", setup: r => r.provider(claudeProvider), stop: claudeProvider.close,
     }));

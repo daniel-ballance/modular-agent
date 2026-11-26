@@ -1,8 +1,9 @@
 //! The standard configuration's offline scripted Provider and request log.
 use modular_agent::{
-    AssistantMessage, ModelInfo, ModelRef, ModelRequest, Provider, ProviderContext,
-    ProviderSupport, Result, async_trait,
+    Answer, Ask, AssistantMessage, Code, Error, ModelInfo, ModelRef, ModelRequest, Plugin,
+    Provider, ProviderContext, ProviderSupport, Result, Tool, ToolContext, async_trait,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     io::Write,
@@ -99,4 +100,40 @@ fn log_line(request: &Value) -> Value {
     json!({"system":request["systemPrompt"].as_str().unwrap_or_default(),
         "tools":request["tools"].as_array().into_iter().flatten().map(|t| &t["name"]).collect::<Vec<_>>(),
         "messages":messages})
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AskSecretInput {
+    question: String,
+    credential: String,
+}
+
+pub(crate) fn test_tools_plugin() -> Plugin {
+    Plugin::new("standard.script-tools").tool(
+        Tool::new(
+            "test_ask_secret",
+            "Ask a secret question for scripted testing.",
+        )
+        .input_schema(json!({
+            "type": "object",
+            "properties": {
+                "question": { "type": "string" },
+                "credential": { "type": "string" }
+            },
+            "required": ["question", "credential"],
+            "additionalProperties": false
+        }))
+        .run(|input: Value, cx: ToolContext| async move {
+            let input: AskSecretInput = serde_json::from_value(input)
+                .map_err(|e| Error::new(Code::InvalidRequest, e.to_string()))?;
+            match cx
+                .ask(Ask::secret(input.question, input.credential))
+                .await?
+            {
+                Answer::Declined { .. } => Ok("declined"),
+                _ => Ok("stored"),
+            }
+        }),
+    )
 }

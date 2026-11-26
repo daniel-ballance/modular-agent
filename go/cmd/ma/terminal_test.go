@@ -383,3 +383,60 @@ func TestTerminalDeclinesASecretOnRequest(t *testing.T) {
 	}
 	term.end()
 }
+
+func TestAskSecretHookUnreachableWithoutModularAgentScript(t *testing.T) {
+	d, project, _ := isolated(t)
+	policy, err := readPolicy(filepath.Join(d.config, "policy.json"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := options{project: project, transient: true, policy: policy}
+
+	store := modular.FileHistory(filepath.Join(d.state, "sessions"))
+	input := map[string]any{"question": "Key?", "credential": "deploy"}
+	sessionID := func() string {
+		scripted, err := d.compose(t.Context(), opts, modular.Settings{}, store, io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := scripted.Close(context.Background()); err != nil {
+				t.Error(err)
+			}
+		}()
+		s, err := scripted.Session(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.OnQuestion(t.Context(), func(context.Context, modular.Question) (modular.Answer, error) {
+			return modular.Decline("test"), nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Prompt(t.Context(), "init"); err != nil {
+			t.Fatal(err)
+		}
+		result, err := s.CallTool(t.Context(), "test_ask_secret", input)
+		if err != nil || result.Status != modular.Completed || result.Text() != "declined" {
+			t.Fatalf("expected declined with a script: %+v, %v", result, err)
+		}
+		return s.ID()
+	}()
+
+	if err := os.Unsetenv("MODULAR_AGENT_SCRIPT"); err != nil {
+		t.Fatal(err)
+	}
+	unscripted, err := d.compose(t.Context(), opts, modular.Settings{}, store, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unscripted.Close(context.Background()) })
+	s2, err := unscripted.OpenSession(t.Context(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	direct, err := s2.CallTool(t.Context(), "test_ask_secret", input)
+	if err != nil || direct.Status != modular.Failed || direct.Text() != "unknown or unavailable tool: test_ask_secret" {
+		t.Fatalf("expected unknown tool without MODULAR_AGENT_SCRIPT: %+v, %v", direct, err)
+	}
+}

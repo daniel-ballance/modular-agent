@@ -29,6 +29,8 @@ from modular_agent import (
     QuestionContext,
     ResumeOpen,
     Session,
+    Tool,
+    ToolContext,
     ModelRef,
     OutcomeKind,
     create_agent,
@@ -90,6 +92,37 @@ class Script(ScriptedProvider):
                     + "\n"
                 )
         return await super().request(model, request, context)
+
+
+def _test_ask_secret_tool() -> Tool:
+    async def run(arguments: JsonObject, context: ToolContext) -> str:
+        question = arguments.get("question")
+        credential = arguments.get("credential")
+        if (
+            not isinstance(question, str)
+            or not isinstance(credential, str)
+            or set(arguments) != {"question", "credential"}
+        ):
+            raise ValueError("test_ask_secret requires only string question and credential")
+        reply = await context.ask(
+            {"kind": "secret", "question": question, "credential": credential}
+        )
+        return "declined" if reply.kind == "decline" else "stored"
+
+    return Tool.from_schema(
+        "test_ask_secret",
+        "Ask a secret question for scripted testing.",
+        {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string"},
+                "credential": {"type": "string"},
+            },
+            "required": ["question", "credential"],
+            "additionalProperties": False,
+        },
+        run,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -521,7 +554,7 @@ async def _agent(
         local_process_groups=True,
         providers=providers,
         credentials=file_credentials(auth),
-        tools=[code_tool()],
+        tools=[code_tool(), *([_test_ask_secret_tool()] if script else [])],
         plugins=[
             file_tools(paths.state / "output"),
             prompt_plugin(paths.config, project),
