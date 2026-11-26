@@ -38,7 +38,7 @@ interface InputAdmissionOperations {
 	reserveInput(s: Session, q: QueuedInput, rebuilding?: boolean, startsNow?: boolean): void;
 	reservations(): Reservations;
 	interfaceTools(): Pick<InterfaceToolRoutes, "interfaceSources" | "unsettledHandoffs" | "settleInterfaceCall" | "queuedOffers" | "offerScope">;
-	turns(): Pick<TurnExecution, "startTurn" | "maybeContinueOpenCalls">;
+	turns(): Pick<TurnExecution, "startTurn" | "startQueued" | "maybeContinueOpenCalls">;
 	emit(session: string | Session, type: string, data: any, source: string, ids?: Partial<AgentEvent>): void;
 	problem(plugin: string, where: string, error: unknown): void;
 	approvals(): Pick<ApprovalReconciliation, "reconcileApprovals" | "closeWaiting">;
@@ -181,7 +181,10 @@ export class InputAdmission {
 		const receipt: InputReceipt = { inputId: q.id, taken };
 		if (q.when !== "propose") {
 			if (taken === "now") this.operations.turns().startTurn(s, q);
-			else (taken === "inTurn" ? s.steering : s.followUps).push(q);
+			else {
+				(taken === "inTurn" ? s.steering : s.followUps).push(q);
+				this.operations.turns().startQueued(s);
+			}
 		}
 		this.operations.emit(s, "input.accepted", { inputId: q.id, taken }, "harness", { actorId: q.actorId });
 		return receipt;
