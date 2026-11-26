@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { isDeepStrictEqual as equal } from "node:util";
 import { tracedReply } from "./http-trace.mjs";
+import { leaseFixtures } from "./lease-fixture.mjs";
 
 const id = () => `kit-${randomUUID()}`;
 const path = (sid) => `/v1/sessions/${encodeURIComponent(sid)}`;
@@ -16,20 +17,41 @@ const err = (r, status, code) => r.status === status && json(r) && r.body?.code 
 const need = (condition, reason) => { if (!condition) throw Error(reason); };
 
 function client(req) {
+	const leases = leaseFixtures((sid, lease, signal) =>
+		req("POST", `${path(sid)}/lease/${encodeURIComponent(lease)}/renew`, undefined, { signal }));
 	return {
 		read: (sid) => req("GET", path(sid)),
 		plans: (sid, query = "") => req("GET", registry(sid) + query),
 		async acquire(sid) {
+			const sentAt = performance.now();
 			const r = await req("POST", `${path(sid)}/lease`, { owner: id() });
-			need(r.status === 200 && revisionOK(r.body?.lease), "could not acquire fixture lease");
+			need(r.status === 200 && revisionOK(r.body?.lease) && Number.isSafeInteger(r.body.ttlMs) && r.body.ttlMs > 0,
+				"could not acquire fixture lease");
+			leases.keep(sid, r.body, sentAt);
 			return r.body.lease;
 		},
-		release: (sid, lease) => req("DELETE", `${path(sid)}/lease/${encodeURIComponent(lease)}`),
-		append: (sid, lease, entries, revision) => req("POST", `${path(sid)}/entries`, { lease, entries },
-			{ headers: { "History-Revision": revision } }),
-		publish: (sid, body) => req("POST", registry(sid), body),
-		erase: (sid, lease, entryIds) => req("POST", `${path(sid)}/erase`, { lease, entryIds }),
-		complete: (sid, intent, lease, entryIds) => req("POST", `${registry(sid)}/${encodeURIComponent(intent)}/complete`, { lease, entryIds }),
+		async release(sid, lease) {
+			await leases.stop(lease);
+			return req("DELETE", `${path(sid)}/lease/${encodeURIComponent(lease)}`);
+		},
+		async append(sid, lease, entries, revision) {
+			await leases.ready(lease);
+			return req("POST", `${path(sid)}/entries`, { lease, entries }, { headers: { "History-Revision": revision } });
+		},
+		async publish(sid, body) {
+			await leases.ready(body.lease);
+			return req("POST", registry(sid), body);
+		},
+		async erase(sid, lease, entryIds) {
+			await leases.ready(lease);
+			return req("POST", `${path(sid)}/erase`, { lease, entryIds });
+		},
+		async complete(sid, intent, lease, entryIds) {
+			await leases.ready(lease);
+			return req("POST", `${registry(sid)}/${encodeURIComponent(intent)}/complete`, { lease, entryIds });
+		},
+		ready: leases.ready,
+		close: leases.close,
 	};
 }
 
@@ -57,7 +79,13 @@ async function withClient(connection, trace, work) {
 	}
 }
 
-export async function runErasureRegistry({ url, tokenFile, project, req, check, ttl, restart, trace }) {
+export async function runErasureRegistry(options) {
+	const c = client(options.req);
+	try { await verifyRegistry(options, c); }
+	finally { await c.close(); }
+}
+
+async function verifyRegistry({ url, tokenFile, project, req, check, ttl, restart, trace }, c) {
 	const declare = (r) => r.status === 200 && r.body?.pendingErasure === 1;
 	const supported = declare(await req("GET", "/v1"));
 	check("registry: GET /v1 declares pendingErasure: 1", supported);
@@ -65,7 +93,6 @@ export async function runErasureRegistry({ url, tokenFile, project, req, check, 
 
 	// The base restart probe has just restarted the service. Its exclusion can last a TTL.
 	await sleep(ttl);
-	const c = client(req);
 	const connection = { url, tokenFile };
 	const source = id(), dest = id(), intentId = id();
 	const original = { id: id(), parentId: null, kind: "summary", data: { text: id() } };
@@ -107,8 +134,10 @@ export async function runErasureRegistry({ url, tokenFile, project, req, check, 
 		const snapshot = await c.plans(dest);
 		check("registry: publication requires a current source lease",
 			err(await c.publish(source, { ...publish, lease: sourceLease, revision: snapshot.body.revision }), 409, "lost"));
+		await c.ready(destLease);
 		let mark;
 		await withClient(connection, trace, async (writerA) => { mark = await writerA("mark", { source, dest, copy, publish }); });
+		await c.ready(destLease);
 		check("registry: writer A marks the copy while its destination lease is held", mark.published);
 		const marked = await c.plans(dest);
 		check("registry: pending plan has the stable record and copy IDs; raw reads are unchanged",
@@ -144,11 +173,12 @@ if (process.argv[2] === "--fixture-client" && process.send) {
 	let cached;
 	process.on("message", async ({ connection: { url, tokenFile }, action, args }) => {
 		const trace = [];
+		let c, response;
 		try {
 			const token = readFileSync(tokenFile, "utf8").trim();
-			const c = client((method, route, body, opts) =>
+			c = client((method, route, body, opts) =>
 				tracedReply(method, route, () => fetch(url.replace(/\/+$/, "") + route, {
-					method, redirect: "error", cache: "no-store", signal: AbortSignal.timeout(15000),
+					method, redirect: "error", cache: "no-store", signal: opts?.signal ?? AbortSignal.timeout(15000),
 					headers: { authorization: `Bearer ${token}`, Connection: "close", ...(body === undefined ? {} : { "content-type": "application/json" }), ...opts?.headers },
 					body: body === undefined ? undefined : JSON.stringify(body),
 				}), trace, { strict: true }));
@@ -193,9 +223,12 @@ if (process.argv[2] === "--fixture-client" && process.send) {
 				result = { fenced, bookOnlyRefused, completed };
 				need(ok(await c.release(dest, lease), {}), "writer B could not release its lease");
 			} else throw Error("unknown registry fixture action");
-			process.send({ result, trace });
+			response = { result };
 		} catch (error) {
-			process.send({ error: error.message, trace });
+			response = { error: error.message };
+		} finally {
+			await c?.close();
 		}
+		process.send({ ...response, trace });
 	});
 }
