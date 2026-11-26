@@ -44,10 +44,33 @@ ma sessions [--all]          list saved sessions
 | `--listen ADDR` | with `--acp`, serve ACP on a WebSocket instead of stdio ([an agent service](../bindings/websocket.md#an-agent-service)); with `--agui`, serve AG-UI over HTTP; with both, both on one listener. `ADDR` is a loopback `HOST:PORT`, or a `ws:` URL for ACP alone; `ma` has no TLS options. `ma` serves until stopped. |
 | `--agui` | serve the AG-UI HTTP and SSE binding on `--listen ADDR`, including the [wait-closure feed](../bindings/agui.md#wait-closures) and, for kept sessions, [run receipts](../bindings/agui.md#run-receipts). It requires a listener and never uses stdio. With `--acp`, the same listener accepts ACP WebSocket upgrades at `/`. `ma` prints the HTTP origin when ready. `ma` has no TLS options; bind to loopback. Use `--token-file FILE` for the local user with client ID `ma-local`, or supply policy `actors` with a nonempty `clientId` on every entry. Tokens that share a client ID must bind the same principal and scope. The operator's `--project` selects the AG-UI creation project; the single-user configuration creates sessions without a tenant. See the [AG-UI binding](../bindings/agui.md). |
 | `--resume-open` | with `--acp` or `--agui`, reopen at start-up every kept session in the operator's project that has an interrupted turn, so durable turns carry on without waiting for a client. See [Resuming at start-up](#resuming-at-start-up). Also the setting `resume_open`. |
-| `--approval POLICY` | load the approval feature with this default policy: `off`, `ask`, `all` or `never`. Overrides the setting `approval`. See [Approval](#approval). The help line is `set each new session's default approval policy: off, ask, all or never`. |
+| `--approval POLICY` | load the approval feature with this default policy: `off`, `ask`, `all` or `never`. Overrides the setting `approval`. See [Approval](#approval). |
 | `--token-file FILE` | with `--listen`, shorthand for one token acting as the local user. Do not combine with a policy `actors` list. |
 | `--policy FILE` | read this operator policy instead of `policy.json` in the configuration folder. |
 | `-h`, `--help`; `-V`, `--version` | help; the version, as `ma VERSION (LANGUAGE)` with the language in lowercase |
+
+`ma --help` prints these exact option lines, in this order, under `Options:`. The usage section shows `-p PROMPT` separately.
+
+```text
+  --model PROVIDER/ID   for example chatgpt/gpt-6.1-sol, grok/grok-4.7, claude/claude-sonnet-5-5
+  --thinking LEVEL      off, minimal, low, medium, high or xhigh, as the model allows
+  --session ID          reopen a session
+  -c, --continue        reopen this folder's most recent session
+  --project DIR         work in DIR instead of the current folder
+  --trust-project       let this project's .mcp.json start programs
+  --runtime KIND        durable (default: a turn cut off by a crash carries on) or transient
+  -v, --verbose         also show each call the code makes and what commands print
+  --json                print every event as a JSON line
+  --history             print the session's history
+  --declaration         print what this agent declares it supports
+  --acp                 serve the Agent Client Protocol on stdio, for an editor or host
+  --agui                serve AG-UI over HTTP and SSE; requires --listen
+  --approval POLICY     set each new session's default approval policy: off, ask, all or never
+  --resume-open         reopen interrupted turns before serving --acp or --agui
+  --listen ADDR         loopback listener for --agui, --acp, or both
+  --token-file FILE     configure a single local token for --listen
+  --policy FILE         read operator policy instead of policy.json
+```
 
 ACP project scope, tenant reach and any narrower rights come from operator configuration, never from project files. `ma` MUST enforce an operator restriction before reading project settings or composing that project. Its single-user profile does not enable configured representation. The unrestricted local shorthand is for a trusted launcher, not an untrusted stdio proxy. See [ACP starting](../bindings/acp.md#starting) and [ACP authorization](../bindings/acp.md#authorization).
 
@@ -61,9 +84,27 @@ $ ma sessions --all
 5d2e8a7b1c3f4e6d9a0b2c4e6f8a1b3d  /home/me/code/site
 ```
 
-**Interactive mode** is line-based. While the agent works, a line typed steers the running turn; `/after TEXT` queues a new turn; `/cancel` or Ctrl-C stops the turn. Commands: `/commands`, `/model`, `/thinking`, `/compact`, `/skills`, `/skill:NAME`. Model text streams to stdout; calls and diagnostics go to stderr.
+**Interactive mode** is line-based. While the agent works, a line typed steers the running turn; `/after TEXT` queues a new turn; `/cancel` or Ctrl-C stops the turn. Model text streams to stdout; calls and diagnostics go to stderr. `/quit` cancels any running turn and closes the terminal session.
 
-**Questions** in interactive mode go to stderr. An approval of a tool call takes `y` or `n` ([Approval](#approval)). The terminal shows one approval at a time. For other questions, the terminal shows `Question REQUEST_ID: QUESTION`, any options, and how to answer. The terminal registers a question before it shows it, so an `/answer` it reads after the line appears finds that question. More than one question can be open. `/answer REQUEST_ID VALUE` answers the named question, and `/answer REQUEST_ID decline` declines it. End of input declines every open question.
+`/commands` prints the terminal commands as sorted slash names, one per line:
+
+```text
+/after
+/answer
+/cancel
+/commands
+/compact
+/model
+/questions
+/quit
+/skill:NAME
+/skills
+/thinking
+```
+
+Rust also offers and lists `/tool` until [#134](https://github.com/daniel-ballance/modular-agent/issues/134) resolves it.
+
+**Questions** in interactive mode go to stderr. An approval of a tool call takes `y` or `n` ([Approval](#approval)). The terminal shows one approval at a time and asks `Allow? (y/n)`. While it shows an approval, any line other than `y`, `n` (case-insensitive), or `/cancel` gets `Answer y or n.`. This includes blank lines and other slash commands. `/questions` prints the IDs of open questions as a JSON array. For other questions, the terminal shows `Question REQUEST_ID: QUESTION`, any options, and how to answer. The terminal registers a question before it shows it, so an `/answer` it reads after the line appears finds that question. More than one question can be open. `/answer REQUEST_ID VALUE` answers the named question, and `/answer REQUEST_ID decline` declines it. End of input declines every open question.
 
 **Secret answers** are never typed on the visible line:
 

@@ -1,6 +1,6 @@
 # Reference checks
 
-The 33 checks test whether an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs, its ACP and AG-UI responses and the telemetry it exports. So one set of checks covers both implementations.
+The 35 checks test whether an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs, its ACP and AG-UI responses and the telemetry it exports. So one set of checks covers both implementations.
 
 Install the shared OTLP receiver's dependencies from this directory: `npm ci --prefix ../telemetry`.
 
@@ -17,7 +17,9 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 
 | Check | What it shows |
 |---|---|
-| `interactive-commands` | `/commands` lists `/compact` without asking the model |
+| `help-options` | Both `ma --help` option sections match the exact lines in the standard configuration. When running a listed build, skip this check if its peer is not built, or fail in strict mode. With an explicit command after `--`, check only that command. |
+| `interactive-commands` | `/commands` prints exactly the specified sorted names, with `/tool` only in Rust ([#134](https://github.com/daniel-ballance/modular-agent/issues/134)). `/questions` lists open IDs and `/quit` exits without a model request. |
+| `terminal-approval` | The terminal shows `Allow? (y/n)` and replies `Answer y or n.` to other inputs, including `/quit`, without running them. A subsequent `Y` allows the script. |
 | `print` | Print mode prints the final answer; the model is offered only `codemode` |
 | `client-identity` | `MA_CLIENT_IDENTITY` is checked at startup: an invalid value stops `ma` with status 1, a valid one is accepted |
 | `approval-covers-script` | Refusal leaves both files untouched. A live allow or an allow after restart runs both writes once, with the parent call and request on each start. |

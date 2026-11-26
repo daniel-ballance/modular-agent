@@ -304,8 +304,9 @@ async fn interactive(session: &Session, questions: Questions, mode: Mode) -> Res
                     break;
                 };
                 let line = line.trim();
-                if line.is_empty() { continue; }
-                if line == "/quit" {
+                let approving = questions.0.lock().unwrap().approval().is_some();
+                if line.is_empty() && !approving { continue; }
+                if line == "/quit" && !approving {
                     questions.decline_all();
                     session.cancel().await?;
                     break;
@@ -363,6 +364,8 @@ async fn read_hidden(lines: &mut mpsc::Receiver<std::io::Result<String>>) -> Res
     Ok(read)
 }
 
+const SESSION_COMMANDS: [&str; 4] = ["compact", "model", "skills", "thinking"];
+
 /// Returns the ID of a secret question to read with echo off.
 async fn input(
     session: &Session,
@@ -414,24 +417,27 @@ async fn input(
     } else if let Some(text) = line.strip_prefix("/after ") {
         session.send(text, Timing::After).await?;
     } else if line == "/commands" {
-        let mut commands = session.commands()?;
-        commands.extend(
-            [
-                "after",
-                "answer",
-                "cancel",
-                "questions",
-                "quit",
-                "skill:NAME",
-                "tool",
-            ]
-            .map(str::to_owned),
-        );
+        let mut commands = [
+            "after",
+            "answer",
+            "cancel",
+            "commands",
+            "questions",
+            "quit",
+            "skill:NAME",
+            "tool",
+        ]
+        .to_vec();
+        commands.extend(SESSION_COMMANDS);
         commands.sort();
         for name in commands {
             display(&format!("/{name}"));
         }
     } else if line.starts_with('/') && !line.starts_with("/skill:") {
+        let name = line[1..].split_whitespace().next().unwrap_or_default();
+        if !SESSION_COMMANDS.contains(&name) {
+            bail!("unknown command {name}");
+        }
         if let Some(text) = session.run_command(line).await? {
             display(&text);
         }

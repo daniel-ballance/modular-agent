@@ -51,17 +51,6 @@ export function approval(options: { policy?: ApprovalPolicy;  /** Close an unans
 				if (answer.declined || answer.value !== "allow") return { refuse: `${p.call.name} was not approved${answer.reason ? ` (${answer.reason})` : ""}.` };
 				return undefined;
 			});
-
-			api.registerCommand("approvals", {
-				description: "Show or set the approval policy: ask, all, never or off",
-				run: async (args, ctx) => {
-					const wanted = args.trim() as ApprovalPolicy;
-					if (!wanted) return `Approval policy: ${policyOf(ctx.sessionId)}`;
-					if (!POLICIES.includes(wanted)) return `Unknown policy. Use one of: ${POLICIES.join(", ")}`;
-					await api.setSetting(ctx.sessionId, "approval", wanted, ctx.actorId);
-					return `Approval policy set to ${wanted}`;
-				},
-			});
 		},
 	};
 }

@@ -2,6 +2,8 @@ import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
 import type { Agent, Answer, Event, Session, ToolCall, ToolStatus } from "@modular-agent/core";
 
+const SESSION_COMMANDS = ["/compact", "/skills"];
+
 function sink(json: boolean, verbose: boolean, stream: boolean) {
   let midline = false;
   const calls = new Map<string, boolean>();
@@ -117,15 +119,17 @@ export async function line(agent: Agent, session: Session, json: boolean, verbos
         else out.show("question is no longer answerable");
         continue;
       }
-      if (!input.trim()) continue;
-      const [word, value = ""] = /^([\S]+)(?:\s+(.*))?$/.exec(input.trim())?.slice(1) ?? [];
+      const line = input.trim();
+      const approval = firstApproval();
+      if (!line && !approval) continue;
+      const [word = "", value = ""] = /^([\S]+)(?:\s+(.*))?$/.exec(line)?.slice(1) ?? [];
       try {
-        const approval = firstApproval();
-        if (word === "/cancel") cancel();
+        if (line === "/cancel") cancel();
         else if (approval) {
-          if (/^[yn]$/i.test(input.trim())) approval.answer(input.trim().toLowerCase() === "y" ? "allow" : "decline");
+          if (/^[yn]$/i.test(line)) approval.answer(line.toLowerCase() === "y" ? "allow" : "decline");
           else out.show("Answer y or n.");
         }
+        else if (line === "/quit") { await session.cancel(); break; }
         else if (word === "/after") { if (value) await session.send(value, "after"); }
         else if (word === "/answer") {
           const split = value.indexOf(" ");
@@ -140,15 +144,18 @@ export async function line(agent: Agent, session: Session, json: boolean, verbos
             echo.mute(true);
           } else if (given === undefined) throw new Error("use /answer REQUEST_ID VALUE");
           else question.answer({ value: given });
-        } else if (word === "/commands") {
-          say(["/commands", "/model [PROVIDER/ID]", "/thinking [LEVEL]", "/after TEXT", "/cancel", "/skill:NAME", ...session.commands().map(c => `/${c.name}  ${c.description}`)].join("\n"));
+        } else if (line === "/questions") {
+          say(JSON.stringify([...waiting.keys()]));
+        } else if (line === "/commands") {
+          say(["/after", "/answer", "/cancel", "/commands", "/model", "/questions", "/quit", "/skill:NAME", "/thinking", ...SESSION_COMMANDS].sort().join("\n"));
         } else if (word === "/model") {
           if (value) await session.setSetting("model", value);
           else say(models().join("\n"));
         } else if (word === "/thinking") {
           if (value) await session.setSetting("thinking", value);
           else say(String(session.settings().reasoning ?? "off"));
-        } else if (word.startsWith("/") && !word.startsWith("/skill:")) say(await session.runCommand(input));
+        } else if (SESSION_COMMANDS.includes(word)) say(await session.runCommand(input));
+        else if (word.startsWith("/") && !word.startsWith("/skill:")) throw new Error(`Unknown command ${word}`);
         else await session.send(input, "steer");
       } catch (err) { out.show((err as Error).message); }
     }
