@@ -166,14 +166,11 @@ async function poll(read, what, { attempts = Infinity, delay = 50, recheck, time
 }
 
 async function cancelPending(agent, sessionId, pending, lifetime) {
-	// A settled prompt wins the race. The sentinel wins only while it is pending.
-	const outstanding = Symbol();
+	const outstanding = Symbol(); // A settled prompt wins the race; the sentinel wins only while it is pending.
 	if (await Promise.race([pending, outstanding]).catch(() => undefined) !== outstanding) return;
 	await agent.ctx.notify(methods.agent.session.cancel, { sessionId }).catch(() => undefined);
-	// A command that still launches would block opening the pipe's write end; keep a reader ready.
-	const reader = lifetime && setInterval(() => lifetime.opened(), 50);
-	try { await within(10000, pending, "cancelled prompt").catch(() => undefined); }
-	finally { if (reader) clearInterval(reader); }
+	const reader = lifetime && setInterval(() => lifetime.opened(), 50); // A late launch must not block on the pipe.
+	await within(10000, pending, "cancelled prompt").catch(() => undefined).finally(() => clearInterval(reader));
 }
 
 function commandLifetime(marker, declaration) {
