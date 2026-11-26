@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "agent-api"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -36,7 +36,7 @@ dependencies = [
 
 [[package]]
 name = "agent-base"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "agent-client-protocol",
@@ -128,7 +128,7 @@ dependencies = [
 
 [[package]]
 name = "agent-harness"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -854,7 +854,7 @@ dependencies = [
 
 [[package]]
 name = "config-files"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "credentials-auth"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "modular-agent",
@@ -956,7 +956,7 @@ dependencies = [
 
 [[package]]
 name = "credentials-file"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -1218,7 +1218,7 @@ dependencies = [
 
 [[package]]
 name = "environment-local"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -1287,7 +1287,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "feature-approval"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "serde_json",
@@ -1295,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "feature-commands"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -1304,7 +1304,7 @@ dependencies = [
 
 [[package]]
 name = "feature-context"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -1314,7 +1314,7 @@ dependencies = [
 
 [[package]]
 name = "feature-jobs"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "tokio",
@@ -1322,7 +1322,7 @@ dependencies = [
 
 [[package]]
 name = "feature-model"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -1332,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "feature-prompt"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -1341,7 +1341,7 @@ dependencies = [
 
 [[package]]
 name = "feature-questions"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "serde_json",
@@ -1350,7 +1350,7 @@ dependencies = [
 
 [[package]]
 name = "feature-subagents"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "serde_json",
@@ -1679,7 +1679,7 @@ dependencies = [
 
 [[package]]
 name = "guardrail"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -1791,7 +1791,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "history-fs"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -1803,7 +1803,7 @@ dependencies = [
 
 [[package]]
 name = "history-http"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -2143,7 +2143,7 @@ dependencies = [
 
 [[package]]
 name = "interface-acp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "agent-client-protocol",
@@ -2160,7 +2160,7 @@ dependencies = [
 
 [[package]]
 name = "interface-terminal"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -2565,7 +2565,7 @@ checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
 name = "mcp-client"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -2641,7 +2641,7 @@ dependencies = [
 
 [[package]]
 name = "modular-agent"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "agent-harness",
@@ -2691,7 +2691,7 @@ dependencies = [
 
 [[package]]
 name = "modular-agent-files"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2704,7 +2704,7 @@ dependencies = [
 
 [[package]]
 name = "modular-agent-mcp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "futures-util",
  "mcp-client",
@@ -3325,7 +3325,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "plugin-stdio"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "agent-harness",
@@ -3476,7 +3476,7 @@ dependencies = [
 
 [[package]]
 name = "provider-fake"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -3487,7 +3487,7 @@ dependencies = [
 
 [[package]]
 name = "provider-openai"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -4246,7 +4246,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-durable"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "runtime-engine",
@@ -4254,7 +4254,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-engine"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "async-trait",
@@ -4265,7 +4265,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-transient"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -4519,7 +4519,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "sdk-scenarios"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -4884,7 +4884,7 @@ dependencies = [
 
 [[package]]
 name = "standard"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "credentials-auth",
@@ -5320,7 +5320,7 @@ dependencies = [
 
 [[package]]
 name = "tools-builtin"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -5330,7 +5330,7 @@ dependencies = [
 
 [[package]]
 name = "tools-code"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -5345,7 +5345,7 @@ dependencies = [
 
 [[package]]
 name = "tools-mcp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "async-trait",
@@ -5440,7 +5440,7 @@ dependencies = [
 
 [[package]]
 name = "transport-websocket"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum-core",

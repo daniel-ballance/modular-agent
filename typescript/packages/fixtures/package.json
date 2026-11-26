@@ -1,6 +1,6 @@
 {
   "name": "@modular-agent/fixtures",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "license": "MIT",
   "type": "module",
   "exports": "./dist/src/index.js",
@@ -9,14 +9,14 @@
   },
   "devDependencies": {
     "@agentclientprotocol/sdk": "2.7.0",
-    "@modular-agent/openai": "0.3.0",
-    "@modular-agent/anthropic": "0.3.0"
+    "@modular-agent/openai": "0.4.0",
+    "@modular-agent/anthropic": "0.4.0"
   },
   "dependencies": {
-    "@modular-agent/core": "0.3.0",
-    "@modular-agent/harness": "0.3.0",
-    "@modular-agent/history-jsonl": "0.3.0",
-    "@modular-agent/services": "0.3.0",
+    "@modular-agent/core": "0.4.0",
+    "@modular-agent/harness": "0.4.0",
+    "@modular-agent/history-jsonl": "0.4.0",
+    "@modular-agent/services": "0.4.0",
     "@opentelemetry/api": "^1.10.0",
     "@opentelemetry/context-async-hooks": "^3.1.1",
     "@opentelemetry/exporter-trace-otlp-proto": "^0.301.2",
