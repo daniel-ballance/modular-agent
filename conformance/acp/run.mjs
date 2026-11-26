@@ -2,7 +2,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual as equal, parseArgs } from "node:util";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
@@ -138,6 +138,43 @@ async function within(ms, promise, what) {
 	let timer;
 	return Promise.race([promise, new Promise((_, reject) => (timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms: ${what}`)), ms)))]).finally(() => clearTimeout(timer));
 }
+const replyDetail = (reply) => JSON.stringify(reply instanceof Error ? { ...reply, message: reply.message } : reply);
+function beforePromptReply(ready, pending, acceptReply) {
+	const ended = (reply) => { throw Error(`prompt settled before the fixture was ready: ${replyDetail(reply)}`); };
+	return Promise.race([ready, pending.then((reply) => acceptReply?.(reply) ? ready : ended(reply), ended)]);
+}
+async function poll(ms, read, what, pending, acceptReply) {
+	let done = false;
+	const ready = (async () => {
+		while (!done) {
+			const value = await read();
+			if (value) return value;
+			if (!done) await sleep(50);
+		}
+	})();
+	try { return await within(ms, pending ? beforePromptReply(ready, pending, acceptReply) : ready, what); }
+	finally { done = true; }
+}
+
+function commandLifetime(marker, declaration) {
+	if (!["strong", "processGroup"].includes(declaration?.commandContainment)) return;
+	const fifo = `${marker}.fifo`, path = join(project, fifo);
+	let fd;
+	// The fixture opens the pipe after the saved point and holds it through its last write.
+	const start = `if ! test -e ${marker}; then mkfifo ${fifo} && exec 3>${fifo} && rm ${fifo} || exit 1; fi; `;
+	const opened = () => {
+		if (fd === undefined && existsSync(path)) fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+		return fd !== undefined;
+	};
+	const exited = () => {
+		try { return readSync(fd, Buffer.alloc(1)) === 0; }
+		catch (e) { if (e.code !== "EAGAIN") throw e; return false; }
+	};
+	return { start, opened, exited, close() {
+		if (fd !== undefined) closeSync(fd);
+		rmSync(path, { force: true });
+	} };
+}
 async function attempt(name, fn) {
 	try {
 		await fn();
@@ -252,6 +289,7 @@ const textOf = (updates, sessionId, kind = "agent_message_chunk") => updates.fil
 async function prompt(agent, sessionId, text, key) {
 	return agent.ctx.request(methods.agent.session.prompt, { sessionId, prompt: [{ type: "text", text }], ...(key ? { _meta: { [NS]: { key } } } : {}) });
 }
+const bash = (agent, sid, command) => prompt(agent, sid, `tool:bash ${JSON.stringify({ command })}`);
 async function setOption(agent, sessionId, configId, value) {
 	const r = await agent.ctx.request(methods.agent.session.setConfigOption, { sessionId, configId, value });
 	if (sessionId === mainSession && meta(r)?.declaration) decl = meta(r).declaration;
@@ -728,11 +766,9 @@ if (decl.tenants) {
 		await closeSession(agent, broke);
 		const busy = await open("kit-no-cancel");
 		const marker = join(project, "kit-close-started"), release = join(project, "kit-close-release");
-		const pending = prompt(agent, busy, `tool:bash ${JSON.stringify({ command: "touch kit-close-started; for ((i=0; i<200; i++)); do if test -f kit-close-release; then echo finished >> kit-close-started; exit; fi; sleep .1; done" })}`);
-		void pending.catch(() => undefined);
+		const pending = bash(agent, busy, "touch kit-close-started; for ((i=0; i<200; i++)); do if test -f kit-close-release; then echo finished >> kit-close-started; exit; fi; sleep .1; done");
 		try {
-			for (let i = 0; i < 100 && !existsSync(marker); i++) await sleep(50);
-			if (!existsSync(marker)) throw Error("the close fixture's tool did not start");
+			await poll(5000, () => existsSync(marker), "close fixture command start", pending);
 			const before = await history(agent, busy, { all: true });
 			const denied = await within(6000, closeSession(agent, busy), "refuse close without cancel").catch((e) => e);
 			const after = await history(agent, busy, { all: true }).catch(() => null);
@@ -754,39 +790,33 @@ if (decl.tenants) {
 
 // ACP: Cancelling; Plugin binding: Command lifetime. Witness execution, not a tool announcement.
 await attempt("cancel", async () => {
-	const marker = join(project, "cancel-test.txt");
+	const name = "cancel-test.txt", marker = join(project, name);
 	const markerState = () => existsSync(marker) ? readFileSync(marker, "utf8").trim() : "missing";
-	const since = agent.updates.length;
-	const sent = performance.now();
-	const pending = prompt(agent, sessionId, 'tool:bash {"command":"echo started > cancel-test.txt; sleep 6; echo finished >> cancel-test.txt"}');
-	void pending.catch(() => undefined);
-	for (let i = 0; i < 100 && !existsSync(marker); i++) await sleep(50);
-	const before = markerState();
-	const startedMs = Math.round(performance.now() - sent);
-	check("cancel: fixture command actually started", before !== "missing", JSON.stringify({ startedMs, marker: before, updates: toolUpdates(agent, sessionId, since) }));
-	let notifyMs;
-	const state = () => JSON.stringify({
-		startedMs, notifyMs, cancelMs: Math.round(performance.now() - t0), before, marker: markerState(),
-		exit: agent.child?.exitCode, signal: agent.child?.signalCode, updates: toolUpdates(agent, sessionId, since),
-	});
-	let r;
-	const t0 = performance.now();
+	const lifetime = commandLifetime(name, decl);
+	const since = agent.updates.length, sent = performance.now();
+	let startedMs, t0, notifyMs;
+	const state = () => JSON.stringify({ startedMs, notifyMs, cancelMs: t0 && Math.round(performance.now() - t0),
+		marker: markerState(), exit: agent.child?.exitCode, signal: agent.child?.signalCode, updates: toolUpdates(agent, sessionId, since) });
 	try {
+		const pending = bash(agent, sessionId, `${lifetime?.start ?? ""}echo started > ${name}; sleep 6; echo finished >> ${name}`);
+		await poll(5000, () => (!lifetime || lifetime.opened()) && markerState() === "started", "cancel fixture command start", pending);
+		startedMs = Math.round(performance.now() - sent);
+		check("cancel: fixture command actually started", true);
+		t0 = performance.now();
 		await agent.ctx.notify(methods.agent.session.cancel, { sessionId });
 		notifyMs = Math.round(performance.now() - t0);
-		r = await within(10000, pending, "cancelled prompt");
+		const r = await within(10000, pending, "cancelled prompt");
+		const elapsed = performance.now() - t0;
+		const cancelled = r.stopReason === "cancelled" && meta(r)?.outcome?.kind === "cancelled";
+		check("cancel: stopReason and outcome are cancelled", cancelled, replyDetail(r));
+		check("cancel: prompt answers within five seconds", elapsed <= 5000, state());
+		if (lifetime) {
+			await poll(6500, lifetime.exited, "cancel fixture command exit");
+			check("cancel: the managed command does not finish", markerState() === "started", state());
+		}
 	} catch (error) {
-		check("cancel", false, `${error instanceof Error ? error.message : String(error)}; ${state()}`);
-		return;
-	}
-	const elapsed = performance.now() - t0;
-	const reply = meta(r)?.outcome;
-	check("cancel: stopReason and outcome are cancelled", r.stopReason === "cancelled" && reply?.kind === "cancelled", JSON.stringify({ stopReason: r.stopReason, outcome: reply?.kind }));
-	check("cancel: prompt answers within five seconds", elapsed <= 5000, state());
-	if (["strong", "processGroup"].includes(decl.commandContainment)) {
-		await sleep(6500);
-		check("cancel: the managed command does not finish", markerState() === "started", state());
-	}
+		check(t0 ? "cancel" : "cancel: fixture command actually started", false, `${error.message}; ${state()}`);
+	} finally { if (lifetime) lifetime.close(); }
 });
 
 // ACP: Input admission. Both methods share the first receipt, and it runs exactly once.
@@ -816,15 +846,9 @@ await attempt("requests and answer", async () => {
 	let release;
 	agent.state.permissionHandler = () => new Promise((resolve) => { release = resolve; });
 	const pending = prompt(agent, sessionId, 'tool:bash {"command":"echo approved >> answer-race.txt"}');
-	void pending.catch(() => undefined);
 	try {
-		let q;
-		for (let i = 0; i < 100 && !q; i++) {
-			q = (await requests()).find((r) => r.kind === "approval" && r.answerable);
-			if (!q) await sleep(50);
-		}
-		check("requests: live approval is listed and answerable", !!q?.id && typeof q.toolCallId === "string");
-		if (!q) return;
+		const q = await poll(5000, async () => (await requests()).find((r) => r.kind === "approval" && r.answerable), "live approval request", pending);
+		check("requests: live approval is listed and answerable", !!q.id && typeof q.toolCallId === "string");
 		const winner = await answer(q.id, "allow");
 		check("answer: extension accepts the first valid answer", winner.accepted === true);
 		release?.({ outcome: { outcome: "selected", optionId: "refuse" } });
@@ -928,15 +952,10 @@ if (probeChecks) {
 if (probeChecks) {
 	// Plugin binding: The host asks a tool source. The latch makes the refresh barrier observable.
 	await attempt("tool refresh barrier", async () => {
-		let settled = false;
 		const pending = prompt(agent, sessionId, "tool:probe-refresh {}");
-		void pending.then(() => { settled = true; }, () => { settled = true; });
-		const requested = () => {
-			try { return trace("probe-events").some((e) => e.refreshRequested); } catch { return false; }
-		};
 		try {
-			for (let i = 0; i < 75 && !requested() && !settled; i++) await sleep(50);
-			check("refresh: triggering tool reply waits for the new list", !settled && requested());
+			await poll(3750, () => trace("probe-events").some((e) => e.refreshRequested), "tool refresh request", pending);
+			check("refresh: triggering tool reply waits for the new list", true);
 		} finally { writeFileSync(probeOut("release-refresh"), "release"); }
 		await within(15000, pending, "tool list refresh");
 		const before = agent.updates.length;
@@ -948,15 +967,10 @@ if (probeChecks) {
 	for (const late of decl.questionsOutlastTurns && decl.lateAnswersStartTurns ? [false, true] : [false]) await attempt(late ? "late text question" : "in-turn text question", async () => {
 		const since = agent.updates.length;
 		const pending = prompt(agent, sessionId, `tool:probe-question {"late":${late}}`);
-		void pending.catch(() => undefined);
 		const requests = () => agent.ctx.request(`_${NS}/requests`, { sessionId }).then((r) => r.requests);
-		let question;
-		for (let i = 0; i < 100 && !question; i++) {
-			question = (await requests()).find((r) => r.kind === "text" && r.question === "Fixture question");
-			if (!question) await sleep(50);
-		}
+		const question = await poll(5000, async () => (await requests()).find((r) => r.kind === "text" && r.question === "Fixture question"),
+			"fixture text question", pending, (reply) => late && reply.stopReason === "end_turn" && meta(reply)?.outcome?.kind === "completed");
 		check(`${late ? "late" : "in-turn"} question: visible without a form route`, question?.answerable === true && typeof question?.toolCallId === "string");
-		if (!question) return;
 		let originatingTurn;
 		if (late) {
 			await within(10000, pending, "original turn leaves a question open");
@@ -1064,9 +1078,9 @@ if (probeChecks) {
 			await setOption(agent, sid, "model", "conformance/echo");
 			await setOption(agent, sid, "approval", "all");
 			const pending = prompt(agent, sid, 'tool:bash {"command":"echo ran > kit-gated-approval.txt"}');
-			void pending.catch(() => undefined);
 			const find = (es) => es.find((e) => e.kind === "inputRequest" && e.data?.request?.kind === "approval");
-			const question = find(await waitFor(agent, sid, (es) => !!find(es), 5000));
+			const ready = waitFor(agent, sid, (es) => !!find(es), 5000).then(find);
+			const question = await beforePromptReply(ready, pending, (reply) => reply.stopReason === "end_turn");
 			const id = question?.requestId;
 			if (!id) throw Error("fixture approval request not recorded");
 			if (portableChecks && meta(s)?.declaration?.portableSessions) {
@@ -1096,7 +1110,6 @@ if (probeChecks) {
 		}
 	});
 
-	// ACP: Request. Keep the standard permission route exact and change only the polling view.
 	if (agent.state.hasApproval) await attempt("Request: approval projection after gating", async () => {
 		const s = await agent.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] });
 		const sid = s.sessionId;
@@ -1107,10 +1120,8 @@ if (probeChecks) {
 			await setOption(agent, sid, "model", "conformance/echo");
 			await setOption(agent, sid, "approval", "all");
 			const pending = prompt(agent, sid, 'tool:bash {"command":"echo ran > kit-list-redact.txt"}');
-			void pending.catch(() => undefined);
-			let view;
-			for (let i = 0; i < 100 && !release; i++) await sleep(50);
-			if (release) view = await agent.ctx.request(`_${NS}/requests`, { sessionId: sid }).catch((e) => e);
+			await poll(5000, () => release, "permission route for the approval projection", pending);
+			const view = await agent.ctx.request(`_${NS}/requests`, { sessionId: sid }).catch((e) => e);
 			const gateViews = trace("output-observer").filter((p) => p.sessionId === sid).flatMap((p) => p.events ?? [])
 				.filter((e) => e.type === "reply" && e.data?.method === `_${NS}/requests`)
 				.flatMap((e) => e.data.result?.requests ?? []).filter((q) => q.kind === "approval");
@@ -1234,9 +1245,8 @@ if (probeChecks) {
 					const target = await openProbe("kit-race"), burner = await openProbe("kit-race");
 					racePath = store.path(target) + "/entries";
 					const pending = prompt(remote, target, "fixture post-intent");
-					void pending.catch(() => undefined);
 					try {
-						await within(5000, committed, "target model intent commit");
+						await within(5000, beforePromptReply(committed, pending), "target model intent commit");
 						await within(5000, prompt(remote, burner, "fixture burner"), "other session exhausts the budget");
 					} finally { releaseIntent(); }
 					const result = await within(15000, pending, "post-intent limit settles");
@@ -1262,13 +1272,8 @@ if (probeChecks) await attempt("Input admission: steering cutoff", async () => {
 		const s = await remote.ctx.request(methods.agent.session.new, { cwd: project, mcpServers: [] });
 		if (!check("Runtime callbacks: fixture Runtime advertises steering through the host", meta(s)?.declaration?.inputDuringTurn === true)) return;
 		await setOption(remote, s.sessionId, "model", "conformance/echo");
-		const opening = prompt(remote, s.sessionId, "first fixture input").catch((e) => e);
-		let finalTurn;
-		for (let i = 0; i < 200 && !finalTurn; i++) {
-			finalTurn = trace("steering").find((e) => e.final)?.final;
-			if (!finalTurn) await sleep(30);
-		}
-		if (!finalTurn) throw Error("fixture Runtime never acknowledged its final steering check");
+		const opening = prompt(remote, s.sessionId, "first fixture input");
+		const finalTurn = await poll(6000, () => trace("steering").find((e) => e.final)?.final, "final steering check", opening);
 		const late = await within(5000, remote.ctx.request(`_${NS}/input`, { sessionId: s.sessionId, when: "steer", content: "input after the cutoff" }), "late steering receipt");
 		writeFileSync(release, "continue");
 		const first = await within(10000, opening, "first steering fixture turn");
@@ -1301,11 +1306,11 @@ if (probeChecks) await attempt("tool catalog refresh fails", async () => {
 if (jobChecks) {
 	await attempt("jobs", async () => {
 		const r = await within(15000, prompt(agent, sessionId, 'tool:background {"text":"kit-job","ms":300}'), "background prompt");
-		check("jobs: the turn that started the job ends", r.stopReason === "end_turn", r.stopReason);
+		if (!check("jobs: the turn that started the job ends", r.stopReason === "end_turn", replyDetail(r))) return;
+		const jobId = (await within(15000, history(agent, sessionId, { all: true }), "read committed job start"))
+			.entries.find((e) => e.kind === "jobStarted" && e.data?.kind === "background")?.jobId;
+		if (!check("Entry: the job start appears in ACP history", !!jobId, replyDetail(r))) return;
 		const entries = await waitFor(agent, sessionId, (es) => decl.startsTurnsUnasked === "jobReports" ? said(es, "echo: background: kit-job") : es.some((e) => e.kind === "jobEnded" && e.data?.report));
-		const started = entries.find((e) => e.kind === "jobStarted" && e.data?.kind === "background");
-		const jobId = started?.jobId;
-		check("Entry: the job start appears in ACP history", !!jobId, JSON.stringify(started));
 		const ended = entries.filter((e) => e.kind === "jobEnded" && e.jobId === jobId);
 		check("jobs: one jobEnded, completed and reported", ended.length === 1 && ended[0].data?.outcome?.kind === "completed" && ended[0].data?.report === true, String(JSON.stringify(ended)).slice(0, 200));
 		// Shared data: Job reports; Plugin binding: Jobs.
@@ -1331,10 +1336,10 @@ if (jobChecks) {
 			check("jobs: the report reached the model", said(entries, "echo: background: kit-job"));
 		}
 		if (extensions.includes("cancel-job")) {
-			await within(15000, prompt(agent, sessionId, 'tool:background {"text":"kit-cancel","ms":600000}'), "long background prompt");
-			const newJob = (e) => e.kind === "jobStarted" && e.data?.kind === "background" && e.jobId !== jobId;
-			const es = await waitFor(agent, sessionId, (x) => x.some(newJob));
-			const id = es.find(newJob)?.jobId;
+			const reply = await within(15000, prompt(agent, sessionId, 'tool:background {"text":"kit-cancel","ms":600000}'), "long background prompt");
+			const { entries } = await within(15000, history(agent, sessionId, { all: true }), "read cancellable job start");
+			const id = entries.find((e) => e.kind === "jobStarted" && e.data?.kind === "background" && e.jobId !== jobId)?.jobId;
+			if (!id || reply.stopReason !== "end_turn") throw Error(`cancellable job did not start: ${replyDetail(reply)}`);
 			await agent.ctx.request(`_${NS}/cancel-job`, { sessionId, jobId: id });
 			// ACP: Extension methods (cancel-job). The long fixture timer cannot win this race.
 			const after = (await history(agent, sessionId, { all: true })).entries;
@@ -1389,11 +1394,13 @@ await attempt(network ? "load on a new connection" : "load in a new process", as
 		const policy = await within(await reopenWatchdog(), agent.ctx.request(methods.agent.session.load, { sessionId: policyId, cwd: project, mcpServers: [] }), "load saved policy");
 		check("load: the tool fixture reopens under never", policy.configOptions?.find(o => o.id === "approval")?.currentValue === "never");
 		const n = agent.permissions.length;
-		const nv = await within(15000, prompt(agent, policyId, 'tool:bash {"command":"echo yes > never.txt"}'), "prompt under never");
+		const nv = await within(15000, bash(agent, policyId, "echo yes > never.txt").catch((e) => e), "prompt under never");
+		if (nv.stopReason !== "end_turn") throw Error(`prompt under never returned ${replyDetail(nv)}`);
 		const turn = (await history(agent, policyId)).entries;
 		const result = turn.findLast(e => e.kind === "toolResult");
-		check("load: under never, the call is refused without asking", nv.stopReason === "end_turn" && result?.data?.status === "refused" &&
-			!turn.some(e => e.kind === "toolStarted" && e.toolCallId === result.toolCallId) && agent.permissions.length === n && !existsSync(join(project, "never.txt")));
+		const started = result && turn.some(e => e.kind === "toolStarted" && e.toolCallId === result.toolCallId);
+		check("load: under never, the call is refused without asking", result?.data?.status === "refused" &&
+			!started && agent.permissions.length === n && !existsSync(join(project, "never.txt")), replyDetail(nv));
 		await closeSession(agent, policyId);
 		await setOption(agent, sessionId, "approval", "off");
 	}
@@ -1499,21 +1506,22 @@ if (crashChecks) {
 		sessionsUsed.push(sid);
 		await setOption(agent, sid, "model", "conformance/echo");
 		await setOption(agent, sid, "approval", "off");
-		const marker = join(project, "crash.txt");
-		void prompt(agent, sid, `tool:bash {"command":"echo start >> crash.txt; sleep 4; echo end >> crash.txt"}`).catch(() => undefined);
-		for (let i = 0; i < 200 && !(existsSync(marker) && readFileSync(marker, "utf8").includes("start")); i++) await sleep(50);
-		check("crash: the bash call started", existsSync(marker));
-		if (network) await crash(agent);
-		else agent.child.kill("SIGKILL");
-		await sleep(6000);
-		const after = existsSync(marker) ? readFileSync(marker, "utf8") : "";
-		// Contracts: The working environment. Loss containment follows the session declaration.
-		if (["strong", "processGroup"].includes(meta(s)?.declaration?.commandContainment)) check("crash: the managed command did not finish after agent loss", !after.includes("end"));
+		const name = "crash.txt", marker = join(project, name);
+		const lifetime = commandLifetime(name, meta(s)?.declaration);
+		try {
+			const pending = bash(agent, sid, `${lifetime?.start ?? ""}echo start >> ${name}; sleep 4; echo end >> ${name}`);
+			await poll(10000, () => (!lifetime || lifetime.opened()) && existsSync(marker) && readFileSync(marker, "utf8").includes("start"), "crash fixture command start", pending);
+			check("crash: the bash call started", true);
+			await crash(agent);
+			if (lifetime) {
+				await poll(6000, lifetime.exited, "crash fixture command exit");
+				check("crash: the managed command did not finish after agent loss", !readFileSync(marker, "utf8").includes("end"));
+			}
+		} finally { if (lifetime) lifetime.close(); }
 		agent = connect(second);
 		const init = await agent.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
 		// A history service holds the killed agent's lease until it runs out, so reopening may wait for it.
 		const loaded = await within(await reopenWatchdog(), agent.ctx.request(methods.agent.session.load, { sessionId: sid, cwd: project, mcpServers: [] }), "session/load after the crash");
-		// The agent that reopens decides how the turn ends.
 		validateDeclaration("crash recovery load", meta(loaded)?.declaration);
 		const durable = (meta(loaded)?.declaration ?? meta(init)?.declaration ?? {}).continuesAfterRestart === true;
 		let entries = [];
@@ -1765,13 +1773,8 @@ if (probeChecks && crashChecks) for (const boundary of ["before", "after"]) {
 			const sid = session.sessionId;
 			await setOption(remote, sid, "model", "kit-gate-recovery/echo");
 			if (session.configOptions?.some((o) => o.id === "approval")) await setOption(remote, sid, "approval", "off");
-			const pending = prompt(remote, sid, "fixture gate recovery").then(() => true, () => true);
-			let latch;
-			for (const t0 = Date.now(); !latch && Date.now() - t0 < 10000;) {
-				latch = trace(role).find((x) => x.latch === boundary);
-				if (!latch && await Promise.race([pending, sleep(50).then(() => false)])) break;
-			}
-			if (!latch) throw Error(`fixture did not reach the ${boundary} crash boundary`);
+			const pending = prompt(remote, sid, "fixture gate recovery");
+			const latch = await poll(10000, () => trace(role).find((x) => x.latch === boundary), `${boundary} crash boundary`, pending);
 			await crash(remote);
 			remote = start();
 			await init(remote);
@@ -1912,23 +1915,20 @@ if (jobChecks && crashChecks) {
 		sessionsUsed.push(sid);
 		await setOption(agent, sid, "model", "conformance/echo");
 		await setOption(agent, sid, "approval", "off");
-		const startedAt = performance.now();
-		const tracePath = probeOut("jobs");
+		const startedAt = performance.now(), tracePath = probeOut("jobs");
 		const traceOffset = existsSync(tracePath) ? readFileSync(tracePath).length : 0;
+		let reply;
 		try {
-			await within(15000, prompt(agent, sid, 'tool:background {"text":"kit-survivor","ms":600000}'), "long background prompt");
+			reply = await within(15000, prompt(agent, sid, 'tool:background {"text":"kit-survivor","ms":600000}'), "long background prompt");
 		} catch (error) {
 			const elapsedMs = Math.round(performance.now() - startedAt);
 			const traceEvents = existsSync(tracePath) ? readFileSync(tracePath).subarray(traceOffset).toString()
 				.split("\n").slice(0, -1).filter(Boolean).map((line) => Object.keys(JSON.parse(line))) : [];
-			throw new Error(`${error.message}: ${JSON.stringify({ elapsedMs, traceEvents, ...await promptState(agent, sid) })}`, { cause: error });
+			throw new Error(`${replyDetail(error)}: ${JSON.stringify({ elapsedMs, traceEvents, ...await promptState(agent, sid) })}`, { cause: error });
 		}
-		const before = await waitFor(agent, sid, (x) => x.some((e) => e.kind === "jobStarted"));
-		const jobId = before.find((e) => e.kind === "jobStarted")?.jobId;
-		check("jobs after a crash: the job started", !!jobId);
-		if (network) await crash(agent);
-		else agent.child.kill("SIGKILL");
-		await sleep(500);
+		const jobId = (await within(15000, history(agent, sid, { all: true }), "read surviving job start")).entries.find((e) => e.kind === "jobStarted")?.jobId;
+		if (!check("jobs after a crash: the job started", !!jobId && reply.stopReason === "end_turn", replyDetail(reply))) return;
+		await crash(agent);
 		agent = connect(second);
 		await agent.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
 		const loaded = await within(await reopenWatchdog(), agent.ctx.request(methods.agent.session.load, { sessionId: sid, cwd: project, mcpServers: [] }), "session/load after the crash");
