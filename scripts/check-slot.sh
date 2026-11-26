@@ -87,8 +87,12 @@ take_check_slots() { # count: wait until this many slots are free, then hold the
   done
   check_slot_fds+=("${fds[@]}")
   export MA_CHECK_SLOT_HELD=1
+  # A run that took its slots on the first pass did not wait, even when SECONDS
+  # ticked over a whole second while it took them.
+  local waited=0
+  $waiting && waited=$((SECONDS - started))
   printf 'check-slot: took slot %s of %s at %s after %ss\n' \
-    "${taken[*]}" "$slots" "$(date -u +%T)" $((SECONDS - started)) >&2
+    "${taken[*]}" "$slots" "$(date -u +%T)" "$waited" >&2
 }
 
 drop_check_slots() { # in a child process: close the slot files, so a process left behind cannot keep a slot
