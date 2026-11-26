@@ -4,7 +4,7 @@ Each SDK ships a testing kit for developers, and runs a shared set of scenarios 
 
 ## AG-UI kit
 
-The [AG-UI kit](../../conformance/agui/README.md) uses a scripted Provider, a controlled clock and store, and disposable tokens. It needs no real model or external tools. All four fixtures test the binding on their configured sessions, including the [wait-closure and kept-receipt reads](../bindings/agui.md#wait-closures). Each fixture must supply the required controls and declarations. The checks include:
+The [AG-UI kit](../../conformance/agui/README.md) uses a scripted Provider, a controlled clock and store, and disposable tokens. It needs no real model or external tools. Both launchers test the binding on their configured sessions, including the [wait-closure and kept-receipt reads](../bindings/agui.md#wait-closures). Each fixture must supply the required controls and declarations. The checks include:
 
 - Discovery, explicit AG-UI version, request and event limits, SSE framing, lifecycle validation and coexistence with ACP WebSocket on one listener. Check TLS, actor and client scope, tenant and project filters, and no setup on an unauthorized request.
 - Initial prompt, one turn per run, stable message IDs, message snapshots, duplicate input keys, mismatched copies, history with and without a cursor, stale cursors, branch moves and erasure. Reconnect must not replay live chunks or execute work.
@@ -26,7 +26,7 @@ The [AG-UI kit](../../conformance/agui/README.md) uses a scripted Provider, a co
 | Recheck at handoff | Change the registered source, definition, or final input from a `tool.before` transform in separate runs. Gate the display for one recipient. Revoke the work actor's `tools`, then in another run the approver's `approve`, **after** allow and before handoff. Expect no effect and no substitute question; the stale call is `refused`. As a control, an approver with `watch` and `approve` but no `tools` may approve a worker's otherwise authorized call. |
 | Reopen | Stop after the completed origin and separately after the committed answer. Reopen both `kept` and `durable` sessions. With an open question, recover the same request, call and deadline but require a fresh view. With an allow, recheck its recorded proof; do not need a second answer or presence. Kill after the counter effect but before its result: no second effect on reopen, `outcomeUnknown` if unconfirmed. |
 
-The [shared format](../../conformance/sdk/README.md#waiting-approval-scenarios) provides setup for the maximum and declared capabilities, authenticated polling on a session handle, a controlled clock, and barriers at answer commit and dispatch. Check absent records, exact counts, IDs, associations, `openToolCalls` and deadlines; the existing ordered `records` assertion alone cannot prove these cases. Run applicable tool placements in all four SDKs. Use commit barriers, not sleeps or retries.
+The [shared format](../../conformance/sdk/README.md#waiting-approval-scenarios) provides setup for the maximum and declared capabilities, authenticated polling on a session handle, a controlled clock, and barriers at answer commit and dispatch. Check absent records, exact counts, IDs, associations, `openToolCalls` and deadlines; the existing ordered `records` assertion alone cannot prove these cases. Run applicable tool placements in both SDKs. Use commit barriers, not sleeps or retries.
 
 The binding kits own checks the single-session scenario runner cannot make: [ACP](../../conformance/acp/README.md#waiting-approval-checks) for polling, actor races and portable reopen; [AG-UI](../../conformance/agui/README.md#waiting-approval-checks) for presence routes, snapshots and mixed waits; [telemetry](../../conformance/telemetry/README.md#waiting-approval-checks) for spans. No real Provider or credentials are needed.
 
@@ -70,10 +70,10 @@ The scenarios are JSON files in [`conformance/sdk/scenarios/`](../../conformance
 The runner runs each scenario in every applicable placement of the fixture plugins:
 
 - `inProcess`: the fixtures in the agent's process;
-- `process:<sdk>`: the fixtures served by an SDK's fixture program, for each of the four.
-- `service:<sdk>`: the fixtures served by the same program as services on a WebSocket ([Services](placement.md#services)), for each of the four.
+- `process:<sdk>`: the fixtures served by an SDK's fixture program, for both SDKs.
+- `service:<sdk>`: the fixtures served by the same program as services on a WebSocket ([Services](placement.md#services)), for both SDKs.
 
-So a Rust agent runs every scenario with fixtures in process, then served from Rust, TypeScript, Go and Python, first as programs, then as services. Every result MUST be the same. A scenario that uses an in-process-only feature lists `"placements": ["inProcess"]`.
+So a Rust agent runs every scenario with fixtures in process, then served from Rust and TypeScript, first as programs, then as services. Every result MUST be the same. A scenario that uses an in-process-only feature lists `"placements": ["inProcess"]`.
 
 For each run of a scenario in each placement, the runner creates a fresh, empty directory outside the agent's reach and supplies two things from it:
 
@@ -175,7 +175,7 @@ The runner MUST report each failed expectation with the scenario, placement, ste
 
 The [`conformance/telemetry/` check](../../conformance/telemetry/README.md) reuses the [shared scenarios](#the-shared-scenarios) without replacing their outcome or history assertions. It needs no live Provider or collector.
 
-The harness runs a receiver on a fresh loopback port outside the agent and plugin process groups. It accepts [OTLP/HTTP](https://opentelemetry.io/docs/specs/otlp/#otlphttp) at `/v1/traces` in both encodings, protobuf and JSON, and returns a successful OTLP response. Each SDK's scenario runner and each participating fixture program install their language's OpenTelemetry SDK with an always-on sampler and the language's official OTLP/HTTP span exporter, using `http/protobuf`, pointed at that receiver. Every language's official exporter supports protobuf, and it is the encoding `ma` and common backends such as Arize Phoenix use; Go's exporter has no JSON encoding. Pass the endpoint explicitly to children. Do not use production credentials or endpoints. Force a flush on normal exit and wait for the acknowledged exports before comparing spans. Do not require a flush from a killed process.
+The harness runs a receiver on a fresh loopback port outside the agent and plugin process groups. It accepts [OTLP/HTTP](https://opentelemetry.io/docs/specs/otlp/#otlphttp) at `/v1/traces` in both encodings, protobuf and JSON, and returns a successful OTLP response. Each SDK's scenario runner and each participating fixture program install their language's OpenTelemetry SDK with an always-on sampler and the language's official OTLP/HTTP span exporter, using `http/protobuf`, pointed at that receiver. Every language's official exporter supports protobuf, and it is the encoding `ma` and common backends such as Arize Phoenix use. Pass the endpoint explicitly to children. Do not use production credentials or endpoints. Force a flush on normal exit and wait for the acknowledged exports before comparing spans. Do not require a flush from a killed process.
 
 Run these cases for each host SDK:
 

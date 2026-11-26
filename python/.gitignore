@@ -1,9 +1,0 @@
-.venv/
-__pycache__/
-*.pyc
-*.key
-.env
-dist/
-.pytest_cache/
-.ruff_cache/
-node_modules/

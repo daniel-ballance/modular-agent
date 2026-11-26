@@ -4,20 +4,20 @@ How each language expresses the [API](api.md). The rule is the same throughout: 
 
 ## At a glance
 
-| | Rust | TypeScript | Go | Python |
-|---|---|---|---|---|
-| Operations and fields | `snake_case` | `camelCase` | `UpperCamelCase` (exported) | `snake_case` |
-| Types | `UpperCamelCase` | `UpperCamelCase` | `UpperCamelCase` | `UpperCamelCase` |
-| `createAgent(options)` | `Agent::builder()…build().await` | `createAgent({ … })` | `modular.New(ctx, opts…)` | `await create_agent(…)` |
-| Asynchronous work | `async` on Tokio | `Promise` | blocking calls taking `context.Context` | `async` on asyncio |
-| Streams | `impl Stream<Item = Result<Event>>` | `AsyncIterable<Event>` | `iter.Seq2[Event, error]` | `AsyncIterator[Event]` |
-| Cancellation | `CancellationToken` | `AbortSignal` | `context.Context` | task cancellation, plus `context.cancelled` |
-| Errors | `Result<T, modular_agent::Error>` | thrown `AgentError` | returned `*modular.Error` | raised `AgentError` |
-| Error code | `error.code()`, an enum | `error.code`, a string union | `err.Code`, typed string constants | `error.code`, a `StrEnum` |
-| `lastTurn()` | `session.last_turn().await`: `Result<Option<PromptResult>>` | `session.lastTurn(): Promise<PromptResult \| undefined>` | `session.LastTurn(ctx): (*PromptResult, error)` | `await session.last_turn()`; `None` if absent |
-| Optional arguments | builder methods | an options object | functional options (`WithX`) | keyword arguments |
-| Closed sets of values | enums with an `Unknown(String)` variant where shared data keeps unknown values | string unions | typed string constants | `StrEnum` |
-| Tool input | a type deriving `Deserialize` and `JsonSchema` | a [Standard Schema](https://standardschema.dev) or JSON Schema | a struct with `json` tags | type hints or a Pydantic model |
+| | Rust | TypeScript |
+|---|---|---|
+| Operations and fields | `snake_case` | `camelCase` |
+| Types | `UpperCamelCase` | `UpperCamelCase` |
+| `createAgent(options)` | `Agent::builder()…build().await` | `createAgent({ … })` |
+| Asynchronous work | `async` on Tokio | `Promise` |
+| Streams | `impl Stream<Item = Result<Event>>` | `AsyncIterable<Event>` |
+| Cancellation | `CancellationToken` | `AbortSignal` |
+| Errors | `Result<T, modular_agent::Error>` | thrown `AgentError` |
+| Error code | `error.code()`, an enum | `error.code`, a string union |
+| `lastTurn()` | `session.last_turn().await`: `Result<Option<PromptResult>>` | `session.lastTurn(): Promise<PromptResult \| undefined>` |
+| Optional arguments | builder methods | an options object |
+| Closed sets of values | enums with an `Unknown(String)` variant where shared data keeps unknown values | string unions |
+| Tool input | a type deriving `Deserialize` and `JsonSchema` | a [Standard Schema](https://standardschema.dev) or JSON Schema |
 
 ## OpenTelemetry
 
@@ -27,8 +27,6 @@ Each Modular Agent SDK depends on the OpenTelemetry API only. The app chooses an
 |---|---|---|
 | Rust | `opentelemetry` crate, not `opentelemetry_sdk` | Set the SDK tracer provider through `opentelemetry::global`. |
 | TypeScript | `@opentelemetry/api` | Register the SDK tracer provider and an async context manager with the API. |
-| Go | `go.opentelemetry.io/otel` API packages, including `trace` and `metric` | Set the SDK tracer provider through `otel.SetTracerProvider`. |
-| Python | `opentelemetry-api` | Set the SDK tracer provider through `opentelemetry.trace.set_tracer_provider`. |
 
 See [Tracing](api.md#tracing) for the common rules and the [research note](../research/opentelemetry-genai.md#language-apis-and-export) for the upstream versions checked.
 
@@ -38,8 +36,6 @@ A tool's input and output are written as types or schema objects, never as hand-
 
 - **Rust:** `schemars` from a type that also derives `serde::Deserialize`.
 - **TypeScript:** any validator implementing Standard Schema with a JSON Schema export, such as Zod or Valibot; or a JSON Schema object with its TypeScript type inferred.
-- **Go:** `github.com/google/jsonschema-go` from a struct; field descriptions from `jsonschema` tags.
-- **Python:** Pydantic from a model or from a function's type hints; field descriptions from the docstring or `Field`.
 
 The SDK checks input against the schema before calling the tool, so the tool receives a typed value.
 
@@ -79,64 +75,21 @@ The SDK checks input against the schema before calling the tool, so the tool rec
 - Use `defineProvider` to get `changed()`. `agent.refreshModels()` explicitly refreshes served catalogs.
 - ACP's `compose(project, saved?)` takes an optional `SessionInfo`. `projectSettings(project)` and `projectMcp(project)` may be async. Without an explicit stdio `actor`, the actor ID comes from `actorId`, then `MODULAR_AGENT_ACTOR`, then `acp-user`.
 - No default exports.
-- Subscription Providers come from `@modular-agent/subscription` (`subscriptionLogins(path)`, `chatgpt({ logins, … })`, `grok({ logins, … })`, `signIn(provider, logins, options)` and `signOut(provider, logins)`, with `provider` `"chatgpt"` or `"grok"`) and `@modular-agent/claude` (`claude(options)`, in process on Anthropic's Agent SDK). The Claude package also has the program the Rust and Go SDKs start.
+- Subscription Providers come from `@modular-agent/subscription` (`subscriptionLogins(path)`, `chatgpt({ logins, … })`, `grok({ logins, … })`, `signIn(provider, logins, options)` and `signOut(provider, logins)`, with `provider` `"chatgpt"` or `"grok"`) and `@modular-agent/claude` (`claude(options)`, in process on Anthropic's Agent SDK). The Claude package also has the program the Rust SDK starts.
 - Approvals that wait: set `maxApprovalWaitMs` in `createAgent`; a session opts in with `approvalWait: "untilDeadline"` at creation or through `session.setSetting`. `session.questions({ present: true })` is an answerable delivery on that handle; a plain listing is not.
 - Covered approvals: `createAgent({ approval: "ask", approvalCoversNested: true })`, default false. The approval view carries `coversNested`; each covered start records `approvalCoveredBy`.
 - For named plugin callers, use `await serve(({ callerId }) => makePluginFor(callerId), { listen, callers })`. Add `tls` for a TLS listener. Each operator entry is `{ callerId, tokenFile }`. The listener authenticates before calling the factory. Neither the token nor a caller claim goes in a plugin message.
 - `await agent.serveAgui({ listen, actors })` serves both host reads. From the thread snapshot, pass `waitCursor` as the `after` query value on `wait-closures`. When `runReceipts === 1`, pass the original `runId` as one query value on `run-receipt`. Use authenticated HTTP; neither read needs a presence stream.
 
-## Go
-
-- Use `agent.SessionSummary(ctx, id, viewer)` to read kept work without opening the session. An inaccessible or missing session returns `nil, nil`.
-- The module is `github.com/daniel-ballance/modular-agent/go` until the repository is published; import `github.com/daniel-ballance/modular-agent/go/modular` and construct an agent with `modular.New(ctx, …)`.
-- Every operation that can wait takes a `context.Context` first. Cancellation is the context's.
-- A tool is `modular.NewTool(name, description, func(ctx context.Context, in T, tc *modular.ToolContext) (Out, error), opts…)`, with type parameters for input and output.
-- A plugin is a `modular.Plugin` value with `Name`, `Replaces` and `Setup func(*modular.Registrar) error`.
-- Streams are `iter.Seq2[Event, error]`, used with `range`.
-- Use `agent.Session(ctx, modular.SessionOptions{Settings: settings, Tenant: tenant, Actors: actors})` for per-session options.
-- `ServeACP(ctx, options ...ServeACPOptions)` accepts at most one options value; `Input` and `Output` can replace stdin and stdout. `StdioActor` sets the stdio principal. `Compose(ctx, project)` gets the saved id on reopen through `modular.ACPReopeningSession(ctx)`. `ProjectSettings` supplies new-session defaults and `ProjectMCP` supplies trusted server configs. Use `ListenACP(ctx, options)` for the WebSocket listener handle.
-- Use `modular.HTTPHistory(url, tokenFile)` for the client store and `modular.ServeHistory(ctx, store, modular.HistoryOptions{Address: address, TokenFile: tokenFile, LeaseTTL: leaseTTL})` for the service. `LeaseTTL` is a `time.Duration`: zero uses 15 seconds; other values must be whole milliseconds and at least 1 ms. A relay preserves the upstream lease. `ServeHistory` returns a service handle with `URL` and `Close()`, including when the address uses port `0`.
-- Set `Provider.CatalogChanges` to a `*modular.CatalogChanges` and call `Changed()` after updating the catalog. Register hooks with `Registrar.On(point, handler, options...)` or the typed methods; use `HookOrder` for explicit order.
-- Errors are values. `errors.As(err, &modularErr)` gives the code.
-- Minimum Go version: the one pinned in `go/mise.toml`.
-- Subscription Providers are in package `subscription`: `SubscriptionLogins(path)`, `SignIn`, `SignOut`, `ChatGPT`, `Grok` and `Claude`. `Grok(subscription.GrokOptions{Logins: logins})` returns a Provider; `SignIn(ctx, "grok", logins, options)` runs its device sign-in. `Claude` starts the TypeScript Claude program as a process plugin; it needs Node.js 22 or later.
-- Interface-run tools: `modular.WithInterfaceTools(...)` registers them. A binding attaches an executor with `Agent.ConnectInterfaceTools`, then pulls handoffs with `NextHandoff` (Go's form of `onHandoff`) and reports with `ReportToolResult`.
-- Approvals that wait: `WithMaxApprovalWaitMs(ms)` sets the operator bound; a session opts in with `SessionOptions.Settings["approvalWait"]` or `SetSetting(ctx, "approvalWait", "untilDeadline")`. `Questions(ctx, modular.QuestionsOptions{Present: true})` is an answerable delivery on that handle; a plain listing is not.
-- Covered approvals: `WithApprovalCoversNested(true)` with the approval plugin, default false. The approval view carries `coversNested`; each covered start records `approvalCoveredBy`.
-- For AG-UI host reads use `host := modular.AGUIHost{Origin: service.URL, Client: client}`, where `client` is an authenticated `*http.Client`. `host.WaitClosures(ctx, threadID, after)` returns `iter.Seq2[modular.WaitClosure, error]`. `host.RunReceipt(ctx, threadID, runID)` returns `(modular.RunReceipt, error)`.
-- Serve named plugin callers with `modular.ServeNamedServiceFactory(ctx, factory, modular.ServeOptions{Listen: addr, Callers: callers})`. Use `factory func(callerID string) modular.Plugin` and `callers []modular.PluginCaller`. Each entry has `CallerID`, `TokenFile` and optional `Projects`. The single-token `ServeService` and `ServeServiceFactory` forms are unchanged.
-
-## Python
-
-- Use `await agent.session_summary(id, actor=..., rights=..., route_id=..., scope=...)` to read kept work without opening the session. An inaccessible or missing session returns `None`.
-- The distribution is `modular-agent`, imported as `modular_agent`. Official plugins are extras: `modular-agent[openai]`.
-- Attributes and keyword arguments are `snake_case`. A dictionary that is shared wire data, such as a raw history entry, a hook payload or a Provider request, keeps the shared field names; passing or returning it never renames its keys.
-- Durations are seconds, as `float`, the Python convention; the SDK converts them to the binding's integer milliseconds.
-- Approvals that wait: `create_agent(max_approval_wait=30.0, approval="ask", late_answers_start_turns=True, …)` with kept or durable history; the bound is seconds as `float`, a whole number of milliseconds, at least one. A session opts in with `settings={"approvalWait": "untilDeadline"}` or `set_setting`. `await session.questions(present=True)` is an answerable delivery on that handle. `Question.deadline` is a UTC ISO 8601 string, as for other timed questions; the wire and records use integer milliseconds.
-- Covered approvals: `create_agent(approval="ask", approval_covers_nested=True, …)`, default false. `Question.covers_nested` is part of the approval view; each covered start records `approvalCoveredBy`.
-- The API is `async`. `modular_agent.run(coro)` runs a coroutine for scripts that are not already async.
-- `create_agent(…)` can be awaited, or used with `async with`, which closes the agent at the end of the block. `serve(plugin)` is an ordinary function for stdio. For WebSocket use `await serve(plugin_or_factory, listen=..., token_file=...)`; the factory returns a fresh plugin per connection. Set `service_ping_interval` and `service_control_timeout` in `create_agent` to configure plugin-service liveness in seconds.
-- Use `await agent.session(settings=..., actors=..., tenant=...)` for per-session options and `session.as_actor(actor_id)` for `session.as(actorId)` (`as` is reserved).
-- ACP's async `compose(project)` and optional `compose_reopen(project, id)` take a canonical `Path`; `project_settings` and `project_mcp` are synchronous callbacks.
-- In the history service process, call `serve_history(file_history(directory), address=(host, port), token_file=path, lease_ttl=15.0)`. The optional `lease_ttl` defaults to 15.0 seconds. It must be a whole number of milliseconds, at least one. The client uses `http_history(url, token_file)`.
-- Inherit `ProviderCatalog` to call `changed()`. A hook handler registered with `r.on(point, handler, order='normal')` receives a payload dictionary with the binding's keys and a `HookContext`; a handler that does not need the context may take only the payload. Return `{'change': {'input': new_input}}` to rewrite `tool.before`, `{'change': {'content': content}}` to rewrite `tool.after`, `{'add': {'system': text}}` to contribute a prompt, or `{'end': reason}` to end at `step.after`.
-- A tool is an `async` function with the `@tool` decorator. The docstring's summary is the description and its `Args:` entries describe the fields; type hints are the input schema; hints are decorator arguments: `@tool(read_only=True)`.
-- A plugin is a `Plugin(name, tools=[…], hooks={…})` or a subclass overriding `setup`.
-- Every public function and type is fully type-annotated and passes a strict type checker.
-- Minimum Python version: the one pinned in `python/mise.toml`.
-- Subscription Providers: `subscription_logins(path)`, `await sign_in(provider, logins, …)` and `await sign_out(provider, logins)`, where `provider` is `"chatgpt"` or `"grok"`. Construct the Providers with `modular_agent.chatgpt.chatgpt(logins=…)` or `modular_agent.grok.grok(logins=…)`, and `modular_agent.claude.claude(…)` on Anthropic's Python Agent SDK.
-- For named plugin callers, use `await serve(factory, listen=address, callers=[{"caller_id": "desk", "token_file": path}])`. The synchronous factory takes a `CallerContext` with `context["caller_id"]` and returns a fresh `Plugin`. `PluginCaller` is the operator entry type. With `token_file=path` instead, an existing zero-argument factory or plugin value still works.
-- The listener returned by `await agent.serve_agui(...)` serves the host reads over HTTP. In the thread snapshot use `waitCursor` for `GET /agui/v1/threads/{threadId}/wait-closures?after=...`. When `runReceipts` is `1`, use `GET /agui/v1/threads/{threadId}/run-receipt?runId=...`. Encode each query value separately. Neither read delivers an answer handle or dispatches a tool.
-
 ## Packages
 
-| | Rust | TypeScript | Go | Python |
-|---|---|---|---|---|
-| Core | crate `modular-agent` | `@modular-agent/core` | package `modular` | `modular-agent` |
-| Official plugin `<name>` | crate `modular-agent-<name>` | `@modular-agent/<name>` | package `modular/<name>` | module `modular_agent.<name>`, extra `[<name>]` |
-| Testing kit | module `modular_agent::testing` | `@modular-agent/core/testing` | package `modular/modulartest` | module `modular_agent.testing` |
-| Fixture program | binary `modular-agent-fixtures` | `bin` of `@modular-agent/fixtures` | command `modular/cmd/fixtures` | `python -m modular_agent.fixtures` |
+| | Rust | TypeScript |
+|---|---|---|
+| Core | crate `modular-agent` | `@modular-agent/core` |
+| Official plugin `<name>` | crate `modular-agent-<name>` | `@modular-agent/<name>` |
+| Testing kit | module `modular_agent::testing` | `@modular-agent/core/testing` |
+| Fixture program | binary `modular-agent-fixtures` | `bin` of `@modular-agent/fixtures` |
 
-The packages are not published to registries; build them from the repository (see the top-level README). The Go module path is `github.com/daniel-ballance/modular-agent/go`.
+The packages are not published to registries; build them from the repository (see the top-level README).
 
 Official plugin names are the same in every language: `openai`, `anthropic`, `files`, `mcp`, `acp`, `approval`, `questions`, `compaction`, `model-selection`, `subagents`, `guardrails`, `history-http`.

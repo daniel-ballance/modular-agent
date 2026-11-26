@@ -17,7 +17,7 @@ Use a numeric loopback address such as `127.0.0.1:39071`. Plain HTTP is only for
 
 Run the following helper in the service process. Rust's future runs until stopped; if the same process also uses the blocking HTTP client, run the service on a separate task on a multi-thread Tokio runtime. A separate service process avoids sharing that runtime.
 
-Go's service stops when its context is cancelled. Python's call blocks. TypeScript returns a handle with `url` and `close()`. The [Rust](../../../rust/crates/sdk/tests/guide09.rs), [TypeScript](../../../typescript/packages/core/test/guide09.test.ts), [Go](../../../go/modular/guide09_test.go) and [Python](../../../python/tests/test_sdk_guide09.py) tests call these same helpers on loopback with a temporary store and a test token. See those files for imports and service startup. TypeScript applications import from `@modular-agent/core` and `@modular-agent/core/testing`.
+TypeScript returns a handle with `url` and `close()`. The [Rust](../../../rust/crates/sdk/tests/guide09.rs) and [TypeScript](../../../typescript/packages/core/test/guide09.test.ts) tests call these same helpers on loopback with a temporary store and a test token. See those files for imports and service startup. TypeScript applications import from `@modular-agent/core` and `@modular-agent/core/testing`.
 
 **Rust**
 
@@ -34,22 +34,6 @@ async fn serve_store(address: SocketAddr, store_dir: &Path, token_file: &Path) -
 function serveStore(address: string, storeDir: string, tokenFile: string) {
   return serveHistory(fileHistory(storeDir), { address, tokenFile });
 }
-```
-
-**Go**
-
-```go
-func serveStore(ctx context.Context, address, storeDir, tokenFile string) error {
-	return modular.ServeHistory(ctx, modular.FileHistory(storeDir),
-		modular.HistoryOptions{Address: address, TokenFile: tokenFile})
-}
-```
-
-**Python**
-
-```python
-def serve_store(address: tuple[str, int], store_dir: Path, token_file: Path) -> None:
-    serve_history(file_history(store_dir), address=address, token_file=token_file)
 ```
 
 ## Hand off a session
@@ -149,104 +133,9 @@ async function handoff(project: string, writerDir: string, readerDir: string, ur
 }
 ```
 
-**Go**
-
-```go
-func connectHistory(ctx context.Context, project, dataDir, url, tokenFile string) (*modular.Agent, error) {
-	return modular.New(ctx,
-		modular.WithProject(project),
-		modular.WithDataDir(dataDir),
-		modular.WithDurability(modular.Kept),
-		modular.WithHistory(modular.HTTPHistory(url, tokenFile)),
-		modulartest.Script(`[{"text": "Whitby."}, {"text": "14:02."}]`),
-		modular.WithModel("scripted/script"))
-}
-
-func handoff(t *testing.T, ctx context.Context, project, writerDir, readerDir, url, tokenFile string) {
-	t.Helper()
-	writer, err := connectHistory(ctx, project, writerDir, url, tokenFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer writer.Close(ctx)
-	first, err := writer.Session(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if turn, err := first.Prompt(ctx, "Name a harbour."); err != nil || turn.Text != "Whitby." {
-		t.Fatalf("first turn: %+v, %v", turn, err)
-	}
-	id := first.ID()
-	if err := writer.Close(ctx); err != nil { // Give up the writer lease.
-		t.Fatal(err)
-	}
-
-	reader, err := connectHistory(ctx, project, readerDir, url, tokenFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reader.Close(ctx)
-	reopened, err := reader.OpenSession(ctx, id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if turn, err := reopened.LastTurn(ctx); err != nil || turn == nil || turn.Text != "Whitby." {
-		t.Fatalf("saved turn: %+v, %v", turn, err)
-	}
-	if turn, err := reopened.Prompt(ctx, "When is high tide there?"); err != nil || turn.Text != "14:02." {
-		t.Fatalf("next turn: %+v, %v", turn, err)
-	}
-	history, err := reopened.History(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var actors []any
-	for _, entry := range history {
-		if entry["kind"] == "input" {
-			actors = append(actors, entry["actorId"])
-		}
-	}
-	if !slices.Equal(actors, []any{"user", "user"}) {
-		t.Fatalf("input actor ids: %v", actors)
-	}
-}
-```
-
-**Python**
-
-```python
-async def connect_history(project: Path, data_dir: Path, url: str, token_file: Path) -> Agent:
-    return await create_agent(
-        project=project,
-        data_dir=data_dir,
-        durability="kept",
-        history=http_history(url, token_file),
-        providers=[scripted_provider([{"text": "Whitby."}, {"text": "14:02."}])],
-        model="scripted/script",
-    )
-
-
-async def handoff(
-    project: Path, writer_dir: Path, reader_dir: Path, url: str, token_file: Path
-) -> None:
-    async with await connect_history(project, writer_dir, url, token_file) as writer:
-        first = await writer.session()
-        assert (await first.prompt("Name a harbour.")).text == "Whitby."
-        session_id = first.id
-    # The writer lease has been released.
-
-    async with await connect_history(project, reader_dir, url, token_file) as reader:
-        reopened = await reader.open_session(session_id)
-        saved = await reopened.last_turn()
-        assert saved is not None and saved.text == "Whitby."
-        assert (await reopened.prompt("When is high tide there?")).text == "14:02."
-        history = await reopened.history()
-        assert [e["actorId"] for e in history if e["kind"] == "input"] == ["user", "user"]
-```
-
 ## Switch languages
 
-For example, on the same host, keep the history service running. Use the Rust `connect_history` above to write the first turn, then pass the printed ID to a Python program using its own `connect_history`. Use the same URL, token and canonical project path, and separate local data directories. This mixed-language example is shown, not run in the guide tests.
+For example, on the same host, keep the history service running. Use the Rust `connect_history` above to write the first turn, then pass the printed ID to a TypeScript program using `connectHistory`. Use the same URL, token and canonical project path, and separate local data directories. This mixed-language example is shown, not run in the guide tests.
 
 **Rust writer**
 
@@ -259,14 +148,19 @@ writer.close().await?;
 println!("{id}");
 ```
 
-**Python reader** (use `run` from `modular_agent` to run the coroutine)
+**TypeScript reader**
 
-```python
-async def resume(session_id: str) -> None:
-    async with await connect_history(project, reader_dir, url, token_file) as reader:
-        reopened = await reader.open_session(session_id)
-        turn = await reopened.prompt("When is high tide there?")
-        print(turn.text)
+```ts
+async function resume(id: string) {
+  const reader = await connectHistory(project, readerDir, url, tokenFile);
+  try {
+    const reopened = await reader.openSession(id);
+    const turn = await reopened.prompt("When is high tide there?");
+    console.log(turn.text);
+  } finally {
+    await reader.close();
+  }
+}
 ```
 
 ## Keep identity and portability separate

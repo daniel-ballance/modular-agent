@@ -6,7 +6,7 @@ const scope = ["--in-process", "--peers"].includes(args[0]) ? args.shift() : nul
 const [action, ...command] = args;
 const selected = ({ placement }) => scope === null || (placement === "inProcess") === (scope === "--in-process");
 if (!sdks.includes(host) || !(action === "--list" && command.length === 0 || action === "--" && command.length)) {
-  console.error("Usage: node run.mjs <rust|typescript|go|python> [--in-process|--peers] (--list | -- ADAPTER [ARG ...])");
+  console.error("Usage: node run.mjs <rust|typescript> [--in-process|--peers] (--list | -- ADAPTER [ARG ...])");
   process.exitCode = 2;
 } else if (action === "--list") {
   for (const item of caseMatrix(host).filter(selected)) console.log(JSON.stringify(item));

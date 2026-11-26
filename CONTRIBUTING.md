@@ -58,17 +58,15 @@ Several agents work at once, each on its own issue.
 
 ### Releases
 
-A release gives the four SDKs and `ma` one new version, named by its milestone. Steps 1 to 5 go in one release pull request.
+A release gives both SDKs and `ma` one new version, named by its milestone. Steps 1 to 5 go in one release pull request.
 
 1. Bump the version everywhere it is stated:
    - Rust: `version` in the workspace `rust/Cargo.toml`, and `rust/Cargo.lock`.
    - TypeScript: `version` in each `typescript/packages/*/package.json`, the exact versions those packages pin for each other, and `typescript/package-lock.json`.
-   - Python: `version` in `python/pyproject.toml` and each `python/packages/*/pyproject.toml`, the exact versions they pin for each other, and `python/uv.lock`.
-   - Go: `ImplementationVersion` in `go/api/api.go`.
    - The manifests and lock files under `demos/`, the status line in `README.md`, and the `ma --version` example in `.github/ISSUE_TEMPLATE/bug.yml`.
 
    Then search the tracked files for the old version with `git grep -n -F OLD`, which also reads `.github/`, and change each place that still gives it as current.
-2. Update the status line at the top of `docs/sdk/README.md`. It gives the SDK specification's revision and what the four SDKs pass.
+2. Update the status line at the top of `docs/sdk/README.md`. It gives the SDK specification's revision and what both SDKs pass.
 3. Add a section for the release to `docs/status.md`, with the step counts of `scripts/check.sh` and `scripts/macos-check.sh` on the release commit.
 4. Add a section for the release to `CHANGELOG.md`.
 5. Run the docs-state check (#27). It fails on a version that drifted, an ADR index status that disagrees with its record, or a gap section without an issue.
@@ -80,7 +78,7 @@ The project has five layers, and each is made only from the layers below it ([AD
 
 1. the specification (`docs/`, the kits in `conformance/`);
 2. the SDK specification (`docs/sdk/`, the shared scenarios in `conformance/sdk/`);
-3. the SDKs (`rust/`, `typescript/`, `go/`, `python/`);
+3. the SDKs (`rust/`, `typescript/`);
 4. the reference implementations (`docs/reference/`, each language's `ma`, the checks in `conformance/reference/`);
 5. demonstrative implementations (`demos/`: the project notes agent and the ops desk).
 
@@ -89,7 +87,7 @@ The project has five layers, and each is made only from the layers below it ([AD
 - A change to what an agent or part must do starts in `docs/contracts.md`, `docs/security.md` or a binding, with a kit check where one can be written, and an ADR if it is hard to reverse.
 - A change to the developer API starts in `docs/sdk/`, usually with a shared scenario in `conformance/sdk/scenarios/` that every SDK then passes, and a guide example that runs as a test.
 - A change to `ma` starts in `docs/reference/standard-configuration.md`, with a reference check where the behavior can be seen from outside.
-- The Rust and TypeScript SDKs are one SDK in two languages, and the two `ma` builds are one program. A change to one language is a change to both, or a recorded gap in the other ([ADR 0037](docs/adr/0037-two-languages.md)). Go and Python are leaving `main` ([#157](https://github.com/daniel-ballance/modular-agent/issues/157)): new SDK and `ma` work, including the shared scenarios and reference checks above, is implemented in Rust and TypeScript only, and a gap is recorded only for those two. Until #157 removes them, the full check still runs the Go and Python lanes and every existing check against them, and work already in flight there finishes. A new shared scenario or reference check that the Go or Python build would fail waits for that removal. A recorded gap is one issue with a `lang:` label for each language left out.
+- The Rust and TypeScript SDKs are one SDK in two languages, and the two `ma` builds are one program. A change to one language is a change to both, or a recorded gap in the other ([ADR 0037](docs/adr/0037-two-languages.md)). Shared scenarios and reference checks run against both languages. Record a gap as one issue with the other language's `lang:` label.
 
 **No backward compatibility before 1.0.** The project's owner is its only user. Change or remove a rule, field, option or API outright; do not keep an old spelling, alias, fallback, migration or "optional for older builds" form beside the new one. Interoperability with outside protocols and clients (ACP, AG-UI, OpenTelemetry, model APIs) is not backward compatibility and stays.
 
@@ -107,11 +105,11 @@ Keep one concern per module. Split a module by the rule each part enforces, not 
 
 Keep tracked source files at 1,000 lines or fewer. The docs lane runs `scripts/check-maintainability.mjs` to check this. Files listed in `scripts/maintainability-baseline.json` may exceed the limit up to their recorded counts. Lower an entry when its file shrinks. Remove the entry if the file is gone or fits the limit. Adding or raising an entry requires review. Explain why in the PR.
 
-The docs lane runs `scripts/check-docs-state.mjs`, which checks three things. The setup step installs its parsers with `npm ci --silent --prefix scripts`. First, in tracked Markdown outside `docs/adr/`, `docs/research/`, `docs/pressure-test/` and `*/docs/clean-room/`, a heading that starts with Known gaps, Gaps, Findings or Remaining (alone, or ending in work or gaps), ends in gaps or findings, starts with Proposed and names text, or reads "Proposed, not yet written" must reference an issue before the next heading. The check follows CommonMark for both `#` and underlined (Setext) headings. Indented code blocks do not count as issue references. Other headings that list open work are not checked, but their work still belongs in an issue. Second, every record in `docs/adr/` must have a row in `docs/adr/README.md`, and each row must start its status with its record's status; a row for an accepted record may instead start with Historical. Third, the release at the top of `CHANGELOG.md` must match the versions in every tracked `Cargo.toml`, in each `typescript/packages/*/package.json` with its `@modular-agent/` pins, in each `pyproject.toml` under `python/` with its pins on other packages there, and in the Go `ImplementationVersion`. Its major.minor must match the SDK specification status. Lock files and the Node and Python manifests under `demos/` are not checked; the release checklist covers them. Stale status prose and untracked open work are left to the reviewer's [agent check](#how-work-is-tracked).
+The docs lane runs `scripts/check-docs-state.mjs`, which checks three things. The setup step installs its parsers with `npm ci --silent --prefix scripts`. First, in tracked Markdown outside `docs/adr/`, `docs/research/`, `docs/pressure-test/` and `*/docs/clean-room/`, a heading that starts with Known gaps, Gaps, Findings or Remaining (alone, or ending in work or gaps), ends in gaps or findings, starts with Proposed and names text, or reads "Proposed, not yet written" must reference an issue before the next heading. The check follows CommonMark for both `#` and underlined (Setext) headings. Indented code blocks do not count as issue references. Other headings that list open work are not checked, but their work still belongs in an issue. Second, every record in `docs/adr/` must have a row in `docs/adr/README.md`, and each row must start its status with its record's status; a row for an accepted record may instead start with Historical. Third, the release at the top of `CHANGELOG.md` must match the versions in every tracked `Cargo.toml` and in each `typescript/packages/*/package.json` with its `@modular-agent/` pins. Its major.minor must match the SDK specification status. Lock files and the Node manifests under `demos/` are not checked; the release checklist covers them. Stale status prose and untracked open work are left to the reviewer's [agent check](#how-work-is-tracked).
 
 Do not merge a commit into `main` if its subject starts with `WIP`, regardless of case, or if its message has a closing keyword such as `Fixes #12` ([Branch and pull request](#how-work-is-tracked)). `scripts/check-maintainability.mjs` fails on either in the commits that `main` does not have (`git log origin/main..HEAD`, or the local `main` when there is no `origin/main`). It reads GitHub's keywords (close, closes, closed, fix, fixes, fixed, resolve, resolves, resolved, in any case) followed by a whole `#N`, `OWNER/REPO#N` or issue URL; "fixed in #12" does not close an issue and passes.
 
-Follow the split issues for the four Harness modules over the limit: [TypeScript #8](https://github.com/daniel-ballance/modular-agent/issues/8), [Rust #9](https://github.com/daniel-ballance/modular-agent/issues/9), [Python #10](https://github.com/daniel-ballance/modular-agent/issues/10) and [Go #11](https://github.com/daniel-ballance/modular-agent/issues/11).
+Follow the split issues for the Harness modules over the limit: [TypeScript #8](https://github.com/daniel-ballance/modular-agent/issues/8) and [Rust #9](https://github.com/daniel-ballance/modular-agent/issues/9).
 
 ## Checking a change
 
@@ -120,14 +118,14 @@ There is no hosted CI. Run the checks locally before pushing:
 ```sh
 scripts/check.sh --quick      # builds, lint, SDK tests and cross-language checks
 scripts/check.sh              # every suite and the binding kits
-scripts/check.sh go python    # only the Go and Python lanes
+scripts/check.sh rust         # only the Rust language lane, plus the docs lane
 scripts/check.sh --serial     # one step at a time, in the original order
 scripts/stress.sh 3           # three independent full checks at once, on three check slots
 ```
 
-`--quick` runs a subset of each language's tests: Rust's `modular-agent` and `standard` crates, Go's `./modular/...` and `./cmd/ma/...` without the race detector, the root TypeScript suite once without the separate `MA_REMOTE=...` rerun, and Python in the transient local placement only. It also skips the telemetry, AG-UI, WebSocket and ADR 0030 kits, the ACP kit's groups other than stdio rights, and the erasure matrix. A change to code outside that subset, such as the Harness, a base agent, an interface, a plugin host or a history service, runs the full lane for each language it touches (`scripts/check.sh go`) before review. #130 passed `--quick` while 21 Go tests outside `./modular/...` failed.
+`--quick` runs a subset of each language's tests: Rust's `modular-agent` and `standard` crates, and the root TypeScript suite once without the separate `MA_REMOTE=...` rerun. It also skips the telemetry, AG-UI, WebSocket and ADR 0030 kits, the ACP kit's groups other than stdio rights, and the erasure matrix. A change to code outside that subset, such as the Harness, a base agent, an interface, a plugin host or a history service, runs the full lane for each language it touches (`scripts/check.sh rust` or `scripts/check.sh typescript`) before review. At the four-language checkpoint, #130 passed `--quick` while 21 Go tests outside `./modular/...` failed.
 
-Each selected language runs in its own lane. A failing step does not stop that lane or the others. The shared scenarios, reference checks, demo, telemetry peer placements and erasure matrix wait for all four lanes. They are skipped if you select fewer than four languages. The erasure pairings also run together unless you pass `--serial`.
+Each selected language runs in its own lane. A failing step does not stop that lane or the others. The shared scenarios, reference checks, both demos, telemetry peer placements and erasure matrix run only when both language lanes are selected. In a parallel run, they wait for both lanes. The erasure pairings also run together unless you pass `--serial`.
 
 The script prints each finished step with its lane and elapsed time. It prints the wall time and log folder in the final summary. These times are from the reference machine (32 logical CPUs) at 0.3.0, on 2026-11-25. The quick run took about 16 minutes (954 s) in a fresh worktree with cold builds; the Go build alone took 330 s. The full run took about 37 minutes (2,198 s). It started later in the same worktree, so its builds were warm, and other agents' work shared the machine. The erasure matrix took 2 minutes of it. The quick run passed all 20 steps; the full run passed 60 of 61 ([#43](https://github.com/daniel-ballance/modular-agent/issues/43)). Other work on the machine makes either run slower.
 
@@ -152,7 +150,7 @@ A failure that is not a missed deadline, such as a wrong reply, blocks until it 
 
 Each step has a 30-minute hang guard (`MA_CHECK_STEP_LIMIT`, in seconds). A step that reaches it is stopped with its processes and reported as failed; its log ends with `hang guard: stopped after`. The guard catches hangs; a step that is merely slow is a problem to find, not a reason to raise it.
 
-The checks need Linux with unprivileged user, PID and mount namespaces, [mise](https://mise.jdx.dev) (which pins Rust and Go), Node.js 22.12 or later, and [uv](https://docs.astral.sh/uv/) (which pins Python 3.13). Leave `TMPDIR` and `CARGO_INCREMENTAL` unset. No suite needs an on-disk temp directory or a shared Cargo incremental setting. A full RAM-backed `/tmp` once filled and caused spurious failures; that is a size limit. The check scripts therefore run their steps with `TMPDIR` at `~/.cache/ma-std-tmp` when it is unset. A suite run on its own uses the system temp directory. Parallel worktrees keep separate Cargo target directories. A shared `CARGO_TARGET_DIR` would make those worktrees wait on one build lock.
+The checks need Linux with unprivileged user, PID and mount namespaces, [mise](https://mise.jdx.dev) (which pins Rust), Node.js 22.12 or later, and Python 3 (`python3` for the demos and reference helpers). Leave `TMPDIR` and `CARGO_INCREMENTAL` unset. No suite needs an on-disk temp directory or a shared Cargo incremental setting. A full RAM-backed `/tmp` once filled and caused spurious failures; that is a size limit. The check scripts therefore run their steps with `TMPDIR` at `~/.cache/ma-std-tmp` when it is unset. A suite run on its own uses the system temp directory. Parallel worktrees keep separate Cargo target directories. A shared `CARGO_TARGET_DIR` would make those worktrees wait on one build lock.
 
 A coding agent's shell commands may run inside a systemd scope that ends with the agent's process; T3 Code does this. Ending the scope kills everything in it, including a check started with `nohup` or `setsid`. Start a long run as its own user unit instead, so it survives:
 
@@ -167,7 +165,7 @@ systemctl --user is-active ma-check    # active while it runs
 
 For a stress run, use a different unit name and log file and pass `scripts/stress.sh 3` instead of `scripts/check.sh`.
 
-On an Apple silicon Mac, run `scripts/macos-check.sh` from a fresh clone in a native arm64 shell. It checks for mise, Node.js 22 or later, uv and the Xcode command line tools. It builds all four `ma` programs, including the Go Monty worker, then runs the language suites, reference checks and ACP kits. It needs no sudo. It uses a temporary home, removes it when the run ends and leaves the logs at the paths in its summary table.
+On an Apple silicon Mac, run `scripts/macos-check.sh` from a fresh clone in a native arm64 shell. It checks for mise, Node.js 22 or later and the Xcode command line tools. It builds both `ma` programs, then runs the language suites, reference checks and ACP kits. It needs no sudo. It uses a temporary home, removes it when the run ends and leaves the logs at the paths in its summary table.
 
 What the full run covers:
 
@@ -175,13 +173,13 @@ What the full run covers:
 |---|---|
 | Each language's suites | The base build, its SDK and its `ma`, including the base builds' own kit runs |
 | Shared scenarios, `MODULAR_AGENT_SDK_REQUIRE=all` | Every SDK's runner passes every scenario in process and served by every SDK |
-| Reference checks, `MODULAR_AGENT_REF_REQUIRE=all` | All four `ma` builds behave as the standard configuration says |
+| Reference checks, `MODULAR_AGENT_REF_REQUIRE=all` | Both `ma` builds behave as the standard configuration says |
 | ACP kit and `scripts/websocket-kits.sh` | ACP on each `ma`, plus the direct WebSocket ACP and plugin checks, including separate-listener plugin isolation |
 | `scripts/production-kits.sh` | ADR 0030 isolation, capacity and erasure over ACP on each `ma` and base agent; deployment isolation against two copies of each language's history service; the [pending-erasure registry profile](docs/bindings/history-http.md#pending-erasure-registry-profile-pendingerasure-1) across a service restart |
-| `scripts/erasure-matrix.sh` | The ACP erasure checks with each language's agents on each other language's history service: 12 pairings, all through the registry profile |
+| `scripts/erasure-matrix.sh` | The ACP erasure checks with each language's agents on each other language's history service: two pairings, all through the registry profile |
 | `scripts/check-links.mjs` | Every relative link and anchor in the Markdown resolves |
 
-To run only the ADR 0030 kits for a built language, use `scripts/production-kits.sh rust` (or `typescript`, `go` or `python`). Use the builds from `scripts/check.sh`, including the Rust `history_service` example or Go `modular-service`, and install the kit dependencies with `npm ci --prefix conformance/acp` and `npm ci --prefix conformance/tools`. The runner uses disposable loopback listeners, tokens and stores. It checks ACP on stdio and over direct WebSocket listeners where available; Go's base agent serves ACP on stdio only. The full check runs this step for each selected language; `--quick` skips it.
+To run only the ADR 0030 kits for a built language, use `scripts/production-kits.sh rust` (or `typescript`). Use the builds from `scripts/check.sh`, including the Rust `history_service` example, and install the kit dependencies with `npm ci --prefix conformance/acp` and `npm ci --prefix conformance/tools`. The runner uses disposable loopback listeners, tokens and stores. It checks ACP on stdio and over direct WebSocket listeners. The full check runs this step for each selected language; `--quick` skips it.
 
 To look at traces while working on [telemetry](docs/telemetry.md), run `scripts/phoenix.sh start`. It starts [Arize Phoenix](https://arize.com/docs/phoenix) in podman or docker on loopback, with authentication off, from a pinned image. Point an exporter at it with `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:6006` and `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`; its HTTP endpoint does not take JSON. Phoenix shows `invoke_agent`, `chat` and `execute_tool` spans as agent, model and tool steps, and groups them by `gen_ai.conversation.id`. Its span API (`/v1/projects/default/spans`) does not return resource attributes such as `service.name`; check those at an OTLP receiver. It runs as the systemd user unit `ma-phoenix` where one is available, so it outlives the shell that started it. `scripts/phoenix.sh stop` stops it and keeps its traces in the `ma-phoenix-data` volume; `scripts/phoenix.sh reset` also deletes them. To open it from another device on your tailnet without MagicDNS, forward the port with `tailscale serve --bg --tcp=6006 tcp://127.0.0.1:6006` and browse to `http://TAILSCALE-IP:6006`; raw TCP forwarding does not depend on the hostname the browser sends. The checks do not need it.
 

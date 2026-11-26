@@ -8,7 +8,7 @@ Each SDK ships three Providers that use a person's own subscription plan instead
 | `grok(options)` | `grok` | The X Subscription, and the SuperGrok and X Premium plans it replaces | OAuth device sign-in, then xAI's Responses API |
 | `claude(options)` | `claude` | Claude (Pro, Max, Team) | The Claude Agent SDK, signed in through Claude Code |
 
-They are ordinary [Providers](api.md#providers): an app adds them with `providers`, and they serve and load over the plugin binding like any other. They behave the same in all four languages.
+They are ordinary [Providers](api.md#providers): an app adds them with `providers`, and they serve and load over the plugin binding like any other. They behave the same in both languages.
 
 ## Terms of use
 
@@ -49,7 +49,7 @@ Requests and sign-ins name the client to the service: `originator` on ChatGPT re
 
 ## Models
 
-`chatgpt()` and `grok()` offer the models in [subscription-models.json](subscription-models.json), which uses the format and reasoning rules of the [API-key model table](api-key-models.md). The `claude` entries map each level to the Agent SDK's `thinking` and `effort` options, in the TypeScript SDK's spelling; the Python SDK uses its own names for the same settings. Each SDK MUST ship it unchanged and test that its copy is byte-identical. The `models` option enrolls an unlisted id with its limits, as for the API-key Providers.
+`chatgpt()` and `grok()` offer the models in [subscription-models.json](subscription-models.json), which uses the format and reasoning rules of the [API-key model table](api-key-models.md). The `claude` entries map each level to the Agent SDK's `thinking` and `effort` options, in the TypeScript SDK's spelling. Each SDK MUST ship it unchanged and test that its copy is byte-identical. The `models` option enrolls an unlisted id with its limits, as for the API-key Providers.
 
 ## ChatGPT
 
@@ -69,7 +69,7 @@ The client is the one xAI registered for its own Grok Build CLI; xAI publishes n
 ## Claude
 
 - `claude()` reaches Claude through the Claude Agent SDK, used as a plain model endpoint: the host's system prompt with no Claude Code preset; only the host's tools shown to the model; Claude Code's own tools, settings files, hooks, memory, MCP configuration, skills and session files off. When the model asks for a tool, the request ends with `toolCall` parts and stop `toolUse`; nothing runs inside the Agent SDK. Text and reasoning arrive as pieces.
-- TypeScript and Python use Anthropic's Agent SDK for their language. Anthropic publishes none for Rust or Go, so their `claude()` runs the TypeScript SDK's Claude program as a [process plugin](placement.md#a-plugin-in-another-process) and needs Node.js 22 or newer. The `program` option, or `MODULAR_AGENT_CLAUDE_SIDECAR`, names it; otherwise each SDK looks in its documented install location. A missing program is `invalid_composition` naming both.
+- TypeScript uses Anthropic's Agent SDK. Anthropic publishes none for Rust, so Rust's `claude()` runs the TypeScript SDK's Claude program as a [process plugin](placement.md#a-plugin-in-another-process) and needs Node.js 22 or newer. The `program` option, or `MODULAR_AGENT_CLAUDE_SIDECAR`, names it; otherwise the Rust SDK looks in its documented install location. A missing program is `invalid_composition` naming both.
 - The catalog starts from the `claude` entries in [subscription-models.json](subscription-models.json), then takes what Claude Code reports the account offers.
 - `available()` is true when Claude Code reports a Claude plan sign-in. If Claude Code is using an API key instead, `available()` is false and the reason names the key's source, so a plan is never silently replaced by metered use. Served, the Claude program sends that reason in `provider/available`.
 

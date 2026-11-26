@@ -4,7 +4,7 @@ Work on the branch in the checkout you were given. Never commit to `main`.
 
 ## Map
 
-- `rust/` and `typescript/` are one SDK and one `ma`, each in its own language. `go/` and `python/` are leaving `main` ([ADR 0037](docs/adr/0037-two-languages.md), #157): start no work in them.
+- `rust/` and `typescript/` are one SDK and one `ma`, each in its own language, kept in lockstep ([ADR 0037](docs/adr/0037-two-languages.md)).
 - `conformance/` holds the kits that check a build against the specification.
 - `docs/` is the specification. `GLOSSARY.md` is the vocabulary. `CONTRIBUTING.md` is how a change moves through the layers, how to write, and how the checks run.
 
@@ -35,7 +35,7 @@ Open work lives only in GitHub Issues. Read `gh issue list` before you start. Ev
 ```sh
 scripts/check.sh --quick
 scripts/check.sh
-scripts/check.sh go python
+scripts/check.sh rust
 ```
 
 `--quick` runs only part of each language's tests; a change outside them runs the full lane for that language, as `CONTRIBUTING.md` ("Checking a change") says. Read each command's own exit code; a pipe hides it. A suite run on its own in a fresh worktree first needs the setup steps `scripts/check.sh` runs, such as `npm ci` in `conformance/acp`, `conformance/tools` and `conformance/telemetry`.

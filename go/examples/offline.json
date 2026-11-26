@@ -1,9 +1,0 @@
-[
-  {
-    "Response": {
-      "Content": [{"type": "text", "text": "Hello from the offline fake Provider."}],
-      "Stop": "finished",
-      "Usage": {"input": 3, "output": 4}
-    }
-  }
-]

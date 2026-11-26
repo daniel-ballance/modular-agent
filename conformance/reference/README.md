@@ -1,6 +1,6 @@
 # Reference checks
 
-The 33 checks test whether an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs, its ACP and AG-UI responses and the telemetry it exports. So one set of checks covers all four implementations.
+The 33 checks test whether an implementation of the [standard configuration](../../docs/reference/standard-configuration.md) behaves as that page says. They run `ma` as a person would, with a scripted model, and look only at what it prints, its exit status, the files it leaves, the model requests it logs, its ACP and AG-UI responses and the telemetry it exports. So one set of checks covers both implementations.
 
 Install the shared OTLP receiver's dependencies from this directory: `npm ci --prefix ../telemetry`.
 
@@ -64,6 +64,6 @@ The reference column records the 28-check suite before `reopen-approval`. The AC
 | Go | 27/28 checked | 188/188 |
 | Python | 27/28 checked | 188/188 |
 
-All four run the identical set of 188 ACP checks, including the four that check an undeclared feature is refused, so they present the same agent over ACP.
+All four ran the identical set of 188 ACP checks, including the four that check an undeclared feature is refused, so they presented the same agent over ACP in that run.
 
 The ACP kit is the other half: each implementation must also pass `node conformance/acp/run.mjs -- ma --acp` with `MODULAR_AGENT_CONFORMANCE=1`.

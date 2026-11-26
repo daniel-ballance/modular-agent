@@ -81,7 +81,7 @@ const wire = (direction, msg) => ({ direction, raw: JSON.stringify({ jsonrpc: "2
 const host = msg => wire("hostToPlugin", msg);
 const peer = msg => wire("pluginToHost", msg);
 
-function toolCall(placement = "process:go", nested = false) {
+function toolCall(placement = "process:typescript", nested = false) {
   const calls = nested ? [
     { id: "call-1", stepId: "step-1", name: "pilot", status: "completed" },
     { id: "call-2", stepId: "step-1", name: "tide", status: "completed", parentCallId: "call-1" },
@@ -150,7 +150,7 @@ function crash(kept = false) {
   });
 }
 
-for (const placement of ["inProcess", "process:go"]) {
+for (const placement of ["inProcess", "process:typescript"]) {
   test(`accepts tool and scoped nested calls (${placement})`, () => {
     compareTrace(toolCall(placement));
     compareTrace(toolCall(placement, true));

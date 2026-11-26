@@ -11,8 +11,8 @@ node run.mjs rust --list
 node run.mjs rust -- /absolute/path/to/built/adapter
 ```
 
-The command takes a built SDK adapter. This kit does not build or wire the four adapters.
-Run it once per host SDK: 14 ordinary and eight waiting cases per host. A missing fixture for an applicable case is a failure,
+The command takes a built SDK adapter. This kit does not build or wire the adapters.
+Run it once per host SDK: 10 ordinary (eight in process, two with the other SDK's fixtures) and eight waiting cases per host. A missing fixture for an applicable case is a failure,
 not a skip. The commands and build hints come from the [fixture registry](../sdk/fixtures/).
 A failed case leaves its workspace and runner log on disk and prints their location.
 The kit never retries a case. The library entry points are `startReceiver` in
@@ -72,8 +72,7 @@ scripted Provider and generated fixture data. Never read real credentials or use
   one receiver snapshot after this barrier so it can detect extra spans as well as missing ones.
 
 Rust uses `sdk_scenarios::run` and `scenario-agent`; TypeScript uses `runScenario`
-and `scenario-agent`; Go uses the shared scenario test runner and its crash child;
-Python uses `modular_agent._scenarios.run_scenario` and its crash child. Add the hook
+and `scenario-agent`. Add the hook
 at those entry points and where they build process plugin options. Ordinary shared
 scenarios still use their current fixture commands and environments. This telemetry
 matrix does not add service placements.

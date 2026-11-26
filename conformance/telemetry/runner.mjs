@@ -11,7 +11,7 @@ import { startReceiver } from "./receiver.mjs";
 import { readWire } from "./wire.mjs";
 import { waitingCases } from "./waiting-cases.mjs";
 
-export const sdks = ["rust", "typescript", "go", "python"];
+export const sdks = ["rust", "typescript"];
 const cases = ["first-turn", "tool-call", "nested-call", "gate-refusal", "question-answered", "durable-crash", "kept-crash"];
 const repo = fileURLToPath(new URL("../../", import.meta.url));
 const proxy = fileURLToPath(new URL("./wire-proxy.mjs", import.meta.url));

@@ -4,40 +4,28 @@ Run the `tide` tool from [Add a tool](02-add-a-tool.md) in a process of its own,
 
 ## Serve the plugin
 
-A plugin program wraps its tools in a plugin and calls `serve`. `serve` speaks the binding on stdin and stdout until the agent closes the connection. Here the program is in Python; any of the four would do.
+A plugin program wraps its tools in a plugin and calls `serve`. `serve` speaks the binding on stdin and stdout until the agent closes the connection. Here the program is in TypeScript and uses the `tide` tool from the previous guide.
 
-```python
-# tides.py
-from modular_agent import Plugin, serve, tool
+```ts
+// tides.ts (compile to tides.js)
+import { serve } from "@modular-agent/core";
+import { tide } from "./tide.js";
 
-
-@tool(read_only=True)
-async def tide(harbour: str) -> str:
-    """Today's high tide at a harbour.
-
-    Args:
-        harbour: The harbour to look up.
-    """
-    return f"High tide at {harbour} is 14:02."
-
-
-serve(Plugin("tides", tools=[tide]))
+await serve({ name: "tides", tools: [tide] });
 ```
 
-The same call in the other languages:
+The call in each SDK:
 
 | Language | Serve a plugin |
 |---|---|
 | Rust | `modular_agent::serve(plugin).await` |
 | TypeScript | `await serve(plugin)` |
-| Go | `modular.Serve(ctx, plugin)` |
-| Python | `serve(plugin)` |
 
 A program must write nothing else to stdout: the binding owns it. Log with the context's `log`, which goes to stderr.
 
 ## Load it into an agent
 
-Name the program in the agent's process plugins. The command is an argument vector, not a shell line. The program starts with a [minimal environment](../placement.md#a-plugin-in-another-process), so give the interpreter's full path. Here it is a virtual environment that has `modular-agent` installed.
+Name the program in the agent's process plugins. The command is an argument vector, not a shell line. The program starts with a [minimal environment](../placement.md#a-plugin-in-another-process), so give Node's full path. Build and deploy the plugin with its SDK dependencies.
 
 **Rust**
 
@@ -47,7 +35,7 @@ use modular_agent::ProcessPlugin;
 let agent = Agent::builder()
     .provider(openai())
     .model("openai/gpt-6-luna")
-    .process_plugin(ProcessPlugin::new(["/srv/tides/.venv/bin/python", "/srv/tides/tides.py"]))
+    .process_plugin(ProcessPlugin::new(["/usr/bin/node", "/srv/tides/tides.js"]))
     .build()
     .await?;
 ```
@@ -58,32 +46,8 @@ let agent = Agent::builder()
 const agent = await createAgent({
   providers: [openai()],
   model: "openai/gpt-6-luna",
-  processPlugins: [{ command: ["/srv/tides/.venv/bin/python", "/srv/tides/tides.py"] }],
+  processPlugins: [{ command: ["/usr/bin/node", "/srv/tides/tides.js"] }],
 });
-```
-
-**Go**
-
-```go
-agent, err := modular.New(ctx,
-	modular.WithProvider(openai.New()),
-	modular.WithModel("openai/gpt-6-luna"),
-	modular.WithProcessPlugin(modular.ProcessPlugin{
-		Command: []string{"/srv/tides/.venv/bin/python", "/srv/tides/tides.py"},
-	}))
-```
-
-**Python**
-
-```python
-from modular_agent import ProcessPlugin, create_agent
-from modular_agent.openai import openai
-
-agent = await create_agent(
-    providers=[openai()],
-    model="openai/gpt-6-luna",
-    process_plugins=[ProcessPlugin(["/srv/tides/.venv/bin/python", "/srv/tides/tides.py"])],
-)
 ```
 
 The model sees `tide` exactly as it would in process. The call passes the same gates, is recorded the same way and returns the same result.
@@ -148,17 +112,7 @@ test("guide 03 loads the tide from a fixture program", async () => {
 
 ## Or keep it in process
 
-The Python agent can use the same plugin directly, with no second process:
-
-```python
-from tides import tide  # move serve() under `if __name__ == "__main__":` first
-
-agent = await create_agent(
-    providers=[openai()],
-    model="openai/gpt-6-luna",
-    plugins=[Plugin("tides", tools=[tide])],
-)
-```
+The TypeScript agent can import the tool from `tide.js` and include it in `tools: [tide]` instead of starting the process plugin.
 
 Which placement to use is a deployment choice. In process is faster. In its own process the tool can be written in another language, and a crash in it does not take the agent down. Neither is a sandbox: the program runs with the agent's permissions.
 

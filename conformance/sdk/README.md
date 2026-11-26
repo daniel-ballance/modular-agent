@@ -24,9 +24,11 @@ A scenario that turns out to be wrong is fixed here first, then in the SDKs.
 | [`kept-crash`](scenarios/kept-crash.json) | A crash under `kept`: the turn fails, the call is not repeated |
 | [`durable-crash`](scenarios/durable-crash.json) | A crash under `durable`: the turn carries on, the call is not repeated |
 
-## Results
+## Historical results
 
-These results are from before [ADR 0029](../../docs/adr/0029-sdk-decisions-after-four-builds.md) and do not include its three ephemeral scenarios.
+The Rust and TypeScript runners now each use five placements: in process and over stdio and WebSocket from both SDKs. `MODULAR_AGENT_SDK_REQUIRE=all` requires both fixture programs.
+
+The results below are from before [ADR 0029](../../docs/adr/0029-sdk-decisions-after-four-builds.md) and do not include its three ephemeral scenarios.
 
 SDK specification 0.1 after the fifth build round. Each runner ran all seventeen scenarios in process, served by each SDK's fixture program on stdio, and served by each as a WebSocket service, with `MODULAR_AGENT_SDK_REQUIRE=all`:
 

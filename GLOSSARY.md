@@ -342,7 +342,7 @@ The documents that set what a developer using an SDK sees: its concepts, names a
 _Avoid_: API docs, SDK guide
 
 **SDK**:
-A published library, in one of Rust, TypeScript, Go or Python, for building agents and plugins from the specification and the SDK specification. The four are one SDK in four languages.
+A library in Rust or TypeScript for building agents and plugins from the specification and the SDK specification. The two are one SDK in two languages.
 _Avoid_: Base, framework, build
 
 **Servable plugin**:
@@ -362,7 +362,7 @@ An implementation of the specification made to test it, such as the five clean-r
 _Avoid_: Reference build
 
 **Reference implementation**:
-A batteries-included agent for everyday use, written in one language on that language's SDK. Each of the four languages has one; the standard configuration is Rust's.
+A batteries-included agent for everyday use, written in one language on that language's SDK. Rust and TypeScript each have one; the Rust implementation is the reference for wording.
 _Avoid_: Reference build, batteries-included version, standard version
 
 **Demonstrative implementation**:

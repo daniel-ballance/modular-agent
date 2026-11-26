@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The ACP erasure checks with each language's agents on every other language's history
 # service, all using the pendingErasure: 1 profile (docs/bindings/history-http.md).
-# Needs everything scripts/production-kits.sh needs, for all four languages.
+# Needs everything scripts/production-kits.sh needs, for both languages.
 set -uo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 serial=false
@@ -28,8 +28,8 @@ pair() {
 
 failed=0
 pids=()
-for agent in rust typescript go python; do
-  for history in rust typescript go python; do
+for agent in rust typescript; do
+  for history in rust typescript; do
     [ "$agent" = "$history" ] && continue # production-kits.sh runs these
     if $serial; then
       pair "$agent" "$history" || failed=1

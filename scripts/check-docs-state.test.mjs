@@ -8,13 +8,10 @@ import { fileURLToPath } from "node:url";
 
 const checker = fileURLToPath(new URL("check-docs-state.mjs", import.meta.url));
 const sdk = "docs/sdk/README.md";
-const go = "go/api/api.go";
 const workspace = "rust/Cargo.toml";
 const crate = "rust/crates/sdk/Cargo.toml";
 const demoCrate = "demos/project-notes/history/Cargo.toml";
 const node = "typescript/packages/core/package.json";
-const python = "python/pyproject.toml";
-const pythonPackage = "python/packages/demo/pyproject.toml";
 const adrIndex = "docs/adr/README.md";
 const accepted = "docs/adr/0033-interface-tools-and-ag-ui.md";
 const proposed = "docs/adr/0034-approvals-that-wait.md";
@@ -30,13 +27,10 @@ function checkout(t) {
   git("init", "-q");
   write("CHANGELOG.md", "# Changelog\n\n## Unreleased\n\n## 0.3.2\n\n## 0.2.0\n");
   write(sdk, "# The SDK specification\n\n**Status: 0.3, accepted.**\n");
-  write(go, 'package api\n\nconst ImplementationVersion = "0.3.2"\n');
   write(workspace, '[workspace]\n\n[workspace.package]\nversion = "0.3.2"\n');
   write(crate, '[package]\nname = "sdk"\nversion.workspace = true # use the workspace release\n');
   write(demoCrate, '[package]\nname = "demo"\nversion = "0.3.2"\n');
   write(node, '{\n  "version": "0.3.2",\n  "dependencies": { "@modular-agent/demo": "0.3.2", "outside": "^1.0.0" }\n}\n');
-  write(python, '[project]\nname = "modular-agent"\nversion = "0.3.2"\n\n[dependency-groups]\ndev = ["demo-sdk[test]==0.3.2", "outside==1.0.0"]\n');
-  write(pythonPackage, '[project]\nname = "demo_sdk"\nversion = "0.3.2"\ndependencies = ["modular-agent", "outside==1.0.0"]\n');
   git("add", "-f", "--", ".");
   return {
     write,
@@ -151,7 +145,7 @@ test("issue numbers and URLs satisfy gap headings; history and untracked files a
     "## Production gaps", "Tracked in #23.",
     "````md", "```", "## Known gaps", "````",
   ].join("\n"));
-  for (const path of ["docs/adr/example.md", "docs/research/example.md", "docs/pressure-test/example.md", "go/docs/clean-room/example.md"]) {
+  for (const path of ["docs/adr/example.md", "docs/research/example.md", "docs/pressure-test/example.md", "rust/docs/clean-room/example.md"]) {
     repo.track(path, "## Findings\n\nHistorical evidence.\n");
   }
   repo.write("untracked.md", "## Known gaps\n");
@@ -261,23 +255,16 @@ test("release versions agree across package manifests and major.minor in the SDK
 test("each release version source reports drift with a line and fix", (t) => {
   const repo = checkout(t);
   repo.write(sdk, "# SDK\n\n**Status: 0.2, accepted**\n");
-  repo.write(go, 'package api\n\nconst ImplementationVersion = "0.2.0"\n');
   repo.write(workspace, '[workspace]\n\n[workspace.package]\nversion = "0.2.0"\n');
   repo.write(demoCrate, '[package]\nname = "demo"\nversion = "0.2.0"\n');
   repo.write(node, '{\n  "version": "0.2.0",\n  "dependencies": { "@modular-agent/demo": "*" },\n  "devDependencies": { "@modular-agent/demo": "0.2.0" }\n}\n');
-  repo.write(pythonPackage, '[project]\nname = "demo_sdk"\nversion = "0.2.0"\ndependencies = ["modular-agent == 0.2.0"]\n');
-  repo.write(python, '[project]\nname = "modular-agent"\nversion = "0.3.2"\n\n[dependency-groups]\ndev = ["demo-sdk[test]==0.2.0"]\n');
   repo.check([
     `${sdk}:3: SDK specification version`,
-    `${go}:3: Go implementation version`,
     `${workspace}:4: Cargo workspace version`,
     `${demoCrate}:3: Cargo package version`,
     `${node}:2: Package version`,
     `${node}:3: Dependency @modular-agent/demo`,
     `${node}:4: Dependency @modular-agent/demo`,
-    `${pythonPackage}:3: Python project version`,
-    `${pythonPackage}:4: Dependency modular-agent`,
-    `${python}:6: Dependency demo-sdk`,
   ]);
 });
 
@@ -379,44 +366,6 @@ test("a huge unrelated key or group name is skipped without being copied", (t) =
   repo.check([`${node}:2: Package version`], cap);
   repo.write(node, `{\n  "version": "0.3.2",\n  "${huge}": { "@modular-agent/demo": "0.1.0" },\n  "dependencies": { "@modular-agent/demo": "0.2.0" }\n}\n`);
   repo.check([`${node}:4: Dependency @modular-agent/demo`], cap);
-});
-
-test("Python pins are read from dependency arrays, not from other project strings", (t) => {
-  const repo = checkout(t);
-  repo.write(python, [
-    "[project]", 'name = "modular-agent"', 'version = "0.3.2"',
-    'description = "demo-sdk==0.2.0 was the old example"',
-    "dependencies = [", '  "outside==1.0.0",', '  "demo-sdk==0.2.0",', "]",
-    'readme = "demo-sdk==0.1.0"',
-  ].join("\n") + "\n");
-  repo.check([`${python}:7: Dependency demo-sdk`]);
-});
-
-test("a bracket in a dependency marker does not end the TOML array", (t) => {
-  const repo = checkout(t);
-  repo.write(python, [
-    "[project]", 'name = "modular-agent"', 'version = "0.3.2"', "dependencies = [",
-    String.raw`  "outside==1.0.0; platform_release == \"]\"",`,
-    '  "demo-sdk==0.2.0",', "]",
-  ].join("\n"));
-  repo.check([`${python}:6: Dependency demo-sdk`]);
-});
-
-test("a quoted dependencies key still holds Python pins", (t) => {
-  const repo = checkout(t);
-  repo.write(python, '[project]\nname = "modular-agent"\nversion = "0.3.2"\n"dependencies" = ["demo-sdk==0.2.0"]\n');
-  repo.check([`${python}:4: Dependency demo-sdk`]);
-});
-
-test("Python pin locations distinguish identical prose and grouped requirements", (t) => {
-  const repo = checkout(t);
-  const pin = "  DEMO.Sdk [test] (>=0, === 0.2.0); python_version >= '3.13'";
-  repo.write(python, [
-    "[project]", 'name = "modular-agent"', 'version = "0.3.2"', `description = "${pin}"`,
-    "[project.optional-dependencies]", `dev = ["${pin}"]`, "[dependency-groups]",
-    `dev = [{include-group = "test"}, "${pin}"]`, 'test = ["demo-sdk @ https://example.org/demo-sdk==0.2.0"]',
-  ].join("\n"));
-  repo.check([`${python}:6: Dependency DEMO.Sdk`, `${python}:8: Dependency DEMO.Sdk`]);
 });
 
 test("Cargo reads quoted and dotted keys and locates the value, not a matching comment", (t) => {

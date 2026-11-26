@@ -12,7 +12,7 @@ fi
 count=$1; shift
 for arg in "$@"; do
   case "$arg" in
-    --quick|--serial|rust|typescript|go|python) ;;
+    --quick|--serial|rust|typescript) ;;
     -h|--help) echo "$usage"; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
@@ -28,8 +28,8 @@ TMPDIR="$(cd "$TMPDIR" && pwd -P)"
 root="$(mktemp -d "$TMPDIR/stress-XXXXXX")"
 printf 'Stress logs: %s\n' "$root"
 
-# Copy tracked sources as they are on disk. Each run needs its own build outputs,
-# virtual environment and node_modules (npm ci removes the old tree).
+# Copy tracked sources as they are on disk. Each run needs its own build outputs
+# and node_modules (npm ci removes the old tree).
 (
   drop_check_slots
   git ls-files -z | tar -cf "$root/source.tar" --null -T -

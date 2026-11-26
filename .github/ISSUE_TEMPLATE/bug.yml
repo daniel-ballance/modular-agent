@@ -36,8 +36,6 @@ body:
       options:
         - label: Rust
         - label: TypeScript
-        - label: Go
-        - label: Python
   - type: input
     id: version
     attributes:

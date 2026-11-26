@@ -24,7 +24,7 @@ npm test
 MA_REMOTE=provider-pi-ai,runtime-transient,tools-files,env-local npm test
 ```
 
-`npm test` includes runs of the ACP kit against the agent, with history kept locally and in a history service, and of the history kit against its own service. It also runs the SDK tests and shared scenarios in process, over stdio and over WebSocket against each built fixture program. Set `MODULAR_AGENT_SDK_REQUIRE=all` after building the four fixture programs to require the full matrix. [Status](../docs/status.md) records what the build exercises.
+`npm test` includes runs of the ACP kit against the agent, with history kept locally and in a history service, and of the history kit against its own service. It also runs the SDK tests and shared scenarios in process, over stdio and over WebSocket against each built fixture program. Set `MODULAR_AGENT_SDK_REQUIRE=all` after building both fixture programs to require the full matrix. [Status](../docs/status.md) records what the build exercises.
 
 ## Run
 
