@@ -239,41 +239,57 @@ async function receiptWriter(t:TestContext) {
     const child = fork(new URL("../../../../scripts/receipt-writer.mjs",import.meta.url),[dir,stop],{stdio:["ignore","ignore","inherit","ipc"]});
     const ended = once(child,"exit"); t.after(()=>{ if (child.exitCode===null && child.signalCode===null) child.kill("SIGKILL"); });
     const [origin] = await Promise.race([once(child,"message"),ended.then(()=>{throw Error("Writer exited before listening");})]);
-    const http = (path:string,body?:unknown)=>fetch(`${origin}/agui/v1`+path,{method:body?"POST":"GET",headers:{authorization:"Bearer "+token,"content-type":"application/json"},body:body===undefined ? undefined : JSON.stringify(body)});
+    const http = async (step: string, path: string, body?: unknown) => {
+      const method = body === undefined ? "GET" : "POST";
+      try {
+        // Every step gets its own socket so an idle connection expiring cannot interfere with the crash boundary.
+        return await fetch(`${origin}/agui/v1`+path, {
+          method, headers: { authorization: "Bearer "+token, "content-type": "application/json", connection: "close" },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+      } catch (cause) {
+        throw new Error(`Receipt writer ${stop}: ${step} (${method} ${path}) failed`, { cause });
+      }
+    };
     return {child,ended,http};
   };
 }
 for (const stop of ["before-marker","after-marker"]) test(`SIGKILL ${stop}: read the released exchange after restart without reopening`, async t => {
   const writer=await receiptWriter(t);
-  const first = await writer(stop), {threadId} = await (await first.http("/threads",{})).json() as any;
-  const runId = randomUUID(), post = first.http("/run",{threadId,runId,protocolVersion:"1.0",messages:[prompt("Begin")]});
+  const first = await writer(stop), {threadId} = await (await first.http("create thread", "/threads", {})).json() as any;
+  const runId = randomUUID(), post = first.http("run before crash", "/run", {threadId,runId,protocolVersion:"1.0",messages:[prompt("Begin")]});
   await post.then(r=>r.text()).catch(()=>{}); assert.deepEqual(await first.ended,[null,"SIGKILL"]);
   const second = await writer("read");
-  try { assert.deepEqual(await (await second.http(`/threads/${threadId}/run-receipt?runId=${runId}`)).json(),
+  try { assert.deepEqual(await (await second.http("read receipt", `/threads/${threadId}/run-receipt?runId=${runId}`)).json(),
     {terminal:stop==="before-marker"?"unknown":"success",work:"completed"}); }
   finally { second.child.send("stop"); await second.ended; }
 });
 
 test("SIGKILL after the first decision of a batch reserves its run but not the remaining result",{timeout:10000},async t=>{
   const writer=await receiptWriter(t), first=await writer("after-answer");
-  const {threadId}=await (await first.http("/threads",{})).json() as any, path="/threads/"+threadId;
+  const {threadId}=await (await first.http("create thread", "/threads", {})).json() as any, path="/threads/"+threadId;
   const run=(runId:string,messages:unknown[],extra={})=>({threadId,runId,protocolVersion:"1.0",messages,...extra});
-  const origin=(await events(await first.http("/run",run("origin",[prompt("Mixed")],{tools:[definition]})))).at(-1);
+  const origin=(await events(await first.http("open waits", "/run", run("origin",[prompt("Mixed")],{tools:[definition]})))).at(-1);
   const [call]=origin.outcome.pendingToolCallIds;
-  const presence=await first.http(path+"/presence"), view=await (await first.http(path)).json() as any;
+  const presence=await first.http("open presence", path+"/presence");
+  assert.equal(presence.status, 200);
+  const view=await (await first.http("read waits before crash", path)).json() as any;
   const [question]=view.waiting.questions, result={id:"report",role:"tool",toolCallId:call,content:"Done"};
   const batch=run("batch",[...view.messages,result],{resume:[{interruptId:question.id,status:"resolved",payload:{allow:true}}]});
-  await first.http("/run",batch).then(r=>r.text()).catch(()=>{});
+  await first.http("submit batch before crash", "/run", batch).then(r=>r.text()).catch(()=>{});
   assert.deepEqual(await first.ended,[null,"SIGKILL"]); await presence.body?.cancel().catch(()=>{});
-  const next=await writer("read-batch"), receipt=()=>next.http(path+"/run-receipt?runId=batch").then(r=>r.json());
+  const next=await writer("read-batch");
+  const receipt = (step: string) => next.http(step, path+"/run-receipt?runId=batch").then(r=>r.json());
   try {
-    assert.deepEqual(await receipt(),{terminal:"unknown",work:"unsettled"});
-    const current=await (await next.http(path)).json() as any;
+    assert.deepEqual(await receipt("read unsettled receipt"),{terminal:"unknown",work:"unsettled"});
+    const current=await (await next.http("read waits after restart", path)).json() as any;
     assert.deepEqual(current.waiting.toolCalls.map((c:any)=>c.toolCallId),[call]);
     const remaining=[...current.messages,result];
-    assert.equal((await next.http("/run",run("batch",remaining))).status,409);
-    assert.equal((await events(await next.http("/run",run("remaining",remaining)))).at(-1).outcome.type,"success");
-    assert.deepEqual(await receipt(),{terminal:"unknown",work:"completed"});
+    const duplicate = await next.http("reject duplicate batch", "/run", run("batch",remaining));
+    assert.equal(duplicate.status,409);
+    await duplicate.text();
+    assert.equal((await events(await next.http("submit remaining result", "/run", run("remaining",remaining)))).at(-1).outcome.type,"success");
+    assert.deepEqual(await receipt("read completed receipt"),{terminal:"unknown",work:"completed"});
   } finally { next.child.send("stop"); await next.ended; }
 });
 
