@@ -261,9 +261,20 @@ test("services: an interrupted writer delivers an unrecorded SSE event and ends 
 		if (pending) t.diagnostic(`pending ${pending} for ${(performance.now() - since).toFixed(1)} ms; completed: ${completed.join(", ") || "none"}`);
 	}, { once: true });
 	let failAppend = false;
+	let holdRecoveryEnd = false;
+	let recoveryEnding!: () => void;
+	const recoveryEnd = new Promise<void>(resolve => { recoveryEnding = resolve; });
+	let releaseRecovery!: () => void;
+	const finishRecovery = new Promise<void>(resolve => { releaseRecovery = resolve; });
+	t.after(() => releaseRecovery());
 	class FailingStore extends HttpHistoryStore {
 		override async append(id: string, batch: HistoryEntry[]) {
 			if (failAppend) { failAppend = false; throw new Error("fixture append failure"); }
+			if (holdRecoveryEnd && batch.some(e => e.kind === "turnEnd")) {
+				holdRecoveryEnd = false;
+				recoveryEnding();
+				await finishRecovery;
+			}
 			await super.append(id, batch);
 		}
 	}
@@ -299,15 +310,34 @@ test("services: an interrupted writer delivers an unrecorded SSE event and ends 
 	stage("read interrupted session history");
 	assert.ok(!(await storedEntries(sessionId)).some(e => e.kind === "turnEnd"));
 	stage("reopen interrupted session");
+	holdRecoveryEnd = true;
 	await http(a, "POST", `/sessions/${sessionId}/open`);
 	const recovered = events(a, sessionId, stream.seen.findLast(e => e.eventId)?.eventId);
 	t.after(() => recovered.close());
 	stage("subscribe to recovered SSE stream");
 	await following(recovered);
-	stage("start a turn after reopening");
-	await http(a, "POST", `/sessions/${sessionId}/input`, { content: "say hello" });
-	stage("observe recovered turn completion");
-	await recovered.until(e => e.type === "turn.ended" && e.data.outcome.kind === "completed");
+	stage("hold the interrupted turn at its recovery end");
+	await recoveryEnd;
+	const interruptedTurn = a.h.session(sessionId).running!;
+	const commit = a.h.commit.bind(a.h);
+	t.mock.method(a.h, "commit", async (...args: Parameters<Harness["commit"]>) => {
+		if (args[1].some(e => e.kind === "inputAccepted")) {
+			releaseRecovery();
+			await interruptedTurn.done;
+		}
+		return commit(...args);
+	});
+	stage("accept follow-up while the interrupted turn is still running");
+	const { inputId, taken } = await http(a, "POST", `/sessions/${sessionId}/input`, { content: "say hello" });
+	assert.equal(taken, "after");
+	stage("read the follow-up turn from durable history");
+	await a.h.api("t").waitForIdle(sessionId);
+	const entries = await storedEntries(sessionId);
+	const turnId = entries.find(e => e.kind === "input" && e.inputId === inputId)?.turnId;
+	assert.ok(turnId, "the accepted follow-up must start after the preceding turn has drained its queue");
+	assert.ok(entries.some(e => e.kind === "turnEnd" && e.turnId === turnId));
+	stage("observe the follow-up turn completion");
+	await recovered.until(e => e.type === "turn.ended" && e.turnId === turnId && e.data.outcome.kind === "completed");
 	assert.ok(!recovered.seen.some(e => e.type === "session.interrupted"));
 	stage("stop HTTP agent");
 	await a.h.stop();

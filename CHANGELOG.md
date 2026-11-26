@@ -4,6 +4,7 @@ The two SDKs and `ma` share one project version. The [SDK specification](docs/sd
 
 ## Unreleased
 
+- Fixed a TypeScript input race that could leave a committed follow-up stuck in the queue when the preceding turn ended during admission.
 - The Rust and TypeScript `ma --help` option lines now match. `--trust-project` help names only `.mcp.json`, the project file that can start programs.
 - Both terminals list sorted slash names with `/commands`. TypeScript adds `/questions` to list open question IDs and `/quit` to cancel and exit. Rust no longer offers its undocumented SDK commands `/erase`, `/fork`, `/move`, `/sessions` and `/settings` in `ma`'s terminal. `/tool` stays Rust-only for now ([#134](https://github.com/daniel-ballance/modular-agent/issues/134)).
 - An open terminal approval replies `Answer y or n.` to blank lines and other slash commands, including `/quit`. Use `/cancel` to stop the turn.
