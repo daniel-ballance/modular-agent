@@ -8,6 +8,7 @@ import { request as httpsRequest } from "node:https";
 import { isDeepStrictEqual as equal } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import { runErasureRegistry } from "./erasure-registry.mjs";
+import { tracedReply } from "./http-trace.mjs";
 
 const [url, tokenFile, ...options] = process.argv.slice(2);
 const registryChecks = options[0] === "--erasure-registry-checks";
@@ -29,16 +30,27 @@ if (!safe(base) || (isolation && (!safe(otherBase) || otherBase.origin === base.
 }
 const token = readFileSync(tokenFile, "utf8").trim();
 const results = [];
-const check = (name, ok) => { results.push(!!ok); console.log(`${ok ? "PASS" : "FAIL"}  ${name}`); };
-const run = async (name, fn) => {
-	try { await fn(); } catch (e) { check(`${name}: ${e.message}`, false); }
+let trace;
+const check = (name, ok) => {
+	results.push(!!ok);
+	console.log(`${ok ? "PASS" : "FAIL"}  ${name}`);
+	if (!ok && trace) {
+		for (const request of trace) console.log(`      HTTP ${JSON.stringify(request)}`);
+	}
 };
-const req = async (method, path, body, { auth = token, raw = false, media = "application/json", endpoint = base, headers = {} } = {}) => {
-	const res = await fetch(endpoint.href.replace(/\/$/, "") + path, {
+const run = async (name, fn, requests) => {
+	trace = requests;
+	try { await fn(); } catch (e) { check(`${name}: ${e.message.replace(/\r?\n/g, "\\n")}`, false); }
+	finally { trace = undefined; }
+};
+const req = async (method, path, body, { auth = token, raw = false, media = "application/json", endpoint = base, headers = {}, record = trace } = {}) => {
+	const send = () => fetch(endpoint.href.replace(/\/$/, "") + path, {
 		method, redirect: "error", signal: AbortSignal.timeout(15000),
 		headers: { ...(auth ? { authorization: `Bearer ${auth}` } : {}), ...(body !== undefined ? { "content-type": media } : {}), ...headers },
 		body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
 	});
+	if (record) return tracedReply(method, path, send, record);
+	const res = await send();
 	return { status: res.status, headers: res.headers, body: await res.json().catch(() => null) };
 };
 // fetch normalizes dot segments before sending them. Send the request target verbatim.
@@ -79,12 +91,18 @@ async function startService(phase = "initial") {
 		child.once("exit", resolve);
 		child.once("error", resolve);
 	}) };
+	const probe = trace ? [] : undefined;
 	for (let i = 0; i < 300; i++) {
 		if (!child.pid || child.exitCode !== null || child.signalCode !== null) break;
-		const r = await req("GET", "/v1", undefined, { headers: { Connection: "close" } }).catch(() => null);
-		if (r?.status === 200) return r;
+		if (probe) probe.length = 0;
+		const r = await req("GET", "/v1", undefined, { headers: { Connection: "close" }, record: probe }).catch(() => null);
+		if (r?.status === 200) {
+			if (probe) trace.push(...probe);
+			return r;
+		}
 		await sleep(50);
 	}
+	if (probe) trace.push(...probe);
 	throw Error("fixture service did not start");
 }
 async function stopService() {
@@ -180,7 +198,7 @@ await run("session lifecycle", async () => {
 	check("lease: delayed stale release, append, erase and renew cannot fence the new writer", ok(race[0], {}) && race.slice(1, 4).every((r) => err(r, 409, "lost")) && ok(race[4], { kept: 1 }) && ok(await read(sid), { session, entries: [...tombstones, third] }));
 	await release(sid, l2);
 	check("erase: no lease is needed without a writer", ok(await erase(sid, undefined, [third.id]), { erased: [third.id] }));
-});
+}, []);
 
 // History HTTP: Erasure; Shared data: Entry fields and tombstones. Opaque rows isolate the projection.
 await run("envelope associations", async () => {
@@ -209,7 +227,7 @@ await run("envelope associations", async () => {
 	const next = (await acquire(sid, id())).body.lease;
 	check("Erasure: a new writer sees the same identities", !!next && ok(await read(sid), { session: { id: sid, ...meta }, entries: expected }));
 	await release(sid, next);
-});
+}, []);
 
 // History HTTP: The basics (path segments are validated before normalization).
 await run("dot segments", async () => {
@@ -313,7 +331,7 @@ if (restartFlag) {
 	});
 	if (registryChecks) {
 		await run("pending-erasure registry", () => runErasureRegistry({
-			url: base.href, tokenFile, project, check, ttl,
+			url: base.href, tokenFile, project, check, ttl, trace,
 			req: (method, path, body, opts) => req(method, path, body, {
 				...opts, headers: { ...opts?.headers, Connection: "close" },
 			}),
@@ -321,7 +339,7 @@ if (restartFlag) {
 				await stopService();
 				return await startService("restart");
 			},
-		}));
+		}), []);
 	}
 	await stopService();
 } else console.log("SKIP  restart hold (use --restart with a disposable service command)");

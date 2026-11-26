@@ -4,6 +4,7 @@ import { once } from "node:events";
 import { readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { isDeepStrictEqual as equal } from "node:util";
+import { tracedReply } from "./http-trace.mjs";
 
 const id = () => `kit-${randomUUID()}`;
 const path = (sid) => `/v1/sessions/${encodeURIComponent(sid)}`;
@@ -32,7 +33,7 @@ function client(req) {
 	};
 }
 
-async function withClient(connection, work) {
+async function withClient(connection, trace, work) {
 	const child = fork(new URL(import.meta.url), ["--fixture-client"], { execArgv: [], stdio: ["ignore", "ignore", "inherit", "ipc"] });
 	const stopped = new Promise((resolve) => {
 		child.once("exit", resolve);
@@ -46,6 +47,7 @@ async function withClient(connection, work) {
 				reply,
 				stopped.then(() => { throw Error("registry fixture client exited without replying"); }),
 			]);
+			for (const request of response.trace) trace.push({ action, ...request });
 			if (response.error) throw Error(response.error);
 			return response.result;
 		});
@@ -55,7 +57,7 @@ async function withClient(connection, work) {
 	}
 }
 
-export async function runErasureRegistry({ url, tokenFile, project, req, check, ttl, restart }) {
+export async function runErasureRegistry({ url, tokenFile, project, req, check, ttl, restart, trace }) {
 	const declare = (r) => r.status === 200 && r.body?.pendingErasure === 1;
 	const supported = declare(await req("GET", "/v1"));
 	check("registry: GET /v1 declares pendingErasure: 1", supported);
@@ -100,13 +102,13 @@ export async function runErasureRegistry({ url, tokenFile, project, req, check, 
 		err(await c.plans(id()), 404, "unknown_session"));
 	need(ok(await c.release(source, sourceLease), {}), "could not release source fixture lease");
 
-	await withClient(connection, async (reader) => {
+	await withClient(connection, trace, async (reader) => {
 		check("registry: independent reader can serve the copy before publication", await reader("prepare", { dest, copy }));
 		const snapshot = await c.plans(dest);
 		check("registry: publication requires a current source lease",
 			err(await c.publish(source, { ...publish, lease: sourceLease, revision: snapshot.body.revision }), 409, "lost"));
 		let mark;
-		await withClient(connection, async (writerA) => { mark = await writerA("mark", { source, dest, copy, publish }); });
+		await withClient(connection, trace, async (writerA) => { mark = await writerA("mark", { source, dest, copy, publish }); });
 		check("registry: writer A marks the copy while its destination lease is held", mark.published);
 		const marked = await c.plans(dest);
 		check("registry: pending plan has the stable record and copy IDs; raw reads are unchanged",
@@ -124,7 +126,7 @@ export async function runErasureRegistry({ url, tokenFile, project, req, check, 
 		check("registry: pending mark survives a service restart and still blocks the reader",
 			declare(restarted) && hasPlan(await c.plans(dest), [plan(false)]) && await reader("cached-refused", { dest }));
 		await sleep(ttl); // The restart exclusion is a protocol wait, not a retry.
-		await withClient(connection, async (writerB) => {
+		await withClient(connection, trace, async (writerB) => {
 			const result = await writerB("complete", { dest, intentId, record, copy, destLease });
 			check("registry: writer B's new lease fences completion by the old writer", result.fenced);
 			check("registry: a matching erasure record alone does not confirm deletion", result.bookOnlyRefused);
@@ -141,16 +143,15 @@ export async function runErasureRegistry({ url, tokenFile, project, req, check, 
 if (process.argv[2] === "--fixture-client" && process.send) {
 	let cached;
 	process.on("message", async ({ connection: { url, tokenFile }, action, args }) => {
+		const trace = [];
 		try {
 			const token = readFileSync(tokenFile, "utf8").trim();
-			const c = client(async (method, route, body, opts) => {
-				const res = await fetch(url.replace(/\/+$/, "") + route, {
+			const c = client((method, route, body, opts) =>
+				tracedReply(method, route, () => fetch(url.replace(/\/+$/, "") + route, {
 					method, redirect: "error", cache: "no-store", signal: AbortSignal.timeout(15000),
 					headers: { authorization: `Bearer ${token}`, Connection: "close", ...(body === undefined ? {} : { "content-type": "application/json" }), ...opts?.headers },
 					body: body === undefined ? undefined : JSON.stringify(body),
-				});
-				return { status: res.status, headers: res.headers, body: await res.json() };
-			});
+				}), trace, { strict: true }));
 			const view = async (sid, entries) => {
 				// Prepare first, then consult the authoritative plans before answering.
 				const r = await c.plans(sid);
@@ -192,9 +193,9 @@ if (process.argv[2] === "--fixture-client" && process.send) {
 				result = { fenced, bookOnlyRefused, completed };
 				need(ok(await c.release(dest, lease), {}), "writer B could not release its lease");
 			} else throw Error("unknown registry fixture action");
-			process.send({ result });
+			process.send({ result, trace });
 		} catch (error) {
-			process.send({ error: error.message });
+			process.send({ error: error.message, trace });
 		}
 	});
 }

@@ -11,15 +11,14 @@ const repo = fileURLToPath(new URL("../../../../", import.meta.url));
 const kit = `${repo}conformance/acp/run.mjs`;
 const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 
-function acpFailures(stdout: string): string {
-	// The ACP kit prints failure details on an indented line below each FAIL.
+function kitFailures(stdout: string): string {
 	return (stdout.match(/^FAIL  .*(?:\n {6}.*)*/gm) ?? []).join("\n");
 }
 
 test("this agent passes the ACP binding's conformance kit", t => {
 	const run = spawnSync(process.execPath, [kit, "--", process.execPath, cli, "--acp"], { encoding: "utf8", timeout: 120_000 });
 	t.diagnostic(run.stdout.trim().split("\n").at(-1) ?? "No kit summary");
-	assert.equal(run.status, 0, `${acpFailures(run.stdout)}\n${run.stdout.split("\n").at(-2)}\n${run.stderr.slice(-500)}`);
+	assert.equal(run.status, 0, `${kitFailures(run.stdout)}\n${run.stdout.split("\n").at(-2)}\n${run.stderr.slice(-500)}`);
 });
 
 async function startHistoryService(leaseTtl?: number): Promise<{ url: string; tokenFile: string; stop: () => void }> {
@@ -39,7 +38,7 @@ test("this build's history service passes the history binding's conformance kit"
 	try {
 		const run = spawnSync(process.execPath, [`${repo}conformance/history/run.mjs`, svc.url, svc.tokenFile], { encoding: "utf8", timeout: 60_000 });
 		t.diagnostic(run.stdout.trim().split("\n").at(-1) ?? "No kit summary");
-		assert.equal(run.status, 0, run.stdout.split("\n").filter((l) => l.startsWith("FAIL")).join("\n"));
+		assert.equal(run.status, 0, kitFailures(run.stdout));
 	} finally {
 		svc.stop();
 	}
@@ -50,7 +49,7 @@ test("this agent passes the ACP kit with its history in a history service", asyn
 	try {
 		const run = spawnSync(process.execPath, [kit, "--", process.execPath, cli, "--acp"], { encoding: "utf8", timeout: 120_000, env: { ...process.env, MODULAR_AGENT_HISTORY_URL: svc.url, MODULAR_AGENT_HISTORY_TOKEN_FILE: svc.tokenFile } });
 		t.diagnostic(run.stdout.trim().split("\n").at(-1) ?? "No kit summary");
-		assert.equal(run.status, 0, acpFailures(run.stdout));
+		assert.equal(run.status, 0, kitFailures(run.stdout));
 	} finally {
 		svc.stop();
 	}
@@ -71,13 +70,13 @@ test("this agent passes the ACP kit hosting its Provider, tools, environment and
 	];
 	const run = spawnSync(process.execPath, [kit, "--plugin-checks", "--probe-checks", "--job-checks", "--", process.execPath, cli, "--acp"], { encoding: "utf8", timeout: 180_000, env: { ...process.env, MODULAR_AGENT_PLUGINS: JSON.stringify(plugins) } });
 	t.diagnostic(run.stdout.trim().split("\n").at(-1) ?? "No kit summary");
-	assert.equal(run.status, 0, acpFailures(run.stdout));
+	assert.equal(run.status, 0, kitFailures(run.stdout));
 });
 
 test("this agent survives kill -9 mid-turn with a durable Runtime served from another process", t => {
 	const plugins = [{ command: [process.execPath, servePlugin], env: { MODULAR_AGENT_PLUGIN_PARTS: "durable-runtime" } }];
 	const run = spawnSync(process.execPath, [kit, "--crash-checks", "--job-checks", "--", process.execPath, cli, "--acp"], { encoding: "utf8", timeout: 240_000, env: { ...process.env, MODULAR_AGENT_PLUGINS: JSON.stringify(plugins) } });
 	t.diagnostic(run.stdout.trim().split("\n").at(-1) ?? "No kit summary");
-	assert.equal(run.status, 0, acpFailures(run.stdout));
+	assert.equal(run.status, 0, kitFailures(run.stdout));
 	assert.match(run.stdout, /PASS {2}crash: with continuesAfterRestart, the turn carried on and completed/);
 });

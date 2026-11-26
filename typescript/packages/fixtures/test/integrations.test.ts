@@ -274,7 +274,12 @@ for (const placement of ["file", "memory", "relay", "custom"] as const) {
       assert.match(await kept.text(), /"extra":9007199254740993/);
     }
     const kit = fileURLToPath(new URL("../../../../../conformance/history/run.mjs", import.meta.url));
-    const { stdout } = await promisify(execFile)(process.execPath, [kit, (relay ?? direct).url, tokenFile], { timeout: 52_000 });
+    const { stdout } = await promisify(execFile)(process.execPath, [kit, (relay ?? direct).url, tokenFile], { timeout: 52_000 }).catch((error: unknown) => {
+      if (error instanceof Error && "stdout" in error && typeof error.stdout === "string") {
+        assert.fail(`${error.message}\n${error.stdout}`);
+      }
+      throw error;
+    });
     t.diagnostic(stdout.trim().split("\n").at(-1)!);
     assert.match(stdout, /\d+\/\d+ checks passed/);
   });
