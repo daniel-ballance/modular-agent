@@ -246,7 +246,7 @@ Claude uses Claude Code's plan sign-in and rejects API-key use; `unavailableReas
 
 ### Registering or serving a custom history store
 
-Register an in-process `HistoryStore` with `r.historyStore(store)`. It declares `persistent` and `ttlMs`, receives `create(id, metadata)` with no `id` in the metadata, and receives the binding's `after` and `limit` on `read` and `list`. The adapter follows the page cursors and manages lease renewal. Implement `writerSignal(id, lease)` when the store can discover loss independently of renewal; abort it as soon as that lease is lost. The earlier writer-oriented `WriterHistoryStore` interface is still accepted.
+Register an in-process `HistoryStore` with `r.historyStore(store)` on a plugin that lists `history` in `replaces`. It declares `persistent` and `ttlMs`, receives `create(id, metadata)` with no `id` in the metadata, and receives the binding's `after` and `limit` on `read` and `list`. The adapter follows the page cursors and manages lease renewal. Implement `writerSignal(id, lease)` when the store can discover loss independently of renewal; abort it as soon as that lease is lost. The earlier writer-oriented `WriterHistoryStore` interface is still accepted.
 
 `serveHistory(store, { address, tokenFile, leaseTtl })` serves a history store over HTTP. For the built-in file and test-only memory services, the optional `leaseTtl` sets the writer lease that the service declares as `ttlMs`. It defaults to 15,000 milliseconds and must be a whole number of milliseconds, at least 1. A custom store declares its own `ttlMs`; a relay preserves the upstream declaration.
 
