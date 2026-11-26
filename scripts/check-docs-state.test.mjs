@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -19,7 +20,7 @@ const proposed = "docs/adr/0034-approvals-that-wait.md";
 function checkout(t) {
   const cwd = mkdtempSync(join(tmpdir(), "docs-state-"));
   t.after(() => rmSync(cwd, { force: true, recursive: true }));
-  const git = (...args) => execFileSync("git", args, { cwd });
+  const git = (...args) => execFileSync("git", args, { cwd, env: gitEnv() });
   const write = (file, content) => {
     mkdirSync(dirname(join(cwd, file)), { recursive: true });
     writeFileSync(join(cwd, file), content);
@@ -42,7 +43,7 @@ function checkout(t) {
       this.track(adrIndex, ["| ADR | Decision | Status | Rule |", "| --- | --- | --- | --- |", ...rows].join("\n"));
     },
     check(failures = [], { timeout = 0, nodeArgs = [] } = {}) {
-      const result = spawnSync(process.execPath, [...nodeArgs, checker, "--root", cwd], { cwd, encoding: "utf8", timeout });
+      const result = spawnSync(process.execPath, [...nodeArgs, checker, "--root", cwd], { cwd, env: gitEnv(), encoding: "utf8", timeout });
       const diagnostics = result.stderr.trim().split("\n").filter(Boolean);
       assert.equal(result.status, Number(failures.length > 0), result.stderr);
       assert.match(result.stdout, new RegExp(`Failures: ${failures.length}\\.$`, "m"));
@@ -58,7 +59,7 @@ test("missing parser dependencies give a one-line install instruction", (t) => {
   const cwd = mkdtempSync(join(tmpdir(), "docs-state-no-deps-"));
   t.after(() => rmSync(cwd, { force: true, recursive: true }));
   for (const module of ["check-docs-state.mjs", "markdown.mjs"]) copyFileSync(new URL(module, import.meta.url), join(cwd, module));
-  const result = spawnSync(process.execPath, [join(cwd, "check-docs-state.mjs")], { cwd, encoding: "utf8" });
+  const result = spawnSync(process.execPath, [join(cwd, "check-docs-state.mjs")], { cwd, env: gitEnv(), encoding: "utf8" });
   assert.equal(result.status, 1);
   assert.equal(result.stdout, "");
   assert.equal(result.stderr, "scripts/check-docs-state.mjs:1: Missing parser dependencies. Run npm ci --prefix scripts.\n");
@@ -380,4 +381,63 @@ test("a malformed newest changelog release cannot fall back to an older release"
   const repo = checkout(t);
   repo.write("CHANGELOG.md", "# Changelog\n\n## 0.4\n\n## 0.3.2\n");
   repo.check(["CHANGELOG.md:3: No valid top release heading. Use a heading with the current major.minor.patch release"]);
+});
+
+function gitEnv() {
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+}
+
+function repositoryState(repo) {
+  const git = (args) => execFileSync("git", ["-C", repo, ...args], { env: gitEnv(), encoding: "utf8" });
+  const gitDir = git(["rev-parse", "--absolute-git-dir"]).trim();
+  return {
+    head: git(["rev-parse", "HEAD"]),
+    refs: git(["for-each-ref", "--format=%(refname) %(objectname)"]),
+    config: git(["config", "--local", "--list"]),
+    bare: git(["config", "--get", "core.bare"]),
+    index: createHash("sha256").update(readFileSync(join(gitDir, "index"))).digest("hex"),
+  };
+}
+
+function makeWitness(t, prefix) {
+  const repo = mkdtempSync(join(tmpdir(), prefix));
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+  const git = (args) => execFileSync("git", args, { env: gitEnv() });
+  git(["init", "-q", "-b", "topic", repo]);
+  mkdirSync(join(repo, "docs/adr"), { recursive: true });
+  writeFileSync(join(repo, "docs/adr/keep.md"), "keep\n");
+  const identity = ["-C", repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"];
+  git([...identity, "add", "docs/adr/keep.md"]);
+  git([...identity, "commit", "-q", "-m", "witness"]);
+  return repo;
+}
+
+function withGitDir(repo, run) {
+  const saved = { GIT_DIR: process.env.GIT_DIR, GIT_WORK_TREE: process.env.GIT_WORK_TREE };
+  process.env.GIT_DIR = join(repo, ".git");
+  process.env.GIT_WORK_TREE = repo;
+  try {
+    return run();
+  } finally {
+    for (const key of ["GIT_DIR", "GIT_WORK_TREE"]) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
+}
+
+test("a fixture leaves the repository named by GIT_DIR and GIT_WORK_TREE unchanged", (t) => {
+  const witness = makeWitness(t, "docs-state-git-dir-");
+  const before = repositoryState(witness);
+  let thrown;
+  try {
+    withGitDir(witness, () => {
+      const repo = checkout(t);
+      repo.check();
+    });
+  } catch (error) {
+    thrown = error;
+  }
+  assert.deepEqual(repositoryState(witness), before);
+  if (thrown) throw thrown;
 });

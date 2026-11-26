@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -21,7 +22,7 @@ function checkout(t, branch = "main") {
   const git = (...args) => execFileSync("git", [
     "-c", "user.name=Test", "-c", "user.email=test@example.com",
     "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", ...args,
-  ], { cwd });
+  ], { cwd, env: gitEnv() });
   const write = (file, content) => {
     mkdirSync(dirname(join(cwd, file)), { recursive: true });
     writeFileSync(join(cwd, file), Array.isArray(content) ? content.join("\n") : content);
@@ -44,7 +45,7 @@ function checkout(t, branch = "main") {
       git("commit", "-q", "--allow-empty", "-m", subject);
     },
     run(...args) {
-      const result = spawnSync(process.execPath, [script, ...args], { cwd, encoding: "utf8" });
+      const result = spawnSync(process.execPath, [script, ...args], { cwd, env: gitEnv(), encoding: "utf8" });
       const found = result.stdout.split("\n").filter((line) => /^[^ ].*?:\d+: /.test(line));
       return { ...result, found, at: found.map((line) => line.match(/^(.*?:\d+): /)[1]) };
     },
@@ -193,7 +194,7 @@ test("missing parser dependencies give a one-line install instruction", (t) => {
   const cwd = mkdtempSync(join(tmpdir(), "docs-review-no-deps-"));
   t.after(() => rmSync(cwd, { force: true, recursive: true }));
   for (const module of modules) copyFileSync(new URL(module, import.meta.url), join(cwd, module));
-  const result = spawnSync(process.execPath, [join(cwd, "docs-review.mjs"), "--all"], { cwd, encoding: "utf8" });
+  const result = spawnSync(process.execPath, [join(cwd, "docs-review.mjs"), "--all"], { cwd, env: gitEnv(), encoding: "utf8" });
   assert.equal(result.status, 2);
   assert.equal(result.stdout, "");
   assert.equal(result.stderr, "scripts/docs-review.mjs: Missing parser dependencies. Run npm ci --prefix scripts.\n");
@@ -417,7 +418,7 @@ test("names that are not UTF-8 stop the review only when it must read them", (t)
   writeFileSync(join(top, "review-renamed.md"), `${filler}\nResume is planned.\n`);
   repo.write("review-control.md", "Support is planned.\n");
   repo.git("add", "-A");
-  execFileSync("git", ["update-index", "--index-info"], { cwd: top, input: Buffer.concat([Buffer.from(`160000 commit ${submodule}\t`), bad("vendored"), Buffer.from("\n")]) });
+  execFileSync("git", ["update-index", "--index-info"], { cwd: top, env: gitEnv(), input: Buffer.concat([Buffer.from(`160000 commit ${submodule}\t`), bad("vendored"), Buffer.from("\n")]) });
   repo.git("commit", "-q", "-m", "Docs");
   assert.ok(repo.git("ls-tree", "-z", "HEAD").includes(Buffer.concat([Buffer.from(`160000 commit ${submodule}\t`), bad("vendored"), Buffer.from([0])])));
   const result = repo.run();
@@ -482,4 +483,66 @@ test("a usage or git error exits 2; candidates never fail the run", (t) => {
   assert.match(missing.stderr, /Cannot find origin\/main or main/);
   assert.equal(repo.run("--base", "nowhere").status, 2);
   assert.equal(repo.run("--all").status, 0);
+});
+
+function gitEnv() {
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+}
+
+function repositoryState(repo) {
+  const git = (args) => execFileSync("git", ["-C", repo, ...args], { env: gitEnv(), encoding: "utf8" });
+  const gitDir = git(["rev-parse", "--absolute-git-dir"]).trim();
+  return {
+    head: git(["rev-parse", "HEAD"]),
+    refs: git(["for-each-ref", "--format=%(refname) %(objectname)"]),
+    config: git(["config", "--local", "--list"]),
+    bare: git(["config", "--get", "core.bare"]),
+    index: createHash("sha256").update(readFileSync(join(gitDir, "index"))).digest("hex"),
+  };
+}
+
+function makeWitness(t, prefix) {
+  const repo = mkdtempSync(join(tmpdir(), prefix));
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+  const git = (args) => execFileSync("git", args, { env: gitEnv() });
+  git(["init", "-q", "-b", "topic", repo]);
+  mkdirSync(join(repo, "docs/adr"), { recursive: true });
+  writeFileSync(join(repo, "docs/adr/keep.md"), "keep\n");
+  const identity = ["-C", repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"];
+  git([...identity, "add", "docs/adr/keep.md"]);
+  git([...identity, "commit", "-q", "-m", "witness"]);
+  return repo;
+}
+
+function withGitDir(repo, run) {
+  const saved = { GIT_DIR: process.env.GIT_DIR, GIT_WORK_TREE: process.env.GIT_WORK_TREE };
+  process.env.GIT_DIR = join(repo, ".git");
+  process.env.GIT_WORK_TREE = repo;
+  try {
+    return run();
+  } finally {
+    for (const key of ["GIT_DIR", "GIT_WORK_TREE"]) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
+}
+
+test("a fixture leaves the repository named by GIT_DIR and GIT_WORK_TREE unchanged", (t) => {
+  const witness = makeWitness(t, "docs-review-git-dir-");
+  const before = repositoryState(witness);
+  let result;
+  let thrown;
+  try {
+    withGitDir(witness, () => {
+      const repo = checkout(t);
+      repo.commit("Docs");
+      result = repo.run("--all");
+    });
+  } catch (error) {
+    thrown = error;
+  }
+  assert.deepEqual(repositoryState(witness), before);
+  if (thrown) throw thrown;
+  assert.equal(result.status, 0, result.stderr);
 });

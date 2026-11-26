@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -246,8 +247,8 @@ function fakeStress(t, box) {
   mkdirSync(join(dir, "pids"));
   for (const file of ["stress.sh", "check-slot.sh"]) copyFileSync(join(repo, "scripts", file), join(dir, "scripts", file));
   writeFileSync(join(dir, "scripts/check.sh"), `#!/usr/bin/env bash\nsleep 60 & echo $! >"${dir}/pids/.$$" && mv "${dir}/pids/.$$" "${dir}/pids/$$"\nwait\n`, { mode: 0o755 });
-  spawnSync("git", ["init", "-q"], { cwd: dir });
-  spawnSync("git", ["add", "."], { cwd: dir });
+  spawnSync("git", ["init", "-q"], { cwd: dir, env: gitEnv() });
+  spawnSync("git", ["add", "."], { cwd: dir, env: gitEnv() });
   const pids = () => readdirSync(join(dir, "pids"))
     .filter((name) => !name.startsWith("."))
     .flatMap((name) => [Number(name), Number(readFileSync(join(dir, "pids", name), "utf8"))])
@@ -345,4 +346,64 @@ test("stress.sh takes one slot per run and refuses more runs than slots", (t) =>
   assert.equal(result.status, 2);
   assert.match(result.stderr, /3 slots wanted, but MA_CHECK_SLOTS is 2/);
   assert.doesNotMatch(result.stdout, /Stress logs/);
+});
+
+function gitEnv() {
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+}
+
+function repositoryState(dir) {
+  const git = (args) => execFileSync("git", ["-C", dir, ...args], { env: gitEnv(), encoding: "utf8" });
+  const gitDir = git(["rev-parse", "--absolute-git-dir"]).trim();
+  return {
+    head: git(["rev-parse", "HEAD"]),
+    refs: git(["for-each-ref", "--format=%(refname) %(objectname)"]),
+    config: git(["config", "--local", "--list"]),
+    bare: git(["config", "--get", "core.bare"]),
+    index: createHash("sha256").update(readFileSync(join(gitDir, "index"))).digest("hex"),
+  };
+}
+
+function makeWitness(t, prefix) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const git = (args) => execFileSync("git", args, { env: gitEnv() });
+  git(["init", "-q", "-b", "topic", dir]);
+  mkdirSync(join(dir, "docs/adr"), { recursive: true });
+  writeFileSync(join(dir, "docs/adr/keep.md"), "keep\n");
+  const identity = ["-C", dir, "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"];
+  git([...identity, "add", "docs/adr/keep.md"]);
+  git([...identity, "commit", "-q", "-m", "witness"]);
+  return dir;
+}
+
+function withGitDir(dir, run) {
+  const saved = { GIT_DIR: process.env.GIT_DIR, GIT_WORK_TREE: process.env.GIT_WORK_TREE };
+  process.env.GIT_DIR = join(dir, ".git");
+  process.env.GIT_WORK_TREE = dir;
+  try {
+    return run();
+  } finally {
+    for (const key of ["GIT_DIR", "GIT_WORK_TREE"]) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
+}
+
+test("a fixture leaves the repository named by GIT_DIR and GIT_WORK_TREE unchanged", (t) => {
+  const box = machine(t, 1);
+  const witness = makeWitness(t, "check-slot-git-dir-");
+  const before = repositoryState(witness);
+  let fake;
+  let thrown;
+  try {
+    fake = withGitDir(witness, () => fakeStress(t, box));
+  } catch (error) {
+    thrown = error;
+  }
+  assert.deepEqual(repositoryState(witness), before);
+  if (thrown) throw thrown;
+  const inside = execFileSync("git", ["-C", fake.dir, "rev-parse", "--is-inside-work-tree"], { env: gitEnv(), encoding: "utf8" });
+  assert.equal(inside.trim(), "true");
 });

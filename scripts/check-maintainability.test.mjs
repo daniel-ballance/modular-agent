@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,7 +15,7 @@ function checkout(t, branch = "main") {
   const git = (...args) => execFileSync("git", [
     "-c", "user.name=Test", "-c", "user.email=test@example.com",
     "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", ...args,
-  ], { cwd });
+  ], { cwd, env: gitEnv() });
   const write = (file, content) => {
     mkdirSync(dirname(join(cwd, file)), { recursive: true });
     writeFileSync(join(cwd, file), content);
@@ -29,7 +30,7 @@ function checkout(t, branch = "main") {
     read: (file) => readFileSync(join(cwd, file), "utf8"),
     track: (...files) => git("add", "-f", "--", ...files),
     commit: (subject) => git("commit", "-q", "--allow-empty", "-m", subject),
-    check: (...args) => spawnSync(process.execPath, [checker, ...args], { cwd, encoding: "utf8" }),
+    check: (...args) => spawnSync(process.execPath, [checker, ...args], { cwd, env: gitEnv(), encoding: "utf8" }),
   };
 }
 
@@ -217,5 +218,67 @@ test("no main ref skips the subject check", (t) => {
   const repo = checkout(t, "topic");
   repo.commit("WIP: finish the split");
   const result = repo.check();
+  assert.equal(result.status, 0, result.stderr);
+});
+
+function gitEnv() {
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+}
+
+function repositoryState(repo) {
+  const git = (args) => execFileSync("git", ["-C", repo, ...args], { env: gitEnv(), encoding: "utf8" });
+  const gitDir = git(["rev-parse", "--absolute-git-dir"]).trim();
+  return {
+    head: git(["rev-parse", "HEAD"]),
+    refs: git(["for-each-ref", "--format=%(refname) %(objectname)"]),
+    config: git(["config", "--local", "--list"]),
+    bare: git(["config", "--get", "core.bare"]),
+    index: createHash("sha256").update(readFileSync(join(gitDir, "index"))).digest("hex"),
+  };
+}
+
+function makeWitness(t, prefix) {
+  const repo = mkdtempSync(join(tmpdir(), prefix));
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+  const git = (args) => execFileSync("git", args, { env: gitEnv() });
+  git(["init", "-q", "-b", "topic", repo]);
+  mkdirSync(join(repo, "docs/adr"), { recursive: true });
+  writeFileSync(join(repo, "docs/adr/keep.md"), "keep\n");
+  const identity = ["-C", repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"];
+  git([...identity, "add", "docs/adr/keep.md"]);
+  git([...identity, "commit", "-q", "-m", "witness"]);
+  return repo;
+}
+
+function withGitDir(repo, run) {
+  const saved = { GIT_DIR: process.env.GIT_DIR, GIT_WORK_TREE: process.env.GIT_WORK_TREE };
+  process.env.GIT_DIR = join(repo, ".git");
+  process.env.GIT_WORK_TREE = repo;
+  try {
+    return run();
+  } finally {
+    for (const key of ["GIT_DIR", "GIT_WORK_TREE"]) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
+}
+
+test("a fixture leaves the repository named by GIT_DIR and GIT_WORK_TREE unchanged", (t) => {
+  const witness = makeWitness(t, "maintainability-git-dir-");
+  const before = repositoryState(witness);
+  let result;
+  let thrown;
+  try {
+    withGitDir(witness, () => {
+      const repo = checkout(t);
+      repo.commit("Start");
+      result = repo.check();
+    });
+  } catch (error) {
+    thrown = error;
+  }
+  assert.deepEqual(repositoryState(witness), before);
+  if (thrown) throw thrown;
   assert.equal(result.status, 0, result.stderr);
 });
