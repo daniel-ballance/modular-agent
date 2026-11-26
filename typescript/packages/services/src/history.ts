@@ -18,6 +18,17 @@ const pathId = (value: string) => {
 const positive = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n > 0;
 const timeout = (ms: number) => AbortSignal.timeout(Math.max(1, Math.min(2 ** 31 - 1, Math.ceil(ms))));
 const bodyCap = 64 * 1024 * 1024;
+// A request that failed on the way, such as one past its deadline, has no binding code.
+// Give it one, so a caller sees lost writer access or an unavailable service rather than
+// an unclassified error (which ACP reports as invalid_params). "lost" is for a failure
+// that ended writer access: it replaces any other code and keeps the failure as the cause.
+const coded = (error: unknown, code: "lost" | "unavailable") => {
+	const own = (error as { code?: unknown } | undefined)?.code;
+	if (code === "lost" ? own === "lost" : error instanceof ServiceError || typeof own === "string") return error;
+	const message = error instanceof Error ? error.message : String(error);
+	return Object.assign(code === "lost" ? new ServiceError(409, `Session is not open for writing: ${message}`, "lost")
+		: new ServiceError(503, `History service request failed: ${message}`, "unavailable"), { cause: error });
+};
 
 // The first field in Linux /proc/uptime includes suspension and is truncated
 // to centiseconds. Reserve a tick against local deadlines.
@@ -184,6 +195,14 @@ class HistoryWriter implements HistoryStore {
 		try { if (this.clock.now() >= lease.cutoff) this.lose(lease); } catch { this.lose(lease); }
 		if (lease.abort.signal.aborted) throw lease.abort.signal.reason;
 	}
+	/**
+	 * The deadline of a request made under a lease. It ends when the lease is lost, not at the
+	 * cutoff current when the request was sent: a renewal that succeeds meanwhile moves the
+	 * cutoff, and the service fences the write by lease. A renewal that misses the cutoff loses
+	 * the lease, and checkWriter enforces the cutoff on the reply and before the next effect.
+	 * It is capped at 10 seconds or half a TTL, whichever is longer.
+	 */
+	private leased(lease: Lease): AbortSignal { return AbortSignal.any([lease.abort.signal, timeout(Math.max(10_000, lease.ttl / 2))]); }
 	private lose(lease: Lease) {
 		clearTimeout(lease.timer);
 		lease.watch?.[Symbol.dispose]();
@@ -214,7 +233,7 @@ class HistoryWriter implements HistoryStore {
 				}
 				if (lastHeld && (this.clock.now() >= budget || (signal.aborted && remaining <= 10_000))) throw lastHeld;
 				if (this.port.remote && !(error instanceof ServiceError) && !lostReply) { lostReply = true; continue; }
-				throw error;
+				throw coded(error, "unavailable");
 			}
 			if (lastHeld && this.clock.now() >= budget) throw lastHeld;
 			if (!validLease(grant.lease) || !positive(grant.ttlMs)) throw new ServiceError(409, "Invalid history lease grant", "lost");
@@ -325,7 +344,7 @@ class HistoryWriter implements HistoryStore {
 			}
 			this.checkWriter(id);
 			try {
-				await this.port.append(id, lease.value, batch, AbortSignal.any([lease.abort.signal, timeout(lease.cutoff - this.clock.now())]), dest.revision);
+				await this.port.append(id, lease.value, batch, this.leased(lease), dest.revision);
 				this.checkWriter(id);
 				return;
 			} catch (error) {
@@ -342,9 +361,9 @@ class HistoryWriter implements HistoryStore {
 					this.checkWriter(id);
 					if (batch.every(e => isDeepStrictEqual(JSON.parse(JSON.stringify(e)), kept.get(e.id)))) return;
 					if (batch.every(e => !kept.has(e.id))) continue;
-				} catch (failure) { this.lose(lease); throw failure; }
+				} catch (failure) { this.lose(lease); throw coded(failure, "lost"); }
 				this.lose(lease);
-				throw error;
+				throw coded(error, "lost");
 			}
 		}
 	}
@@ -352,7 +371,7 @@ class HistoryWriter implements HistoryStore {
 		for (let attempt = 0; ; attempt++) {
 			if (lease) this.checkWriter(id);
 			try {
-				await work(lease ? AbortSignal.any([lease.abort.signal, timeout(lease.cutoff - this.clock.now())]) : timeout(10_000));
+				await work(lease ? this.leased(lease) : timeout(10_000));
 				if (lease) this.checkWriter(id);
 				return;
 			} catch (error) {
@@ -360,7 +379,7 @@ class HistoryWriter implements HistoryStore {
 				// Retry an identical mutation only if this generation is still proven current.
 				if (this.port.remote && !(error instanceof ServiceError) && lease && attempt < 4 && !lease.abort.signal.aborted && this.clock.now() < lease.cutoff) continue;
 				if (lease) this.lose(lease);
-				throw error;
+				throw coded(error, lease ? "lost" : "unavailable");
 			}
 		}
 	}
@@ -375,7 +394,7 @@ class HistoryWriter implements HistoryStore {
 		const entries: HistoryEntry[] = [];
 		let meta!: StoredSession, after: string | undefined;
 		do {
-			const r = await this.port.read(id, { after, limit: 500 }, timeout(10_000));
+			const r = await this.port.read(id, { after, limit: 500 }, timeout(10_000)).catch(error => { throw coded(error, "unavailable"); });
 			meta ??= r.session;
 			entries.push(...r.entries);
 			after = this.next(r.entries, r.next, after);
@@ -387,7 +406,7 @@ class HistoryWriter implements HistoryStore {
 		const sessions: StoredSession[] = [];
 		let after: string | undefined;
 		do {
-			const r = await this.port.list({ ...filter, after, limit: 500 }, timeout(10_000));
+			const r = await this.port.list({ ...filter, after, limit: 500 }, timeout(10_000)).catch(error => { throw coded(error, "unavailable"); });
 			sessions.push(...r.sessions);
 			after = this.next(r.sessions, r.next, after);
 		} while (after !== undefined);
