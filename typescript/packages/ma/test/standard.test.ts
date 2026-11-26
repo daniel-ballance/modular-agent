@@ -11,7 +11,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import assert from "node:assert/strict";
-import { createAgent, defaultAcpActor, fileHistory, serveHistory, tool, type HistoryEntry } from "@modular-agent/core";
+import { createAgent, defaultAcpActor, memoryHistory, serveHistory, tool, type HistoryEntry } from "@modular-agent/core";
 import { scriptedProvider, testResources } from "@modular-agent/core/testing";
 import { standardFileTools } from "@modular-agent/tools-files/sdk";
 import { codemode } from "../src/codemode.js";
@@ -695,8 +695,10 @@ for (const remote of [false, true]) test(`ma ACP session/new is provisional with
   stage("write history token");
   await writeFile(tokenFile, token, { mode: 0o600 });
   if (remote) stage("start history listener");
+  // The test is about what ma publishes, not about the service's storage. A file store commits each of the service's
+  // writes with SQLite fsyncs (46 in this test), and under disk load they took longer than the test (#121).
   const service = remote ? await start(
-    () => serveHistory(fileHistory(join(p.dir, "history")), { address: "127.0.0.1:0", tokenFile }),
+    () => serveHistory(memoryHistory(), { address: "127.0.0.1:0", tokenFile, testOnly: true }),
     service => service.close(),
   ) : undefined;
   t.signal.throwIfAborted();
