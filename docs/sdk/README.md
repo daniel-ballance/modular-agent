@@ -1,6 +1,6 @@
 # The SDK specification
 
-**Status: 0.3, accepted.** [ADR 0027](../adr/0027-sdk-0-1-and-edition-4.md) accepted the first revision.
+**Status: 0.4, accepted.** [ADR 0027](../adr/0027-sdk-0-1-and-edition-4.md) accepted the first revision. At 0.4.0 the Rust and TypeScript SDKs each pass every shared scenario in every placement, and both `ma` builds pass the 37 reference checks and the binding kits ([Status](../status.md#040)).
 
 Both SDKs implement the specification: [Rust](../../rust/crates/sdk/README.md) and [TypeScript](../../typescript/packages/core/README.md). Each SDK runs the [shared scenarios](../../conformance/sdk/README.md) in process and served by every SDK. See [Status](../status.md) for release results. Each SDK runs the [guide examples](guides/README.md) as tests.
 
@@ -60,6 +60,6 @@ The third check is the swap matrix of the experiment, made part of every SDK's t
 
 ## Versioning
 
-Both SDKs share one version number, the revision of this specification. SDK 0.3 in any language implements SDK specification 0.3. Patch releases are each SDK's own. Implement the current normative documents and SDK scenarios from the same revision. Report the commit or tag tested and the binding versions implemented.
+Both SDKs share one version number, the revision of this specification. SDK 0.4 in any language implements SDK specification 0.4. Patch releases are each SDK's own. Implement the current normative documents and SDK scenarios from the same revision. Report the commit or tag tested and the binding versions implemented.
 
 Until 1.0, a minor version can break the API. From 1.0, a breaking change needs a major version in both.

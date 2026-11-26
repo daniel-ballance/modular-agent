@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-api"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "agent-harness"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -387,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "config-files"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -461,7 +461,7 @@ dependencies = [
 
 [[package]]
 name = "credentials-file"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -655,7 +655,7 @@ dependencies = [
 
 [[package]]
 name = "environment-local"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -724,7 +724,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "feature-approval"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "serde_json",
@@ -732,7 +732,7 @@ dependencies = [
 
 [[package]]
 name = "feature-commands"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -741,7 +741,7 @@ dependencies = [
 
 [[package]]
 name = "feature-context"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -751,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "feature-jobs"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "tokio",
@@ -759,7 +759,7 @@ dependencies = [
 
 [[package]]
 name = "feature-model"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "feature-prompt"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -778,7 +778,7 @@ dependencies = [
 
 [[package]]
 name = "feature-questions"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "serde_json",
@@ -1083,7 +1083,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "history-fs"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -1095,7 +1095,7 @@ dependencies = [
 
 [[package]]
 name = "history-http"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -1404,7 +1404,7 @@ dependencies = [
 
 [[package]]
 name = "interface-acp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "agent-client-protocol",
@@ -1728,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "modular-agent"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "agent-harness",
@@ -1971,7 +1971,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "plugin-stdio"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "agent-harness",
@@ -2028,7 +2028,7 @@ dependencies = [
 
 [[package]]
 name = "project-notes-history"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "modular-agent",
  "tokio",
@@ -2036,7 +2036,7 @@ dependencies = [
 
 [[package]]
 name = "project-notes-tools"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "modular-agent",
  "schemars 1.2.3",
@@ -2047,7 +2047,7 @@ dependencies = [
 
 [[package]]
 name = "provider-fake"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -2058,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "provider-openai"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -2308,7 +2308,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-durable"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "runtime-engine",
@@ -2316,7 +2316,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-engine"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "async-trait",
@@ -2326,7 +2326,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-transient"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -2954,7 +2954,7 @@ dependencies = [
 
 [[package]]
 name = "tools-builtin"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "agent-api",
  "anyhow",
@@ -3040,7 +3040,7 @@ dependencies = [
 
 [[package]]
 name = "transport-websocket"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "futures-util",

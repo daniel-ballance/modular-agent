@@ -41,4 +41,4 @@ body:
     attributes:
       label: Version
       description: The output of `ma --version`.
-      placeholder: ma 0.3.0 (rust)
+      placeholder: ma 0.4.0 (rust)

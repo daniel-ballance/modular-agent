@@ -2,22 +2,38 @@
 
 The two SDKs and `ma` share one project version. The [SDK specification](docs/sdk/README.md) has its own revision. Nothing is published to a registry; a version names a commit on `main`.
 
-## Unreleased
+## 0.4.0
 
-- The Rust and TypeScript SDKs report `unavailable` when an HTTP history freshness check fails during a session handoff.
-- Rust and TypeScript `ma -p` decline tool questions so the turn can finish without input.
-- Rust `ma` no longer offers the model `ask_user`, so both builds offer the same tools. The Rust SDK no longer gives the model `ask_user` either, as TypeScript already did not. An app that wants the model to ask gives it a tool that calls `ask`.
-- Fixed a TypeScript input race that could leave a committed follow-up stuck in the queue when the preceding turn ended during admission.
-- The Rust and TypeScript `ma --help` option lines now match. `--trust-project` help names only `.mcp.json`, the project file that can start programs.
-- Both terminals list sorted slash names with `/commands`. TypeScript adds `/questions` to list open question IDs and `/quit` to cancel and exit. Rust no longer offers its undocumented SDK commands `/erase`, `/fork`, `/move`, `/sessions` and `/settings` in `ma`'s terminal.
-- Removed Rust's undocumented `/tool` terminal command, which blocked input when a tool asked a question ([#134](https://github.com/daniel-ballance/modular-agent/issues/134)).
-- An open terminal approval replies `Answer y or n.` to blank lines and other slash commands, including `/quit`. Use `/cancel` to stop the turn.
-- Removed TypeScript's `/approvals` command from the terminal and ACP's advertised commands. `--approval`, the `approval` setting and ACP and AG-UI policy changes still work.
-- Rust `ma -c --history` no longer records an `approval` setting while printing a session that started without one. Like TypeScript, it prints history without applying `--model` or `--thinking`.
-- Removed the Go and Python SDKs and `ma` builds from `main`. Rust and TypeScript stay in lockstep ([ADR 0037](docs/adr/0037-two-languages.md)). The [`four-languages`](https://github.com/daniel-ballance/modular-agent/tree/four-languages) tag preserves both removed builds and their results.
+The fourth release, and the first in two languages: Go and Python are removed from `main`, so Rust and TypeScript are the two SDKs and `ma` builds. The two `ma` builds now give the same help, terminal commands, session listing and tools. Fixes cover history leases, erasure, handoffs and input under load, and the checks run in about 19 minutes. Results are in [docs/status.md](docs/status.md#040).
 
-- The [project notes](demos/project-notes/README.md) and [ops desk](demos/ops-desk/README.md) demos now use only the Rust and TypeScript SDKs. Their scripted runs use the same process and service placements and still need no sign-in.
-- Go and Python `ma` sessions that previously recorded `off` without loading the approval feature keep that policy. Load the feature and change the policy with the ACP or AG-UI `approval` setting, or with `/approval` in Go's terminal.
+- **Two languages, Rust and TypeScript ([ADR 0037](docs/adr/0037-two-languages.md)).** Removed the Go and Python SDKs and `ma` builds from `main`. Rust and TypeScript stay in lockstep. The [`four-languages`](https://github.com/daniel-ballance/modular-agent/tree/four-languages) tag keeps both removed builds and their results, including fixes made to them in this cycle. The [project notes](demos/project-notes/README.md) and [ops desk](demos/ops-desk/README.md) demos now use only the Rust and TypeScript SDKs. Their scripted runs keep the same process and service placements and still need no sign-in.
+- **The same tools in both `ma` builds.** Rust `ma` no longer offers the model `ask_user`, as TypeScript did not. The Rust SDK no longer gives the model `ask_user` either. An app that wants the model to ask gives it a tool that calls `ask`.
+- **The same terminal in both `ma` builds.** A reference check now compares each build's help and terminal commands with the [standard configuration](docs/reference/standard-configuration.md).
+  - The `ma --help` option lines match. `--trust-project` help names only `.mcp.json`, the project file that can start programs.
+  - `/commands` lists sorted slash names in both. TypeScript adds `/questions`, which lists open question IDs, and `/quit`, which cancels and exits.
+  - Removed from Rust's terminal: the undocumented SDK commands `/erase`, `/fork`, `/move`, `/sessions` and `/settings`, and `/tool`, which blocked input when a tool asked a question ([#134](https://github.com/daniel-ballance/modular-agent/issues/134)). Both terminals now refuse `/tool`.
+  - Removed TypeScript's `/approvals` command from the terminal and from ACP's advertised commands. `--approval`, the `approval` setting and ACP and AG-UI policy changes still work.
+  - An open terminal approval replies `Answer y or n.` to blank lines and to other slash commands, including `/quit`. Use `/cancel` to stop the turn.
+  - A secret answer is read after `/answer REQUEST_ID` with echo off. An inline secret is refused and the question stays open. Without a terminal on standard input, a secret question is declined. A reference check confirms the secret is not echoed.
+  - Rust's terminal registers a question before it shows it, so an `/answer` it reads after the line appears finds that question.
+- **`ma -p` declines tool questions** in both builds, so a print-mode turn can finish without input.
+- **`ma sessions` prints one text listing in both builds:** one line per session, its ID, two spaces and its project folder, most recently active first and then by ID. Rust printed a JSON array. A session whose last entry is erased has no last activity, so it lists with the sessions that have no entries.
+- **Rust `ma -c --history`** no longer records an `approval` setting while printing a session that started without one. Like TypeScript, it prints history without applying `--model` or `--thinking`.
+- **A reopened session keeps its approval policy.** Base compositions that load approval by default set it off when they create a session, not when they reopen one. A malformed recorded policy is refused, not converted.
+- **Replacing a default part is explicit.** The SDK supplies a history store, credential store and Configuration before explicit plugins. A plugin that registers its own lists `history`, `credentials` or `configuration` in `replaces`; otherwise `createAgent` raises `invalid_composition` ([API](docs/sdk/api.md)). Rust takes a Configuration through `AgentBuilder::configuration`.
+- **History leases under load.**
+  - A renewal of a current lease no longer waits for another session's storage work, in either history service. A write that names a lease checks it immediately before commit ([history binding](docs/bindings/history-http.md)).
+  - In TypeScript, a request made under a lease ends when the lease is lost, not at the cutoff current when it was sent. A commit slower than that cutoff no longer loses the writer and reports `invalid_params`.
+  - Each history handoff and interruption stage has its own deadline, so a later stage no longer times out on time an earlier stage used.
+  - Both SDKs report `unavailable` when an HTTP history freshness check fails during a session handoff.
+- **Erasure.** A pending copy is retried when a writer opens, when authorized session history is read and when input is admitted ([contracts](docs/contracts.md#cross-session-coordination)). TypeScript's pending-erasure reader waits up to 5 s for a held write lock instead of failing with `unavailable`.
+- **Fixed:** in TypeScript, a committed follow-up could stay in the queue when the preceding turn ended during its admission.
+- **Fixed:** in TypeScript, a question's events could reach a prompt stream for another turn.
+- **Fixed:** TypeScript's stdio ACP agent refused an operator principal given with a separate rights list. Both lists are now validated and the rights intersected with the SDK ceiling.
+- **Fixed:** in Rust, when a project point cannot be saved, the input now fails before dispatch, and the failure is recorded so a retry can settle it.
+- **Fixed:** in TypeScript, a plugin in another process could be sent an answer after `stop()` closed its input. A closed connection now drops late answers.
+- **Checks.** On an idle 32-CPU machine at `2e8c1f3`, `scripts/check.sh` passed all 44 steps in 19 minutes, against about 37 minutes for the four-language check at 0.3.0. The 0.4.0 release results are in [docs/status.md](docs/status.md#040). Rust debug builds keep only line tables, so one test build writes 15 GB instead of 54 GB. Check slots limit how many runs share one machine, and `scripts/stress.sh` takes its slots at once. The docs lane adds a docs-state check (versions agree, ADR index status matches each record, gap sections name an issue) and a maintainability check (files over 1,000 lines are held to a baseline; `WIP` subjects and closing keywords are refused). An ACP check that fails reports the agent's last stderr lines.
+- **Process.** Work is tracked in GitHub issues and milestones. [CONTRIBUTING](CONTRIBUTING.md) sets a bar for filing issues and a release checklist, and says how to reproduce a missed deadline before blaming a pull request ([#154](https://github.com/daniel-ballance/modular-agent/issues/154)).
 
 ## 0.3.0
 

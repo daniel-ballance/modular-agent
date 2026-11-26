@@ -18,6 +18,23 @@ Remaining ADR 0030 work is tracked in #19.
 
 **What the checks do not establish.** Byte limits are counted logically: they do not reserve physical disk, and the operator provides the extra space a backend needs for framing, journals and atomic replacement. Scope is rechecked when a queued reply leaves its queue, but not every transport proves it at the last socket handoff. A deletion is not held until every external effect already in flight has finished, and restoring a backup still needs separate proof that it is current. Each SDK's README lists its own remaining items. Full production readiness is not claimed.
 
+## 0.4.0
+
+Recorded on 2026-11-26 for the release commit, from `scripts/check.sh` on Linux (Fedora 44, x86-64, 32 logical CPUs; 44 steps, all passed). The first release in two languages, Rust and TypeScript ([ADR 0037](adr/0037-two-languages.md)). `scripts/macos-check.sh` has not yet been run on macOS for 0.4.0.
+
+| Check | Rust | TypeScript |
+|---|---|---|
+| Shared SDK scenarios, every placement | pass | 225/225 |
+| Reference checks against `ma` | 37/37 | 37/37 |
+| ACP kit against `ma`: core, covered approvals, approvals that wait, stdio rights | 190, 2, 50, 12 | 190, 2, 50, 12 |
+| Over WebSocket: plugin kit, listener isolation, named callers, ACP kit, portability with two credentials | 157, 14, 29, 195, 9 | 157, 14, 29, 195, 9 |
+| [AG-UI kit](../conformance/agui/README.md) against `ma` and an SDK fixture | 49/49 | 49/49 |
+| [Telemetry check](../conformance/telemetry/README.md), as host: in process and with the other language's plugins | 16, 2 | 16, 2 |
+| [ADR 0030](adr/0030-production-gaps.md) kits | pass | pass |
+| Own suites | 514 tests | 678 in each of two layouts, 5 live skipped |
+
+Rust's scenario runner reports pass or fail, not a count. Each language's agents passed the erasure checks on the other language's history service: 2 of 2 pairings. The [project notes demo](../demos/project-notes/README.md) passed with its crash run, and the [ops desk](../demos/ops-desk/README.md) passed its eight scripted checks. Every result above used scripted models.
+
 ## 0.3.0
 
 Recorded on 2026-11-24 for the commit tagged `v0.3.0`, from `scripts/check.sh` on Linux (Fedora, x86-64; 61 steps, all passed) and `scripts/macos-check.sh` on macOS (Apple silicon; 34 steps, all passed).
