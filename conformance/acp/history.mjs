@@ -5,6 +5,13 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 
 const digest = (value) => createHash("sha256").update(value).digest();
 
+function heldRetryAfter(bytes) {
+	try {
+		const { code, retryAfterMs } = JSON.parse(bytes);
+		if (code === "held" && Number.isSafeInteger(retryAfterMs) && retryAfterMs > 0) return retryAfterMs;
+	} catch { return undefined; }
+}
+
 export function historyService(raw, tokenFile) {
 	if (!raw || !tokenFile) throw new Error("set MODULAR_AGENT_HISTORY_URL and MODULAR_AGENT_HISTORY_TOKEN_FILE to disposable service settings");
 	const url = new URL(raw);
@@ -48,10 +55,16 @@ export function historyService(raw, tokenFile) {
 			const batches = [];
 			const server = createServer(async (req, res) => {
 				const info = { method: req.method, path: req.url };
-				let upstreamStatus, upstreamMs;
-				const start = onTrace && performance.now();
-				if (onTrace) res.once("close", () => onTrace({ ...info, start, upstreamStatus, upstreamMs,
-					replyMs: performance.now() - start, sent: res.writableFinished }));
+				const trace = onTrace && { ...info, start: performance.now(), upstreamStatus: null,
+					upstreamMs: null, replyMs: null, sent: false };
+				if (trace) {
+					onTrace(trace);
+					res.once("finish", () => {
+						trace.replyMs = performance.now() - trace.start;
+						trace.sent = true;
+					});
+					res.once("close", () => { trace.replyMs ??= performance.now() - trace.start; });
+				}
 				try {
 					if (!timingSafeEqual(digest(req.headers.authorization ?? ""), digest(`Bearer ${token}`))) return res.writeHead(401, { "content-type": "application/json", "www-authenticate": "Bearer" }).end(JSON.stringify({ error: "Unauthorized", code: "unauthorized" }));
 					onRequest?.(info);
@@ -68,6 +81,7 @@ export function historyService(raw, tokenFile) {
 					// Pass the pending-erasure profile's revision through unchanged, so appends stay fenced (history-http.md).
 					const revision = req.headers["history-revision"];
 					const r = await request(req.url, { method: req.method, body, ...(revision === undefined ? {} : { headers: { "history-revision": revision } }) });
+					if (trace) trace.upstreamStatus = r.status;
 					const entries = r.ok && req.method === "POST" && req.url.endsWith("/entries") && body ? JSON.parse(body).entries : undefined;
 					if (entries) {
 						const events = entries.filter((e) => (e.kind === "jobEnded" && e.data?.report === true) || (e.kind === "inputAccepted" && e.data?.key?.startsWith("job:"))).map((e) => ({ kind: e.kind, jobId: e.jobId, key: e.data?.key }));
@@ -75,9 +89,11 @@ export function historyService(raw, tokenFile) {
 					}
 					const headers = Object.fromEntries(["content-type", "www-authenticate", "cache-control"].flatMap((k) => r.headers.has(k) ? [[k, r.headers.get(k)]] : []));
 					const bytes = Buffer.from(await r.arrayBuffer());
-					if (onTrace) {
-						upstreamStatus = r.status;
-						upstreamMs = performance.now() - start;
+					if (trace) {
+						trace.upstreamMs = performance.now() - trace.start;
+						if (r.status === 409 && req.method === "POST" && req.url.endsWith("/lease")) {
+							trace.retryAfterMs = heldRetryAfter(bytes);
+						}
 					}
 					await beforeReply?.({ method: req.method, path: req.url, ok: r.ok, entries });
 					res.writeHead(r.status, headers).end(bytes);

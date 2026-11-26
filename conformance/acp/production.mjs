@@ -473,28 +473,38 @@ async function holdLease(store, path) {
 }
 
 export async function erasure(kit) {
-	if (!kit.store || (await kit.store.json("/v1")).pendingErasure !== 1) throw Error("erasure fixture requires the shared HTTP pendingErasure: 1 registry");
+	const declaration = await kit.store?.json("/v1");
+	if (declaration?.pendingErasure !== 1) throw Error("erasure fixture requires the shared HTTP pendingErasure: 1 registry");
 	for (const cutoff of ["reported pending", "bookkeeping commit", "tombstone commit"]) {
-		await kit.attempt(`erasure: ${cutoff}`, () => eraseAcrossWriters(kit, cutoff));
+		await kit.attempt(`erasure: ${cutoff}`, () => eraseAcrossWriters(kit, cutoff, declaration.ttlMs));
 	}
 }
 
-async function eraseAcrossWriters(kit, cutoff) {
+function historyTimings(trace, started, sourcePath) {
+	const ms = (value) => value === null ? null : Math.round(value);
+	return trace.map(({ method, path, start, upstreamStatus, upstreamMs, replyMs, sent, retryAfterMs }) => {
+		const [, , group, session, suffix, , action] = path.split("?")[0].split("/");
+		let route = suffix ?? "session";
+		if (group !== "sessions") route = "version";
+		else if (!session) route = "list";
+		else if (suffix === "lease" && action === "renew") route = "renew";
+		else if (suffix === "pending-erasure" && action === "complete") route = "pending-erasure/complete";
+		return { method, route, source: session !== undefined && `/v1/sessions/${session}` === sourcePath,
+			atMs: ms(start - started), upstreamStatus, upstreamMs: ms(upstreamMs), replyMs: ms(replyMs), sent, retryAfterMs };
+	});
+}
+
+async function eraseAcrossWriters(kit, cutoff, ttlMs) {
 	const { project, store, prompt, history, closeSession, reopenWatchdog, within } = kit;
 	const check = (label, ok, detail) => kit.check(`erasure (${cutoff}): ${label}`, ok, detail);
 	const scope = scoped([project], [null]);
 	const reached = deferred(), releaseReply = deferred();
 	let eraseSource, sourcePath;
 	let stage = "start writer", faultReached = false;
-	const trace = [], started = performance.now();
+	const trace = [], reopenTrace = [], started = performance.now();
 	const proxy = cutoff === "reported pending" ? undefined : await store.observe({
-		onTrace({ method, path, start, upstreamStatus, upstreamMs, replyMs, sent }) {
-			const [, , group, session, suffix, , action] = path.split("?")[0].split("/");
-			const route = group !== "sessions" ? "version" : !session ? "list" : !suffix ? "session" :
-				suffix === "lease" && action === "renew" ? "renew" : ["entries", "lease", "pending-erasure", "erase"].includes(suffix) ? suffix : "other";
-			trace.push({ method, route, source: session !== undefined && `/v1/sessions/${session}` === sourcePath,
-				atMs: Math.round(start - started), upstreamStatus, upstreamMs: upstreamMs === undefined ? undefined : Math.round(upstreamMs),
-				replyMs: Math.round(replyMs), sent });
+		onTrace(request) {
+			trace.push(request);
 			if (trace.length > 24) trace.shift();
 		},
 		async beforeReply({ method, path, ok, entries }) {
@@ -515,18 +525,27 @@ async function eraseAcrossWriters(kit, cutoff) {
 		return profile;
 	};
 	const h = await startHost("eraser", { extraEnv: proxy ? { MODULAR_AGENT_HISTORY_URL: proxy.url } : {} });
-	let reader, reopener, releaseLease, dst, failure, diagnostics;
+	let reader, reopener, reopenProxy, releaseLease, dst, failure, diagnostics;
 	const takeoverLoad = async (peer, sid, ms, label) => {
-		const started = performance.now();
+		const loadStarted = performance.now();
 		try {
 			return await within(ms, load(peer, sid, project), label);
 		} catch (error) {
-			const elapsedMs = Math.round(performance.now() - started);
+			const failedAt = performance.now();
+			const elapsedMs = Math.round(failedAt - loadStarted);
+			const requests = reopenTrace.filter(({ start }) => start >= loadStarted);
+			const leasePath = `${store.path(sid)}/lease`;
+			const held = requests.find((request) => request.path === leasePath && request.sent && request.retryAfterMs !== undefined);
+			const heldDeadline = held && held.start + held.replyMs + ttlMs + 1000;
+			const reopenerHistory = {
+				estimatedHeldLeaseBudgetRemainingMs: heldDeadline === undefined ? null : Math.max(0, Math.round(heldDeadline - failedAt)),
+				requests: historyTimings(requests, loadStarted, sourcePath),
+			};
 			const records = await within(1000, store.pages(sid), "read diagnostic history")
 				.then((rows) => rows.map((e) => e.erased ? `${e.kind} (erased)` : e.kind), (e) => e.message);
 			throw new Error(`${label} after ${elapsedMs} ms: ${error.message} ${JSON.stringify({
 				code: error.code, dataCode: error.data?.code, records,
-			})}`, { cause: error });
+			})}. Reopener history HTTP: ${JSON.stringify(reopenerHistory)}`, { cause: error });
 		}
 	};
 	try {
@@ -621,7 +640,8 @@ async function eraseAcrossWriters(kit, cutoff) {
 		releaseLease = undefined;
 		await release();
 		stage = "reopen and reconcile the pending intent";
-		reopener = await startHost("reopener", { which: kit.second });
+		reopenProxy = await store.observe({ onTrace: (request) => reopenTrace.push(request) });
+		reopener = await startHost("reopener", { which: kit.second, extraEnv: { MODULAR_AGENT_HISTORY_URL: reopenProxy.url } });
 		const { a: next } = await reopener.peer();
 		await takeoverLoad(next, dst, loadMs, "new writer reconciles fork-of-fork");
 		const kept = await store.pages(dst);
@@ -635,7 +655,7 @@ async function eraseAcrossWriters(kit, cutoff) {
 		check("repeated authorized erase reports convergence without duplicate bookkeeping", pair(done.erased, dst, copy.id) && !pair(done.pending, dst, copy.id) &&
 			rows("erasure", await store.pages(dst)).length === 1 && rows("erasure", await store.pages(sid)).length === 1);
 	} catch (error) {
-		const traceDetail = proxy ? `; fault reached: ${faultReached}; history HTTP: ${JSON.stringify(trace)}` : "";
+		const traceDetail = proxy ? `; fault reached: ${faultReached}; history HTTP: ${JSON.stringify(historyTimings(trace, started, sourcePath))}` : "";
 		failure = Error(`${stage}: ${error.message}${traceDetail}`, { cause: error });
 		if (connectionLost(error)) {
 			diagnostics = (await Promise.all(hosts.map(async ({ role, profile }) =>
@@ -647,8 +667,12 @@ async function eraseAcrossWriters(kit, cutoff) {
 	} finally {
 		releaseReply.resolve();
 		if (releaseLease) await releaseLease().catch(() => {});
-		await Promise.all([reader?.stop(), reopener?.stop(), h.stop()]);
-		proxy?.stop();
+		try {
+			await Promise.all([reader?.stop(), reopener?.stop(), h.stop()]);
+		} finally {
+			reopenProxy?.stop();
+			proxy?.stop();
+		}
 	}
 	if (diagnostics) {
 		const agents = await Promise.all(diagnostics.map(async ({ role, agent, beforeCleanup }) => {
