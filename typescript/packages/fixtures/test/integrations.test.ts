@@ -17,7 +17,7 @@ import {
   createAgent, encodeHistoryJson, fileHistory, HistoryServiceError, httpHistory, memoryHistory, parseHistoryJson, serveHistory, tool,
   type HistoryJsonObject, type HistoryReadOptions, type HistoryServiceErrorCode, type HistoryServiceStore,
 } from "@modular-agent/core";
-import { restart, testAgent } from "@modular-agent/core/testing";
+import { restart, testAgent, testResources } from "@modular-agent/core/testing";
 import { openai } from "@modular-agent/openai";
 import { anthropic } from "@modular-agent/anthropic";
 import { fixture } from "../src/index.js";
@@ -106,11 +106,12 @@ for (const [name, provider, endpoint, credential] of [
 }
 
 test("ACP serves an SDK agent on stdio", { timeout: 5_000 }, async t => {
-  const project = await mkdtemp(join(tmpdir(), "ma-acp-"));
-  t.after(() => rm(project, { recursive: true, force: true }));
+  const start = testResources(t);
+  const project = await start(() => mkdtemp(join(tmpdir(), "ma-acp-")), project => rm(project, { recursive: true, force: true }));
   const child = spawn(process.execPath, [fileURLToPath(new URL("../src/acp-agent.js", import.meta.url))],
     { cwd: project, stdio: ["pipe", "pipe", "inherit"] });
-  t.after(() => { child.kill(); });
+  const done = once(child, "close");
+  t.after(async () => { child.kill(); await done; });
   const updates: SessionNotification[] = [];
   const app = client({ name: "sdk-client" }).onNotification(methods.client.session.update, ({ params }) => { updates.push(params); });
   const cx = app.connect(ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>)).agent;
@@ -119,29 +120,30 @@ test("ACP serves an SDK agent on stdio", { timeout: 5_000 }, async t => {
   const reply = await cx.request(methods.agent.session.prompt, { sessionId, prompt: [{ type: "text", text: "Hello." }] });
   assert.equal(reply.stopReason, "end_turn");
   assert.ok(updates.some(({ update }) => update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" && update.content.text === "Hi over ACP."));
-  const done = once(child, "close");
   child.stdin.end();
   await done;
 });
 
 test("ACP resume returns while recovered work waits for the client's answer", { timeout: 10_000 }, async t => {
-  const project = await mkdtemp(join(tmpdir(), "ma-acp-recover-"));
+  const start = testResources(t);
+  const project = await start(() => mkdtemp(join(tmpdir(), "ma-acp-recover-")), project => rm(project, { recursive: true, force: true }));
   const dataDir = join(project, "state");
-  t.after(() => rm(project, { recursive: true, force: true }));
   let started!: () => void;
   const ready = new Promise<void>(r => { started = r; });
   const hold = tool({ name: "hold", description: "Wait until interrupted", input: { type: "object" }, async run(_, cx) {
     started();
     await delay(30_000, undefined, { signal: cx.cancelled });
   } });
-  const first = await testAgent({ project, dataDir, durability: "durable", tools: [hold], plugins: [fixture("confirm")], script: [{ toolCalls: [{ name: "hold", input: {} }] }] });
-  t.after(() => first.close());
+  const first = await start(() => testAgent({ project, dataDir, durability: "durable", tools: [hold],
+    plugins: [fixture("confirm")], script: [{ toolCalls: [{ name: "hold", input: {} }] }] }), agent => agent.close());
   const session = await first.session();
   const interrupted = assert.rejects(session.prompt("Before crash"), { code: "lost" });
   await ready;
-  await (await restart(first)).close();
+  const restarted = await start(() => restart(first), agent => agent.close());
+  await restarted.close();
   await interrupted;
 
+  t.signal.throwIfAborted();
   const child = spawn(process.execPath, [fileURLToPath(new URL("../src/acp-agent.js", import.meta.url)), dataDir],
     { cwd: project, stdio: ["pipe", "pipe", "inherit"] });
   const closed = once(child, "close");
@@ -194,21 +196,21 @@ test("setup-discovered in-process registration answers initialize with not_suppo
 });
 
 test("a kept session reopens over the history HTTP binding", { timeout: 10_000 }, async t => {
-  const dir = await mkdtemp(join(tmpdir(), "ma-http-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  const start = testResources(t);
+  const dir = await start(() => mkdtemp(join(tmpdir(), "ma-http-")), dir => rm(dir, { recursive: true, force: true }));
   const tokenFile = join(dir, "token");
   await writeFile(tokenFile, "literal-fake-history-token\n", { mode: 0o600 });
-  const service = await serveHistory(fileHistory(join(dir, "service")), { address: "127.0.0.1:0", tokenFile });
-  t.after(() => service.close());
+  const service = await start(
+    () => serveHistory(fileHistory(join(dir, "service")), { address: "127.0.0.1:0", tokenFile }),
+    service => service.close(),
+  );
   const history = httpHistory(service.url, tokenFile);
   const script = [{ text: "First." }, { text: "Still here." }];
-  const a = await testAgent({ script, durability: "kept", history });
-  t.after(() => a.close());
+  const a = await start(() => testAgent({ script, durability: "kept", history }), agent => agent.close());
   const s = await a.session();
   assert.equal((await s.prompt("First")).text, "First.");
   await a.close();
-  const b = await testAgent({ script, durability: "kept", history });
-  t.after(() => b.close());
+  const b = await start(() => testAgent({ script, durability: "kept", history }), agent => agent.close());
   const reopened = await b.openSession(s.id);
   assert.equal((await reopened.lastTurn())?.text, "First.");
   assert.equal((await reopened.prompt("Second")).text, "Still here.");
@@ -216,9 +218,9 @@ test("a kept session reopens over the history HTTP binding", { timeout: 10_000 }
 
 // A custom backend with its durable records and leases kept by a separate archive.
 // Use the SDK's lossless codec on both sides, not a byte-forwarding HTTP relay.
-async function customHistory(url: string, token: string): Promise<HistoryServiceStore> {
+async function customHistory(url: string, token: string, signal: AbortSignal): Promise<HistoryServiceStore> {
   const call = async (path: string, method = "GET", body?: string): Promise<string> => {
-    const response = await fetch(`${url}/v1${path}`, { method, body, headers: {
+    const response = await fetch(`${url}/v1${path}`, { method, body, signal, headers: {
       authorization: `Bearer ${token}`, "content-type": "application/json",
     } });
     const raw = await response.text();
@@ -253,23 +255,26 @@ async function customHistory(url: string, token: string): Promise<HistoryService
 
 for (const placement of ["file", "memory", "relay", "custom"] as const) {
   test(`SDK ${placement} history passes the history binding kit`, { timeout: 60_000 }, async t => {
-    const dir = await mkdtemp(join(tmpdir(), "ma-sdk-history-"));
+    const start = testResources(t);
+    const dir = await start(() => mkdtemp(join(tmpdir(), "ma-sdk-history-")), dir => rm(dir, { recursive: true, force: true }));
     const tokenFile = join(dir, "token");
     const token = randomBytes(32).toString("hex");
     await writeFile(tokenFile, token + "\n", { mode: 0o600 });
     const options = { address: "127.0.0.1:0", tokenFile };
     const store = placement === "memory" ? memoryHistory() : fileHistory(join(dir, "archive"));
     // The kit waits for a lease to expire and also appends a large batch.
-    const direct = await serveHistory(store, { ...options, leaseTtl: 5_000, testOnly: placement === "memory" });
+    const direct = await start(() => serveHistory(store, { ...options, leaseTtl: 5_000, testOnly: placement === "memory" }),
+      service => service.close());
     let relay: Awaited<ReturnType<typeof serveHistory>> | undefined;
-    t.after(async () => { await relay?.close(); await direct.close(); await rm(dir, { recursive: true, force: true }); });
-    if (placement === "relay") relay = await serveHistory(httpHistory(direct.url, tokenFile), options);
+    if (placement === "relay") relay = await start(() => serveHistory(httpHistory(direct.url, tokenFile), options), service => service.close());
     if (placement === "custom") {
-      relay = await serveHistory(await customHistory(direct.url, token), options);
+      const upstream = await customHistory(direct.url, token, t.signal);
+      relay = await start(() => serveHistory(upstream, options), service => service.close());
       const path = `${relay.url}/v1/sessions/committed-without-reply`;
       const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
-      await assert.rejects(fetch(path, { method: "PUT", headers, body: '{"project":"/precise","created":0,"extra":9007199254740993}' }));
-      const kept = await fetch(path, { headers });
+      const signal = t.signal;
+      await assert.rejects(fetch(path, { method: "PUT", headers, signal, body: '{"project":"/precise","created":0,"extra":9007199254740993}' }));
+      const kept = await fetch(path, { headers, signal });
       assert.equal(kept.status, 200);
       assert.match(await kept.text(), /"extra":9007199254740993/);
     }

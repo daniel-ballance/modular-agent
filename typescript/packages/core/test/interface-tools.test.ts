@@ -9,7 +9,7 @@ import { context, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { InMemorySpanExporter, SimpleSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
 import { createAgent, definePlugin, tool, transientRuntime, type AgentOptions, type InterfaceToolHandoff, type InterfaceToolReport } from "../src/index.js";
-import { memoryEnvironment, scriptedProvider } from "../src/testing.js";
+import { memoryEnvironment, scriptedProvider, testResources } from "../src/testing.js";
 import { pick, picker, provider, remoteRuntime, requested, source } from "./fixtures/interface-tools.js";
 
 const completed = { status: "accepted" };
@@ -183,23 +183,23 @@ for (const remote of [false, true]) {
 
   for (const [cutoff, durability] of [["ended", "kept"], ["handoff", "durable"], ["handoff", "kept"]] as const) {
     test(`${placement}: SIGKILL ${cutoff}, then reopen ${durability} history`, { skip: process.platform === "win32", timeout: 15_000 }, async t => {
-      const dataDir = await mkdtemp(join(tmpdir(), "ma-interface-crash-"));
-      t.after(() => rm(dataDir, { recursive: true, force: true }));
+      const start = testResources(t);
+      const dataDir = await start(() => mkdtemp(join(tmpdir(), "ma-interface-crash-")), dir => rm(dir, { recursive: true, force: true }));
       const child = fork(new URL("./fixtures/interface-tools.js", import.meta.url), ["crash", dataDir, remote ? "remote" : "in-process", cutoff, durability],
         { detached: true, execArgv: [], stdio: ["ignore", "ignore", "pipe", "ipc"] });
       let stderr = "";
       child.stderr!.setEncoding("utf8").on("data", data => { stderr += data; });
       const died = once(child, "exit");
       const kill = () => { if (child.pid) try { process.kill(-child.pid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH" && !(process.platform === "darwin" && (error as NodeJS.ErrnoException).code === "EPERM")) throw error; } };
-      t.after(async () => { kill(); await died; });
+      const stop = async () => { kill(); await died; };
+      await start(() => child, stop);
       const ready = await Promise.race([once(child, "message").then(([message]) => message as { id: string; callId: string }),
         died.then(() => { throw new Error(`Agent exited before handoff: ${stderr}`); })]);
       assert.ok(ready.callId);
       kill();
       assert.equal((await died)[1], "SIGKILL");
-      const agent = await createAgent(options(remote, { dataDir, durability,
-        ...(remote ? { processPlugins: [remoteRuntime(durability === "durable")] } : {}) }));
-      t.after(() => agent.close());
+      const agent = await start(() => createAgent(options(remote, { dataDir, durability,
+        ...(remote ? { processPlugins: [remoteRuntime(durability === "durable")] } : {}) })), agent => agent.close());
       const session = await agent.openSession(ready.id);
       const conn = agent.connectInterfaceTools(session.id, { actor: picker, routeId: source.routeId,
         onHandoff: () => assert.fail("Recovery replayed an executable request") });

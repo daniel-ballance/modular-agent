@@ -9,7 +9,7 @@ import {
   createAgent, definePlugin, defineToolSource, serve, tool, transientRuntime,
   type Agent, type AgentOptions, type Content, type Event, type Plugin, type Session, type WorkingEnvironment,
 } from "@modular-agent/core";
-import { memoryEnvironment, scriptedProvider, testAgent } from "@modular-agent/core/testing";
+import { memoryEnvironment, scriptedProvider, testAgent, testResources } from "@modular-agent/core/testing";
 
 const image = { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" } as const;
 const preview = (text: string): Content => [{ type: "text", text }, image];
@@ -171,29 +171,20 @@ async function followUntil(session: Session, done: (event: Event) => boolean = e
 type Transport = "stdio" | "websocket";
 type Placement = Pick<AgentOptions, "processPlugins" | "servicePlugins">;
 async function hosted(t: TestContext, transport: Transport, plugin: () => Plugin, start: (options: Placement) => Promise<Agent>): Promise<Agent> {
+  const use = testResources(t);
   if (transport === "stdio") {
-    const agent = await start({ processPlugins: [{
+    return use(() => start({ processPlugins: [{
       command: [process.execPath, "--input-type=module", "--eval",
         `import { ${plugin.name} } from ${JSON.stringify(import.meta.url)};\n` +
         `import { serve } from ${JSON.stringify(import.meta.resolve("@modular-agent/core"))};\nawait serve(${plugin.name}());`],
       env: { CALLBACK_TEST_PLUGIN: "1" },
-    }] });
-    t.after(() => agent.close());
-    return agent;
+    }] }), agent => agent.close());
   }
-  const dir = await mkdtemp(join(tmpdir(), "sdk-callbacks-"));
-  let agent: Agent | undefined, server: Awaited<ReturnType<typeof serve>> | undefined;
-  t.after(async () => {
-    try { await agent?.close(); }
-    finally {
-      try { await server?.close(); }
-      finally { await rm(dir, { recursive: true, force: true }); }
-    }
-  });
+  const dir = await use(() => mkdtemp(join(tmpdir(), "sdk-callbacks-")), dir => rm(dir, { recursive: true, force: true }));
   const tokenFile = join(dir, "token");
   await writeFile(tokenFile, randomBytes(32).toString("hex"), { mode: 0o600 });
-  server = await serve(plugin, { listen: "127.0.0.1:0", tokenFile });
-  return agent = await start({ servicePlugins: [{ url: server.url, tokenFile }] });
+  const server = await use(() => serve(plugin, { listen: "127.0.0.1:0", tokenFile }), server => server.close());
+  return use(() => start({ servicePlugins: [{ url: server.url, tokenFile }] }), agent => agent.close());
 }
 
 if (!process.env.CALLBACK_TEST_PLUGIN) {

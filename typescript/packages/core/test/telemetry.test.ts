@@ -15,7 +15,7 @@ import { Harness, type ToolSource } from "@modular-agent/harness";
 import { currentSpan, readTrace, startOperation, withTrace } from "@modular-agent/harness/telemetry";
 import { registerExternalPlugin, servePlugins, WirePeer } from "@modular-agent/plugin-wire";
 import { definePlugin, fileHistory, tool } from "../src/index.js";
-import { testAgent } from "../src/testing.js";
+import { testAgent, testResources } from "../src/testing.js";
 import { waitingAgent } from "./fixtures/waiting-approval.js";
 
 function record(t: TestContext, failing = false) {
@@ -225,37 +225,40 @@ test("plugin work and its host callback carry the current operation", async t =>
 
 test("restart after SIGKILL uses the committed trace and does not repeat the effect", { timeout: 15_000 }, async t => {
   const { spans, provider } = record(t);
-  const dir = await mkdtemp(join(tmpdir(), "ma-trace-crash-"));
-  const child = fork(fileURLToPath(new URL("./fixtures/telemetry-crash.js", import.meta.url)), [dir], {
-    env: { HOME: dir, PATH: process.env.PATH, TMPDIR: process.env.TMPDIR },
+  const start = testResources(t);
+  const dir = await start(() => mkdtemp(join(tmpdir(), "ma-trace-crash-")), dir => rm(dir, { recursive: true, force: true }));
+  const { child, exited } = await start(() => {
+    const child = fork(fileURLToPath(new URL("./fixtures/telemetry-crash.js", import.meta.url)), [dir], {
+      env: { HOME: dir, PATH: process.env.PATH, TMPDIR: process.env.TMPDIR },
+    });
+    return { child, exited: once(child, "close") };
+  }, async ({ child, exited }) => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await exited;
   });
-  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); await rm(dir, { recursive: true, force: true }); });
-  const exited = once(child, "exit");
   const [{ sessionId, turnId, traceContext }] = await Promise.race([once(child, "message"), exited.then(() => { throw new Error("crash fixture exited before barrier"); })]);
   const saved = readTrace(traceContext)!;
   assert.ok(saved);
   child.kill("SIGKILL");
   assert.deepEqual(await exited, [null, "SIGKILL"]);
-  const a = await testAgent({ project: dir, dataDir: dir, durability: "durable", history: fileHistory(join(dir, "history")), script: [{ text: "not requested" }],
+  const a = await start(() => testAgent({ project: dir, dataDir: dir, durability: "durable", history: fileHistory(join(dir, "history")), script: [{ text: "not requested" }],
     tools: [tool({ name: "barrier", description: "Must not run again", input: { type: "object" }, run() { assert.fail("effect was repeated"); } })],
-  });
-  try {
-    const s = await a.openSession(sessionId);
-    await s.waitIdle();
-    await provider.forceFlush();
-    const resumed = spans().find(s => s.attributes["modular_agent.turn.resumed"] === true)!;
-    assert.equal(resumed.attributes["modular_agent.turn.id"], turnId);
-    assert.equal(resumed.spanContext().traceId, saved.traceId);
-    assert.notEqual(id(resumed), saved.spanId);
-    assert.equal(parent(resumed), saved.spanId);
-    assert.deepEqual(resumed.links.map(x => x.context.spanId), [saved.spanId]);
-    const history = await s.history();
-    const checkpoint = history.findIndex(e => e.kind === "modular-agent.turnTrace");
-    assert.equal(readTrace((history[checkpoint].data as { traceContext: unknown }).traceContext)?.spanId, id(resumed));
-    assert.ok(checkpoint < history.findIndex(e => e.kind === "toolResult"));
-    assert.equal(await readFile(join(dir, "effect"), "utf8"), "once");
-    const copied = await (await s.fork()).history();
-    assert.ok(copied.some(e => e.kind === "turnStart"));
-    assert.ok(copied.every(e => e.kind !== "modular-agent.turnTrace" && !JSON.stringify(e.data)?.includes("traceContext")));
-  } finally { await a.close(); }
+  }), agent => agent.close());
+  const s = await a.openSession(sessionId);
+  await s.waitIdle();
+  await provider.forceFlush();
+  const resumed = spans().find(s => s.attributes["modular_agent.turn.resumed"] === true)!;
+  assert.equal(resumed.attributes["modular_agent.turn.id"], turnId);
+  assert.equal(resumed.spanContext().traceId, saved.traceId);
+  assert.notEqual(id(resumed), saved.spanId);
+  assert.equal(parent(resumed), saved.spanId);
+  assert.deepEqual(resumed.links.map(x => x.context.spanId), [saved.spanId]);
+  const history = await s.history();
+  const checkpoint = history.findIndex(e => e.kind === "modular-agent.turnTrace");
+  assert.equal(readTrace((history[checkpoint].data as { traceContext: unknown }).traceContext)?.spanId, id(resumed));
+  assert.ok(checkpoint < history.findIndex(e => e.kind === "toolResult"));
+  assert.equal(await readFile(join(dir, "effect"), "utf8"), "once");
+  const copied = await (await s.fork()).history();
+  assert.ok(copied.some(e => e.kind === "turnStart"));
+  assert.ok(copied.every(e => e.kind !== "modular-agent.turnTrace" && !JSON.stringify(e.data)?.includes("traceContext")));
 });
