@@ -102,8 +102,6 @@ $ ma sessions --all
 /thinking
 ```
 
-Rust also offers and lists `/tool` until [#134](https://github.com/daniel-ballance/modular-agent/issues/134) resolves it.
-
 **Questions** in interactive mode go to stderr. An approval of a tool call takes `y` or `n` ([Approval](#approval)). The terminal shows one approval at a time and asks `Allow? (y/n)`. While it shows an approval, any line other than `y`, `n` (case-insensitive), or `/cancel` gets `Answer y or n.`. This includes blank lines and other slash commands. `/questions` prints the IDs of open questions as a JSON array. For other questions, the terminal shows `Question REQUEST_ID: QUESTION`, any options, and how to answer. The terminal registers a question before it shows it, so an `/answer` it reads after the line appears finds that question. More than one question can be open. `/answer REQUEST_ID VALUE` answers the named question, and `/answer REQUEST_ID decline` declines it. End of input declines every open question.
 
 **Secret answers** are never typed on the visible line:

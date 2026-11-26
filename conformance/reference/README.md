@@ -18,7 +18,7 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 | Check | What it shows |
 |---|---|
 | `help-options` | Both `ma --help` option sections match the exact lines in the standard configuration. When running a listed build, skip this check if its peer is not built, or fail in strict mode. With an explicit command after `--`, check only that command. |
-| `interactive-commands` | `/commands` prints exactly the specified sorted names, with `/tool` only in Rust ([#134](https://github.com/daniel-ballance/modular-agent/issues/134)). `/questions` lists open IDs and `/quit` exits without a model request. |
+| `interactive-commands` | `/commands` prints exactly the specified sorted names. The terminal rejects `/tool`. `/questions` lists open IDs and `/quit` exits without a model request. |
 | `terminal-approval` | The terminal shows `Allow? (y/n)` and replies `Answer y or n.` to other inputs, including `/quit`, without running them. A subsequent `Y` allows the script. |
 | `print` | Print mode prints the final answer; the model is offered only `codemode` |
 | `print-questions` | Plain and JSON print mode decline questions from nested and direct tool calls and finish the turn |
