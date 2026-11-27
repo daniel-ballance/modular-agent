@@ -1,78 +1,105 @@
 use agent_api::*;
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 pub struct ContextPlugin;
-fn view(branch: &[Entry]) -> Vec<Entry> {
-    let mut covered = BTreeSet::new();
-    for e in branch
+
+fn cut_before(entries: &[&Entry], keep: u64, force: bool) -> Result<usize> {
+    let results: BTreeMap<_, _> = entries
         .iter()
-        .filter(|e| e.kind == "summary" && e.content.is_some())
-    {
-        covered.extend(e.copies.iter().cloned());
-    }
-    let active: Vec<_> = branch
-        .iter()
-        .filter(|e| e.visible && !covered.contains(&e.id))
-        .cloned()
+        .enumerate()
+        .filter(|(_, e)| e.kind == "tool.result")
+        .filter_map(|(i, e)| Some((e.scope.call.as_deref()?, i)))
         .collect();
-    active
-        .iter()
-        .filter(|e| e.kind == "summary")
-        .chain(active.iter().filter(|e| e.kind != "summary"))
-        .cloned()
-        .collect()
-}
-async fn compact(api: Api, scope: &Scope, system: &str, force: bool) -> Result<bool> {
-    let data = api.snapshot(&scope.session)?;
-    let visible = view(&data.branch());
-    // Keep the newest actor input and all model/tool records after it as one unit.
-    let mut boundary = if force {
-        visible.len()
-    } else {
-        visible
-            .iter()
-            .rposition(|e| e.kind == "input")
-            .unwrap_or(visible.len())
-    };
-    if boundary == 0 {
-        boundary = visible.len();
-    }
-    // A summary must not separate a handed-off call from its eventual
-    // result. Keep both in the live view if the pair cannot fit the prefix.
-    for (index, response) in visible.iter().enumerate().rev() {
-        if response.kind != "model.response" || index >= boundary {
+    let mut safe = Vec::with_capacity(entries.len() + 1);
+    let mut steps = Vec::new();
+    let mut through = 0;
+    let mut has_calls = false;
+    for (i, entry) in entries.iter().enumerate() {
+        safe.push(i >= through);
+        if entry.kind != "model.response" {
             continue;
         }
-        if data
-            .entries
-            .iter()
-            .filter(|e| {
-                interface_handoff(e)
-                    && e.scope.turn == response.scope.turn
-                    && e.scope.step == response.scope.step
-            })
-            .any(|handoff| {
-                !visible[..boundary].iter().any(|e| {
-                    e.kind == "tool.result"
-                        && e.scope.call == handoff.scope.call
-                        && e.content.is_some()
-                })
-            })
-        {
-            boundary = index;
+        let response: ModelResponse =
+            serde_json::from_value(entry.content.as_ref().unwrap().clone())?;
+        if matches!(
+            response.stop.as_str(),
+            "failed" | "aborted" | "refused" | "limit" | "length"
+        ) {
+            continue;
+        }
+        steps.push(i);
+        for call in response.tool_calls() {
+            has_calls = true;
+            // A late result pins the whole span. A missing result pins the
+            // rest of the view, including for an Interface handoff.
+            through = through.max(results.get(call.id.as_str()).map_or(usize::MAX, |i| i + 1));
         }
     }
+    safe.push(entries.len() >= through);
+
+    let first_new = entries
+        .iter()
+        .position(|e| e.kind != "summary")
+        .unwrap_or(entries.len());
+    let latest_input = entries.iter().rposition(|e| e.kind == "input");
+    let input_cut = latest_input.filter(|&i| i > first_new && safe[i]);
+    // Preserve the standalone command's full-history behavior outside a
+    // single tool turn, subject to the same pairing rule.
+    if force
+        && (!has_calls || input_cut.is_some())
+        && let Some(cut) = (first_new + 1..=entries.len()).rev().find(|&i| safe[i])
+    {
+        return Ok(cut);
+    }
+    if let Some(cut) = input_cut {
+        return Ok(cut);
+    }
+
+    let mut tokens = 0;
+    let mut end = entries.len();
+    let mut cut = 0;
+    let first = steps.partition_point(|&i| latest_input.is_some_and(|input| i <= input));
+    for &step in steps.get(first + 1..).unwrap_or_default().iter().rev() {
+        for entry in &entries[step..end] {
+            tokens += serde_json::to_vec(&entry.content)?.len().div_ceil(4) as u64;
+        }
+        end = step;
+        if safe[step] && (cut == 0 || tokens <= keep) {
+            cut = step;
+        }
+    }
+    Ok(cut)
+}
+
+async fn compact(api: Api, scope: &Scope, system: &str, force: bool, budget: u64) -> Result<bool> {
+    let data = api.snapshot(&scope.session)?;
+    let branch = data.branch();
+    let visible = context_entries(&branch);
+    let keep = data.settings["keep_recent_tokens"]
+        .as_u64()
+        .unwrap_or(20_000)
+        .min(budget);
+    let boundary = cut_before(&visible, keep, force)?;
     let old = &visible[..boundary];
     if old.is_empty() {
         return Ok(false);
     }
+    let covered: BTreeSet<_> = old.iter().map(|e| e.id.as_str()).collect();
+    let sources: Vec<_> = branch
+        .iter()
+        .filter(|e| covered.contains(e.id.as_str()))
+        .map(|e| e.id.clone())
+        .collect();
     let selection: Arc<dyn ModelSelection> = capability(api.as_ref(), "model.selection")?;
     let model = selection.select(api.clone(), scope).await?;
     let mut request = ModelRequest {
         session: scope.session.clone(),
         system: format!(
-            "{system}\nSummarize the supplied history faithfully and concisely. Preserve important facts and outstanding tool outcomes. Do not call tools."
+            "{system}\nSummarize the supplied history faithfully and concisely. Preserve the user's goal, decisions, important facts, tool outcomes and next steps. Do not call tools."
         ),
-        messages: messages_with_origins(old, &data.branch())?,
+        messages: messages_with_origins(old, &branch)?,
         thinking: data.settings["thinking"].as_str().unwrap_or("").into(),
         output_limit: 1024,
         ..ModelRequest::default()
@@ -108,7 +135,7 @@ async fn compact(api: Api, scope: &Scope, system: &str, force: bool) -> Result<b
             ModelAttempt {
                 writer: "context.management",
                 tools: vec![],
-                sources: old.iter().map(|e| e.id.clone()).collect(),
+                sources: sources.clone(),
                 auxiliary: true,
                 safe_to_repeat: false,
                 replay: None,
@@ -129,10 +156,11 @@ async fn compact(api: Api, scope: &Scope, system: &str, force: bool) -> Result<b
         Draft::new("model.response", false, json!(response)).copying(vec![intent.id]),
     )?;
     ensure!(
-        response.tool_calls().is_empty() && !response.text_content().trim().is_empty(),
+        response.stop == "finished"
+            && response.tool_calls().is_empty()
+            && !response.text_content().trim().is_empty(),
         "invalid summary response"
     );
-    let copies = old.iter().map(|e| e.id.clone()).collect();
     api.append(
         scope,
         "context.management",
@@ -141,7 +169,7 @@ async fn compact(api: Api, scope: &Scope, system: &str, force: bool) -> Result<b
             true,
             json!({"text":response.text_content(),"on_demand":force,"usage":response.usage}),
         )
-        .copying(copies),
+        .copying(sources),
     )?;
     model.discard(&scope.session).await?;
     Ok(true)
@@ -160,7 +188,7 @@ impl Plugin for ContextPlugin {
                     let mut request: ModelRequest =
                         serde_json::from_value(value["request"].clone())?;
                     let branch = data.branch();
-                    let visible = view(&branch);
+                    let visible = context_entries(&branch);
                     let bytes = serde_json::to_vec(&messages_with_origins(&visible, &branch)?)?
                         .len()
                         + request.system.len()
@@ -169,12 +197,12 @@ impl Plugin for ContextPlugin {
                     let threshold = data.settings["context_tokens"]
                         .as_u64()
                         .unwrap_or(window.saturating_sub(request.output_limit));
-                    if bytes as u64 / 4 > threshold.min(window.saturating_sub(request.output_limit))
-                    {
-                        compact(api.clone(), &scope, &request.system, false).await?;
+                    let threshold = threshold.min(window.saturating_sub(request.output_limit));
+                    if value["attempt"].as_u64().unwrap_or(0) == 0 && bytes as u64 / 4 > threshold {
+                        compact(api.clone(), &scope, &request.system, false, threshold).await?;
                     }
                     let branch = api.snapshot(&scope.session)?.branch();
-                    request.messages = messages_with_origins(&view(&branch), &branch)?;
+                    request.messages = messages_with_origins(&context_entries(&branch), &branch)?;
                     for feedback in pending_result_feedback(&branch, scope.turn.as_deref()) {
                         if let Some(reason) =
                             feedback.content.as_ref().and_then(|v| v["reason"].as_str())
@@ -193,8 +221,15 @@ impl Plugin for ContextPlugin {
             handler(|api, scope, value| {
                 Box::pin(async move {
                     if value["failure"]["kind"] == "context_too_large" && value["attempt"] == 0 {
-                        let compacted = compact(api, &scope, "", false).await?;
-                        return Ok(answer(json!({"retry":compacted})));
+                        if !compact(api.clone(), &scope, "", false, u64::MAX).await? {
+                            return Ok(answer(json!({"retry":false})));
+                        }
+                        let branch = api.snapshot(&scope.session)?.branch();
+                        let mut request: ModelRequest =
+                            serde_json::from_value(value["request"].clone())?;
+                        request.messages =
+                            messages_with_origins(&context_entries(&branch), &branch)?;
+                        return Ok(answer(json!({"retry":true, "request":request})));
                     }
                     Ok(HookResult::default())
                 })
@@ -209,7 +244,7 @@ impl Plugin for ContextPlugin {
                         "cannot manually compact during a turn"
                     );
                     Ok(answer(
-                        json!({"compacted":compact(api,&scope,"",true).await?}),
+                        json!({"compacted":compact(api,&scope,"",true,u64::MAX).await?}),
                     ))
                 })
             }),
@@ -217,3 +252,6 @@ impl Plugin for ContextPlugin {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod boundaries;

@@ -78,6 +78,11 @@ export function modelView(entries: HistoryEntry[], _turnId?: string, provider?: 
 		if (e.erased || e.kind !== "turnEnd") return [];
 		return (e.data as { result?: { openToolCalls?: string[] } })?.result?.openToolCalls ?? [];
 	}));
+	return pairToolResults(modelViewRows(entries, provider).map((row) => row.message), pending);
+}
+
+/** Effective messages and their history sources, before tool results are paired. */
+export function modelViewRows(entries: HistoryEntry[], provider?: string): { id: string; message: ModelMessage }[] {
 	const rows: { id: string; message: ModelMessage }[] = [];
 	const contexts = new Map<string, HistoryEntry>();
 	const byId = new Map(entries.map((e) => [e.id, e]));
@@ -110,7 +115,7 @@ export function modelView(entries: HistoryEntry[], _turnId?: string, provider?: 
 			rows.push({ id: e.id, message: sameProvider ? e.message : withoutProviderData(e.message) });
 		}
 	}
-	return pairToolResults(rows.map((r) => r.message), pending);
+	return rows;
 }
 
 export const WAITING_NOTE = "This call is waiting for an answer. It has no result yet.";

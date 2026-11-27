@@ -1,4 +1,5 @@
 use crate::*;
+use std::collections::{BTreeMap, BTreeSet};
 /// Lossless standard messages plus opaque Provider data; excludes record-only entries.
 pub fn messages(entries: &[Entry]) -> Result<Vec<Message>> {
     model_messages(entries, None)
@@ -6,7 +7,7 @@ pub fn messages(entries: &[Entry]) -> Result<Vec<Message>> {
 
 /// The feedback belongs only to a new step of this turn, not the general view.
 pub fn model_messages(entries: &[Entry], turn: Option<&str>) -> Result<Vec<Message>> {
-    let mut result = messages_with_origins(entries, entries)?;
+    let mut result = messages_with_origins(&context_entries(entries), entries)?;
     for feedback in pending_result_feedback(entries, turn) {
         let reason = feedback.content.as_ref().and_then(|v| v["reason"].as_str());
         if let Some(reason) = reason {
@@ -14,6 +15,48 @@ pub fn model_messages(entries: &[Entry], turn: Option<&str>) -> Result<Vec<Messa
         }
     }
     Ok(result)
+}
+
+/// Replace summary sources at their original context position. A later
+/// summary can cover an earlier summary as well as newly compacted entries.
+pub fn context_entries(branch: &[Entry]) -> Vec<&Entry> {
+    let mut rows = BTreeMap::new();
+    let mut positions = BTreeMap::new();
+    let mut unavailable = BTreeSet::new();
+    for (i, entry) in branch.iter().enumerate() {
+        let id = entry.id.as_str();
+        if entry.content.is_none() {
+            unavailable.insert(id);
+            continue;
+        }
+        if !entry.visible {
+            continue;
+        }
+        let mut position = i;
+        if entry.kind == "summary" {
+            // A fork also carries foreign source IDs for erasure. Only
+            // remapped IDs can replace entries in this branch's model view.
+            let sources = || entry.copies.iter().map(String::as_str);
+            if sources().any(|source| unavailable.contains(source)) {
+                unavailable.insert(id);
+                continue;
+            }
+            let mut replaced = sources()
+                .filter_map(|source| positions.remove(source))
+                .peekable();
+            if replaced.peek().is_none() {
+                unavailable.insert(id);
+                continue;
+            }
+            for at in replaced {
+                position = position.min(at);
+                rows.remove(&at);
+            }
+        }
+        positions.insert(id, position);
+        rows.insert(position, entry);
+    }
+    rows.into_values().collect()
 }
 
 pub fn pending_result_feedback<'a>(
@@ -39,22 +82,11 @@ pub fn pending_result_feedback<'a>(
         })
 }
 
-/// Project a filtered conversation using the unfiltered branch for Provider
-/// provenance. Recording intents need not be in the filtered conversation.
-pub fn messages_with_origins(entries: &[Entry], branch: &[Entry]) -> Result<Vec<Message>> {
+/// Render selected context entries using the unfiltered branch for Provider
+/// provenance. Recording intents need not be in the selected context.
+pub fn messages_with_origins(entries: &[&Entry], branch: &[Entry]) -> Result<Vec<Message>> {
     let mut result = vec![];
-    let mut emitted = std::collections::BTreeSet::new();
-    let summarized: std::collections::BTreeSet<_> = entries
-        .iter()
-        .rev()
-        .find(|e| e.kind == "summary" && e.visible && e.content.is_some())
-        .into_iter()
-        .flat_map(|e| e.copies.iter().map(String::as_str))
-        .collect();
     for e in entries {
-        if !e.visible || summarized.contains(e.id.as_str()) {
-            continue;
-        }
         let Some(value) = e.content.as_ref() else {
             continue;
         };
@@ -128,10 +160,7 @@ pub fn messages_with_origins(entries: &[Entry], branch: &[Entry]) -> Result<Vec<
                     let done = entries
                         .iter()
                         .find(|e| {
-                            e.kind == "tool.result"
-                                && e.visible
-                                && !summarized.contains(e.id.as_str())
-                                && e.scope.call.as_ref() == Some(&call.id)
+                            e.kind == "tool.result" && e.scope.call.as_ref() == Some(&call.id)
                         })
                         .and_then(|e| e.content.as_ref());
                     let text = if let Some(v) = done {
@@ -163,7 +192,6 @@ pub fn messages_with_origins(entries: &[Entry], branch: &[Entry]) -> Result<Vec<
                             m.parts = crate::wire::parts(&json!(content))?;
                         }
                     }
-                    emitted.insert(call.id);
                     result.push(m);
                 }
             }

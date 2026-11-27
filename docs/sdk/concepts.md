@@ -80,6 +80,8 @@ Each SDK ships at least one implementation of every part the specification names
 | Configuration | settings files and project trust |
 | Feature plugins | approval; questions; context compaction and its `/compact` command; model selection; subagents; guardrails |
 
+In both SDKs, context compaction can summarize older settled steps within a long turn. The soft retention budget for those steps defaults to 20,000 estimated tokens. Set `keepRecentTokens` in the TypeScript context-compaction plugin configuration or `keep_recent_tokens` in Rust session settings. A recent step and all its tool results stay together even when that step exceeds the budget.
+
 **Not in the SDK** are product features the specification does not describe: Agent Skills, a code tool, a line-based CLI or terminal UI, and prompts tuned for a particular use. They belong to a [reference implementation](../../GLOSSARY.md), built on the SDK's public API like any other developer's agent.
 
 The line is the specification. If a feature is a part or rule the specification names, the SDK has it. If not, a reference implementation does.
