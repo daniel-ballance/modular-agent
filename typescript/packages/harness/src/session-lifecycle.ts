@@ -181,6 +181,16 @@ export class SessionLifecycle {
 		return s.id;
 	}
 
+	async withQuietWriter<T>(id: string, work: () => Promise<T>): Promise<T> {
+		if (this.opening.has(id) || this.operations.sessions().has(id)) throw failure("busy", "Session is busy");
+		this.opening.add(id);
+		try {
+			const store = this.operations.use<HistoryStore>("history-store")!;
+			await store.openForWriting(id, {wait: false});
+			try { return await work(); } finally { await store.close(id); }
+		} finally { this.opening.delete(id); }
+	}
+
 	async loadInto(id: string): Promise<Session | undefined> {
 		const store = this.operations.use<HistoryStore>("history-store");
 		if (!store) return undefined;
@@ -430,16 +440,16 @@ export class SessionLifecycle {
 		void connectionRights.exit(() => this.operations.turns().launch(s, interrupted.turnId, (signal) => this.operations.turns().resumeTurn(s, interrupted, snapshot, signal)));
 	}
 
-	async forkSession(sessionId: string, entryId: string): Promise<string> {
+	async forkSession(sessionId: string, entryId?: string): Promise<string> {
 		const s = this.operations.session(sessionId);
-		await this.operations.erasure().admitHistory(s);
+		await this.operations.erasure().reconcilePending(s);
 		if (s.erasing) throw failure("busy", "Erasure is in progress");
 		// Forking at unfinished work would copy work that is still running: refused.
 		if (s.running || this.operations.jobWork().runningJobs(s).length || this.operations.questions().waitingRequests(s).length || this.operations.turns().openCalls(s).length || this.operations.interfaceTools().unsettledHandoffs(s).length) throw failure("busy", "Can't fork while the session has unfinished work: a running turn, a job, or a call waiting for an answer");
-		const target = s.entries.get(entryId);
+		const target = s.entries.get(entryId ?? s.position ?? "");
 		if (!target) throw Object.assign(new Error("Unknown fork target"), { code: "not_found" });
 		if (target.kind === "position") throw Object.assign(new Error("Cannot fork a position record"), { code: "conflict" });
-		const id = await this.operations.startSession({ forkFrom: { sessionId, entryId }, actor: [...s.actors.values()][0] });
+		const id = await this.operations.startSession({ forkFrom: { sessionId, entryId: target.id }, actor: [...s.actors.values()][0] });
 		await this.suspendSession(id);
 		return id;
 	}
@@ -555,6 +565,7 @@ export class SessionLifecycle {
 		const s = this.operations.session(sessionId);
 		return this.operations.admission().admit(s, async () => {
 			if (options.actorId) this.operations.requireAuthority(s, options.actorId, "settings");
+			await this.operations.erasure().reconcilePending(s);
 			if (s.provisional) throw failure("invalid_request", "Session has not admitted its first input");
 			if (s.isBusy() || s.outsideTools || s.erasing || s.settling || s.requests.size || this.operations.questions().waitingRequests(s).length || this.operations.turns().openCalls(s).length || this.operations.interfaceTools().unsettledHandoffs(s).length || this.operations.jobWork().runningJobs(s).length) {
 				throw failure("busy", "Can't move while work is unfinished");
@@ -640,7 +651,7 @@ export class SessionLifecycle {
 }
 
 function copyForkPrefix(branch: HistoryEntry[], sessionId: string, makeId: () => string): HistoryEntry[] {
-	const kept = branch.filter((e) => !e.erased && e.kind !== "position" && e.kind !== TURN_TRACE);
+	const kept = branch.filter((e) => e.kind !== "position" && e.kind !== TURN_TRACE);
 	const entries = new Map(kept.map((e) => [e.id, makeId()]));
 	const associations = new Map<string, Map<string, string>>();
 	const remap = (kind: string, id: string) => {
@@ -651,7 +662,7 @@ function copyForkPrefix(branch: HistoryEntry[], sessionId: string, makeId: () =>
 	};
 	let parentId: string | null = null;
 	return kept.map((old) => {
-		const e: HistoryEntry = { ...structuredClone(historyForPeer(old)), id: entries.get(old.id)!, parentId, sessionId, sources: [old.id] };
+		const e: HistoryEntry = { ...structuredClone(historyForPeer(old)), id: entries.get(old.id)!, parentId, sessionId, ...(old.erased ? {} : { sources: [old.id] }) };
 		if (e.turnId) e.turnId = remap("turn", e.turnId);
 		if (e.continuesTurnId) e.continuesTurnId = remap("turn", e.continuesTurnId);
 		if (e.stepId) e.stepId = remap("step", e.stepId);
@@ -659,6 +670,7 @@ function copyForkPrefix(branch: HistoryEntry[], sessionId: string, makeId: () =>
 		if (e.jobId) e.jobId = remap("job", e.jobId);
 		if (e.inputId) e.inputId = remap("input", e.inputId);
 		if (e.requestId) e.requestId = remap("request", e.requestId);
+		if (e.erased) { delete e.sources; parentId = e.id; return e; }
 		if (e.message?.role === "assistant") for (const part of e.message.content) {
 			if (isToolCall(part)) part.id = remap("call", part.id);
 		}

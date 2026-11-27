@@ -70,6 +70,12 @@ pub trait PortableHistoryStore: Send + Sync + 'static {
     fn pending_erasure_v1(&self) -> bool {
         false
     }
+    fn pending_erasure_index_v1(&self) -> bool {
+        false
+    }
+    async fn erasure_index(&self, _after: Option<&str>, _limit: usize) -> HistoryResult<Value> {
+        Err(HistoryFault::Unavailable)
+    }
     async fn erasure_plans(
         &self,
         _session: &str,
@@ -157,9 +163,13 @@ pub(super) async fn request(
                 json!({"binding":"modular-agent-history/1", "ttlMs":store.ttl_ms()});
             if store.pending_erasure_v1() {
                 declaration["pendingErasure"] = json!(1);
+                if store.pending_erasure_index_v1() {
+                    declaration["pendingErasureIndex"] = json!(1);
+                }
             }
             Ok(declaration)
         }
+        (Method::GET, ["v1", "pending-erasure"]) => store.erasure_index(after, limit).await,
         (Method::GET, ["v1", "sessions", id, "pending-erasure"]) => {
             store.erasure_plans(id, after, limit).await
         }

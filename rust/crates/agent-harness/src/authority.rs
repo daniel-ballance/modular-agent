@@ -164,11 +164,19 @@ impl Harness {
     }
 
     pub(super) fn actor_authority(&self, session: &str, actor: &str) -> Result<Authority> {
-        let data = self.snapshot(session).or_else(|_| {
-            self.store()
+        let open = self
+            .sessions
+            .lock()
+            .unwrap()
+            .get(session)
+            .map(|open| open.data.clone());
+        let data = match open {
+            Some(data) => data,
+            None => self
+                .store()
                 .ok_or_else(|| anyhow!("session unavailable"))?
-                .load(session)
-        })?;
+                .inspect(session)?,
+        };
         if let Some(id) = actor.strip_prefix("job:") {
             let job = jobs(&data)?
                 .into_iter()

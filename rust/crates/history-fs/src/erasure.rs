@@ -43,6 +43,24 @@ impl FileHistory {
         Ok(true)
     }
 
+    pub(super) fn pending_copies(&self) -> Result<BTreeMap<String, Vec<String>>> {
+        let mut pending = BTreeMap::<String, Vec<String>>::new();
+        for intent in self.read_registry()?.intents {
+            for (session, ids) in intent.copies {
+                for id in ids {
+                    if !intent
+                        .confirmed
+                        .get(&session)
+                        .is_some_and(|seen| seen.contains(&id))
+                    {
+                        pending.entry(session.clone()).or_default().push(id);
+                    }
+                }
+            }
+        }
+        Ok(pending)
+    }
+
     fn read_registry(&self) -> Result<Registry> {
         let bytes = fs::read(self.root.join(".erasure/intents")).map_err(unavailable)?;
         serde_json::from_slice(&bytes).map_err(unavailable)
@@ -91,7 +109,7 @@ impl FileHistory {
                     .entries
                     .iter()
                     .rev()
-                    .take_while(|e| erasure_job_settlement(e))
+                    .take_while(|e| erasure_job_settlement(e) || erasure_control_record(e))
                     .take_while(|e| !kept.entries.iter().any(|old| old.id == e.id))
                     .cloned()
                     .collect();

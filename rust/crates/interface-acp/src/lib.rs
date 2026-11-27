@@ -535,7 +535,6 @@ impl State {
                 // Serialize project opens with rewind across session-local Harnesses.
                 let _setup = self.routes.setup.lock().await;
                 let session = self.session(&p)?;
-                binding::require_feature(self.factory.as_ref(), &session, "rewinding")?;
                 require(session.api.as_ref(), &actor_scope(&session.id), "settings")?;
                 if self.project_in_use(&session.project, &session.id) {
                     return Err(request_error("conflict", "cannot rewind a shared project").into());
@@ -643,6 +642,8 @@ impl State {
                 );
                 // A driver flushing an already finished turn is not a running turn.
                 let _guard = session.gate.lock().await;
+                require(session.api.as_ref(), &actor_scope(&session.id), "settings")?;
+                session.api.retry_open_erasure(&session.id).await?;
                 let name = string(&p, "configId")?;
                 let value = string(&p, "value")?;
                 match name {

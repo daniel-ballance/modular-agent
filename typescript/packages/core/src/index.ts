@@ -7,7 +7,7 @@ export type { AgentOptions, Approval, FileHistoryOptions, Durability, ProcessPlu
 export { durableRuntime, transientRuntime, localEnvironment, environmentCredentials, fileCredentials } from "./parts.js";
 export { advanceSecretSlot, secretStaging, withCredentialLock } from "@modular-agent/harness";
 export type * from "./parts.js";
-export type { WaitingSummary, SessionSummary, ReservationOptions, ReservationLimits, ReservationDeclaration } from "@modular-agent/harness";
+export type { WaitingSummary, SessionSummary, ReconcileErasureOptions, ErasureRetryReport, ReservationOptions, ReservationLimits, ReservationDeclaration } from "@modular-agent/harness";
 export { Session } from "./session.js";
 export type { InterfaceToolSource, InterfaceToolConnection, InterfaceToolHandoff, InterfaceToolReceipt, InterfaceToolReport } from "@modular-agent/harness";
 export type { InterfaceToolConnectionOptions } from "./agent.js";

@@ -128,7 +128,7 @@ impl Harness {
         let Some(open) = sessions.get_mut(session) else {
             return Ok(false);
         };
-        self.refresh_open_erasure(open)?;
+        self.check_open_erasure(open)?;
         let Some(handoff) = open
             .data
             .branch()
@@ -369,7 +369,7 @@ impl Harness {
             let Some(open) = sessions.get_mut(&connection.session) else {
                 return Ok(REFUSED);
             };
-            if self.refresh_open_erasure(open).is_err() {
+            if self.check_open_erasure(open).is_err() {
                 return Ok(REFUSED);
             }
             if let Err(status) = inspect(&open.data) {

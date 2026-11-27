@@ -441,7 +441,6 @@ pub(crate) async fn extension(
         "limit" => Some("sessionLimits"),
         "tenant" => Some("tenants"),
         "erase" => Some("erasure"),
-        "fork" => Some("forking"),
         _ => None,
     };
     if let Some(feature) = feature {
@@ -456,7 +455,7 @@ pub(crate) async fn extension(
         let represented = represented_actors();
         if actor != connection_actor.as_str()
             && (!represented.iter().any(|id| id == actor)
-                || !actors(&session.api.snapshot(&session.id)?).contains_key(actor))
+                || !actors(&session.api.authority_snapshot(&session.id)?).contains_key(actor))
         {
             return Err(
                 request_error("forbidden", "connection does not represent this actor").into(),
@@ -537,7 +536,7 @@ pub(crate) async fn extension(
                 require(api, &scope, "grant")?;
             }
             ensure!(
-                actors(&api.snapshot(&session.id)?).contains_key(id),
+                actors(&api.authority_snapshot(&session.id)?).contains_key(id),
                 "unknown actor"
             );
             api.append(
@@ -620,12 +619,13 @@ pub(crate) async fn extension(
         }
         "history" => {
             require(api, &scope, "watch")?;
+            api.retry_open_erasure(&session.id).await?;
             history(&session, p).await
         }
         "input" => {
             let timing = serde_json::from_value(p["when"].clone())?;
             ensure!(
-                actors(&api.snapshot(&session.id)?).contains_key(actor),
+                actors(&api.authority_snapshot(&session.id)?).contains_key(actor),
                 "unknown actor"
             );
             require_both(if timing == Timing::Propose {
@@ -660,7 +660,7 @@ pub(crate) async fn extension(
             };
             {
                 ensure!(
-                    actors(&api.snapshot(&session.id)?).contains_key(actor),
+                    actors(&api.authority_snapshot(&session.id)?).contains_key(actor),
                     "unknown actor"
                 );
                 let required = if q.kind == RequestKind::Approval {
@@ -711,6 +711,13 @@ pub(crate) async fn extension(
             if q.kind == RequestKind::Secret {
                 return Ok(json!({"accepted":false,"reason":"ACP does not accept secret answers"}));
             }
+            api.retry_open_erasure(&q.scope.session).await?;
+            let after = api.snapshot(&q.scope.session)?;
+            if !questions(&after)?.iter().any(|current| {
+                current.id == q.id && current.answerable && json!(current) == json!(q)
+            }) {
+                return Ok(json!({"accepted":false,"reason":"not_open"}));
+            }
             match service
                 .answer(
                     session.api.clone(),
@@ -739,10 +746,19 @@ pub(crate) async fn extension(
         }
         "fork" | "move" => {
             require(api, &scope, "settings")?;
+            if method == "fork" {
+                require(api, &scope, "watch")?;
+            }
             let _guard = session
                 .gate
                 .try_lock()
                 .map_err(|_| request_error("busy", "session busy"))?;
+            api.retry_open_erasure(&session.id).await?;
+            if method == "fork" {
+                require_feature(factory, &session, "forking")?;
+            } else if p["rewind"] == true {
+                require_feature(factory, &session, "rewinding")?;
+            }
             let data = session.api.snapshot(&session.id)?;
             let branch = data.branch();
             ensure!(

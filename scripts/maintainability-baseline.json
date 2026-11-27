@@ -3,14 +3,13 @@
   "conformance/plugin/run.mjs": 1361,
   "rust/crates/agent-api/src/portable.rs": 1085,
   "rust/crates/agent-base/tests/plugin_binding.rs": 1997,
-  "rust/crates/history-http/src/lib.rs": 1193,
-  "rust/crates/history-http/src/server.rs": 1619,
+  "rust/crates/history-http/src/server.rs": 1525,
   "rust/crates/plugin-stdio/src/host.rs": 2180,
   "rust/crates/plugin-stdio/src/runtime_host.rs": 1937,
   "rust/crates/runtime-engine/src/lib.rs": 1613,
-  "rust/crates/sdk/src/agent.rs": 1068,
+  "rust/crates/sdk/src/agent.rs": 1059,
   "rust/crates/sdk/src/agui/run.rs": 1055,
   "rust/crates/sdk/src/plugin.rs": 1079,
-  "rust/crates/sdk/src/session.rs": 1412,
+  "rust/crates/sdk/src/session.rs": 1282,
   "typescript/packages/interface-acp/src/index.ts": 1194
 }

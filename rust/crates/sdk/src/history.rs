@@ -1,5 +1,5 @@
 //! History choices. The HTTP client uses the base's lease and portable-record implementation.
-use crate::{Code, Error, Result, core::MemoryHistory};
+use crate::{Agent, Code, Error, Result, Session, core::MemoryHistory};
 use agent_api as base;
 pub use agent_api::HistoryStore;
 pub use history_http::{
@@ -8,6 +8,28 @@ pub use history_http::{
 };
 use serde_json::Value;
 use std::{path::Path, sync::Arc};
+
+impl Agent {
+    /// Reopen a kept session. Interrupted work is recovered, as the Runtime declares,
+    /// before this returns.
+    pub async fn open_session(&self, id: &str) -> Result<Session> {
+        self.check_crashed()?;
+        let harness = self.inner.harness.as_ref();
+        if let Ok(writer) = harness.session_generation(id) {
+            let scope = base::Scope::session(id);
+            base::require(harness, &scope, "watch")?;
+            harness.retry_open_erasure(id).await?;
+            base::AgentApi::snapshot(harness, id)?;
+            base::require(harness, &scope, "watch")?;
+            if writer.is_cancelled() {
+                return Err(Error::new(Code::Lost, "session writer was detached"));
+            }
+            return Ok(Session::new(self.inner.clone(), id.into()));
+        }
+        base::AgentApi::install_recovery(harness, id).await?;
+        self.finish_open(id).await
+    }
+}
 
 /// Serve a dedicated history store on loopback.
 pub async fn serve_history(store: History, options: ServeHistoryOptions) -> Result<()> {
@@ -264,16 +286,35 @@ impl History {
 
     pub fn sessions(&self, project: Option<&Path>) -> Result<Vec<SessionInfo>> {
         let project = project.map(Path::canonicalize).transpose()?;
-        Ok(self
-            .0
+        self.0
             .list(project.as_deref())?
             .into_iter()
-            .map(SessionInfo::from)
-            .collect())
+            .filter_map(|data| match self.0.check_erasure(&data) {
+                Ok(()) => Some(Ok(SessionInfo::from(data))),
+                Err(error) if error.is::<base::PendingErasure>() => None,
+                Err(error) => Some(Err(error.into())),
+            })
+            .collect()
     }
 
     pub fn session_info(&self, id: &str) -> Result<SessionInfo> {
-        Ok(self.0.load(id)?.into())
+        let data = self.0.inspect(id)?;
+        self.0.check_erasure(&data)?;
+        Ok(data.into())
+    }
+}
+
+impl crate::Agent {
+    /// Retry durable erasure work without opening sessions for ordinary work.
+    pub async fn reconcile_erasure(
+        &self,
+        options: crate::ReconcileErasureOptions,
+    ) -> Result<Vec<crate::ErasureRetryReport>> {
+        Ok(self
+            .inner
+            .harness
+            .reconcile_erasure_sessions(options)
+            .await?)
     }
 }
 

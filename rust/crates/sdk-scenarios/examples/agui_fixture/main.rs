@@ -131,6 +131,21 @@ impl Kit {
         let scope = base::Scope::session(id);
         match v["operation"].as_str() {
             Some("inspect") => return self.inspect(id),
+            Some("storedEntries") => {
+                let data = self.file(id)?;
+                let entries = data
+                    .entries
+                    .iter()
+                    .map(|e| base::portable::entry(e, &data))
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok(json!({"entries":entries}));
+            }
+            Some("markPending") => {
+                let entries: Vec<String> = serde_json::from_value(v["entryIds"].clone())?;
+                let store = history_fs::FileHistory::new(&self.dir.join("ledger"))?;
+                store.mark_erasure(id, &entries)?;
+                return Ok(json!({}));
+            }
             Some("openWait") if v["kind"] == "leaveOpen" => {
                 let api = self.api()?.clone();
                 api.submit(
@@ -502,7 +517,11 @@ async fn serve(config: Value) -> Result<()> {
             k.name == "state-and-gate",
         ))
         .model("scripted/script")
-        .approval_covers_nested(k.name.starts_with("approval") || k.name.starts_with("waiting-"))
+        .approval_covers_nested(
+            k.name.starts_with("approval")
+                || k.name.starts_with("waiting-")
+                || k.name == "erasure-retry",
+        )
         .approval(
             if k.name.starts_with("approval")
                 || matches!(k.name.as_str(), "closure-presence" | "closure-routes")

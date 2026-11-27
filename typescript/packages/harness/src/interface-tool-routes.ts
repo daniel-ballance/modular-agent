@@ -49,7 +49,7 @@ interface InterfaceToolRoutesOperations {
 	workRights(s: Session, actors: Iterable<string>, jobs?: Iterable<string>): Authority[];
 	agentName(): string | undefined;
 	maybeContinueOpenCalls(s: Session, trace?: ReturnType<typeof currentSpan>): void;
-	approvals(): Pick<ApprovalReconciliation, "clear" | "invalidateDeliveries" | "closeWaiting">;
+	approvals(): Pick<ApprovalReconciliation, "clear" | "closeWaiting">;
 	recordedTurnActors(branch: HistoryEntry[], turnId: string): string[];
 	recordedTurnJobs(branch: HistoryEntry[], turnId: string): string[];
 	recordedTurnRights(branch: HistoryEntry[], turnId: string): Authority[];
@@ -350,7 +350,6 @@ export class InterfaceToolRoutes {
 
 	async invalidateErasedHandoffs(s: Session, entryIds: string[]): Promise<void> {
 		const ids = new Set(entryIds);
-		this.operations.approvals().invalidateDeliveries(s);
 		for (const w of waitingApprovals(s).values()) {
 			if (!w.result && !w.start && [w.entry.id, w.decision?.id, w.end?.id, ...(w.entry.sources ?? []),
 				...s.branch().filter(e => e.toolCallId === w.request.toolCallId && e.kind === "toolPending").map(e => e.id)].some(id => id && ids.has(id))) {

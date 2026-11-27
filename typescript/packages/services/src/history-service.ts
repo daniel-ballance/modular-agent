@@ -26,6 +26,7 @@ const routes = [
 	[/^\/v1\/sessions\/([^/]+)\/entries$/, ["POST"], "append"],
 	[/^\/v1\/sessions\/([^/]+)\/erase$/, ["POST"], "erase"],
 	[/^\/v1\/sessions\/([^/]+)\/pending-erasure$/, ["GET", "POST"], "plans"],
+	[/^\/v1\/pending-erasure$/, ["GET"], "index"],
 	[/^\/v1\/sessions\/([^/]+)\/pending-erasure\/([^/]+)\/complete$/, ["POST"], "complete"],
 ] as const;
 
@@ -129,7 +130,7 @@ export async function historyService(options: HistoryServiceOptions, controls?: 
 				const rawQuery = q < 0 ? undefined : target.slice(q + 1);
 				// Do not use a URL parser that normalizes dot segments or backslashes.
 				if (path.split("/").some((s) => [".", ".."].includes(decode(s)))) invalid("Dot path segments are forbidden");
-				const route = routes.find(([re, , op]) => (profile || (op !== "plans" && op !== "complete")) && re.test(path));
+				const route = routes.find(([re, , op]) => (profile || (op !== "plans" && op !== "complete" && op !== "index")) && re.test(path));
 				if (!route) throw new BindingError(404, "not_found", "Unknown path");
 				const [re, methods, op] = route;
 				if (!(methods as readonly string[]).includes(req.method ?? "")) {
@@ -149,10 +150,10 @@ export async function historyService(options: HistoryServiceOptions, controls?: 
 				const reading = method === "GET";
 				const [sid, param] = re.exec(path)!.slice(1).map(decode);
 				if ((op === "renew" || op === "release") && !validLease(param)) return invalid("Invalid lease");
-				const { after, limit, project } = query(rawQuery, op === "list" ? ["after", "limit", "project"] : (op === "session" || op === "plans") && reading ? ["after", "limit"] : []);
+				const { after, limit, project } = query(rawQuery, op === "list" ? ["after", "limit", "project"] : (op === "session" || op === "plans" || op === "index") && reading ? ["after", "limit"] : []);
 				if (op === "version") {
 					if (raw.length) return invalid("This operation takes no body");
-					return send(res, 200, JSON.stringify({ binding: HISTORY_BINDING, ttlMs, retention, ...(profile && { pendingErasure: 1 }) }));
+					return send(res, 200, JSON.stringify({ binding: HISTORY_BINDING, ttlMs, retention, ...(profile && { pendingErasure: 1, pendingErasureIndex: 1 }) }));
 				}
 				if (thread && !thread.available) { leases.clear(); throw unavailable(); }
 				if (thread && op === "renew") {

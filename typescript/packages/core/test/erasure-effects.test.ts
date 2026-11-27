@@ -68,6 +68,7 @@ for (const pending of [false, true]) for (const confirm of [false, true]) {
     const project = await mkdtemp(join(tmpdir(), "sdk-erasure-job-"));
     t.after(() => rm(project, { recursive: true, force: true }));
     let cancels = 0;
+    let job: import("@modular-agent/core").Job | undefined;
     const plugin = definePlugin({ name: "erasure-jobs", setup(r) {
       r.jobs({ async cancel(_job, cx) {
         cancels++;
@@ -75,7 +76,8 @@ for (const pending of [false, true]) for (const confirm of [false, true]) {
         await cx.job.end({ kind: "cancelled" }, "must not enter history", true);
       } });
       r.tool(tool({ name: "lookup", description: "Start a job", input: { type: "object" }, async run(_, cx) {
-        return (await cx.jobs.start("lookup", {})).id;
+        job = await cx.jobs.start("lookup", {});
+        return job.id;
       } }));
     } });
     const options = { project, dataDir: project, durability: "kept" as const, plugins: [plugin], script: [{ text: "seed" }] };
@@ -94,15 +96,23 @@ for (const pending of [false, true]) for (const confirm of [false, true]) {
       await destination.callTool("lookup", {});
       const report = await source.erase([id]);
       if (pending) assert.ok(report.pending.some(copy => copy.sessionId === destination.id));
-      if (confirm) {
+      if (pending) {
+        await assert.rejects(destination.history(), { code: "unavailable" });
+        assert.equal((await b.reconcileErasure({ sessions: [destination.id] }))[0].state, "busy");
+        assert.equal(cancels, 0);
+      } else if (confirm) {
         const history = await destination.history();
         assert.ok(history.some(e => e.kind === "jobEnded"));
         assert.doesNotMatch(JSON.stringify(history), /must not enter history|erase this/);
       } else {
         await assert.rejects(destination.history(), { code: "unavailable" });
-        assert.ok((await new JsonlHistoryStore(join(project, "history")).load(destination.id)).entries.some(e => e.kind === "jobCleanupUnconfirmed"));
+        const store = new JsonlHistoryStore(join(project, "history"));
+        const before = await store.load(destination.id);
+        assert.ok(before.entries.some(e => e.kind === "jobCleanupUnconfirmed"));
+        await assert.rejects(job!.end({ kind: "completed" }, "stale payload", true), { code: "lost" });
+        assert.deepEqual((await store.load(destination.id)).entries, before.entries);
       }
-      assert.equal(cancels, !pending && !confirm ? 2 : 1);
+      if (!pending) assert.equal(cancels, confirm ? 1 : 2);
     } finally { await Promise.allSettled([a.close(), ...(pending ? [b.close()] : [])]); }
   });
 }
@@ -138,6 +148,9 @@ for (const [retryByErase, served] of [[false, false], [true, false], [false, tru
   await destination.callTool("lookup", {});
   assert.ok((await source.erase([target])).pending.some(copy => copy.sessionId === fork.id));
   await assert.rejects(destination.history(), { code: "unavailable" });
+  assert.equal(cancels, 0);
+  // Explicit cancellation may settle the job; a history retry cannot.
+  await destination.close();
   assert.equal(cancels, 1);
   await b.close();
   await a.close();
@@ -194,9 +207,19 @@ for (const pending of [false, true]) test(`erasure joins a live destination turn
     block = destination.id;
     const prompt = destination.prompt("running").then(result => result.text, () => undefined);
     await started.promise;
-    if (pending) assert.ok((await source.erase([target])).pending.some(copy => copy.sessionId === block));
+    if (pending) {
+      assert.ok((await source.erase([target])).pending.some(copy => copy.sessionId === block));
+      let aborted = false;
+      void cancelled.promise.then(() => { aborted = true; });
+      await assert.rejects(destination.setSetting("title", "not applied"), { code: "unavailable" });
+      assert.equal((await b.reconcileErasure({ sessions: [destination.id] }))[0].state, "busy");
+      assert.equal(aborted, false);
+      release.resolve();
+      assert.notEqual(await prompt, "must not escape");
+      return;
+    }
     let done = false;
-    const erasing = (pending ? destination.history() : source.erase([target])).finally(() => { done = true; });
+    const erasing = source.erase([target]).finally(() => { done = true; });
     await cancelled.promise;
     assert.equal(done, false);
     release.resolve();

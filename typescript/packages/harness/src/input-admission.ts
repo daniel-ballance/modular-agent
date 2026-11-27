@@ -193,6 +193,7 @@ export class InputAdmission {
 	releaseInput(s: Session, inputId: string, when: Exclude<InputTiming, "propose">, actorId: string, declined?: boolean): Promise<InputReceipt> {
 		return this.admit(s, async () => {
 			this.operations.requireAuthority(s, actorId, "input");
+			await this.operations.erasure().reconcilePending(s);
 			const q = s.proposals.get(inputId);
 			if (!q) throw Object.assign(new Error(`No open proposal ${inputId}`), { code: "conflict" });
 			const receipt = declined
@@ -256,6 +257,8 @@ export class InputAdmission {
 		});
 		await running?.done;
 		if (this.operations.interfaceTools().interfaceSources.size || s.hasWaitingApprovals) this.operations.turns().maybeContinueOpenCalls(s);
+		try { await this.operations.erasure().admitHistory(s); }
+		catch { return []; }
 		return handedBack;
 	}
 

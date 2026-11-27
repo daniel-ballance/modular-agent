@@ -9,6 +9,8 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { once } from "node:events";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -76,6 +78,42 @@ const checks = [
         if (peer.missing.length) return skip(`${peer.language} not built; build with: ${peer.build}`, "check");
         await checkOptions(peer.language, peer.command);
       }
+    },
+  },
+  {
+    name: "erasure-retry",
+    about: "Quiet erasure retry uses discovery or explicit session IDs and reports incomplete work.",
+    script: [],
+    async run(command, invoke, _skip, t) {
+      const help = await invoke(command, { args: ["erasure", "retry", "--help"] });
+      assert.equal(help.exit, 0, help.stderr);
+      assert.match(help.stdout, /Usage: ma erasure retry/);
+      const empty = await invoke(command, { args: ["erasure", "retry", "--discover"] });
+      assert.equal(empty.exit, 0, empty.stderr);
+      assert.equal(empty.stdout, "");
+      const missing = await invoke(command, { args: ["erasure", "retry", "--session", "absent", "--session", "absent"] });
+      assert.equal(missing.exit, 1, missing.stderr);
+      assert.deepEqual(JSON.parse(missing.stdout), {sessionId: "absent", state: "unavailable", erased: [], pending: []});
+      const token = join(t.project, "mock-history-token");
+      writeFileSync(token, "96760f4c96cc3921227fb3b21e801cd009deaa5a61b934de303ee1db41a03123", { mode: 0o600 });
+      const requests = [];
+      const service = createServer((req, res) => {
+        requests.push(req.url);
+        const route = new URL(req.url, "http://127.0.0.1").pathname;
+        res.writeHead(["/v1", "/v1/sessions"].includes(route) ? 200 : 404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(route === "/v1/sessions" ? { sessions: [] } : { binding: "modular-agent-history/1", ttlMs: 30_000, pendingErasure: 1 }));
+      });
+      service.listen(0, "127.0.0.1");
+      try {
+        await once(service, "listening");
+        const unsupported = await invoke(command, { args: ["erasure", "retry", "--discover"], env: {
+          MODULAR_AGENT_HISTORY_URL: `http://127.0.0.1:${service.address().port}`, MODULAR_AGENT_HISTORY_TOKEN_FILE: token,
+        } });
+        assert.equal(unsupported.exit, 1, unsupported.stderr);
+        assert.equal(unsupported.stdout, "");
+        assert.match(unsupported.stderr, /Pending erasure discovery requires a local registry or pendingErasureIndex: 1/);
+        assert.ok(requests.includes("/v1") && !requests.includes("/v1/pending-erasure"));
+      } finally { await new Promise(resolve => service.close(resolve)); }
     },
   },
   {

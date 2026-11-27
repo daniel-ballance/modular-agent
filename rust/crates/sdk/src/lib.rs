@@ -56,6 +56,7 @@ pub use agent::{
     Agent, AgentBuilder, Approval, ByteCapacity, ByteLimits, Capacity, Durability, ProcessPlugin,
     ResourceLimits, ServicePlugin, SessionOptions,
 };
+pub use agent_harness::{ErasureRetryReport, ErasureRetryState, ReconcileErasureOptions};
 pub use async_trait::async_trait;
 pub use chatgpt::{ChatGptOptions, ChatGptProvider, chatgpt};
 pub use claude::{ClaudeOptions, ClaudeProvider, claude};

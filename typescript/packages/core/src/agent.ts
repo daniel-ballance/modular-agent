@@ -498,9 +498,7 @@ export class Agent {
       isOpen: () => this.#open.get(id) === s,
       fork: async entry => {
         this.#check();
-        const at = entry ?? this.#api.session(id).position;
-        if (!at || !(await this.#api.readHistory(id, { all: true })).some(e => e.id === at)) throw new AgentError("not_found", "No entry to fork");
-        const fork = await checked(() => this.#api.forkSession(id, at));
+        const fork = await checked(() => this.#api.forkSession(id, entry));
         return this.openSession(fork);
       },
       close: async (actor, delegatedBy) => {
@@ -557,14 +555,24 @@ export class Agent {
     await checked(() => this.#api.waitForIdle(id));
     return session;
   }
+  async reconcileErasure(options: import("@modular-agent/harness").ReconcileErasureOptions = {}) {
+    this.#check();
+    return checked(() => this.#h.reconcileErasure(options));
+  }
   async sessions(filter?: { project?: string }): Promise<SessionListEntry[]> {
     this.#check();
     return checked(async () => {
       const stored = await this.#api.listSessions(filter?.project ? await realpath(filter.project) : null);
-      return Promise.all(stored.map(async ({ id }) => {
-        const { project, settings, updated } = await this.#savedSession(id);
+      const rows = await Promise.all(stored.map(async ({ id }) => {
+        const saved = await this.#savedSession(id).catch(error => {
+          if (error?.pendingErasure) return undefined;
+          throw error;
+        });
+        if (!saved) return undefined;
+        const { project, settings, updated } = saved;
         return { id, project, updated, model: parseModel(settings.model), title: typeof settings.title === "string" ? settings.title : undefined };
       }));
+      return rows.filter(row => row !== undefined);
     });
   }
   /** Inspect committed waits without opening a session, joining an actor or supplying presence. */
@@ -580,15 +588,22 @@ export class Agent {
     if (!/^[\w-]+$/.test(id)) throw new AgentError("invalid_params", "Invalid session id");
     return checked(() => this.#savedSession(id));
   }
-  async #savedSession(id: string): Promise<SessionInfo> {
+  async #savedSession(id: string, scopeOnly = false): Promise<SessionInfo> {
     const store = this.#h.use<HistoryStore>("history-store")!;
     const { meta, entries } = await store.load(id);
+    const tenant = (entries.find(e => e.kind === "tenant" && !e.erased)?.data as { tenant?: string } | undefined)?.tenant;
+    if (scopeOnly) return { ...meta, updated: 0, settings: {}, tenant };
+    const erased = new Set(entries.filter(e => e.erased).map(e => e.id));
+    const plans = store.historyErasure && (await store.historyErasure.read(id)).plans;
+    if (plans?.some(p => p.copies.some(c => !c.complete || !erased.has(c.entryId))) || store.pendingErasure?.intents().some(i =>
+      i.copies.some(c => c.sessionId === id && (!c.erased || !erased.has(c.id))))) {
+      throw Object.assign(new AgentError("unavailable", "Session has unresolved pending erasure"), { pendingErasure: true });
+    }
     const settings: Settings = {};
     for (const entry of entries) if (!entry.erased && entry.kind === "setting") {
       const change = entry.data as { key: string; value: unknown };
       settings[change.key] = change.value;
     }
-    const tenant = (entries.find(e => e.kind === "tenant" && !e.erased)?.data as { tenant?: string } | undefined)?.tenant;
     // Last activity is the last entry's time in append order. A tombstone has no time.
     const last = entries.at(-1);
     const updated = last?.erased ? 0 : last?.time ?? 0;
@@ -791,7 +806,7 @@ export class Agent {
       const inaccessible = () => new AgentError("forbidden", "Session is inaccessible");
       const authorize = async (id: string, tools = false) => {
         const owner = sessions.get(id) ?? this;
-        const saved = owner.#h.liveSessionInfo(id) ?? await this.sessionInfo(id).catch(error => {
+        const saved = owner.#h.liveSessionInfo(id) ?? await checked(() => this.#savedSession(id, true)).catch(error => {
           if (error instanceof AgentError && error.code === "not_found") throw inaccessible();
           throw error;
         });
@@ -864,7 +879,10 @@ export class Agent {
         const row = await this.#api.sessionSummary(id, {actor, allowJoin:true});
         if (!row || row.waiting.turn === "none" || !(scope?.allowTenant(row.tenant ?? null) ?? (row.tenant === undefined))) continue;
         if (row.waiting.turn === "running") { options.onResumeOpen?.(id, "skipped"); continue; }
-        const agent = await selectProject(project, id, await this.sessionInfo(id));
+        const agent = await selectProject(project, id, await this.#savedSession(id).catch(error => {
+          if (error?.pendingErasure) return this.#savedSession(id, true);
+          throw error;
+        }));
         let resumed: boolean;
         try { resumed = await agent.#h.withConnectionActor(actor, () => agent.#h.resumeInterruptedSession(id, actor)); }
         catch (error) { if ((error as {code?: string}).code !== "held") throw error; resumed = false; }
@@ -915,7 +933,7 @@ export class Agent {
             if (!id && !p.allowProject(this.#project)) fail("not_found");
             const owner = id && sessions.get(id) || this;
             const live = id ? owner.#h.liveSessionInfo(id) : undefined;
-            const saved = id && !live ? await owner.sessionInfo(id).catch(e => {
+            const saved = id && !live ? await checked(() => owner.#savedSession(id, true)).catch(e => {
               if (e.code === "not_found" || e.cause?.code === "ENOENT") fail("not_found"); throw e;
             }) : undefined;
             const info = live ?? saved;

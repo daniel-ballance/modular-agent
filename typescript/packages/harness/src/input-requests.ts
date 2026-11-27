@@ -26,7 +26,7 @@ interface InputRequestsOperations {
 	questionsOutlastTurns(): boolean;
 	approvalPass(): Pick<AsyncLocalStorage<{ callId: string; attempt: string; inherited?: { toolCallId: string; requestId: string; actorId: string }; allow?: { toolCallId: string; requestId: string; actorId: string } }>, "getStore">;
 	gateSignal(): Pick<AsyncLocalStorage<AbortSignal | undefined>, "getStore">;
-	erasure(): Pick<SessionErasure, "admitHistory">;
+	erasure(): Pick<SessionErasure, "admitHistory" | "reconcilePending">;
 	newId(): string;
 	findTool(s: Session | undefined, name: string): { plugin: string; source: ToolSource; definition: ToolDefinition } | undefined;
 	modelGate(): Pick<AsyncLocalStorage<{ response: HistoryEntry; actorId: string; turnId: string; callId: string }>, "getStore">;
@@ -393,7 +393,6 @@ export class InputRequests {
 	}
 
 	async submitAnswer(s: Session, answer: Answer, handle?: object): Promise<{ accepted: boolean; reason?: string }> {
-		await this.operations.erasure().admitHistory(s);
 		if (resourceBytes(answer) + 2048 > this.operations.reservations().limits.settlementBytes) throw failure("result_too_large", "Answer exceeds reserved capacity");
 		const find = () => s.requests.get(answer.requestId)?.request ?? this.waitingRequests(s).find(r => r.id === answer.requestId);
 		const may = (request: InputRequest) => this.mayAnswer(s, request, answer.actorId) &&
@@ -401,6 +400,8 @@ export class InputRequests {
 		const request = find();
 		if (!request || !may(request)) return { accepted: false };
 		if (request.approvalWait) return this.operations.approvals().decideWaiting(s, request, answer, handle);
+		await this.operations.erasure().reconcilePending(s);
+		if (!find() || !isDeepStrictEqual(find(), request)) return { accepted: false };
 		if (request.kind === "secret" && !answer.declined) {
 			const store = this.secretStore();
 			if (!store || !request.credential || typeof answer.value !== "string") return { accepted: false };

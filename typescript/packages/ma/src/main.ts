@@ -153,7 +153,12 @@ async function main(argv: string[]) {
   if (process.platform !== "linux" && process.platform !== "darwin") throw new Error("ma supports only Linux and macOS");
   const p = paths(), auth = new AuthFile(p.config);
   if (["login", "logout", "auth"].includes(argv[0])) return authCommand(argv, auth, identity);
-  const opts = parse(argv);
+  const erasure = argv[0] === "erasure";
+  if (erasure && argv[1] === "retry" && ["--help", "-h"].includes(argv[2])) {
+    console.log("Usage: ma erasure retry [--session ID]... [--discover]");
+    return 0;
+  }
+  const opts = parse(erasure ? [] : argv);
   if (opts.help) { console.log(HELP); return 0; }
   if (opts.version) { console.log(`ma ${version} (typescript)`); return 0; }
   const serving = opts.acp || opts.agui;
@@ -179,6 +184,27 @@ async function main(argv: string[]) {
     process.env.MODULAR_AGENT_HISTORY_TOKEN_FILE ?? "") : undefined;
   const base = { agentName: "ma", durability: opts.runtime === "durable" ? "durable" as const : "kept" as const, history, dataDir: p.state,
     resourceReservations: policy.resourceReservations };
+  if (erasure) {
+    if (argv[1] !== "retry") throw new Error("expected ma erasure retry");
+    const sessions: string[] = [];
+    let discover = false;
+    for (let i = 2; i < argv.length; ++i) {
+      const flag = argv[i];
+      if (flag === "--discover") discover = true;
+      else if (flag === "--session") {
+        if (++i === argv.length) throw new Error("--session needs a value");
+        sessions.push(argv[i]);
+      } else throw new Error(`unknown erasure retry argument ${flag}`);
+    }
+    if (!discover && !sessions.length) throw new Error("supply --session or --discover");
+    const agent = await createAgent({ ...base, project });
+    try {
+      const reports = await agent.reconcileErasure({ sessions, discover });
+      for (const report of reports) console.log(JSON.stringify(report));
+      if (reports.some(r => r.state !== "complete")) throw new Error("Erasure is not complete for every session");
+      return 0;
+    } finally { await agent.close(); }
+  }
   const settingsPath = join(p.config, "settings.json");
   const global = await optionalJson(settingsPath);
   const approval = opts.approval ?? (global.approval === undefined ? undefined : approvalPolicy(global.approval, settingsPath));

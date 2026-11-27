@@ -6,9 +6,19 @@ pub(super) fn check_append_plans(
     entries: &[Value],
 ) -> Result<()> {
     let settlement = |entry: &Value| {
+        if entry.get("sources").is_some()
+            || entry.get("message").is_some()
+            || entry["modelVisible"] != false
+        {
+            return false;
+        }
+        if matches!(
+            entry["kind"].as_str(),
+            Some("actorJoined" | "actorLeft" | "limit" | "inputHandedBack")
+        ) {
+            return true;
+        }
         entry["jobId"].is_string()
-            && entry.get("sources").is_none()
-            && entry["modelVisible"] == false
             && (entry["kind"] == "jobCleanupUnconfirmed"
                 || entry["kind"] == "jobEnded"
                     && entry["data"]["report"] == false
@@ -95,10 +105,48 @@ impl HttpHistory {
                     registry_unavailable("erasure bookkeeping does not match the plan")
                 );
             }
-            let entries = staged.entries[data.entries.len()..]
+            let mut entries = staged.entries[data.entries.len()..]
                 .iter()
                 .map(|entry| portable::entry(entry, &staged))
                 .collect::<Result<Vec<_>>>()?;
+            let mut erase: Vec<_> = pending.iter().map(|id| json!(id)).collect();
+            // The service owns the tombstone marker. First commit payload-free
+            // terminal envelopes and remember their IDs in the erasure record.
+            if let Some((book, settlements)) = entries.split_last_mut() {
+                for entry in settlements
+                    .iter_mut()
+                    .filter(|entry| entry["erased"] == true)
+                {
+                    let envelope = entry.as_object_mut().unwrap();
+                    envelope.remove("erased");
+                    envelope.remove("sources");
+                    erase.push(entry["id"].clone());
+                }
+                book["data"]["entryIds"] = json!(
+                    targets
+                        .iter()
+                        .map(|id| json!(id))
+                        .chain(erase.iter().skip(pending.len()).cloned())
+                        .collect::<Vec<_>>()
+                );
+            } else if let Some(book) = raw.iter().find(|entry| entry["id"] == plan.record_id) {
+                erase.extend(
+                    book["data"]["entryIds"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|id| {
+                            !targets.iter().any(|target| *id == target)
+                                && raw.iter().any(|entry| {
+                                    entry["id"] == **id
+                                        && entry.get("data").is_none()
+                                        && entry.get("message").is_none()
+                                        && entry.get("sources").is_none()
+                                })
+                        })
+                        .cloned(),
+                );
+            }
             write(&data, &staged, &mut || {
                 if !entries.is_empty() {
                     state.acquire(self.ttl)?;
@@ -113,7 +161,7 @@ impl HttpHistory {
                 self.writer_post(
                     &state,
                     &["v1", "sessions", session, "erase"],
-                    json!({"lease":lease,"entryIds":pending}),
+                    json!({"lease":lease,"entryIds":erase}),
                 )?;
                 let (actual, raw) = self.fetch(session)?;
                 let verified: Vec<_> = pending

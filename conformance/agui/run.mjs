@@ -13,12 +13,13 @@ import { advanced } from './advanced.mjs';
 import { cases as basic, offer } from './cases.mjs';
 import { closures } from './closures.mjs';
 import { receipts } from './receipts.mjs';
+import { erasureRetry } from './erasure.mjs';
 import { waiting } from './waiting.mjs';
 import { at, deadline } from './wire.mjs';
 
 import { openPolicy } from "./open-policy.mjs";
 
-const cases = { ...basic, ...advanced, ...waiting, ...closures, ...receipts, "join-on-open": openPolicy };
+const cases = { ...basic, ...advanced, ...waiting, ...closures, ...receipts, "erasure-retry": erasureRetry, "join-on-open": openPolicy };
 const roles = ['owner', 'rotated', 'sibling', 'foreign', 'watch', 'tenant', 'project', ...openPolicy.roles.filter(role => role !== 'foreign')];
 const usage = `node run.mjs [--only CASE[,CASE...]] -- /absolute/path/to/fixture [args...]
 node run.mjs --only CASE --url ORIGIN --token-file FILE [--ROLE-token-file FILE ...]

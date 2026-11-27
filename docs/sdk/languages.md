@@ -15,6 +15,7 @@ How each language expresses the [API](api.md). The rule is the same throughout: 
 | Errors | `Result<T, modular_agent::Error>` | thrown `AgentError` |
 | Error code | `error.code()`, an enum | `error.code`, a string union |
 | `lastTurn()` | `session.last_turn().await`: `Result<Option<PromptResult>>` | `session.lastTurn(): Promise<PromptResult \| undefined>` |
+| Retry pending erasure as operator | `Agent::reconcile_erasure(ReconcileErasureOptions { sessions, discover })` | `agent.reconcileErasure({ sessions?, discover? })` |
 | Last activity from `sessions()` and `sessionInfo(id)` | `SessionInfo.last_active` (`u64`), `0` for no last activity | `SessionListEntry.updated` and `SessionInfo.updated` (`number`), `0` for no last activity |
 | Optional arguments | builder methods | an options object |
 | Closed sets of values | enums with an `Unknown(String)` variant where shared data keeps unknown values | string unions |

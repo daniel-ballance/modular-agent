@@ -419,7 +419,7 @@ impl Service {
         }
         let open = self.h().open_session_ids().iter().any(|s| s == id);
         let data = if open {
-            self.h().snapshot(id)?
+            self.h().authority_snapshot(id)?
         } else {
             self.agent
                 .inner
@@ -536,7 +536,6 @@ impl Service {
                 {
                     return Err(Fail::Invalid);
                 }
-                self.watch(&a, id)?;
                 self.h().settings(
                     &scope(id, a.id()),
                     base::portable::settings_from_wire(&change),

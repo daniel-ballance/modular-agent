@@ -73,7 +73,19 @@ async fn job_cleanup_is_required_for_direct_and_pending_erasure() -> Result<()> 
                 assert!(!report.pending.is_empty());
             }
             let found = dest.history().await;
-            if confirm {
+            if pending {
+                assert_eq!(found.err().unwrap().code(), Code::Unavailable);
+                let result = b
+                    .as_ref()
+                    .unwrap()
+                    .reconcile_erasure(modular_agent::ReconcileErasureOptions {
+                        sessions: vec![dest.id().into()],
+                        discover: false,
+                    })
+                    .await?;
+                assert_eq!(result[0].state, modular_agent::ErasureRetryState::Busy);
+                assert_eq!(cancels.load(Ordering::SeqCst), 0);
+            } else if confirm {
                 let found = found?;
                 assert!(found.iter().any(|e| e["kind"] == "jobEnded"));
                 assert!(!json!(found).to_string().contains("erase this"));
@@ -82,7 +94,13 @@ async fn job_cleanup_is_required_for_direct_and_pending_erasure() -> Result<()> 
             }
             assert_eq!(
                 cancels.load(Ordering::SeqCst),
-                if !pending && !confirm { 2 } else { 1 }
+                if pending {
+                    0
+                } else if confirm {
+                    1
+                } else {
+                    2
+                }
             );
             let _ = a.close().await;
             if let Some(b) = b {
@@ -290,6 +308,22 @@ async fn active_destination_turns_stop_before_direct_erasure_and_reconciliation(
             barrier.started.notified().await;
             let report = source.erase(vec![target]).await?;
             assert!(!report.erased.is_empty());
+            if pending {
+                assert!(dest.set_setting("title", json!("not applied")).is_err());
+                let operator = b.as_ref().unwrap();
+                let reports = operator
+                    .reconcile_erasure(modular_agent::ReconcileErasureOptions {
+                        sessions: vec![dest.id().into()],
+                        discover: false,
+                    })
+                    .await?;
+                assert_eq!(reports[0].state, modular_agent::ErasureRetryState::Busy);
+                let _ = dest.cancel().await;
+                let _ = prompt.await;
+                operator.close().await?;
+                a.close().await?;
+                return Ok(());
+            }
             let rows = dest.history().await?;
             assert!(!json!(rows).to_string().contains("must not escape"));
             assert!(!json!(rows).to_string().contains("erase this"));

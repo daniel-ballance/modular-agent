@@ -21,6 +21,8 @@ interface ApprovalOperations {
 	emitAnswer(s: Session, request: InputRequest, answer: Answer, late: boolean): void;
 	toolDisposition(call: ToolCall, status: string): void;
 	maybeContinueOpenCalls(s: Session, trace?: ReturnType<typeof currentSpan>): void;
+	retryErasure(s: Session): Promise<string>;
+	checkErasure(s: Session): Promise<string>;
 	problem(plugin: string, where: string, error: unknown): void;
 	intersectRights(...ceilings: readonly Authority[][]): Authority[];
 }
@@ -47,10 +49,6 @@ export class ApprovalReconciliation {
 
 	clear(s: Session): void {
 		clearTimeout(this.approvalTimer.get(s));
-		this.invalidateDeliveries(s);
-	}
-
-	invalidateDeliveries(s: Session): void {
 		this.approvalDeliveries.delete(s);
 	}
 
@@ -158,7 +156,6 @@ export class ApprovalReconciliation {
 	async decideWaiting(s: Session, request: InputRequest, answer: Answer, handle?: object) {
 		const span = startOperation("modular_agent.question.answer", { ...conversation(s.id), "modular_agent.turn.id": request.turnId });
 		const decide = async () => {
-			await this.reconcileApprovals(s);
 			const w = waitingApprovals(s).get(request.toolCallId!);
 			const submittedBy = answer.delegatedBy ?? answer.actorId;
 			const deliveries = this.approvalDeliveries.get(s);
@@ -167,10 +164,17 @@ export class ApprovalReconciliation {
 			for (const d of deliveries ?? []) {
 				if (d.handle !== handle || d.entryId !== w.entry.id || d.actorId !== answer.actorId || d.submittedBy !== submittedBy) continue;
 				const policy = this.approvalRoutes.get(d.routeId);
-				if (d.present() && policy && await this.unchanged(w, policy, answer.actorId)) { delivery = d; route = policy; break; }
+				if (d.present() && policy) {
+					const cap = this.approvalRights(s, w, policy, answer.actorId, submittedBy);
+					if (cap.includes("watch") && cap.includes("approve")) { delivery = d; route = policy; break; }
+				}
 				deliveries!.delete(d);
 			}
 			if (!delivery || !route) return { accepted: false };
+			const freshness = await this.operations.retryErasure(s);
+			const current = waitingApprovals(s).get(request.toolCallId!);
+			if (!current || current.entry.id !== w.entry.id || !sameJson(current.binding, w.binding) || !this.validWait(s, current) ||
+				!await this.unchanged(current, route, answer.actorId)) return { accepted: false };
 			const acceptedRoute = route, delivered = delivery;
 			const rights = () => this.approvalRights(s, w, acceptedRoute, answer.actorId, submittedBy);
 			const proof = { requestEntryId: w.entry.id, routeId: route.id, submittedBy, rights: rights() };
@@ -179,7 +183,8 @@ export class ApprovalReconciliation {
 			const drafts: EntryDraft[] = [{ id, kind: "inputAnswer", writer: "harness", modelVisible: false, actorId: answer.actorId, requestId: request.id,
 				toolCallId: request.toolCallId, turnId: request.turnId, stepId: w.entry.stepId, sources: [w.entry.id], data: body }];
 			if (answer.declined) drafts.push(this.approvalResult(s, w, "refused", "The approver declined", id));
-			const entries = await this.operations.commit(s, drafts, false, () => {
+			const entries = await this.operations.commit(s, drafts, false, async () => {
+				if (await this.operations.checkErasure(s) !== freshness) return false;
 				const current = waitingApprovals(s).get(request.toolCallId!);
 				proof.rights = rights();
 				return !s.suspended && !s.closing && !s.erasing && !s.moving && this.approvalRoutes.get(acceptedRoute.id) === acceptedRoute && deliveries!.has(delivered) && delivered.present() &&

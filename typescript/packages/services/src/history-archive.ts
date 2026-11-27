@@ -73,6 +73,7 @@ export class HistoryArchive {
 				if (this.local.get(id) === owner) this.local.delete(id);
 			},
 			append: (id, batch) => checked({ kind: "local", owner, call: ["append", id, batch] }),
+			erasureTenant: id => checked({ kind: "local", owner, call: ["erasureTenant", id] }),
 			load: id => checked({ kind: "local", owner, call: ["load", id] }),
 			list: filter => checked({ kind: "local", owner, call: ["list", filter] }),
 			erase: (id, targets) => checked({ kind: "local", owner, call: ["erase", id, targets] }),

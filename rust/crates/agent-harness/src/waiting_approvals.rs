@@ -670,8 +670,19 @@ impl Harness {
         route: &ApprovalRoute,
         answer: Option<(bool, Option<String>)>,
     ) -> Result<bool> {
-        self.reconcile_approvals(session, false)?;
-        let data = self.snapshot(session)?;
+        let data = if answer.is_some() {
+            // Only recorded binding and authority are inspected before the retry.
+            self.sessions
+                .lock()
+                .unwrap()
+                .get(session)
+                .ok_or(super::SessionNotOpen)?
+                .data
+                .clone()
+        } else {
+            self.reconcile_approvals(session, false)?;
+            self.snapshot(session)?
+        };
         let branch = data.branch();
         let Some(entry) = request(&branch, id) else {
             return Ok(false);
@@ -681,6 +692,28 @@ impl Harness {
         {
             return Ok(false);
         }
+        if answer.is_some() {
+            let permitted =
+                self.route_ceiling(&data, &route.binding, &route.principal, &route.actor);
+            if route.live.is_cancelled()
+                || !eligible(&self.approval_rights(
+                    &data,
+                    &q,
+                    &route.actor,
+                    &route.principal,
+                    &route.ceiling.intersect(&permitted),
+                )?)
+            {
+                return Ok(false);
+            }
+            self.retry_open_erasure(session).await?;
+            let current = self.snapshot(session)?;
+            if !request(&current.branch(), id).is_some_and(|e| e.id == entry.id)
+                || !binding(&current, &entry, &q)
+            {
+                return Ok(false);
+            }
+        }
         let unchanged = self
             .unchanged_approval(&q, &route.actor, &route.binding)
             .await;
@@ -689,7 +722,7 @@ impl Harness {
             .get_mut(session)
             .ok_or_else(|| anyhow!("session is closed"))?;
         self.check_open_writer(open)?;
-        self.refresh_open_erasure(open)?;
+        self.check_open_erasure(open)?;
         self.reconcile_open_approvals(open, false)?;
         let key = (route.instance.clone(), id.to_owned());
         open.approval_views

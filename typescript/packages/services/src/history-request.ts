@@ -6,7 +6,7 @@ import type { HistoryLeases, Lease } from "./history-leases.js";
 
 type PageQuery = { after?: string; limit: number; project?: string };
 export type HistoryRequest = PageQuery & {
-	op: "list" | "session" | "acquire" | "renew" | "release" | "append" | "erase" | "plans" | "complete";
+	op: "list" | "session" | "acquire" | "renew" | "release" | "append" | "erase" | "plans" | "complete" | "index";
 	method: string; sid: string; param: string; raw: Uint8Array; revisionHeaders?: string[];
 };
 export type HistoryReply = { json: string; grant?: Lease; noStore?: boolean };
@@ -124,6 +124,7 @@ export async function historyRequest(request: HistoryRequest, ttlMs: number, pro
 			result = { kept };
 			break;
 		}
+		case "index": return { json: records!.pendingIndex(after, limit), noStore: true };
 		case "plans": {
 			if (reading) {
 				return { json: records!.plans(sid, after, limit), noStore: true };

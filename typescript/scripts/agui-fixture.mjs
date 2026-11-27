@@ -141,7 +141,7 @@ const provider = closure ? {...script, request:(model,request,cx)=>{
 }} : state ? { ...script, async request(...args) { const m = await script.request(...args); return { ...m, providerData:'provider-only-sentinel' }; } } : script;
 const agent = await createAgent({ project, severalActors: true, sessionLimits: true, tenants: { kit: {rights} }, environment: memoryEnvironment(), runtime,
   durability: durable ? 'durable' : 'kept', dataDir, interfaceTools: [source], plugins, approval: name.startsWith('waiting-mixed') ? 'ask' : waiting || name.startsWith('approval') || ['closure-presence','closure-routes'].includes(name) ? 'all' : 'off',
-  approvalCoversNested: waiting || name.startsWith('approval'),
+  approvalCoversNested: waiting || name.startsWith('approval') || name === 'erasure-retry',
   ...(closure && {questionsOutlastTurns:true}),
   ...(waiting ? { questionsOutlastTurns:true, maxApprovalWaitMs:5000 } : {}),
   settings:{approvalWaitMs:5000, ...(waiting && name !== 'waiting-live' ? {approvalWait:'untilDeadline'} : {})}, providers:[provider] });
@@ -162,7 +162,7 @@ if (tls) {
 const listener = await agent.serveAgui({ listen: env.MA_AGUI_LISTEN, actors, tenant: 'kit', acp: true, tls:tlsOptions,
   statePlugin: state ? {name:'kit',snapshot} : undefined, rawSources: {kit:'kit'}, traceStateVendors:['kit'], onWarning: field => warnings.push(field) });
 const auth = createHash('sha256').update('Bearer '+(await readFile(controlTokenFile,'utf8')).trim()).digest();
-async function control({operation,threadId:id,name:at,milliseconds,client,mode,kind,runId,requestId,right,cursor}) {
+async function control({operation,threadId:id,name:at,milliseconds,client,mode,kind,runId,requestId,right,cursor,entryIds}) {
   if (operation === 'tls') return tls.client;
   if (!/^[\w-]+$/.test(id)) throw Error('invalid session');
   const session = sessions.get(id);
@@ -174,6 +174,13 @@ async function control({operation,threadId:id,name:at,milliseconds,client,mode,k
       const spans = captured.filter(s => s.attributes['gen_ai.conversation.id'] === id).map(s => ({name:s.name,...s.spanContext(),
         parentSpanId:s.parentSpanContext?.spanId, attributes:s.attributes, links:s.links.map(l => l.context)}));
       return {project, batches, counter: (await readFile(join(dataDir,'counter')).catch(e => { if (e.code !== 'ENOENT') throw e; return ''; })).length, dispatches:await lines(join(dataDir,`${id}.dispatches`)), model:await lines(env.MODULAR_AGENT_SCRIPT_LOG), warnings, spans, erasure:erasures.get(id) ?? {outOfReach:[]}};
+    }
+    case 'storedEntries': return { entries: (await store.load(id)).entries };
+    case 'markPending': {
+      const registry = store.pendingErasure;
+      await registry.exclusive(async () => registry.keep({ id: randomUUID(), sessionId: id,
+        targets: entryIds, actorId: 'kit-owner', copies: entryIds.map(idOfEntry => ({ sessionId: id, id: idOfEntry, erased: false })) }));
+      return {};
     }
     case 'openWait': {
       // Use a real turn so leaveOpen can park its call and continue it after the decision.

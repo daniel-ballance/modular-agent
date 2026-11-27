@@ -45,6 +45,7 @@ export function lifecycleHistory(
 				writerSignal: id => staged.has(id) ? undefined : store.writerSignal?.(id),
 				checkWriter: id => { if (!staged.has(id)) store.checkWriter?.(id); },
 				load: store.load.bind(store),
+				erasureTenant: store.erasureTenant?.bind(store),
 				list: store.list.bind(store),
 				erase: store.erase?.bind(store),
 			};

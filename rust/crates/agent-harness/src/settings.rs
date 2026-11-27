@@ -4,6 +4,7 @@ use agent_api::*;
 impl Harness {
     pub(super) fn change_settings(&self, scope: &Scope, patch: Value) -> Result<Value> {
         require(self, scope, "settings")?;
+        self.retry_open_erasure_now(&scope.session)?;
         self.validate_approval_wait(&patch)?;
         ensure!(
             patch

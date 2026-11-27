@@ -497,6 +497,15 @@ pub struct Job {
     pub state: JobState,
     pub result: Option<TurnResult>,
 }
+pub fn erasure_control_record(entry: &Entry) -> bool {
+    !entry.visible
+        && entry.copies.is_empty()
+        && matches!(
+            entry.kind.as_str(),
+            "actor.grant" | "actor.left" | "limit" | "input.returned" | "input.withdrawn"
+        )
+}
+
 pub fn erasure_job_settlement(entry: &Entry) -> bool {
     entry.scope.job.is_some()
         && entry.copies.is_empty()

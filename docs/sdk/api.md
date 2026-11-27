@@ -75,6 +75,7 @@ There is no `createAgent` switch to turn tracing on or off. Without an OpenTelem
 | `openSession(id)` | an existing Session, reopened. It installs interrupted work for recovery, as the Runtime declares, before admitting fresh work. An embedded agent MAY wait for the recovered work before returning; `serveAcp` MUST NOT, as [ACP](../bindings/acp.md#sessions) requires. |
 | `sessions(filter?)` | stored sessions, without opening them or starting recovery: id, canonical project, selected model, title if any, last activity |
 | `sessionSummary(id, viewer)` | Read a kept session without opening it. Return its id, canonical project, last change time and per-viewer waiting summary, or no result for an inaccessible or missing session. Apply the viewer's scope, grant, rights ceiling and executor route. Do not register presence or start recovery. |
+| `reconcileErasure({ sessions?, discover? })` | operator retry for named sessions and sessions discovered from the authoritative registry or HTTP index; no replay or wait for another writer |
 | `sessionInfo(id)` | one stored session's project, settings, creation time and last activity, without opening it or starting recovery |
 | `declaration()` | what this agent supports, as a [Declaration](../contracts.md#declaration) |
 | `models()` | the models its Providers offer, as ModelInfo |
@@ -82,6 +83,8 @@ There is no `createAgent` switch to turn tracing on or off. Without an OpenTelem
 | `connectInterfaceTools(sessionId, { actor, routeId, onHandoff, defer? })` | a handle for a trusted binding's authenticated executor in an open session. The binding checks project and tenant scope before connecting. The handle does not join an actor or grant rights. |
 | `serveAcp(options?)` | serves the agent over [ACP](../bindings/acp.md). On stdio it returns when the client disconnects. With `listen`, `actors` and optional `tls`, it returns a listener with `url` and `close()` once ready ([Placement](placement.md#the-whole-agent)). See composition options below. |
 | `close()` | closes open sessions, stops plugins in reverse load order and releases what it holds |
+
+`reconcileErasure` returns one `{ sessionId, state, erased, pending }` report per candidate. `state` is `complete`, `pending`, `busy`, `lost`, `outOfScope` or `unavailable`. `erased` and `pending` are entry ID lists subject to recipient scope; out-of-scope reports have empty lists. Without the HTTP index, discovery does not scan history. A Harness may offer an operator `erasureSweep` option to drive the same primitive; it is off by default and is not a session setting.
 
 `sessions(filter?)` and `sessionInfo(id)` both report last activity as the time of the last entry in the order the entries were stored. Both report `0` when the session has no entries or its last entry is erased. A [tombstone](../bindings/data.md#entry-fields-and-tombstones) has no time, so neither operation uses an earlier entry's time or the session's creation time instead.
 

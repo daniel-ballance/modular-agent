@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createReadStream, appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import { erasedEntry, filePendingErasure, type HistoryEntry, type HistoryStore, type Plugin, type StoredSession } from "@modular-agent/harness";
 
 type Line =
@@ -175,6 +176,26 @@ export class JsonlHistoryStore implements HistoryStore {
 		return this.read(this.find(id));
 	}
 
+	private async prefix(path: string, count: number): Promise<Line[]> {
+		const input = createReadStream(path, { encoding: "utf8" });
+		const reader = createInterface({ input, crlfDelay: Infinity });
+		const rows: Line[] = [];
+		try {
+			for await (const line of reader) {
+				rows.push(JSON.parse(line) as Line);
+				if (rows.length === count) break;
+			}
+		} finally { reader.close(); input.destroy(); }
+		return rows;
+	}
+	async erasureTenant(id: string): Promise<string | undefined> {
+		this.pendingErasure.check();
+		const [, first] = await this.prefix(this.find(id), 2);
+		if (first?.type !== "entry" || first.entry.kind !== "tenant") return;
+		const tenant = (first.entry.data as { tenant?: unknown } | undefined)?.tenant;
+		if (first.entry.erased || typeof tenant !== "string") throw Object.assign(new Error("Invalid tenant setup record"), { code: "unavailable" });
+		return tenant;
+	}
 	async list(filter?: { project?: string }): Promise<StoredSession[]> {
 		this.pendingErasure.check();
 		if (!existsSync(this.dir)) return [];
@@ -185,9 +206,8 @@ export class JsonlHistoryStore implements HistoryStore {
 			if (!existsSync(path)) continue;
 			for (const file of readdirSync(path).filter((f) => f.endsWith(".jsonl"))) {
 				try {
-					const first = readFileSync(join(path, file), "utf8").split("\n", 1)[0];
-					const line = JSON.parse(first) as Line;
-					if (line.type === "session") out.push(line.meta);
+					const [line] = await this.prefix(join(path, file), 1);
+					if (line?.type === "session") out.push(line.meta);
 				} catch {
 					/* skip unreadable files */
 				}

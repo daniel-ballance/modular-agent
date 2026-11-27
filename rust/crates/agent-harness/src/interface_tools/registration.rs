@@ -511,7 +511,7 @@ impl Harness {
             .get_mut(&connection.session)
             .ok_or_else(|| anyhow!("session is closed"))?;
         self.check_open_writer(open)?;
-        self.refresh_open_erasure(open)?;
+        self.check_open_erasure(open)?;
         Ok((same_authority_record(&open.data, &data, &handoff.scope)
             && !open.cancel.is_cancelled()
             && !connection.generation.is_cancelled()

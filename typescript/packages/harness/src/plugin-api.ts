@@ -113,7 +113,7 @@ export interface PluginApi {
 	/** Sessions in this project, another project, or every project (null). */
 	listSessions(project?: string | null): Promise<StoredSession[]>;
 	sessionSummary(id: string, viewer: ListingViewer): Promise<SessionSummary | undefined>;
-	forkSession(sessionId: string, entryId: string): Promise<string>;
+	forkSession(sessionId: string, entryId?: string): Promise<string>;
 	closeSession(sessionId: string, actorId?: string, delegatedBy?: string, authority?: readonly Authority[]): Promise<void>;
 	sessionInterruption(sessionId: string): AbortSignal;
 	sessionClosed(sessionId: string): AbortSignal;

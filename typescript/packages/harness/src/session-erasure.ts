@@ -16,6 +16,9 @@ interface ErasureOperations {
 	providers(): Provider[];
 	checkWriter(s: Session): void;
 	settleJobs(s: Session): Promise<boolean>;
+	jobsRunning(s: Session): boolean;
+	inScope(project: string, tenant?: string): boolean;
+	withQuietWriter<T>(id: string, work: () => Promise<T>): Promise<T>;
 	invalidateErasedHandoffs(s: Session, ids: string[]): Promise<void>;
 	commitNow(s: Session, drafts: EntryDraft[]): Promise<unknown>;
 	write(s: Session, write: () => Promise<void> | undefined): Promise<void>;
@@ -25,6 +28,14 @@ interface ErasureOperations {
 	newId(): string;
 	problem(source: string, where: string, error: unknown): void;
 	actorRights(s: Session, actor: string): Authority[];
+}
+
+export interface ReconcileErasureOptions { sessions?: readonly string[]; discover?: boolean }
+export interface ErasureRetryReport {
+	sessionId: string;
+	state: "complete" | "pending" | "busy" | "lost" | "outOfScope" | "unavailable";
+	erased: string[];
+	pending: string[];
 }
 
 export class SessionErasure {
@@ -103,17 +114,98 @@ export class SessionErasure {
 
 	async reconcilePending(s: Session): Promise<string> {
 		const remote = this.httpErasure();
+		if (s.running || s.erasing || s.outsideTools || s.moving || s.settling || this.operations.jobsRunning(s)) return this.admitHistory(s);
 		if (remote && !s.provisional) {
 			const { plans } = await remote.read(s.id);
-			for (const plan of plans) if (plan.copies.some(c => !c.complete)) await this.completeHttpErasure(s, plan);
+			for (const plan of plans) if (plan.copies.some(c => !c.complete)) await this.completeHttpErasure(s, plan, "harness", false);
 			return this.admitHistory(s);
 		}
 		for (const intent of this.pendingRegistry()?.intents() ?? []) {
 			if (intent.copies.some(copy => copy.sessionId === s.id && !copy.erased)) {
-				await this.reconcileErasure(s, intent.id);
+				await this.reconcileErasure(s, intent.id, undefined, false);
 			}
 		}
 		return this.checkPending(s);
+	}
+
+	async retrySessions(options: ReconcileErasureOptions): Promise<ErasureRetryReport[]> {
+		const ids = new Set(options.sessions);
+		const remote = this.httpErasure();
+		if (options.discover) {
+			if (remote?.discover) for (const id of await remote.discover()) ids.add(id);
+			else {
+				const registry = this.operations.store()?.pendingErasure;
+				if (!registry) throw failure("unavailable", "Pending erasure discovery requires a local registry or pendingErasureIndex: 1");
+				for (const intent of registry.intents()) for (const copy of intent.copies) if (!copy.erased) ids.add(copy.sessionId);
+			}
+		}
+		const reports = [];
+		for (const id of [...ids].sort()) reports.push(await this.retrySession(id));
+		return reports;
+	}
+
+	private async retrySession(id: string): Promise<ErasureRetryReport> {
+		const report: ErasureRetryReport = { sessionId: id, state: "unavailable", erased: [], pending: [] };
+		const store = this.operations.store();
+		let view: Session | undefined;
+		const remote = this.httpErasure();
+		const copies = async () => remote
+			? (await remote.read(id)).plans.flatMap(p => p.copies.map(c => ({ id: c.entryId, erased: c.complete })))
+			: (this.pendingRegistry()?.intents() ?? []).flatMap(intent => intent.copies.filter(c => c.sessionId === id));
+		const reconcile = async (s: Session, stored: boolean) => {
+			if (!stored && (s.running || s.erasing || s.outsideTools || s.moving || s.settling || s.reopening || this.operations.jobsRunning(s))) {
+				report.state = "busy";
+				return;
+			}
+			this.operations.checkWriter(s);
+			if (stored) {
+				if (remote) {
+					for (const plan of (await remote.read(id)).plans) if (plan.copies.some(c => !c.complete)) await this.completeHttpErasure(s, plan);
+				} else {
+					for (const intent of this.pendingRegistry()?.intents() ?? []) if (intent.copies.some(c => c.sessionId === id && !c.erased)) await this.reconcileErasure(s, intent.id);
+				}
+				await this.admitHistory(s);
+			} else await this.reconcilePending(s);
+			this.operations.checkWriter(s);
+			report.state = "complete";
+		};
+		try {
+			const live = this.operations.sessions.get(id);
+			if (live?.ephemeral) {
+				if (!this.operations.inScope(live.meta.project, live.tenant)) { report.state = "outOfScope"; return report; }
+			} else {
+				if (!store) return report;
+				const meta = (await store.list()).find(row => row.id === id);
+				if (!meta) return report;
+				if (!this.operations.inScope(meta.project)) { report.state = "outOfScope"; return report; }
+				if (!store.erasureTenant) return report;
+				if (!this.operations.inScope(meta.project, await store.erasureTenant(id))) { report.state = "outOfScope"; return report; }
+			}
+			view = live ?? await this.operations.loadInto(id);
+			if (!view) return report;
+			if (!this.operations.inScope(view.meta.project, view.tenant)) {
+				report.state = "outOfScope";
+				return report;
+			}
+			if (!(await copies()).some(c => !c.erased)) report.state = "complete";
+			else if (live) await reconcile(live, false);
+			else await this.operations.withQuietWriter(id, async () => {
+				const s = await this.operations.loadInto(id);
+				if (s) await reconcile(s, true);
+			});
+		} catch (error) {
+			const code = (error as {code?: string}).code;
+			report.state = code === "held" || code === "busy" ? "busy" : code === "lost" ? "lost" :
+				(error as {pendingErasure?: boolean}).pendingErasure ? "pending" : "unavailable";
+		}
+		if (view && this.operations.actorRights(view, "user").includes("watch")) {
+			try {
+				const kept = await copies();
+				report.erased = [...new Set(kept.filter(c => c.erased).map(c => c.id))].sort();
+				report.pending = [...new Set(kept.filter(c => !c.erased).map(c => c.id))].sort();
+			} catch { report.state = "unavailable"; }
+		}
+		return report;
 	}
 
 	checkProviderErasure(s: Session, provider: string): void {
@@ -149,10 +241,10 @@ export class SessionErasure {
 		}
 	}
 
-	private async reconcileErasure(s: Session, operation: string, observe?: Parameters<SessionErasure["reconcileProviderErasure"]>[2]): Promise<void> {
+	private async reconcileErasure(s: Session, operation: string, observe?: Parameters<SessionErasure["reconcileProviderErasure"]>[2], cancelRunning = true): Promise<void> {
 		const registry = this.pendingRegistry()!;
 		const store = this.operations.store();
-		if (s.erasing || s.moving || s.outsideTools) return;
+		if (s.erasing || s.moving || s.outsideTools || !cancelRunning && (s.running || this.operations.jobsRunning(s))) return;
 		s.erasing = true;
 		try {
 			if (s.running) {
@@ -201,9 +293,9 @@ export class SessionErasure {
 		} finally { s.erasing = false; }
 	}
 
-	private async completeHttpErasure(s: Session, plan: ErasurePlan, actorId = "harness"): Promise<void> {
+	private async completeHttpErasure(s: Session, plan: ErasurePlan, actorId = "harness", cancelRunning = true): Promise<void> {
 		const store = this.operations.store()!;
-		if (s.erasing || s.moving || s.outsideTools) return;
+		if (s.erasing || s.moving || s.outsideTools || !cancelRunning && (s.running || this.operations.jobsRunning(s))) return;
 		s.erasing = true;
 		try {
 			if (s.running) { s.running.abort.abort(); await s.running.done; }
