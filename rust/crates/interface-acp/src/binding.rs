@@ -23,7 +23,6 @@ pub(crate) const EXTENSIONS: &[&str] = &[
     "declaration",
     "withdraw",
     "command",
-    "trust-project",
 ];
 
 pub fn declaration(api: &dyn AgentApi, session: Option<&str>) -> Result<Value> {
@@ -886,17 +885,6 @@ pub(crate) async fn extension(
                 api.close(id).await?;
             }
             Ok(value)
-        }
-        "trust-project" => {
-            require(api, &scope, "settings")?;
-            ensure!(p["confirm"] == true, "trust requires explicit confirm=true");
-            let project = Path::new(string(p, "cwd")?);
-            ensure!(
-                project.is_absolute() && project.canonicalize()? == session.project,
-                request_error("forbidden", "can only trust the attached project")
-            );
-            factory.trust(&session.project)?;
-            Ok(json!({"trusted":true,"applies":"new or reopened sessions"}))
         }
         "declaration" => {
             require(api, &scope, "watch")?;

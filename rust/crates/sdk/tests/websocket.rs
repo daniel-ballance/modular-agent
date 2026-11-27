@@ -333,12 +333,6 @@ impl modular_agent::AcpComposition for ComposedProject {
     fn history(&self) -> modular_agent::Result<modular_agent::History> {
         Ok(modular_agent::memory_history())
     }
-    fn trust(&self, _: &Path) -> modular_agent::Result<()> {
-        Err(modular_agent::Error::new(
-            Code::Forbidden,
-            "read-only trust",
-        ))
-    }
     fn configuration(&self) -> Option<&dyn modular_agent::Configuration> {
         Some(self)
     }

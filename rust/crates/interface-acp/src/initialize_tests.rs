@@ -13,9 +13,6 @@ impl Factory for TestFactory {
     fn list(&self, _project: Option<&Path>) -> Result<Vec<SessionData>> {
         Ok(vec![])
     }
-    fn trust(&self, _project: &Path) -> Result<()> {
-        unreachable!()
-    }
     async fn attach(
         &self,
         _api: Api,
@@ -78,6 +75,20 @@ async fn negotiate_protocol_version_independently_of_binding() {
         })
         .await;
     }
+}
+
+#[tokio::test]
+async fn initialize_does_not_advertise_project_trust() {
+    probe(async |cx| {
+        let hello = request(&cx, "initialize", json!({"protocolVersion":1})).await?;
+        let extensions = hello["_meta"]["modular-agent"]["extensions"]
+            .as_array()
+            .unwrap();
+        assert!(extensions.contains(&json!("history")));
+        assert!(!extensions.contains(&json!("trust-project")));
+        Ok(())
+    })
+    .await;
 }
 
 #[tokio::test]

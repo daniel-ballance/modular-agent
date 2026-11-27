@@ -43,9 +43,6 @@ impl interface_acp::Factory for Factory {
             None => history_fs::FileHistory::new(&self.options.history)?.list(project),
         }
     }
-    fn trust(&self, project: &Path) -> Result<()> {
-        config_files::FilesConfiguration::new(self.options.global_config.clone()).trust(project)
-    }
     fn project_settings(&self, _: &Path) -> Result<Value> {
         Ok(self.settings.clone())
     }

@@ -19,7 +19,7 @@ For a multi-project host, use `compose` to supply an Agent for the canonical pro
 
 | Language | Project-aware options |
 |---|---|
-| Rust | Set `AcpOptions.compose` to an `Arc<dyn AcpComposition>`. Its `compose(project, reopening)` receives the optional saved session id. The trait also supplies `history()`, `trust(project)`, `project_settings(project)` and `project_mcp(session, project, servers)`. Composed agents must enable plugin hosting. They need a `data_dir` only where [`createAgent`](../api.md#the-agent) needs one, such as for the default file history under `kept` or `durable`. |
+| Rust | Set `AcpOptions.compose` to an `Arc<dyn AcpComposition>`. Its `compose(project, reopening)` receives the optional saved session id. The trait also supplies `history()`, `configuration()`, `project_settings(project)` and `project_mcp(session, project, servers)`. Composed agents must enable plugin hosting. They need a `data_dir` only where [`createAgent`](../api.md#the-agent) needs one, such as for the default file history under `kept` or `durable`. |
 | TypeScript | Pass `{ compose, projectSettings, projectMcp }` to `serveAcp`. `compose(project, saved?)` is async and can receive a `SessionInfo`. `projectMcp(project)` returns a name-to-config map; it and `projectSettings` may be async. |
 
 Rust's `project_mcp` is an attachment callback for client-supplied servers, not a resolver that reads project config. For configured servers, install a trusted MCP source in `compose`, as the [Rust reference agent](../../reference/standard-configuration.md) does. The fixed-project Rust server refuses nonempty client MCP specs.

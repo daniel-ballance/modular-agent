@@ -16,7 +16,6 @@ type Sink = Arc<dyn base::EventSink>;
 pub trait AcpComposition: Send + Sync + 'static {
     async fn compose(&self, project: &Path, reopening: Option<&str>) -> Result<Agent>;
     fn history(&self) -> Result<crate::History>;
-    fn trust(&self, project: &Path) -> Result<()>;
 
     /// When provided, check project trust before invoking the composition factory.
     fn configuration(&self) -> Option<&dyn crate::Configuration> {
@@ -292,10 +291,6 @@ impl interface_acp::Factory for ProjectFactory {
         self.1
             .acp_list_row(&self.0.history()?, data, principal, in_turn, running)
     }
-    fn trust(&self, project: &Path) -> base::Result<()> {
-        Ok(self.0.trust(project)?)
-    }
-
     fn project_settings(&self, project: &Path) -> base::Result<Value> {
         Ok(base::portable::settings_from_wire(
             &self.0.project_settings(project)?,
@@ -633,9 +628,6 @@ impl interface_acp::Factory for Factory {
     ) -> base::Result<Option<Value>> {
         self.0
             .acp_list_row(&self.0.inner.history, data, principal, in_turn, running)
-    }
-    fn trust(&self, _project: &Path) -> base::Result<()> {
-        base::bail!("ACP cannot change project trust")
     }
     fn project_settings(&self, _: &Path) -> base::Result<Value> {
         Ok(self.0.inner.session_settings.clone())

@@ -171,9 +171,10 @@ async fn start() -> Result<()> {
     };
     if acp_mode {
         ensure!(
-            terminal.prompt.is_none() && terminal.session.is_none() && !trust_project,
-            "ACP sessions and trust are controlled by the client"
+            terminal.prompt.is_none() && terminal.session.is_none(),
+            "ACP sessions are controlled by the client"
         );
+        ensure!(!trust_project, "run --trust-project without --acp");
         ensure!(
             subagents.is_none(),
             "configure ACP subagents in plugin settings"

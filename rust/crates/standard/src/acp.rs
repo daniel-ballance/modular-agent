@@ -110,9 +110,6 @@ impl AcpComposition for Factory {
     fn history(&self) -> modular_agent::Result<History> {
         Ok(self.standard.history()?)
     }
-    fn trust(&self, project: &Path) -> modular_agent::Result<()> {
-        self.standard.configuration().trust(project)
-    }
     fn project_settings(&self, _project: &Path) -> modular_agent::Result<Value> {
         let mut settings = self.settings.clone();
         if self.standard.scripted.is_some() {
