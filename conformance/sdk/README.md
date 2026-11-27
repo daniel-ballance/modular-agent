@@ -20,6 +20,7 @@ A scenario that turns out to be wrong is fixed here first, then in the SDKs.
 | [`actor-rights`](scenarios/actor-rights.json) | An actor without `input` cannot prompt |
 | [`approval-without-handler`](scenarios/approval-without-handler.json) | With no handler, an approval is refused rather than left waiting |
 | [`read-only-approval`](scenarios/read-only-approval.json) | Under `ask`, a read-only tool runs without asking |
+| [`queued-cancel`](scenarios/queued-cancel.json) | Cancelling a held turn hands back queued input; a keyed retry returns the original receipt and starts no turn |
 | [`ephemeral-crash`](scenarios/ephemeral-crash.json) | An ephemeral session cannot be reopened after a crash |
 | [`ephemeral-file-history`](scenarios/ephemeral-file-history.json) | Composition refuses explicit file history under `ephemeral` and names `kept` |
 | [`ephemeral-history-service`](scenarios/ephemeral-history-service.json) | Composition refuses a history service under `ephemeral` and names `kept` |
@@ -76,9 +77,3 @@ Check existing `count` against the actual counter file, including while a writer
 - `recordCounts: {kind:n,...}` is exact across the committed session, including zero. `openToolCalls` compares the PromptResult IDs in order, resolving `$call` to the bound original call. `toolResults: []` forbids a provisional result.
 - `parked: {timeLimitMs:n}` captures the immutable request, response and origin associations from the store. Check the request and pending checkpoint share a commit, the original call and registration match, the deadline equals ask time plus n, and the origin ended completed with the call open. There is no start, result, handoff or decision. On subsequent checks compare the request to the saved one **including IDs and deadline**.
 - `settled: {status,decision,actor?}` checks the one answer and result for that call. System expiry has no actor. An allow has the private proof and its ceiling. Exactly one continuation names the origin and last closure; no substitute question or new admission/input. A dispatched call starts once under that continuation with its old step/call IDs and both sources. For a refusal or expiry, check the factual pre-dispatch status, lineage and zero starts. Run these against the actual store, not a projected history or the model. [Shared assertions](../waiting/records.mjs) give the ID comparisons.
-
-## Proposed, not yet written
-
-Tracked in #31.
-
-- **queued-cancel:** an input queued `after` a held call, then cancel, then a retry with the same key returns `handedBack` without another turn. Needs receipt expectations in the format.

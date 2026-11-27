@@ -20,6 +20,10 @@ How each language expresses the [API](api.md). The rule is the same throughout: 
 | Closed sets of values | enums with an `Unknown(String)` variant where shared data keeps unknown values | string unions |
 | Tool input | a type deriving `Deserialize` and `JsonSchema` | a [Standard Schema](https://standardschema.dev) or JSON Schema |
 
+## Input receipts
+
+For an ordinary `send` with a key, Rust uses `session.send_with(input, timing, Some(key))`; TypeScript uses `session.send(input, timing, { key })`. Rust's `InputReceipt` has `input_id: String`, `taken: String`, and the booleans `duplicate` and `erased`. TypeScript uses `inputId: string` and `taken` as a string union; an ordinary first receipt omits `duplicate`, a retry sets `duplicate: true`, and neither receipt has `erased`. Cancellation hand-back leaves those receipts non-erased in both SDKs. See [Sessions and turns](api.md#sessions-and-turns).
+
 ## OpenTelemetry
 
 Each Modular Agent SDK depends on the OpenTelemetry API only. The app chooses and installs the OpenTelemetry SDK and exporter. Register the app's tracer provider before creating the agent. If the app uses a meter provider, register it the same way.

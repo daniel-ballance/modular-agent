@@ -1,0 +1,21 @@
+{
+  "scenario": "queued-cancel",
+  "about": "Cancellation hands queued input back, and retrying its key returns the original admission without starting another turn.",
+  "rules": ["contracts.md#input", "sdk/api.md#sessions-and-turns"],
+  "agent": { "durability": "ephemeral", "plugins": ["counter"], "approval": "off" },
+  "model": [{ "toolCalls": [{ "name": "bump", "input": { "hold": true } }] }],
+  "steps": [
+    { "send": "Run the counter and hold the call." },
+    { "waitForCount": 1 },
+    { "send": "Queued input", "timing": "after", "key": "queued",
+      "expect": { "receipt": { "inputId": "$queued", "taken": "after", "duplicate": false } } },
+    { "cancel": true,
+      "expect": { "handedBack": [{ "inputId": "$queued", "content": [{ "type": "text", "text": "Queued input" }] }] } },
+    { "wait": true, "expect": { "outcome": "cancelled" } },
+    { "send": "Different input on retry", "timing": "now", "key": "queued",
+      "expect": { "receipt": { "inputId": "$queued", "taken": "after", "duplicate": true } } },
+    { "wait": true,
+      "expect": { "outcome": "cancelled", "count": 1,
+                  "recordCounts": { "inputAccepted": 2, "inputHandedBack": 1, "turnStart": 1, "turnEnd": 1, "input": 1 } } }
+  ]
+}

@@ -1,5 +1,21 @@
 use modular_agent::ToolResult;
-use serde_json::Value;
+use serde_json::{Map, Value};
+
+pub(super) fn record_counts(
+    want: &Map<String, Value>,
+    entries: &[Value],
+    mut fail: impl FnMut(String),
+) {
+    for (kind, count) in want {
+        let got = entries
+            .iter()
+            .filter(|e| e["kind"] == kind.as_str())
+            .count();
+        if count.as_u64() != Some(got as u64) {
+            fail(format!("recordCounts.{kind}: want {count}, got {got}"));
+        }
+    }
+}
 
 pub(super) fn tool_content(w: &Value, g: &ToolResult, mut fail: impl FnMut(String)) {
     if let Some(content) = w.get("content")
