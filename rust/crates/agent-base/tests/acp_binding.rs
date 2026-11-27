@@ -167,7 +167,7 @@ async fn acp_keeps_and_accepts_shared_off_when_reopening_an_openai_session() {
     // This exposes the OpenAI catalog but the test sends no model requests.
     rig.conformance = true;
     let sessions = rig.root.path().join("sessions");
-    std::fs::create_dir(&sessions).unwrap();
+    history_fs::FileHistory::new(&sessions).unwrap();
     let cwd = rig.project.path().to_path_buf();
     let recorded = json!({"id":"settings","parentId":null,"sessionId":"imported","kind":"setting",
         "time":0,"writer":"another-agent","modelVisible":false,
@@ -236,7 +236,7 @@ async fn acp_keeps_and_accepts_shared_off_when_reopening_an_openai_session() {
 async fn acp_joins_before_input_and_preserves_foreign_actors_on_load_and_resume() {
     let r = Rig::new(json!(["new text"]));
     let sessions = r.root.path().join("sessions");
-    std::fs::create_dir(&sessions).unwrap();
+    history_fs::FileHistory::new(&sessions).unwrap();
     let cwd = r.project.path().to_path_buf();
     let foreign = json!({"id":"foreign","parentId":null,"sessionId":"imported","kind":"actorJoined","time":0,
         "writer":"another-agent","modelVisible":false,"actorId":"user","data":{"actor":{"id":"user","kind":"user","rights":["watch"]}}});

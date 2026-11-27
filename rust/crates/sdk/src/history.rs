@@ -294,14 +294,45 @@ pub fn portable_file_history(
     lease_ttl: std::time::Duration,
     max_sessions: usize,
 ) -> Result<History> {
-    let snapshots = history_fs::FileHistory::new(dir.as_ref())?;
+    portable_file_history_with_options(dir, lease_ttl, max_sessions, FileHistoryOptions::default())
+}
+
+/// A dedicated opaque file store with the same restore witness as native file history.
+/// When serving it, match `ServeHistoryOptions::lease_ttl` to `lease_ttl`.
+pub fn portable_file_history_with_options(
+    dir: impl AsRef<Path>,
+    lease_ttl: std::time::Duration,
+    max_sessions: usize,
+    options: FileHistoryOptions,
+) -> Result<History> {
+    let snapshots = history_fs::FileHistory::with_restore_witness(
+        dir.as_ref(),
+        options.restore_witness.as_deref(),
+    )?;
     let store = history_http::SnapshotStore::new(Arc::new(snapshots), lease_ttl, max_sessions)?;
     History::from_named_portable("portable file", Arc::new(store), true)
 }
 
 pub fn file_history(dir: impl AsRef<Path>) -> Result<History> {
+    file_history_with_options(dir, FileHistoryOptions::default())
+}
+
+/// Options for native and portable file history, including when served over HTTP.
+#[derive(Clone, Debug, Default)]
+pub struct FileHistoryOptions {
+    /// An independent witness file outside the history directory, provisioned with a new store.
+    pub restore_witness: Option<std::path::PathBuf>,
+}
+
+pub fn file_history_with_options(
+    dir: impl AsRef<Path>,
+    options: FileHistoryOptions,
+) -> Result<History> {
     Ok(History(
-        Arc::new(history_fs::FileHistory::new(dir.as_ref())?),
+        Arc::new(history_fs::FileHistory::with_restore_witness(
+            dir.as_ref(),
+            options.restore_witness.as_deref(),
+        )?),
         true,
         "file",
         None,

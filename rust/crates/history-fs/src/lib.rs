@@ -1,6 +1,8 @@
 //! Atomic JSON snapshots with OS-owned session writer leases.
 mod erasure;
+mod freshness;
 use agent_api::*;
+use freshness::Witness;
 use fs2::FileExt;
 use std::{
     collections::BTreeSet,
@@ -57,6 +59,7 @@ fn encode(data: &SessionData) -> Result<Value> {
 }
 pub struct FileHistory {
     root: PathBuf,
+    witness: Option<Witness>,
 }
 pub struct HistoryPlugin {
     pub root: PathBuf,
@@ -84,11 +87,20 @@ impl Drop for StoreLock {
 }
 impl FileHistory {
     pub fn new(root: &Path) -> Result<Self> {
+        Self::with_restore_witness(root, None)
+    }
+    /// The optional independent witness is a file outside the snapshot directory.
+    pub fn with_restore_witness(root: &Path, witness: Option<&Path>) -> Result<Self> {
         fs::create_dir_all(root)?;
+        let root = root.canonicalize()?;
         let history = Self {
-            root: root.canonicalize()?,
+            witness: witness.map(|path| Witness::new(&root, path)).transpose()?,
+            root,
         };
-        history.initialize_registry()?;
+        let _lock = history.lock_raw()?;
+        let fresh = history.initialize_registry()?;
+        history.check_witness(fresh)?;
+        history.verify_snapshots(&history.snapshots()?)?;
         Ok(history)
     }
     #[cfg(target_os = "linux")]
@@ -105,6 +117,11 @@ impl FileHistory {
         Ok(self.root.join(format!("{id}.json")))
     }
     fn lock(&self) -> Result<StoreLock> {
+        let lock = self.lock_raw()?;
+        self.check_witness(false)?;
+        Ok(lock)
+    }
+    fn lock_raw(&self) -> Result<StoreLock> {
         let f = OpenOptions::new()
             .read(true)
             .write(true)
@@ -116,21 +133,20 @@ impl FileHistory {
         Ok(StoreLock(f))
     }
     fn load_unlocked(&self, id: &str) -> Result<SessionData> {
-        decode(&fs::read(self.path(id)?)?)
+        decode(&self.read_tracked(&self.path(id)?)?)
     }
     fn all_unlocked(&self) -> Result<Vec<SessionData>> {
         let mut result = vec![];
-        for entry in fs::read_dir(&self.root)? {
-            let path = entry?.path();
-            if path.extension().is_some_and(|e| e == "json") {
-                result.push(decode(&fs::read(path)?)?);
-            }
+        let paths = self.snapshots()?;
+        self.verify_snapshots(&paths)?;
+        for path in paths {
+            result.push(decode(&fs::read(path)?)?);
         }
         result.sort_by(|a: &SessionData, b| a.id.cmp(&b.id));
         Ok(result)
     }
     fn save_unlocked(&self, data: &SessionData) -> Result<()> {
-        self.replace(&self.path(&data.id)?, &serde_json::to_vec(&encode(data)?)?)
+        self.replace_tracked(&self.path(&data.id)?, &serde_json::to_vec(&encode(data)?)?)
     }
     fn replace(&self, target: &Path, bytes: &[u8]) -> Result<()> {
         let dir = target.parent().expect("history path has a parent");
@@ -193,8 +209,44 @@ impl HistoryStore for FileHistory {
             })
         })
     }
-    #[cfg(target_os = "linux")]
     fn acquire(&self, session: &str) -> Result<Box<dyn Lease>> {
+        let _lock = self.lock()?;
+        if self.witness.is_some() {
+            match self.read_tracked(&self.path(session)?) {
+                Ok(_) => {}
+                Err(e)
+                    if e.downcast_ref::<std::io::Error>()
+                        .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        self.acquire_unlocked(session)
+    }
+    fn load(&self, session: &str) -> Result<SessionData> {
+        let _lock = self.lock()?;
+        self.load_unlocked(session)
+    }
+    fn save(&self, data: &SessionData) -> Result<()> {
+        let _lock = self.lock()?;
+        self.check_unlocked(data)?;
+        self.save_unlocked(data)
+    }
+    fn list(&self, project: Option<&Path>) -> Result<Vec<SessionData>> {
+        let _lock = self.lock()?;
+        Ok(self
+            .all_unlocked()?
+            .into_iter()
+            .filter(|s| project.is_none_or(|p| s.project == p))
+            .collect())
+    }
+    fn erase(&self, entries: Vec<String>, held: &[String]) -> Result<Vec<SessionData>> {
+        let _lock = self.lock()?;
+        self.erase_unlocked(entries, held)
+    }
+}
+impl FileHistory {
+    #[cfg(target_os = "linux")]
+    fn acquire_unlocked(&self, session: &str) -> Result<Box<dyn Lease>> {
         self.path(session)?;
         let name = self.lease_name(session);
         // The kernel releases this address on exit. No empty session lock file remains.
@@ -224,7 +276,7 @@ impl HistoryStore for FileHistory {
         unreachable!()
     }
     #[cfg(target_os = "macos")]
-    fn acquire(&self, session: &str) -> Result<Box<dyn Lease>> {
+    fn acquire_unlocked(&self, session: &str) -> Result<Box<dyn Lease>> {
         self.path(session)?;
         // Leave the inode in place: unlinking a lease file would allow two writers.
         let file = OpenOptions::new()
@@ -246,25 +298,7 @@ impl HistoryStore for FileHistory {
             Err(e) => Err(e.into()),
         }
     }
-    fn load(&self, session: &str) -> Result<SessionData> {
-        let _lock = self.lock()?;
-        self.load_unlocked(session)
-    }
-    fn save(&self, data: &SessionData) -> Result<()> {
-        let _lock = self.lock()?;
-        self.check_unlocked(data)?;
-        self.save_unlocked(data)
-    }
-    fn list(&self, project: Option<&Path>) -> Result<Vec<SessionData>> {
-        let _lock = self.lock()?;
-        Ok(self
-            .all_unlocked()?
-            .into_iter()
-            .filter(|s| project.is_none_or(|p| s.project == p))
-            .collect())
-    }
-    fn erase(&self, entries: Vec<String>, held: &[String]) -> Result<Vec<SessionData>> {
-        let _lock = self.lock()?;
+    fn erase_unlocked(&self, entries: Vec<String>, held: &[String]) -> Result<Vec<SessionData>> {
         let mut sessions = self.all_unlocked()?;
         let mut erased: BTreeSet<_> = entries.into_iter().collect();
         loop {
@@ -297,7 +331,7 @@ impl HistoryStore for FileHistory {
             .collect();
         for id in &affected {
             if !held.contains(id) {
-                leases.push(self.acquire(id)?);
+                leases.push(self.acquire_unlocked(id)?);
             }
         }
         let mut changed = vec![];

@@ -47,6 +47,8 @@ See [Declaration choices](languages.md#declaration-choices) for the Rust SDK beh
 
 Each SDK provides constructors for the parts it ships: `transientRuntime()`, `durableRuntime()`, `memoryHistory()`, `fileHistory(dir)`, `httpHistory(url, tokenFile)`, `localEnvironment(root?)`, `environmentCredentials()` and `fileCredentials(path)`. `serve(plugin)` and `serveHistory(store, options)` are covered in [Placement](placement.md).
 
+Built-in file history can be provisioned with a [restore witness](languages.md#history-restore-witness). Pass that same configured store to the built-in HTTP service; HTTP clients do not configure the service’s witness. A non-empty history with a missing erasure registry is unavailable even without a witness. A witness covers the store’s durable erasure and authority state, not revocations recorded only in an external identity system.
+
 Each option that names a part is shorthand for a plugin that provides it. `providers`, `tools`, `environment` and the rest are added before `plugins`, in the order of this table, so an explicit plugin can [replace](#replacing-a-part) one of them.
 
 `createAgent` raises `invalid_composition` for combinations the [durability rules](placement.md#durability) forbid. With `ephemeral`, an explicit persistent history store or a history service raises `invalid_composition` whose message names `kept`. The rule applies whether the store comes from `history` or a plugin registration.

@@ -1091,6 +1091,7 @@ dependencies = [
  "fs2",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -1755,7 +1756,6 @@ dependencies = [
  "interface-acp",
  "plugin-stdio",
  "provider-fake",
- "provider-openai",
  "reqwest",
  "runtime-durable",
  "runtime-transient",
@@ -2052,20 +2052,6 @@ dependencies = [
  "agent-api",
  "anyhow",
  "async-trait",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "provider-openai"
-version = "0.4.0"
-dependencies = [
- "agent-api",
- "anyhow",
- "async-trait",
- "futures-util",
- "reqwest",
- "serde",
  "serde_json",
  "tokio",
 ]
