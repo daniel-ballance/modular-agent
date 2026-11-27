@@ -3,8 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileHistory, tool } from "@modular-agent/core";
+import { AgentError, fileHistory, tool } from "@modular-agent/core";
 import { testAgent } from "@modular-agent/core/testing";
+import { Harness } from "@modular-agent/harness";
+import { JsonlHistoryStore } from "@modular-agent/history-jsonl";
 
 const text = [{ type: "text" as const, text: "proposal" }];
 const tenant = { rights: ["watch", "propose", "input"] as ("watch" | "propose" | "input")[] };
@@ -85,4 +87,66 @@ test("reconstructed payload bytes block new work but not hand-back", async t => 
   const accepted = await next.send("x".repeat(500), "propose", { key: "refused" });
   assert.ok(accepted.inputId);
   assert.equal(accepted.duplicate, undefined);
+});
+
+test("legacy admissions block their own open and still use agent and tenant storage", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "sdk-legacy-reservations-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = new JsonlHistoryStore(join(dir, "history"));
+  const team = { rights: [...tenant.rights, "settings" as const] };
+  const options = { project: dir, dataDir: dir, durability: "kept" as const, tenants: { A: team, B: team },
+    script: [{ text: "healthy" }, { text: "healthy" }] };
+  const seed = await testAgent(options);
+  const a = await seed.session({ tenant: "A" }), b = await seed.session({ tenant: "B" });
+  await a.prompt("healthy A");
+  await b.prompt("healthy B");
+  await seed.close();
+
+  const meta = { id: "legacy", project: dir, created: 0 };
+  await store.create(meta);
+  await store.openForWriting(meta.id);
+  await store.append(meta.id, [
+    { id: "legacy-tenant", sessionId: meta.id, time: 0, parentId: null, writer: "harness",
+      kind: "tenant", modelVisible: false, data: { tenant: "A" } },
+    { id: "legacy-admission", sessionId: meta.id, time: 0, parentId: "legacy-tenant", writer: "harness",
+      kind: "inputAccepted", modelVisible: false, actorId: "local", inputId: "legacy-input",
+      data: { content: [{ type: "text", text: "é".repeat(4096) }], when: "propose", taken: "proposed" } },
+  ]);
+  await store.close(meta.id);
+  const storedBytes = async (id: string) => {
+    const { meta, entries } = await store.load(id);
+    return [meta, ...entries].reduce((sum, record) => sum + Buffer.byteLength(JSON.stringify(record)), 0);
+  };
+  const legacy = await storedBytes(meta.id), healthyA = await storedBytes(a.id), healthyB = await storedBytes(b.id);
+
+  for (const scope of ["agent", "tenant"] as const) {
+    const storageBytes = legacy + healthyA + (scope === "agent" ? healthyB : 0);
+    const agent = await testAgent({ ...options, resourceReservations: { [scope]: { storageBytes, controlBytes: 0, inputs: 1 } } });
+    try {
+      if (scope === "tenant") assert.ok((await agent.session()).id);
+      const opened = await agent.openSession(a.id);
+      assert.equal(opened.id, a.id);
+      await assert.rejects(agent.openSession(meta.id), { message: "Malformed inputAccepted history record: legacy-admission" });
+      await assert.rejects(opened.setSetting("title", "blocked"), { code: "busy" });
+      const other = await agent.openSession(b.id);
+      if (scope === "tenant") await other.setSetting("title", "allowed");
+      else await assert.rejects(other.setSetting("title", "blocked"), { code: "busy" });
+    } finally {
+      await agent.close();
+    }
+  }
+});
+
+for (const operation of ["list", "load"] as const) test(`reservation rebuild propagates store ${operation} failures`, async t => {
+  const dir = await mkdtemp(join(tmpdir(), "sdk-unavailable-reservations-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = new JsonlHistoryStore(join(dir, "history"));
+  const meta = { id: "unavailable", project: dir, created: 0 };
+  if (operation === "load") t.mock.method(store, "list", async () => [meta]);
+  const error = new AgentError("unavailable", "Cannot verify history restore freshness");
+  const failed = t.mock.method(store, operation, async () => { throw error; });
+  const harness = new Harness({ project: dir, home: dir });
+  await harness.load([{ name: "test.history", setup: api => api.provide("history-store", store) }]);
+  await assert.rejects(harness.rebuildReservations(), actual => actual === error);
+  assert.equal(failed.mock.callCount(), 1);
 });

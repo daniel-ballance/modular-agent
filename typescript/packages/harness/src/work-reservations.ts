@@ -1,15 +1,22 @@
-import { SessionLifecycle } from "./session-lifecycle.js";
+import type { SessionLifecycle } from "./session-lifecycle.js";
 import { Jobs } from "./jobs.js";
 import { failure } from "./failure.js";
 import { Reservations, resourceBytes, retainedHistoryBytes } from "./reservations.js";
-import { type QueuedInput, Session } from "./session.js";
+import type { QueuedInput, Session } from "./session.js";
 import { type HistoryStore, isToolCall } from "./types.js";
 
 interface WorkReservationsOperations {
 	use<T>(capability: string): T | undefined;
-	lifecycle(): Pick<SessionLifecycle, "loadInto">;
+	lifecycle(): Pick<SessionLifecycle, "replayStored">;
 	reservations(): Reservations;
 	jobWork(): Pick<Jobs, "runningJobs">;
+}
+
+function retainedTenant({ meta, entries }: Awaited<ReturnType<HistoryStore["load"]>>): string | undefined {
+	const marker = entries.findLast(entry => entry?.kind === "tenant" && !entry.erased &&
+		!(meta.forkedFrom && entry.sources?.length) && typeof (entry.data as { tenant?: unknown } | undefined)?.tenant === "string");
+	return (marker?.data as { tenant: string } | undefined)?.tenant ??
+		("tenant" in meta && typeof meta.tenant === "string" ? meta.tenant : undefined);
 }
 
 export class WorkReservations {
@@ -20,13 +27,20 @@ export class WorkReservations {
 	rebuildReservations(): Promise<void> {
 		return this.reservationScan ??= (async () => {
 			const store = this.operations.use<HistoryStore>("history-store");
-			for (const meta of await store?.list() ?? []) {
-				const s = await this.operations.lifecycle().loadInto(meta.id);
-				if (!s) continue;
-				const entries = s.order.map(id => s.entries.get(id)!);
+			if (!store) return;
+			for (const { id } of await store.list()) {
+				const loaded = await store.load(id);
+				let s: Session | undefined;
+				try {
+					s = this.operations.lifecycle().replayStored(loaded);
+				} catch {
+					// An invalid session still occupies storage, but its work cannot be recovered.
+				}
 				// A pending tombstone can hide content from the in-memory view before
 				// the backend has actually reclaimed the encoded bytes.
-				this.operations.reservations().retain(s, retainedHistoryBytes(await store!.load(s.id)), true);
+				this.operations.reservations().retain(s ?? { id, tenant: retainedTenant(loaded) }, retainedHistoryBytes(loaded), true);
+				if (!s) continue;
+				const entries = s.order.map(id => s.entries.get(id)!);
 				for (const q of s.admissions.values()) this.reserveInput(s, q, true);
 				for (const { job } of this.operations.jobWork().runningJobs(s)) this.reserveJob(s, job.id, true);
 				const own = entries.filter(e => !s.copied.has(e.id));
