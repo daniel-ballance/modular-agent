@@ -2,8 +2,9 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import type { Interrupt, Message, RunAgentInput } from "@ag-ui/core";
 import { readTrace, withTrace } from "@modular-agent/harness/telemetry";
-import type { Actor, Declaration, Harness, HistoryEntry, InputRequest, InterfaceToolConnection, InterfaceToolSource, PluginApi, ToolCall } from "@modular-agent/harness";
+import type { Actor, Declaration, Harness, HistoryEntry, InputRequest, InterfaceToolSource, PluginApi, ToolCall } from "@modular-agent/harness";
 import type { Agent } from "./agent.js";
+import { checked } from "./errors.js";
 import { PATH, body, encode, errorCode, fail, frame, hash, httpError, json, object, parts, runInput, same, sse, type Code, type WireEvent } from "./agui-wire.js";
 import { checkedMessages, current, interrupt, messages, pending, reply, rights, watch, type InterruptView, type Principal } from "./agui-view.js";
 import { receiptId } from "@modular-agent/harness";
@@ -21,6 +22,7 @@ export interface AguiProjectionOptions {
   traceStateVendors?: readonly string[];
   onWarning?(field: string): void;
 }
+export type AdapterInterfaceToolConnection = ReturnType<Harness["connectAdapterInterfaceTools"]>;
 export interface Target { h: Harness; api: PluginApi; agent: Agent; sources: readonly InterfaceToolSource[] }
 interface Host extends AguiProjectionOptions {
   principalScope<T>(actor: Actor, work: () => T): T;
@@ -31,7 +33,7 @@ interface Host extends AguiProjectionOptions {
 export interface Presence { delivered: Set<string>; response: ServerResponse; questions: Set<string>; rejected: Set<string>; reopened: Set<string> }
 export interface Client {
   cursor?: { id: string; digest: string; branch: string; http: boolean }; active?: Exchange; busy?: boolean; presence?: Presence;
-  held?: { connection: InterfaceToolConnection; turnId: string; setDeliver(fn: (call: ToolCall) => void): void };
+  held?: { connection: AdapterInterfaceToolConnection; turnId: string; setDeliver(fn: (call: ToolCall) => void | "withheld"): void };
   needsSnapshot?: boolean; delivered: Set<string>; runs: Set<string>; hidden: Set<string>;
 }
 export class AguiBinding {
@@ -225,7 +227,7 @@ export class Route {
     const { c, api, p, id } = this;
     if (c.busy) fail("conflict");
     c.busy = true;
-    let conn: InterfaceToolConnection | undefined, exchange: Exchange | undefined;
+    let conn: AdapterInterfaceToolConnection | undefined, exchange: Exchange | undefined;
     const scope = Symbol("AG-UI offer");
     try { await this.t.h.withInterfaceOffer(scope, async () => {
       const watermark = await new HostRead(this.t,id,p).view();
@@ -284,9 +286,9 @@ export class Route {
       });
       if (new Set(offers.map(t => t.name)).size !== offers.length || offers.length && !this.rights().includes("tools")) fail("refused");
       if (seen !== c.cursor || res.destroyed || await this.branchGeneration() !== snap.cursor.branch) fail("conflict");
-      let deliver: (call: ToolCall) => void = () => fail("conflict");
+      let deliver: (call: ToolCall) => void | "withheld" = () => "withheld";
       if (sources.length) {
-        conn = this.t.agent.connectInterfaceTools(id, { actor: { id: p.actor.id, kind: p.actor.kind as "user", rights: p.actor.authority }, routeId: p.clientId, defer: true, onHandoff: request => deliver(request.call) });
+        conn = this.t.h.connectAdapterInterfaceTools(id, { actor: { id: p.actor.id, kind: p.actor.kind, authority: p.actor.authority }, routeId: p.clientId, defer: true, onHandoff: request => deliver(request.call) });
         conn.advertise(offers);
       }
       const key = "agui:" + JSON.stringify([p.clientId,input.runId]);
@@ -308,7 +310,7 @@ export class Route {
           for (const { q, answer } of answers) {
             if (q.inTurn && !c.presence?.questions.has(q.wire.id) || !(await api.submitAnswer(id, answer, q.request.approvalWait ? c.presence : undefined)).accepted) fail("conflict");
           }
-          for (const { report } of reports) if ((await conn?.reportInterfaceToolResult(report))?.status !== "accepted") fail("conflict");
+          for (const { report } of reports) if ((await checked(() => conn?.reportInterfaceToolResult(report)))?.status !== "accepted") fail("conflict");
         }
       });
       if (claim) await this.t.h.receiptOperation.run(claim, accept); else await accept();

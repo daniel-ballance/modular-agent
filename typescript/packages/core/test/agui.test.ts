@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { fork } from "node:child_process";
 import { once } from "node:events";
 import { randomUUID } from "node:crypto";
+import { ServerResponse } from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
+import { Harness } from "@modular-agent/harness";
 import { createAgent, defaultAcpActor, definePlugin, tool, type Actor, type AgentOptions, type ServeAguiOptions } from "../src/index.js";
 import { memoryEnvironment, scriptedProvider } from "../src/testing.js";
 
@@ -328,6 +330,110 @@ test("a queued client follows only its own turn and does not inherit another cli
     assert.equal(deltas(await events(await first)),"one"); assert.equal(deltas(await events(second)),"two");
     assert.deepEqual(seen,[["pick"],[]]);
   } finally { release.resolve(); }
+});
+
+for (const mode of ["final group", "turn end", "write preflight"]) test(`withholding at AG-UI ${mode} records definite non-delivery`, async t => {
+  let response: ServerResponse | undefined;
+  const write = ServerResponse.prototype.write;
+  if (mode === "write preflight") t.mock.method(ServerResponse.prototype,"write",function(this: ServerResponse, data: unknown, ...args: unknown[]) {
+    if (typeof data === "string" && data.startsWith('data: {"type":"RUN_STARTED"')) response = this;
+    return Reflect.apply(write,this,[data,...args]);
+  });
+  const gate = definePlugin({name:"withhold-terminal", hooks:{output:({events}) => {
+    if (mode === "turn end" && events.some(e => e.type === "turnEnded")) return "block";
+    if (!events.some(e => {
+      const data = e.data as {method?: string; result?: {type: string}[]};
+      return data?.method === "agui.events" && data.result?.some(f => f.type === "TOOL_CALL_START");
+    })) return;
+    if (mode === "final group") return "block";
+    // Simulate a full send queue without attempting an executable write.
+    if (response) Object.defineProperty(response,"writableLength",{value:Number.MAX_SAFE_INTEGER});
+  }}});
+  const {agent, thread, run} = await setup(t, {interfaceTools:[source], plugins:[gate],
+    providers:[scriptedProvider([{toolCalls:[{name:"pick",input:{}}]},{text:"continued"}])]});
+  const id = await thread(), es = await events(await run(id,[prompt("choose")],{tools:[definition]}));
+  assert.equal(es.at(-1).type,"RUN_ERROR");
+  assert.equal(es.at(-1).code,mode === "write preflight" ? "refused" : "output_withheld");
+  assert.ok(!es.some(e => e.type.startsWith("TOOL_CALL_")));
+  const history = await (await agent.openSession(id)).history();
+  const start = history.find(e => e.kind === "toolStarted");
+  assert.ok(start?.toolCallId);
+  assert.deepEqual(history.filter(e => e.kind === "toolResult").map(e => [e.toolCallId,(e.data as {status: string}).status,e.actorId]),
+    [[start.toolCallId,"notStarted",undefined]]);
+});
+
+for (const mode of ["final group", "turn end"]) test(`a settlement error preserves AG-UI ${mode} withholding`, async t => {
+  const connect = Harness.prototype.connectAdapterInterfaceTools;
+  const withheld = t.mock.fn(() => { throw new Error("could not settle staged calls"); });
+  t.mock.method(Harness.prototype, "connectAdapterInterfaceTools", function(this: Harness, ...args: Parameters<typeof connect>) {
+    return { ...connect.apply(this, args), withholdStaged: withheld };
+  });
+  const gate = definePlugin({ name: "withhold-terminal", hooks: { output: ({ events }) => {
+    if (mode === "turn end" && events.some(e => e.type === "turnEnded")) return "block";
+    if (mode === "final group" && events.some(e => {
+      const data = e.data as {method?: string; result?: {type: string}[]};
+      return data?.method === "agui.events" && data.result?.some(f => f.type === "TOOL_CALL_START");
+    })) return "block";
+  } } });
+  const { thread, run } = await setup(t, { interfaceTools: [source], plugins: [gate],
+    providers: [scriptedProvider([{ toolCalls: [{ name: "pick", input: {} }] }])] });
+  const es = await events(await run(await thread(), [prompt("choose")], { tools: [definition] }));
+  assert.equal(withheld.mock.callCount(), 1);
+  assert.equal(es.at(-1).type, "RUN_ERROR");
+  assert.equal(es.at(-1).code, "output_withheld");
+});
+
+test("a partial AG-UI write stays ambiguous while a later unwritten call settles", async t => {
+  const {agent, thread, run} = await setup(t, {interfaceTools:[source],
+    providers:[scriptedProvider([{toolCalls:[{name:"pick",input:{n:1}},{name:"pick",input:{n:2}}]}])]});
+  const id = await thread();
+  const write = ServerResponse.prototype.write;
+  const attempted: string[] = [];
+  t.mock.method(ServerResponse.prototype,"write",function(this: ServerResponse, data: unknown, ...args: unknown[]) {
+    if (typeof data === "string" && data.startsWith('data: {"type":"TOOL_CALL_START"')) {
+      const firstFrame = data.slice(0, data.indexOf("\n\n") + 2);
+      attempted.push(JSON.parse(firstFrame.slice(6)).toolCallId);
+      Reflect.apply(write,this,[firstFrame]);
+      throw new Error("socket write failed after a frame");
+    }
+    return Reflect.apply(write,this,[data,...args]);
+  });
+  const es = await events(await run(id,[prompt("choose twice")],{tools:[definition]}));
+  assert.equal(es.at(-1).type,"RUN_ERROR");
+  assert.equal(es.filter(e => e.type === "TOOL_CALL_START").length,1);
+  assert.ok(!es.some(e => e.type === "TOOL_CALL_END" || e.type === "RUN_FINISHED"));
+  const session = await agent.openSession(id), history = await session.history();
+  const [first, second] = history.filter(e => e.kind === "toolStarted").map(e => e.toolCallId!);
+  assert.ok(first && second);
+  assert.deepEqual(attempted,[first]);
+  assert.deepEqual(history.filter(e => e.kind === "toolResult").map(e => [e.toolCallId,(e.data as {status: string}).status]), [[second,"notStarted"]]);
+  // The ambiguous call is still open and reportable on a fresh connection.
+  const conn = agent.connectInterfaceTools(id,{actor:owner,routeId:source.routeId,onHandoff:() => assert.fail("replayed")});
+  try { assert.deepEqual(await conn.reportInterfaceToolResult({callId:first,status:"completed",content:[]}),{status:"accepted"}); }
+  finally { conn.disconnect(); }
+});
+
+test("a failed AG-UI terminal write leaves a fully written call reportable", async t => {
+  const { agent, thread, run } = await setup(t, { interfaceTools: [source],
+    providers: [scriptedProvider([{ toolCalls: [{ name: "pick", input: {} }] }])] });
+  const id = await thread();
+  const write = ServerResponse.prototype.write;
+  let terminalAttempted = false;
+  t.mock.method(ServerResponse.prototype, "write", function(this: ServerResponse, data: unknown, ...args: unknown[]) {
+    if (typeof data === "string" && data.includes('\ndata: {"type":"RUN_FINISHED"')) {
+      terminalAttempted = true;
+      throw new Error("terminal write failed");
+    }
+    return Reflect.apply(write, this, [data, ...args]);
+  });
+  const es = await events(await run(id, [prompt("choose")], { tools: [definition] }));
+  assert.ok(terminalAttempted);
+  assert.equal(es.at(-1).type, "RUN_ERROR");
+  const call = es.find(e => e.type === "TOOL_CALL_END");
+  assert.ok(call);
+  const connection = agent.connectInterfaceTools(id, { actor: owner, routeId: source.routeId, onHandoff: () => assert.fail("replayed") });
+  try { assert.deepEqual(await connection.reportInterfaceToolResult({ callId: call.toolCallId, status: "completed", content: [] }), { status: "accepted" }); }
+  finally { connection.disconnect(); }
 });
 
 test("an accepted report ends its waiting exchange with busy when the continuation cannot reserve a turn", { timeout: 10000 }, async t=>{

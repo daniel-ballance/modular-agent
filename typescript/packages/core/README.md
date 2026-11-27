@@ -217,11 +217,9 @@ The adapter uses the `agent.sessionSummary(id, { actor, routeId, inTurn })` read
 
 With `serveAgui({ resumeOpen:true, ... })` or `serveAcp({ resumeOpen:true, ... })`, the SDK installs ordinary recovery for interrupted turns in the configured project before accepting clients. The opener is the embedded local actor with a watch ceiling, not a client token. Recovery keeps the authority recorded for the turn. Use `onResumeOpen(id, disposition)` to receive `resumed` or `skipped`; an idle session with open waits is left alone.
 
-#### Gaps in the core operations
+#### Withheld handoffs and continuation capacity
 
-Tracked in #40.
-
-The [binding](../../../docs/bindings/agui.md#interrupts-and-frontend-tools) requires settlement **if the Harness can confirm non-delivery**. Withholding the final group sends `RUN_ERROR`; it does not report a tool failure on the actor's behalf. The handle has no acknowledgment from the adapter proving non-delivery. If the Harness cannot prove it independently, the call remains open until a valid report, cancellation or its existing deadline. No handoff is repeated.
+If the AG-UI adapter abandons a final group, it sends `RUN_ERROR` if it can. The adapter confirms definite pre-write non-delivery internally, and the Harness records `notStarted` for those calls. Once an executable write is attempted, the call remains open until a valid report, cancellation or its original deadline, even if the write is partial or the terminal event fails. No handoff is repeated.
 
 A waiting exchange receives `RUN_ERROR` with code `busy` if its ready continuation cannot reserve a turn. That refusal does not undo a committed result or start a different turn.
 

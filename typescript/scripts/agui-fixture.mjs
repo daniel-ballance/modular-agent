@@ -10,6 +10,7 @@ import { SimpleSpanProcessor, TracerProvider } from '@opentelemetry/sdk-trace';
 import { createAgent, defaultAcpActor, definePlugin, durableRuntime, transientRuntime, tool } from '@modular-agent/core';
 import { hostControls } from './agui-host-fixture.mjs';
 import { memoryEnvironment, scriptedProvider } from '@modular-agent/core/testing';
+import { Harness } from '@modular-agent/harness';
 import { JsonlHistoryStore } from '@modular-agent/history-jsonl';
 import { loadScript } from '../packages/ma/dist/src/script.js';
 import { disposableTls } from '../../conformance/agui/tls-fixture.mjs';
@@ -143,10 +144,12 @@ const agent = await createAgent({ project, severalActors: true, sessionLimits: t
   ...(waiting ? { questionsOutlastTurns:true, maxApprovalWaitMs:5000 } : {}),
   settings:{approvalWaitMs:5000, ...(waiting && name !== 'waiting-live' ? {approvalWait:'untilDeadline'} : {})}, providers:[provider] });
 // Observe delivery at the real connection callback, not a model draft or a snapshot.
-const connect = agent.connectInterfaceTools.bind(agent);
-agent.connectInterfaceTools = (id, options) => connect(id, { ...options, onHandoff(request) {
-  options.onHandoff(request); appendFileSync(join(dataDir, `${id}.dispatches`), JSON.stringify(request.call.id)+'\n');
-} });
+const connect = Harness.prototype.connectAdapterInterfaceTools;
+Harness.prototype.connectAdapterInterfaceTools = function(id, options) { return connect.call(this, id, { ...options, onHandoff(request) {
+  const disposition = options.onHandoff(request);
+  if (disposition !== "withheld") appendFileSync(join(dataDir, `${id}.dispatches`), JSON.stringify(request.call.id)+'\n');
+  return disposition;
+} }); };
 const tls = name === 'tls' && await disposableTls();
 let tlsOptions;
 if (tls) {
