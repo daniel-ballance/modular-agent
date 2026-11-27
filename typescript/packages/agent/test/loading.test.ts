@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { createAgent } from "../src/index.js";
+import { testTempDir } from "./fixtures/temp-dir.js";
 
 const PLUGIN = `export default (options) => ({
 	name: "hello",
@@ -13,17 +13,17 @@ const PLUGIN = `export default (options) => ({
 });
 `;
 
-function project() {
-	const dir = mkdtempSync(join(tmpdir(), "ma-p-"));
+function project(t: TestContext) {
+	const dir = testTempDir(t, "ma-p-");
 	mkdirSync(join(dir, ".modular-agent", "plugins"), { recursive: true });
 	writeFileSync(join(dir, ".modular-agent", "plugins", "hello.mjs"), PLUGIN);
 	writeFileSync(join(dir, ".modular-agent", "settings.json"), JSON.stringify({ load: [{ module: "./.modular-agent/plugins/hello.mjs", options: { who: "world" } }] }));
 	return dir;
 }
 
-test("plugins named in settings load; a project's plugins load only once the project is trusted", async () => {
-	const dir = project();
-	const home = mkdtempSync(join(tmpdir(), "ma-h-"));
+test("plugins named in settings load; a project's plugins load only once the project is trusted", async (t) => {
+	const dir = project(t);
+	const home = testTempDir(t, "ma-h-");
 
 	let h = await createAgent({ project: dir, home, ephemeral: true });
 	assert.ok(!h.plugins().includes("hello"), "an untrusted project's plugin must not load");
@@ -38,9 +38,9 @@ test("plugins named in settings load; a project's plugins load only once the pro
 	await h.stop();
 });
 
-test("a global plugin loads without trust, and a broken entry is reported, not fatal", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "ma-p-"));
-	const home = mkdtempSync(join(tmpdir(), "ma-h-"));
+test("a global plugin loads without trust, and a broken entry is reported, not fatal", async (t) => {
+	const dir = testTempDir(t, "ma-p-");
+	const home = testTempDir(t, "ma-h-");
 	writeFileSync(join(home, "hello.mjs"), PLUGIN);
 	writeFileSync(join(home, "settings.json"), JSON.stringify({ load: [{ module: "./hello.mjs", options: { who: "home" } }, "./missing.mjs"] }));
 	const h = await createAgent({ project: dir, home, ephemeral: true });

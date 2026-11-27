@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { cases as basic } from './cases.mjs';
@@ -25,13 +27,49 @@ test('runner launches a scripted agent command', async () => {
   assert.match(stdout, /1\/1 AG-UI cases passed/);
 });
 
-test('managed host reads fail without fixture controls', async () => {
-  await assert.rejects(exec(process.execPath, [here('run.mjs'), '--only', 'closure-order,receipt-durable', '--', process.execPath, here('fake-agent.mjs')], { signal: deadline() }), e => e.code === 1 && /managed fixture must report its control URL/.test(e.stderr) && /0\/2 AG-UI cases passed/.test(e.stdout));
+async function scratch(t) {
+  const folder = await mkdtemp(join(tmpdir(), 'agui-kit-'));
+  t.after(() => rm(folder, { recursive: true, force: true }));
+  return folder;
+}
+
+test('managed host reads fail without fixture controls', async t => {
+  const folder = await scratch(t);
+  await assert.rejects(exec(process.execPath, [here('run.mjs'), '--only', 'closure-order,receipt-durable', '--', process.execPath, here('fake-agent.mjs')], {
+    signal: deadline(), env: { ...process.env, TMPDIR: folder },
+  }), e => e.code === 1 && /managed fixture must report its control URL/.test(e.stderr) && /0\/2 AG-UI cases passed/.test(e.stdout));
 });
 
-test('runner connects to an existing scripted agent with a token file', async () => {
+for (const [signal, status] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+  test(`runner stops the managed child and removes its folder on ${signal}`, async t => {
+    const folder = await scratch(t);
+    const marker = join(folder, 'pid');
+    // Hold the fixture before readiness so it stays live until the runner stops it.
+    const childCode = `const fs = require('node:fs');
+      const path = process.argv[1];
+      fs.writeFileSync(path + '.tmp', String(process.pid));
+      fs.renameSync(path + '.tmp', path);
+      setInterval(() => {}, 1000);`;
+    const timeout = deadline();
+    const running = exec(process.execPath, [here('run.mjs'), '--only', 'history', '--', process.execPath, '-e', childCode, marker], {
+      signal: timeout, env: { ...process.env, TMPDIR: folder },
+    });
+    const stopped = assert.rejects(running, error => error.code === status);
+    while (!existsSync(marker)) await delay(20, undefined, { signal: timeout });
+    const pid = Number(await readFile(marker, 'utf8'));
+    t.after(() => {
+      try { process.kill(pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+    });
+    assert.equal(running.child.kill(signal), true);
+    await stopped;
+    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+    assert.deepEqual(await readdir(folder), ['pid']);
+  });
+}
+
+test('runner connects to an existing scripted agent with a token file', async t => {
+  const folder = await scratch(t);
   const server = await fake();
-  const folder = await mkdtemp(join(tmpdir(), 'agui-connect-'));
   const tokenFile = join(folder, 'token');
   try {
     await writeFile(tokenFile, server.tokens.owner + '\n', { mode: 0o600 });
@@ -39,18 +77,17 @@ test('runner connects to an existing scripted agent with a token file', async ()
     assert.match(stdout, /1\/1 AG-UI cases passed/);
   } finally {
     await server.close();
-    await rm(folder, { recursive: true, force: true });
   }
 });
 
-test('a restart case refuses an unmanaged listener', async () => {
+test('a restart case refuses an unmanaged listener', async t => {
+  const folder = await scratch(t);
   const server = await fake();
-  const folder = await mkdtemp(join(tmpdir(), 'agui-no-wait-'));
   try {
     const path = join(folder, 'owner.token');
     await writeFile(path, server.tokens.owner, { mode: 0o600 });
     await assert.rejects(exec(process.execPath, [here('run.mjs'), '--only', 'waiting-restart', '--url', server.origin, '--token-file', path], { signal: deadline() }), e => e.code === 1 && /require a managed fixture command/.test(e.stderr));
-  } finally { await server.close(); await rm(folder, { recursive: true, force: true }); }
+  } finally { await server.close(); }
 });
 
 test('waiting cases require declarations on their own session', async () => {

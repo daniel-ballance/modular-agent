@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
-import { isToolCall, modelView, textOf } from "@modular-agent/harness";
+import { isToolCall, modelView, textOf, type Harness } from "@modular-agent/harness";
 import { createAgent } from "../src/index.js";
 
 const read = (path: string) => fauxAssistantMessage([fauxToolCall("read", { path }, { id: path })], { stopReason: "toolUse" });
@@ -12,15 +12,19 @@ const read = (path: string) => fauxAssistantMessage([fauxToolCall("read", { path
 for (const trigger of ["threshold", "overflow", "command"] as const) {
 	test(`single-turn compaction via ${trigger} keeps the newest tool round`, async (t) => {
 		const root = mkdtempSync(join(tmpdir(), "ma-compact-"));
+		let harness: Harness | undefined;
+		t.after(async () => {
+			try {
+				await harness?.stop();
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		});
 		const model = { id: "faux-1", contextWindow: trigger === "threshold" ? 2200 : 128_000 };
 		const faux = fauxProvider({ models: [model] });
 		const models = createModels();
 		models.setProvider(faux.provider);
-		const harness = await createAgent({ project: root, home: join(root, "home"), models, model: "faux/faux-1", ephemeral: true });
-		t.after(async () => {
-			await harness.stop();
-			rmSync(root, { recursive: true, force: true });
-		});
+		harness = await createAgent({ project: root, home: join(root, "home"), models, model: "faux/faux-1", ephemeral: true });
 		writeFileSync(join(root, "old.txt"), "OLD-RESULT ".repeat(500));
 		writeFileSync(join(root, "recent.txt"), "verbatim recent result");
 		const goal = "Compare the two files and identify their purpose";

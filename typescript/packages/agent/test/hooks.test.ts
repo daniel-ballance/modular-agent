@@ -1,23 +1,20 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { type Harness, type Plugin, type PluginApi, text, textOf } from "@modular-agent/harness";
 import { createAgent } from "../src/index.js";
+import { testDirs } from "./fixtures/temp-dir.js";
 
-const dirs = () => ({ project: mkdtempSync(join(tmpdir(), "ma-p-")), home: mkdtempSync(join(tmpdir(), "ma-h-")) });
-async function agent(responses: FauxResponseStep[], plugins: Plugin[]): Promise<Harness> {
+async function agent(t: TestContext, responses: FauxResponseStep[], plugins: Plugin[]): Promise<Harness> {
 	const faux = fauxProvider();
 	const models = createModels();
 	models.setProvider(faux.provider);
 	faux.setResponses(responses);
-	return createAgent({ ...dirs(), models, model: "faux/faux-1", plugins });
+	return createAgent({ ...testDirs(t), models, model: "faux/faux-1", plugins });
 }
 const lastText = (h: Harness, s: string) => (h.api("t").history(s).filter((e) => e.kind === "turnEnd").at(-1)!.data as { result: { text?: string } }).result.text;
 
-test("a plugin checking the turn's result sends the model back", async () => {
+test("a plugin checking the turn's result sends the model back", async (t) => {
 	const checker: Plugin = {
 		name: "must-cite",
 		setup(api) {
@@ -25,7 +22,7 @@ test("a plugin checking the turn's result sends the model back", async () => {
 		},
 	};
 	let sawCheck = "";
-	const h = await agent([
+	const h = await agent(t, [
 		fauxAssistantMessage([fauxText("The sky is blue.")]),
 		(c) => {
 			sawCheck = textOf(c.messages.at(-1)!.content as never);
@@ -50,20 +47,20 @@ test("a plugin checking the turn's result sends the model back", async () => {
 	await h.stop();
 });
 
-test("a plugin defines a hook point for others, and only it may run it", async () => {
+test("a plugin defines a hook point for others, and only it may run it", async (t) => {
 	let owner!: PluginApi;
 	let stranger!: PluginApi;
 	const linter: Plugin = { name: "linter", setup(api) { owner = api; api.defineHook("lint.rules", "collect"); } };
 	const style: Plugin = { name: "style-rules", setup(api) { api.on("lint.rules", () => "no tabs"); } };
 	const safety: Plugin = { name: "safety-rules", setup(api) { api.on("lint.rules", () => "no eval"); stranger = api; } };
-	const h = await agent([], [linter, style, safety]);
+	const h = await agent(t, [], [linter, style, safety]);
 	assert.deepEqual(await owner.runHook("lint.rules", {}), ["no tabs", "no eval"], "every handler's answer, in load order");
 	await assert.rejects(stranger.runHook("lint.rules", {}), /safety-rules can't run lint\.rules: it belongs to linter/);
 	await assert.rejects(stranger.runHook("provider.request", {}), /belongs to provider/);
 	await h.stop();
 });
 
-test("a UI starts a tool call itself: the same checks apply, and it is recorded", async () => {
+test("a UI starts a tool call itself: the same checks apply, and it is recorded", async (t) => {
 	const seenBefore: string[] = [];
 	const tools: Plugin = {
 		name: "ui-tools",
@@ -82,7 +79,7 @@ test("a UI starts a tool call itself: the same checks apply, and it is recorded"
 			});
 		},
 	};
-	const h = await agent([], [tools]);
+	const h = await agent(t, [], [tools]);
 	const api = h.api("t");
 	const s = await api.startSession();
 	await api.input(s, { actorId: "user", when: "propose", content: "Keep this session" });

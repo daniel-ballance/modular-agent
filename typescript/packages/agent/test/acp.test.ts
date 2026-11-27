@@ -1,20 +1,19 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { client, methods, type InitializeRequest, type SessionNotification } from "@agentclientprotocol/sdk";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { approval } from "@modular-agent/approval";
 import type { Harness, HistoryEntry, Plugin } from "@modular-agent/harness";
 import { acpInterface } from "@modular-agent/interface-acp";
 import { createAgent } from "../src/index.js";
+import { testDirs, testTempDir } from "./fixtures/temp-dir.js";
 
-const dirs = () => ({ project: mkdtempSync(join(tmpdir(), "ma-p-")), home: mkdtempSync(join(tmpdir(), "ma-h-")) });
 
 /** Our agent, with an ACP Interface, and an ACP client from the official SDK connected to it in process. */
-async function setup(responses: FauxResponseStep[], options: { permission?: "allow" | "refuse" | "never"; d?: { project: string; home: string }; waitMs?: number; plugins?: Plugin[] } = {}) {
-	const d = options.d ?? dirs();
+async function setup(t: TestContext, responses: FauxResponseStep[], options: { permission?: "allow" | "refuse" | "never"; d?: { project: string; home: string }; waitMs?: number; plugins?: Plugin[] } = {}) {
+	const d = options.d ?? testDirs(t);
 	const faux = fauxProvider();
 	const models = createModels();
 	models.setProvider(faux.provider);
@@ -43,7 +42,7 @@ test("ACP: initialize negotiates the wire version independently of the binding",
 	const ns = "modular-agent";
 	for (const [version, binding] of [[2, "modular-agent-acp/1"], [2, "modular-agent-acp/2"], [65535, undefined]] as const) {
 		await t.test(`version ${version} with ${binding ?? "the default binding"}`, async (t) => {
-			const { ctx, connection, harness } = await setup([]);
+			const { ctx, connection, harness } = await setup(t, []);
 			t.after(async () => { connection.close(); await harness.stop(); });
 			const hello = await ctx.request(methods.agent.initialize, { protocolVersion: version, _meta: binding ? { [ns]: { binding } } : {} });
 			assert.equal(hello.protocolVersion, 1);
@@ -53,7 +52,7 @@ test("ACP: initialize negotiates the wire version independently of the binding",
 });
 
 test("ACP: failed initialize requests leave the connection uninitialized", async (t) => {
-	const { ctx, connection, harness } = await setup([]);
+	const { ctx, connection, harness } = await setup(t, []);
 	t.after(async () => { connection.close(); await harness.stop(); });
 	const init = (params: unknown) => ctx.request(methods.agent.initialize, params as InitializeRequest);
 	const ns = "modular-agent";
@@ -85,7 +84,7 @@ test("ACP: withheld history entries are omitted before the page reply gate", asy
 			}
 		});
 	} };
-	const { d, harness, ctx, connection } = await setup([fauxAssistantMessage([fauxText("Ready")])], { plugins: [gate] });
+	const { d, harness, ctx, connection } = await setup(t, [fauxAssistantMessage([fauxText("Ready")])], { plugins: [gate] });
 	t.after(async () => { connection.close(); await harness.stop(); });
 	await ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
 	const { sessionId } = await ctx.request(methods.agent.session.new, { cwd: d.project, mcpServers: [] });
@@ -101,8 +100,8 @@ test("ACP: withheld history entries are omitted before the page reply gate", asy
 	assert.deepEqual(seen, [[], ["visible.entry"]]);
 });
 
-test("ACP: initialize declares what the agent supports; a prompt runs a turn with a tool call", async () => {
-	const { d, harness, ctx, updates, permissions, connection } = await setup([
+test("ACP: initialize declares what the agent supports; a prompt runs a turn with a tool call", async (t) => {
+	const { d, harness, ctx, updates, permissions, connection } = await setup(t, [
 		fauxAssistantMessage([fauxToolCall("read", { path: "a.txt" })], { stopReason: "toolUse" }),
 		fauxAssistantMessage([fauxText("It says hello.")]),
 	]);
@@ -128,8 +127,9 @@ test("ACP: initialize declares what the agent supports; a prompt runs a turn wit
 	await harness.stop();
 });
 
-test("ACP: an approval becomes session/request_permission; a refusal blocks the call", async () => {
+test("ACP: an approval becomes session/request_permission; a refusal blocks the call", async (t) => {
 	const { d, harness, ctx, permissions, connection } = await setup(
+		t,
 		[fauxAssistantMessage([fauxToolCall("bash", { command: "echo x > x.txt" })], { stopReason: "toolUse" }), fauxAssistantMessage([fauxText("Not allowed.")])],
 		{ permission: "refuse" },
 	);
@@ -145,8 +145,9 @@ test("ACP: an approval becomes session/request_permission; a refusal blocks the 
 	await harness.stop();
 });
 
-test("ACP: a timed-out approval is closed and a late allow cannot dispatch", async () => {
+test("ACP: a timed-out approval is closed and a late allow cannot dispatch", async (t) => {
 	const { d, harness, ctx, connection, answer } = await setup(
+		t,
 		[fauxAssistantMessage([fauxToolCall("bash", { command: "echo x > x.txt" })], { stopReason: "toolUse" }), fauxAssistantMessage([fauxText("Done.")])],
 		{ permission: "never", waitMs: 30 },
 	);
@@ -167,10 +168,10 @@ test("ACP: a timed-out approval is closed and a late allow cannot dispatch", asy
 	await harness.stop();
 });
 
-test("ACP: session/load replays the history; the session's cwd is where tools run", async () => {
-	const d = dirs();
-	const other = mkdtempSync(join(tmpdir(), "ma-cwd-"));
-	const first = await setup([fauxAssistantMessage([fauxToolCall("write", { path: "here.txt", content: "x" })], { stopReason: "toolUse" }), fauxAssistantMessage([fauxText("Wrote it.")])], { d });
+test("ACP: session/load replays the history; the session's cwd is where tools run", async (t) => {
+	const d = testDirs(t);
+	const other = testTempDir(t, "ma-cwd-");
+	const first = await setup(t, [fauxAssistantMessage([fauxToolCall("write", { path: "here.txt", content: "x" })], { stopReason: "toolUse" }), fauxAssistantMessage([fauxText("Wrote it.")])], { d });
 	await first.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
 	const { sessionId } = await first.ctx.request(methods.agent.session.new, { cwd: other, mcpServers: [] });
 	await first.ctx.request(methods.agent.session.prompt, { sessionId, prompt: [{ type: "text", text: "write here.txt" }] });
@@ -178,7 +179,7 @@ test("ACP: session/load replays the history; the session's cwd is where tools ru
 	first.connection.close();
 	await first.harness.stop();
 
-	const second = await setup([], { d });
+	const second = await setup(t, [], { d });
 	await second.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
 	const listed = await second.ctx.request(methods.agent.session.list, {});
 	assert.ok(listed.sessions.some((s) => s.sessionId === sessionId));
@@ -189,8 +190,8 @@ test("ACP: session/load replays the history; the session's cwd is where tools ru
 	await second.harness.stop();
 });
 
-test("ACP: a slash command is handled without the model", async () => {
-	const { d, harness, ctx, updates, connection } = await setup([], { plugins: [{
+test("ACP: a slash command is handled without the model", async (t) => {
+	const { d, harness, ctx, updates, connection } = await setup(t, [], { plugins: [{
 		name: "test-command",
 		setup(api) { api.registerCommand("hello", { description: "Say hello", run: () => "Hello from the command." }); },
 	}] });

@@ -1,16 +1,15 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { getEventListeners } from "node:events";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AgentEvent } from "@modular-agent/harness";
 import { Peer, remotePlugin } from "@modular-agent/plugin-rpc";
 import { createAgent } from "../src/index.js";
 import type { Scripted } from "./fixtures/faux-provider.js";
+import { testDirs } from "./fixtures/temp-dir.js";
 
-const dirs = () => ({ project: mkdtempSync(join(tmpdir(), "ma-p-")), home: mkdtempSync(join(tmpdir(), "ma-h-")) });
 const fixture = new URL("./fixtures/faux-provider.js", import.meta.url).href;
 const remoteProvider = (responses: Scripted[]) => remotePlugin({ name: "provider-faux", spawn: { module: fixture, export: "fauxProviders", options: { responses } } });
 const children = () => {
@@ -21,8 +20,8 @@ const children = () => {
 	}
 };
 
-test("RPC: only the Harness in this process; Provider, Runtime, tools and working environment each in their own", async () => {
-	const d = dirs();
+test("RPC: only the Harness in this process; Provider, Runtime, tools and working environment each in their own", async (t) => {
+	const d = testDirs(t);
 	writeFileSync(join(d.project, "note.txt"), "remote hello");
 	const h = await createAgent({
 		...d,
@@ -47,8 +46,8 @@ test("RPC: only the Harness in this process; Provider, Runtime, tools and workin
 	assert.equal(children(), 0, "stopping the agent ends its plugin processes");
 });
 
-test("RPC: cancelling reaches a tool in another process", async () => {
-	const d = dirs();
+test("RPC: cancelling reaches a tool in another process", async (t) => {
+	const d = testDirs(t);
 	const h = await createAgent({
 		...d,
 		model: "faux/faux-1",
@@ -70,7 +69,7 @@ test("RPC: cancelling reaches a tool in another process", async () => {
 });
 
 test("RPC: a plugin in another process that dies takes its calls with it, and the turn says so", async t => {
-	const d = dirs();
+	const d = testDirs(t);
 	const environment = remotePlugin({ name: "env-crashing", replaces: "env-local",
 		spawn: { module: new URL("./fixtures/crashing-environment.js", import.meta.url).href, export: "crashingEnvironment" } });
 	const h = await createAgent({ ...d, model: "faux/faux-1", remote: [],

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { type CredentialStore, type Harness, type InputRequest, type Plugin, type PluginApi, textOf } from "@modular-agent/harness";
 import { questionTool } from "@modular-agent/tools-question";
 import { createAgent } from "../src/index.js";
+import { testDirs } from "./fixtures/temp-dir.js";
 
 function fakeUi() {
 	const requests: InputRequest[] = [];
@@ -22,7 +22,6 @@ function fakeUi() {
 		},
 	};
 }
-const dirs = () => ({ project: mkdtempSync(join(tmpdir(), "ma-p-")), home: mkdtempSync(join(tmpdir(), "ma-h-")) });
 async function agent(d: { project: string; home: string }, responses: FauxResponseStep[], ui: Plugin, waitMs?: number): Promise<Harness> {
 	const faux = fauxProvider();
 	const models = createModels();
@@ -37,9 +36,9 @@ const answerSeen = (context: { messages: { role: string; content: unknown }[] })
 	return r ? textOf(r.content as never) : "none";
 };
 
-test("a tool's own question answered within the turn", async () => {
+test("a tool's own question answered within the turn", async (t) => {
 	const ui = fakeUi();
-	const h = await agent(dirs(), [
+	const h = await agent(testDirs(t), [
 		fauxAssistantMessage([fauxToolCall("ask_user", { question: "Which database?", options: ["postgres", "sqlite"] })], { stopReason: "toolUse" }),
 		(context) => fauxAssistantMessage([fauxText(`Using: ${answerSeen(context)}`)]),
 	], ui.plugin);
@@ -54,8 +53,8 @@ test("a tool's own question answered within the turn", async () => {
 	await h.stop();
 });
 
-test("a tool's own question outlasts its turn; the tool runs again and finds the late answer, even after a restart", async () => {
-	const d = dirs();
+test("a tool's own question outlasts its turn; the tool runs again and finds the late answer, even after a restart", async (t) => {
+	const d = testDirs(t);
 	const first = fakeUi();
 	const call = fauxToolCall("ask_user", { question: "Which database?" });
 	let h = await agent(d, [fauxAssistantMessage([call], { stopReason: "toolUse" })], first.plugin, 30);
@@ -85,9 +84,9 @@ test("a tool's own question outlasts its turn; the tool runs again and finds the
 	await h.stop();
 });
 
-test("a tool that can't wait outside a turn fails instead of staying open", async () => {
+test("a tool that can't wait outside a turn fails instead of staying open", async (t) => {
 	const ui = fakeUi();
-	const h = await agent(dirs(), [], ui.plugin, 10);
+	const h = await agent(testDirs(t), [], ui.plugin, 10);
 	const api = h.api("t");
 	const s = await api.startSession();
 	await api.input(s, { actorId: "user", when: "propose", content: "Keep this session" });
@@ -97,8 +96,8 @@ test("a tool that can't wait outside a turn fails instead of staying open", asyn
 	await h.stop();
 });
 
-test("a secret goes to the credential store and nowhere else", async () => {
-	const d = dirs();
+test("a secret goes to the credential store and nowhere else", async (t) => {
+	const d = testDirs(t);
 	const ui = fakeUi();
 	let context = "";
 	const events: unknown[] = [];

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
@@ -8,6 +7,7 @@ import { ALL_AUTHORITY, type Actor, type AgentEvent, type Harness, type InputReq
 import { approval, type ApprovalPolicy } from "@modular-agent/approval";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { createAgent } from "../src/index.js";
+import { testDirs } from "./fixtures/temp-dir.js";
 
 /** An Interface that collects questions and answers them when told to. */
 function fakeUi(actorId = "user") {
@@ -30,10 +30,6 @@ function fakeUi(actorId = "user") {
 			return requests.shift()!;
 		},
 	};
-}
-
-function dirs() {
-	return { project: mkdtempSync(join(tmpdir(), "ma-p-")), home: mkdtempSync(join(tmpdir(), "ma-h-")) };
 }
 
 async function agent(d: { project: string; home: string }, responses: FauxResponseStep[], plugins: Plugin[], policy: ApprovalPolicy = "ask"): Promise<Harness> {
@@ -65,8 +61,8 @@ async function crashWhileAsking(d: { project: string; home: string }) {
 const abandoned: Harness[] = [];
 after(() => Promise.all(abandoned.map((h) => h.stop().catch(() => undefined))));
 
-test("durable: a question open when the process stopped is reopened, and the answer lets the call run", async () => {
-	const d = dirs();
+test("durable: a question open when the process stopped is reopened, and the answer lets the call run", async (t) => {
+	const d = testDirs(t);
 	const { s, asked, abandoned } = await crashWhileAsking(d);
 	await abandoned.stop();
 	const ui = fakeUi();
@@ -85,8 +81,8 @@ test("durable: a question open when the process stopped is reopened, and the ans
 	await h.stop();
 });
 
-test("durable: an answer given before the process stopped is not asked again", async () => {
-	const d = dirs();
+test("durable: an answer given before the process stopped is not asked again", async (t) => {
+	const d = testDirs(t);
 	const { s, asked, abandoned } = await crashWhileAsking(d);
 	// Record the answer as the first process would have, then "crash" before the tool started.
 	const a = abandoned.api("t");
@@ -106,8 +102,8 @@ test("durable: an answer given before the process stopped is not asked again", a
 	await h.stop();
 });
 
-test("durable: a recorded allow from someone who may no longer answer is not reused", async () => {
-	const d = dirs();
+test("durable: a recorded allow from someone who may no longer answer is not reused", async (t) => {
+	const d = testDirs(t);
 	const { s, asked, abandoned } = await crashWhileAsking(d);
 	await abandoned.api("t").append(s, { kind: "inputAnswer", writer: "harness", modelVisible: false, actorId: "alice", requestId: asked.id, turnId: asked.turnId, toolCallId: asked.toolCallId, data: { requestId: asked.id, actorId: "alice", value: "allow" } });
 	await abandoned.stop();
@@ -123,8 +119,8 @@ test("durable: a recorded allow from someone who may no longer answer is not reu
 	await h.stop();
 });
 
-test("transient: a question open when the process stopped is recorded as no longer answerable", async () => {
-	const d = dirs();
+test("transient: a question open when the process stopped is recorded as no longer answerable", async (t) => {
+	const d = testDirs(t);
 	const { s, asked, abandoned } = await crashWhileAsking(d);
 	await abandoned.stop();
 	const ui = fakeUi();
@@ -142,8 +138,8 @@ test("transient: a question open when the process stopped is recorded as no long
 	await h.stop();
 });
 
-test("approval policy never refuses even read-only tools without asking", async () => {
-	const d = dirs();
+test("approval policy never refuses even read-only tools without asking", async (t) => {
+	const d = testDirs(t);
 	const ui = fakeUi();
 	const h = await agent(d, [
 		fauxAssistantMessage([fauxToolCall("read", { path: "nothing.txt" })], { stopReason: "toolUse" }),
@@ -160,8 +156,8 @@ test("approval policy never refuses even read-only tools without asking", async 
 	await h.stop();
 });
 
-test("a viewer can see a question but only an actor with authority can answer it", async () => {
-	const d = dirs();
+test("a viewer can see a question but only an actor with authority can answer it", async (t) => {
+	const d = testDirs(t);
 	const owner = fakeUi("user");
 	const viewer = fakeUi("viewer");
 	const h = await agent(d, [fauxAssistantMessage([writeCall()], { stopReason: "toolUse" }), fauxAssistantMessage([fauxText("done")])], [owner.plugin, viewer.plugin]);
