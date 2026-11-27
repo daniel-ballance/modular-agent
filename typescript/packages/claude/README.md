@@ -70,6 +70,8 @@ The Agent SDK accepts only user input. Earlier messages go in as a marked text r
 
 The Provider hashes the first replayed entry to choose the mark. As messages are appended, the mark and existing record prefix stay the same for prompt caching unless a replayed entry contains the mark after a colon. When that happens, the Provider tries deterministic alternatives until it finds a mark that never follows a colon in the entries. This keeps quoted tags from acting as boundaries.
 
+The record header, each entry and the closing tag occupy separate content blocks. Images split an entry at their original positions. The Provider adds one five-minute cache breakpoint to the last entry, before the closing tag and any new user input. The pinned SDK forwards that breakpoint when the Provider turns off Claude Code's automatic breakpoints for replay. This avoids both the API's TTL ordering error and its limit of four breakpoints. [Anthropic's prompt caching rules](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) give the model-specific token minimums and the 20-block lookback window.
+
 The reference normally does something more involved: it keeps one Claude Code process alive per conversation and holds each tool call open until Pi supplies the result, which gives the model native history, its own thinking and a warm prompt cache. That is an optimisation there, not a necessity, and it would need the stateful Provider rules (`sessionId` on every request, exact-prefix proof, `provider/discard`, reset on move, fork, compaction and model change) plus a pool of long-lived processes. The stateless form is correct with none of that, so it was chosen. Its costs are listed under known gaps.
 
 Failed and aborted assistant messages in the request are not replayed, and neither is a tool result whose call is not in a replayed assistant message. Reasoning parts are not replayed.
@@ -151,10 +153,20 @@ Tracked in #39.
 - **`off` did not stop thinking in one real request.** With `reasoning: "off"` Claude Code is started with thinking disabled. With no tools offered, Haiku 5.5 sent only text. With a tool offered and a replayed record, it still sent a thinking block whose text was empty, at a cost of roughly 90 output tokens. The sidecar passes the setting correctly as far as the SDK's options go; why Claude Code or the model thought anyway was not investigated, to stay inside the request budget. Empty thinking is not streamed and leaves no reasoning part.
 - **Claude Code adds to the prompt.** The host's system prompt is passed unchanged as the system prompt, but Claude Code itself adds an identity line ("You are a Claude agent, built on Anthropic's Claude Agent SDK.") and `<system-reminder>` context such as the working directory, platform, date and account email. The no-tools request above, with a seven-word system prompt, counted 858 input tokens, so this overhead is real. The exact text was not captured. The Agent SDK offers no option to remove it.
 - **Built-in agents, plugin skills and plugins are still listed at start.** Claude Code's init message names its built-in agents (`Explore`, `Plan` and others), four built-in `cc-plugin-*` plugins and three skills those plugins supply. With `skills: []` and `disableBundledSkills` the bundled skills are gone and no skill is listed to the model, and since the tool list is only the host's tools there is no Agent or Skill tool to reach any of them. Whether any of their descriptions reach the prompt could not be checked.
-- **History is a text record, not native turns.** The model sees earlier turns as a quoted record in one user message. Its own earlier thinking is not carried. Prompt caching only helps for the unchanged prefix. Each request pays about a second to start Claude Code.
+- **History is a text record.** The model sees earlier turns as a quoted record in one user message and receives no earlier thinking. Each request starts a fresh Claude Code process.
+
+  The live run for [#227](https://github.com/daniel-ballance/modular-agent/issues/227) on 2026-11-26 used `claude()` directly with a Claude subscription, Haiku 5.5, Agent SDK 0.3.323 and Claude Code 2.1.323. One initial tool call supplied the first page of a synthetic inventory. Each of the next three requests replayed the record, called the same tool and added another 270-line page. Anthropic reported these token counts.
+
+  | Request | `cacheRead` | `cacheWrite` |
+  | --- | ---: | ---: |
+  | Initial, no replay | 0 | 1,383 |
+  | Replay 1 | 0 | 7,544 |
+  | Replay 2 | 7,544 | 6,636 |
+  | Replay 3 | 14,180 | 6,634 |
+
 - **Per-request process.** Requests are independent, so parallel requests work, each with its own process.
 - **`maxOutput` is not proven to bind.** It is passed as `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, and requests with it set succeeded, but no request was spent on hitting the cap.
-- **No temperature, stop sequences or cache control.** Claude Code sets them.
+- **Temperature and stop sequences.** Claude Code sets them.
 - **A call to a tool the host did not offer** is answered by Claude Code itself with an error and the turn goes on inside the same request; the host sees none of it.
 - **`cost` is always 0.** See Usage above.
 - **An empty system prompt** is passed as an empty string. Whether Claude Code then falls back to its own prompt was not tested.

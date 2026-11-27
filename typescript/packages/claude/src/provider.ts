@@ -6,7 +6,7 @@ import type { AccountInfo, Options, SDKResultMessage } from "@anthropic-ai/claud
 import { PROVIDER_ID, REASONING_LEVELS, type AssistantMessage, type ModelInfo, type ModelRequest, type StreamEvent } from "./data.js";
 import { baselineModels, discoveredModels, modelInfo, thinkingFor, type CatalogModel } from "./models.js";
 import { Response, errorKind, scrub, stopFor } from "./response.js";
-import { Inbox, apiRoutingReason, loadQuery, subscriptionEnv, type AgentQuery, type QueryFunction } from "./sdk.js";
+import { Inbox, apiRoutingReason, loadQuery, replayCacheEnabled, subscriptionEnv, type AgentQuery, type QueryFunction } from "./sdk.js";
 import { SERVER_NAME, ToolBridge } from "./tools.js";
 import { promptBlocks } from "./transcript.js";
 
@@ -248,15 +248,19 @@ export class ClaudeProvider {
 	}
 
 	/** The options of the one Claude Code process a request gets. */
-	queryOptions(model: CatalogModel, request: ModelRequest, bridge: ToolBridge, stderr: (data: string) => void): Options {
+	queryOptions(model: CatalogModel, request: ModelRequest, bridge: ToolBridge, stderr: (data: string) => void, hasReplayBreakpoint: boolean): Options {
 		const cap = request.settings.maxOutput;
 		const capped = typeof cap === "number" && Number.isSafeInteger(cap) && cap > 0 ? Math.min(cap, model.maxOutput) : undefined;
 		const level = REASONING_LEVELS.find(level => level === request.settings.reasoning);
 		const thinking = thinkingFor(model, level, capped);
+		const env = subscriptionEnv(this.options.env, this.options.version, capped ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(capped) } : {});
+		// The pinned CLI still forwards our explicit breakpoint with its own caching disabled.
+		// This avoids TTL ordering errors and leaves room under the API's four-breakpoint limit.
+		if (hasReplayBreakpoint) env.DISABLE_PROMPT_CACHING = "1";
 		return {
 			model: model.id,
 			cwd: this.cwd,
-			env: subscriptionEnv(this.options.env, this.options.version, capped ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(capped) } : {}),
+			env,
 			// The host's system prompt replaces Claude Code's; the host's tools are the only tools.
 			systemPrompt: request.systemPrompt,
 			tools: [],
@@ -316,7 +320,10 @@ export class ClaudeProvider {
 			if (routing) return response.finish("failed", { kind: "credentials", message: routing });
 			const start = await this.query;
 			if (signal.aborted || this.closed) throw new Cancelled();
-			query = start({ prompt: inbox, options: this.queryOptions(model, request, bridge, (data) => { stderr = (stderr + data).slice(-2_000); }) });
+			const blocks = promptBlocks(request, replayCacheEnabled(this.options.env, model.id));
+			const options = this.queryOptions(model, request, bridge, (data) => { stderr = (stderr + data).slice(-2_000); },
+				blocks.some(block => block.cache_control));
+			query = start({ prompt: inbox, options });
 			this.running.add(query);
 			const messages = query[Symbol.asyncIterator]();
 			// The login is Claude Code's own; refuse anything that is not a subscription before sending a prompt.
@@ -325,7 +332,7 @@ export class ClaudeProvider {
 			if (!this.usesPlan(account)) {
 				return response.finish("failed", { kind: "credentials", message: `Claude Code is not signed in with a Claude subscription${describe(account)}. ${SIGN_IN}` });
 			}
-			inbox.push({ type: "user", message: { role: "user", content: promptBlocks(request) }, parent_tool_use_id: null, uuid: randomUUID() });
+			inbox.push({ type: "user", message: { role: "user", content: blocks }, parent_tool_use_id: null, uuid: randomUUID() });
 			let failure: { name: string; text: string } | undefined;
 			for (;;) {
 				const next = await Promise.race([cancelled, messages.next()]);
