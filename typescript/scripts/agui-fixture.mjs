@@ -20,8 +20,10 @@ const { name, tokenFiles, project, offer, controlTokenFile } = JSON.parse(await 
 const dataDir = env.MODULAR_AGENT_DATA_DIR;
 const { rights } = defaultAcpActor();
 const actors = Object.entries(tokenFiles).map(([role, tokenFile]) => ({ tokenFile,
-  actor: { id: role === 'foreign' ? 'kit-foreign' : 'kit-owner', kind: 'user', rights: role === 'watch' ? ['watch'] : rights },
-  clientId: ['owner','rotated'].includes(role) ? 'kit-primary' : `kit-${role}`, projects: role === 'project' ? [] : [project],
+  actor: { id: ({ foreign: 'kit-other', 'default-join': 'acp-user', departed: 'kit-departed', outside: 'kit-outside', 'no-watch': 'kit-no-watch' })[role] ?? 'kit-owner',
+    kind: role === 'default-join' ? 'host' : 'user', rights: role === 'watch' ? ['watch'] : role === 'no-watch' ? ['input'] : rights },
+  ...(['foreign', 'departed', 'outside', 'no-watch'].includes(role) && { joinOnOpen: true }),
+  clientId: ['owner','rotated'].includes(role) ? 'kit-primary' : `kit-${role}`, projects: ['project', 'outside'].includes(role) ? [] : [project],
   tenants: role === 'tenant' ? ['other'] : ['kit'], traceTrusted: ['owner','rotated'].includes(role) }));
 const waiting = name.startsWith("waiting-");
 const redacted = new Set();

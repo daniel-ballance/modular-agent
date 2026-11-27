@@ -47,7 +47,7 @@ impl Service {
             rights: &a.principal.actor.rights,
             route_id: Some(&a.client_id),
             join_on_open: a.join_on_open
-                && (self.agent.inner.several_actors || a.id() == base::ACP_HOST_ACTOR),
+                && (self.agent.inner.several_actors || base::actors(d).is_empty()),
             scope: &|project, tenant| {
                 project == self.agent.inner.project
                     && tenant == self.tenant.as_deref()

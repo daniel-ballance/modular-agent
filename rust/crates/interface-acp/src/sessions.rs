@@ -500,6 +500,33 @@ impl Drop for Opening<'_> {
 }
 
 impl State {
+    async fn admit_open(
+        &self,
+        api: &dyn AgentApi,
+        id: &str,
+        project: &Path,
+        tools: bool,
+    ) -> Result<Vec<Input>> {
+        let actor = &self.principal;
+        SESSION_OPEN_POLICY
+            .scope(
+                SessionOpenPolicy {
+                    session: id.into(),
+                    actor: actor.id.clone(),
+                    kind: actor.kind.clone(),
+                    rights: actor.rights.clone(),
+                    project: project.into(),
+                    tenants: actor.tenants.clone().unwrap_or_else(|| vec![None]),
+                    join_on_open: actor.join_on_open,
+                    several_actors: !actor.network || self.factory.several_actors(api)?,
+                    required: if tools { &["tools"] } else { &[] },
+                    writer: "interface.acp",
+                },
+                api.install_recovery(id),
+            )
+            .await
+    }
+
     async fn open_response(
         &self,
         session: &Session,
@@ -648,7 +675,8 @@ impl State {
                         .is_some_and(|servers| !servers.is_empty()),
                     request_error("busy", "cannot attach MCP to an open session")
                 );
-                join_host(shared.api.as_ref(), id)?;
+                self.admit_open(shared.api.as_ref(), id, &project, false)
+                    .await?;
                 let (session, rx) = Session::new(shared);
                 session.start_route(self, rx, cx.clone())?;
                 self.delivery_views
@@ -757,11 +785,11 @@ impl State {
                         .unwrap_or(json!([])),
                 )
                 .await?;
-            let handed_back = if borrowed_writer {
-                join_host(api.as_ref(), &id)?;
-                vec![]
-            } else if reopening {
-                let inputs = api.install_recovery(&id).await?;
+            let handed_back = if reopening {
+                let tools = p["mcpServers"]
+                    .as_array()
+                    .is_some_and(|servers| !servers.is_empty());
+                let inputs = self.admit_open(api.as_ref(), &id, &project, tools).await?;
                 self.routes.rewind_blocks.lock().unwrap().remove(&project);
                 inputs
             } else {

@@ -9,8 +9,10 @@ pub(super) const READER: &str = "disposable-reader-token";
 const OTHER: &str = "disposable-other-token";
 
 pub(super) async fn clients(agent: &Agent, dir: &Path) -> anyhow::Result<AguiServer> {
-    let writer = actor(dir, "app", TOKEN)?;
+    let mut writer = actor(dir, "app", TOKEN)?;
+    writer.join_on_open = true;
     let mut reader = actor(dir, "reader", READER)?;
+    reader.join_on_open = true;
     reader.principal.actor.rights = Rights::only(&["watch"]);
     let mut other = actor(dir, "other", OTHER)?;
     other.principal.actor.id = "uninvited".into();
@@ -74,7 +76,7 @@ async fn pages_are_scoped_to_the_client_and_expire_on_restart() -> anyhow::Resul
     assert_eq!(
         a.history().await?,
         history,
-        "discovery must not join the local host"
+        "discovery must not change membership"
     );
     for (token, query) in [
         (READER, after.as_str()),

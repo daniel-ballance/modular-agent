@@ -582,29 +582,41 @@ async fn serve(config: Value) -> Result<()> {
     fs::create_dir_all(&outside)?;
     for (role, path) in config["tokenFiles"].as_object().context("token files")? {
         let mut p = sdk::AcpActor::local(path.as_str().context("token file")?.into());
-        p.actor.id = if role == "foreign" {
-            "kit-other"
-        } else {
-            "kit-owner"
+        p.actor.id = match role.as_str() {
+            "foreign" => "kit-other",
+            "default-join" => base::ACP_HOST_ACTOR,
+            "departed" => "kit-departed",
+            "outside" => "kit-outside",
+            "no-watch" => "kit-no-watch",
+            _ => "kit-owner",
         }
         .into();
-        p.actor.kind = "user".into();
+        p.actor.kind = if role == "default-join" {
+            "host"
+        } else {
+            "user"
+        }
+        .into();
         p.actor.rights = match role.as_str() {
             "foreign" => Rights::only(&["watch", "input", "tools", "answer", "approve"]),
             "watch" => Rights::only(&["watch"]),
+            "no-watch" => Rights::only(&["input"]),
             _ => Rights::full(),
         };
         p.tenants = Some(vec![Some(
             if role == "tenant" { "other" } else { "kit" }.into(),
         )]);
-        p.projects = Some(vec![if role == "project" {
+        p.projects = Some(vec![if matches!(role.as_str(), "project" | "outside") {
             outside.clone()
         } else {
             project.clone()
         }]);
         let primary = matches!(role.as_str(), "owner" | "rotated");
         let mut a = AguiActor::new(if primary { "kit-primary" } else { role }, p);
-        a.join_on_open = true;
+        a.join_on_open = matches!(
+            role.as_str(),
+            "foreign" | "departed" | "outside" | "no-watch"
+        );
         a.trust_trace_context = primary;
         a.trace_state_keys = vec!["kit".into()];
         actors.push(a);

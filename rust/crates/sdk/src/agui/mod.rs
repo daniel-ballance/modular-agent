@@ -33,12 +33,11 @@ pub struct AguiActor {
 }
 impl AguiActor {
     pub fn new(client_id: impl Into<String>, principal: AcpActor) -> Self {
-        let join_on_open = principal.actor.id == base::ACP_HOST_ACTOR;
         Self {
             trust_trace_context: principal.trust_trace_context,
             principal,
             client_id: client_id.into(),
-            join_on_open,
+            join_on_open: false,
             trace_state_keys: vec![],
         }
     }
@@ -329,16 +328,6 @@ impl Service {
             && d.tenant_id() == self.tenant.as_deref()
             && a.allows(&d.project, d.tenant_id())
     }
-    fn discovery_rights(&self, a: &AguiActor, d: &SessionData) -> R<Rights> {
-        if !self.scope_ok(a, d) {
-            return Ok(Rights::default());
-        }
-        let join =
-            a.join_on_open && (self.agent.inner.several_actors || a.id() == base::ACP_HOST_ACTOR);
-        Ok(self
-            .h()
-            .discovery_rights(d, a.id(), &a.principal.actor.rights, join)?)
-    }
     fn watch(&self, a: &AguiActor, id: &str) -> R<SessionData> {
         self.h().check_writer(id)?;
         let d = self.h().snapshot(id)?;
@@ -410,7 +399,12 @@ impl Service {
         self.h().append(&scope(id,a.id()),"interface.agui",base::Draft::new("actor.grant",false,json!({"actor":a.id(),"kind":a.principal.actor.kind,"authority":rights,"operatorAdmission":true})))?;
         Ok(())
     }
-    async fn attach(&self, a: &AguiActor, id: &str) -> R<Session> {
+    async fn attach(
+        &self,
+        a: &AguiActor,
+        id: &str,
+        required: &'static [&'static str],
+    ) -> R<Session> {
         let _lock = self.opening.lock().await;
         if !a.principal.actor.rights.has("watch")
             || id.is_empty()
@@ -431,17 +425,39 @@ impl Service {
                 .load(id)
                 .map_err(|_| Fail::Missing)?
         };
-        if !self.discovery_rights(a, &data)?.has("watch") {
+        if !self.scope_ok(a, &data) {
             return Err(Fail::Missing);
         }
-        let member = base::actors(&data).contains_key(a.id());
         let session = Session::new(self.agent.inner.clone(), id.into());
-        if !open {
-            self.h().install_recovery(id).await?;
-        }
-        if !member {
-            self.grant(a, id)?;
-        }
+        let policy = base::SessionOpenPolicy {
+            session: id.into(),
+            actor: a.id().into(),
+            kind: a.principal.actor.kind.clone(),
+            rights: a.principal.actor.rights.clone(),
+            project: self.agent.inner.project.clone(),
+            tenants: vec![self.tenant.clone()],
+            join_on_open: a.join_on_open,
+            several_actors: self.agent.inner.several_actors,
+            required,
+            writer: "interface.agui",
+        };
+        base::SESSION_OPEN_POLICY
+            .scope(policy, self.h().install_recovery(id))
+            .await
+            .map_err(|error| {
+                if matches!(
+                    error.downcast_ref::<base::OperationError>(),
+                    Some(base::OperationError::Forbidden(_))
+                ) {
+                    if required.is_empty() {
+                        Fail::Missing
+                    } else {
+                        Fail::Refused
+                    }
+                } else {
+                    Fail::from(error)
+                }
+            })?;
         self.watch(a, id)?;
         if !open {
             self.agent.attach(id).map_err(|_| Fail::Lost)?;
@@ -519,10 +535,6 @@ impl Service {
                     .trim_start_matches("/threads/")
                     .strip_suffix("/settings")
                     .ok_or(Fail::Invalid)?;
-                self.attach(&a, id).await?;
-                if !self.right(&a, id, "settings")? {
-                    return Err(Fail::Refused);
-                }
                 let change = body(req).await?;
                 if change.as_object().is_none_or(|o| o.len() != 1)
                     || !matches!(
@@ -532,6 +544,7 @@ impl Service {
                 {
                     return Err(Fail::Invalid);
                 }
+                self.attach(&a, id, &["settings"]).await?;
                 self.h().settings(
                     &scope(id, a.id()),
                     base::portable::settings_from_wire(&change),
@@ -541,7 +554,7 @@ impl Service {
             (&Method::GET, Some(p)) if p.starts_with("/threads/") => {
                 let rest = &p[9..];
                 let id = rest.strip_suffix("/presence").unwrap_or(rest);
-                self.attach(&a, id).await?;
+                self.attach(&a, id, &[]).await?;
                 let c = self.client(id, &a)?;
                 if id != rest {
                     self.presence(a, id.to_owned(), c)

@@ -10,6 +10,22 @@ use std::{
     path::Path,
 };
 
+fn same_open_authority(a: &SessionData, b: &SessionData) -> bool {
+    fn records(data: &SessionData) -> impl Iterator<Item = &Entry> {
+        data.entries.iter().filter(|e| {
+            matches!(
+                e.kind.as_str(),
+                "actor.grant" | "actor.left" | "limit" | "tenant"
+            )
+        })
+    }
+    a.project == b.project
+        && a.settings == b.settings
+        && records(a)
+            .map(|e| (&e.kind, &e.content))
+            .eq(records(b).map(|e| (&e.kind, &e.content)))
+}
+
 impl Harness {
     pub async fn create(&self, project: &Path, settings: Value) -> Result<String> {
         self.create_tenanted(project, settings, None, false).await
@@ -163,6 +179,30 @@ impl Harness {
     }
 
     pub(super) async fn install_recovery(&self, id: &str) -> Result<Vec<Input>> {
+        if SESSION_OPEN_POLICY
+            .try_with(|policy| policy.session == id)
+            .unwrap_or(false)
+        {
+            let snapshot = self.snapshot(id);
+            if let Ok(data) = snapshot {
+                let rights =
+                    SESSION_OPEN_POLICY.with(|policy| self.check_session_open(&data, policy))?;
+                let mut sessions = self.sessions.lock().unwrap();
+                let open = sessions.get_mut(id).ok_or(SessionNotOpen)?;
+                self.refresh_open_erasure(open)?;
+                open.check_rewind()?;
+                ensure!(
+                    same_open_authority(&open.data, &data),
+                    OperationError::Busy("session authority changed during attachment".into())
+                );
+                SESSION_OPEN_POLICY.with(|policy| self.admit_session_open(open, policy, rights))?;
+                return Ok(vec![]);
+            } else if let Err(error) = snapshot
+                && !error.is::<SessionNotOpen>()
+            {
+                return Err(error);
+            }
+        }
         Ok(self
             .install_recovery_if(id, |_| Ok(true))
             .await?
@@ -206,6 +246,13 @@ impl Harness {
             let Some((lease, mut data, erased)) = loaded else {
                 return Ok(None);
             };
+            let open_rights = SESSION_OPEN_POLICY
+                .try_with(|policy| {
+                    (policy.session == id).then(|| self.check_session_open(&data, policy))
+                })
+                .ok()
+                .flatten()
+                .transpose()?;
             if let Some(remove) = self.private_erasure.get() {
                 remove(&data)?;
             }
@@ -270,6 +317,15 @@ impl Harness {
                         cancel: CancellationToken::new(),
                     },
                 );
+                if let Some(rights) = open_rights
+                    && let Err(error) = SESSION_OPEN_POLICY.with(|policy| {
+                        self.admit_session_open(sessions.get_mut(id).unwrap(), policy, rights)
+                    })
+                {
+                    sessions.remove(id);
+                    self.blocked_projects.lock().unwrap().remove(&project);
+                    return Err(error);
+                }
             }
             self.watch_writer(id);
             if recovery {

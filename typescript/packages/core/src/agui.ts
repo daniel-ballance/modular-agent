@@ -7,7 +7,7 @@ import type { Agent } from "./agent.js";
 import { checked } from "./errors.js";
 import { PATH, body, encode, errorCode, fail, frame, hash, httpError, json, object, parts, runInput, same, sse, type Code, type WireEvent } from "./agui-wire.js";
 import { checkedMessages, current, interrupt, messages, pending, reply, rights, watch, type InterruptView, type Principal } from "./agui-view.js";
-import { receiptId } from "@modular-agent/harness";
+import { receiptId, withSessionOpenPolicy } from "@modular-agent/harness";
 import { runReceipt } from "./agui-receipt.js";
 import { HostRead, WaitClosures } from "./agui-host-reads.js";
 import { ThreadListing } from "./agui-list.js";
@@ -97,7 +97,10 @@ export class AguiBinding {
       if (!id || !/^[\w-]+$/.test(id)) fail("not_found");
       const t = await this.host.locate(p, id);
       const recovered = !t.h.liveSessionInfo(id);
-      await t.h.openSession(id, p.actor);
+      const required = settings ? ["settings" as const] : undefined;
+      await withSessionOpenPolicy({ sessionId: id, joinOnOpen: p.joinOnOpen === true, severalActors: t.agent.declaration().severalActors === true,
+        required, allows: (project, tenant) => project === this.host.project && (tenant ?? null) === (this.host.tenant ?? null) &&
+          p.allowProject(project) && p.allowTenant(tenant ?? null) }, () => t.h.openSession(id, p.actor));
       if (recovered) await t.api.waitForIdle(id);
       await current(t.api, id, p);
       if (settings) {

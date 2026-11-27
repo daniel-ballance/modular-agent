@@ -27,6 +27,27 @@ async fn serve(agent: &Agent, dir: &Path) -> anyhow::Result<AguiServer> {
         })
         .await?)
 }
+async fn embedded_thread(
+    agent: &Agent,
+    dir: &Path,
+) -> anyhow::Result<(modular_agent::Session, AguiServer)> {
+    let mut client = actor(dir, "test-client", TOKEN)?;
+    client.principal.actor.id = "embedded-client".into();
+    let session = agent
+        .session_with(modular_agent::SessionOptions {
+            actors: vec![client.principal.actor.clone()],
+            ..Default::default()
+        })
+        .await?;
+    let server = agent
+        .serve_agui(AguiOptions {
+            listen: "127.0.0.1:0".into(),
+            actors: vec![client],
+            ..Default::default()
+        })
+        .await?;
+    Ok((session, server))
+}
 fn url(server: &AguiServer, route: &str) -> String {
     format!("{}/agui/v1{route}", server.url)
 }
@@ -445,11 +466,11 @@ async fn blocked_wire_text_is_not_reintroduced_by_a_recipient_snapshot() -> anyh
     let agent = Agent::builder()
         .project(dir.path())
         .plugin(gate)
+        .several_actors(true)
         .provider(scripted_provider(json!([{"text":"Private answer."}])))
         .build()
         .await?;
-    let server = serve(&agent, dir.path()).await?;
-    let session = agent.session().await?;
+    let (session, server) = embedded_thread(&agent, dir.path()).await?;
     let first = exchange(&server, input(session.id(), "one", json!("Hi"))).await?;
     assert_eq!(first.last().unwrap()["type"], "RUN_ERROR");
     session.wait_idle().await?;
@@ -547,11 +568,11 @@ async fn closing_a_listener_detaches_without_cancelling_the_admitted_turn() -> a
         .project(dir.path())
         .plugin_host(true)
         .plugin(hold)
+        .several_actors(true)
         .provider(scripted_provider(json!([{"text":"Work survived."}])))
         .build()
         .await?;
-    let session = agent.session().await?;
-    let server = serve(&agent, dir.path()).await?;
+    let (session, server) = embedded_thread(&agent, dir.path()).await?;
     let request = input(session.id(), "one", json!("Hello"));
     let response = post(&server, request.clone()).await?.error_for_status()?;
     entered.notified().await;

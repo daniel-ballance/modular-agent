@@ -141,6 +141,11 @@ Provision the witness with a new store. Use a unique path in an existing private
 - For named plugin callers, use `await serve(({ callerId }) => makePluginFor(callerId), { listen, callers })`. Add `tls` for a TLS listener. Each operator entry is `{ callerId, tokenFile }`. The listener authenticates before calling the factory. Neither the token nor a caller claim goes in a plugin message.
 - `await agent.serveAgui({ listen, actors })` serves both host reads. From the thread snapshot, pass `waitCursor` as the `after` query value on `wait-closures`. When `runReceipts === 1`, pass the original `runId` as one query value on `run-receipt`. Use authenticated HTTP; neither read needs a presence stream.
 
+## Join on open
+
+- Rust: Set `AcpActor::join_on_open` for ACP WebSocket or `AguiActor::join_on_open` for AG-UI (also used by ACP upgrades on that listener). Both default to false. On stdio, `AcpOptions::join_on_open` overrides the default.
+- TypeScript: Set `joinOnOpen: true` on an entry in `actors` for `serveAcp` or `serveAgui`. Omission means false, even with `severalActors: true`. On stdio, set `joinOnOpen` on `serveAcp` to override the default.
+
 ## ACP project options
 
 These are the language mappings for [ACP project composition](api.md#acp-project-composition).

@@ -64,6 +64,7 @@ async fn second_listener_checks_scope_before_refusing_an_open_session() -> modul
     writeln!(allowed, "efd168f0119d47929a1f22e37628dd8b")?;
     writeln!(denied, "da545bb70d5042dbbe63dd575df1ed01")?;
     let principal = |token: &Path, tenant: Option<String>| AcpActor {
+        join_on_open: false,
         token_file: token.to_owned(),
         actor: Actor {
             id: "editor".into(),

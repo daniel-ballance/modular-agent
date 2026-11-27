@@ -23,7 +23,7 @@ export class ThreadListing {
     const inspect = async (id: string): Promise<Thread | undefined> => {
       const { agent } = host.owner(id);
       const presence = binding.clients.get(JSON.stringify([p.clientId, id]))?.presence;
-      const listing = await agent.sessionSummary(id, { actor:{ ...p.actor, rights:p.actor.authority }, routeId:p.clientId,
+      const listing = await agent.sessionSummary(id, { actor:{ ...p.actor, rights:p.actor.authority }, routeId:p.clientId, joinOnOpen:p.joinOnOpen,
         scope:(project, name) => project === host.project && (name ?? null) === tenant && p.allowProject(project) && p.allowTenant(tenant),
         inTurn:presence && !presence.response.destroyed ? [...presence.questions] : [] }).catch(error => {
           if (error.code !== "unavailable" && error.code !== "not_found") throw error;

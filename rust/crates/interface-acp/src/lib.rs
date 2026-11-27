@@ -170,6 +170,9 @@ pub trait Factory: Send + Sync {
     fn serves_project(&self, _project: &Path) -> bool {
         true
     }
+    fn several_actors(&self, api: &dyn AgentApi) -> Result<bool> {
+        Ok(api.declaration()?["several_actors"] == true)
+    }
     /// The usual Factory builds one agent per session; an embedded agent shares one.
     fn owns_session_agent(&self) -> bool {
         true
@@ -206,7 +209,11 @@ impl Plugin for AcpPlugin {
             handler(|api, scope, _| {
                 Box::pin(async move {
                     // Another Interface on this agent is not an ACP connection.
-                    if PRINCIPAL.try_with(|_| ()).is_ok() {
+                    if PRINCIPAL.try_with(|_| ()).is_ok()
+                        && !SESSION_OPEN_POLICY
+                            .try_with(|p| p.session == scope.session)
+                            .unwrap_or(false)
+                    {
                         sessions::join_host(api.as_ref(), &scope.session)?;
                     }
                     Ok(HookResult::default())

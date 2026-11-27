@@ -7,7 +7,7 @@ import { TurnExecution, recordedSnapshot } from "./turn-execution.js";
 import { ToolDispatch } from "./tool-dispatch.js";
 import type { TurnState } from "./turn-state.js";
 import { InterfaceToolRoutes } from "./interface-tool-routes.js";
-import { connectionRights } from "./connection-authority.js";
+import { connectionRights, sessionOpenPolicy } from "./connection-authority.js";
 import { InputRequests, readRequest } from "./input-requests.js";
 import { Jobs } from "./jobs.js";
 import { SessionErasure } from "./session-erasure.js";
@@ -28,9 +28,9 @@ import { type Actor, type AgentEvent, type Authority, type Configuration, type E
 interface SessionLifecycleOperations {
 	sessions(): Map<string, Session>;
 	rebuildReservations(): Promise<void>;
+	canDiscoverSession(id: string, actor: Actor, allowJoin: boolean): Promise<boolean>;
 	session(id: string): Session;
 	startSession(options?: SessionStartOptions): Promise<string>;
-	canDiscoverSession(id: string, actor: Actor, severalActors: boolean): Promise<boolean>;
 	use<T>(capability: string): T | undefined;
 	erasure(): Pick<SessionErasure, "admitHistory" | "pendingRegistry" | "loadTombstones" | "reconcilePending">;
 	tenants(): ReadonlyMap<string, Tenant>;
@@ -238,7 +238,7 @@ export class SessionLifecycle {
 			return id;
 		}
 		if (opened) {
-			if (actor && !await this.operations.canDiscoverSession(id, actor, true)) throw failure("forbidden", "Session is inaccessible");
+			if (actor && !this.openingRights(opened, actor).includes("watch")) throw failure("forbidden", "Session is inaccessible");
 			await this.retireSession(opened);
 		}
 		const store = this.operations.use<HistoryStore>("history-store");
@@ -305,9 +305,9 @@ export class SessionLifecycle {
 		return id;
 	}
 
-	async canDiscoverSession(id: string, actor: Actor, severalActors: boolean, required: readonly Authority[] = ["watch"]): Promise<boolean> {
+	async canDiscoverSession(id: string, actor: Actor, allowJoin: boolean, required: readonly Authority[] = ["watch"]): Promise<boolean> {
 		const s = this.operations.sessions().get(id) ?? await this.loadInto(id);
-		const rights = s ? this.discoveryRights(s, actor, severalActors) : [];
+		const rights = s ? this.discoveryRights(s, actor, allowJoin) : [];
 		return required.every(right => rights.includes(right));
 	}
 
@@ -371,16 +371,28 @@ export class SessionLifecycle {
 			waiting:{questions, toolCalls, turn} };
 	}
 
+	private openingRights(s: Session, actor: Actor): Authority[] {
+		const policy = this.openPolicy(s.id);
+		if (!policy) return s.actors.has(actor.id) ? this.operations.actorRights(s, actor.id) : this.discoveryRights(s, actor, true);
+		if (!policy.allows(s.meta.project, s.tenant)) return [];
+		return this.discoveryRights(s, actor, policy.joinOnOpen && (policy.severalActors || s.actors.size === 0));
+	}
+
+	private openPolicy(id: string) {
+		const policy = sessionOpenPolicy.getStore();
+		return policy?.sessionId === id ? policy : undefined;
+	}
+
 	private async authorizeOpeningActor(s: Session, actor: Actor): Promise<void> {
-		const denied = () => Object.assign(new Error("Session is inaccessible"), { code: "forbidden" });
-		if (s.actors.has(actor.id)) {
-			if (!this.operations.actorRights(s, actor.id).includes("watch")) throw denied();
-			return;
-		}
-		if (s.order.some((id) => { const e = s.entries.get(id)!; return e.kind === "actorLeft" && (e.data as { actorId?: string }).actorId === actor.id; })) throw denied();
-		const rights = actor.authority.filter((r) => this.operations.withinLimits(s, r));
-		if (!rights.includes("watch")) throw denied();
-		await this.operations.commit(s, [actorJoined({ ...actor, authority: rights }, "harness")]);
+		const required = ["watch", ...(this.openPolicy(s.id)?.required ?? [])] as const;
+		const allowed = () => required.every(right => this.openingRights(s, actor).includes(right));
+		const denied = () => failure("forbidden", "Session is inaccessible");
+		if (!allowed()) throw denied();
+		if (s.actors.has(actor.id)) return;
+		const rights = this.openingRights(s, actor);
+		const grants = await this.operations.commit(s, [actorJoined({ ...actor, authority: rights }, "harness")], false,
+			() => !s.actors.has(actor.id) && allowed() && isDeepStrictEqual(rights, this.openingRights(s, actor)));
+		if (!grants.length) throw denied();
 	}
 
 	private async recordPlugins(s: Session): Promise<void> {

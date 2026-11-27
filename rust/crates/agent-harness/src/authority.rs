@@ -52,6 +52,58 @@ impl Harness {
             ConnectionCeiling::for_discovery(&data.id, actor, rights.intersect(ceiling)),
         )
     }
+    pub(super) fn check_session_open(
+        &self,
+        data: &SessionData,
+        policy: &SessionOpenPolicy,
+    ) -> Result<Authority> {
+        let denied = || OperationError::Forbidden("session inaccessible".into());
+        ensure!(policy.allows(data), denied());
+        let rights = self.discovery_rights(
+            data,
+            &policy.actor,
+            &policy.rights,
+            policy.allows_join(data),
+        )?;
+        ensure!(
+            rights.has("watch") && policy.required.iter().all(|right| rights.has(right)),
+            denied()
+        );
+        Ok(rights)
+    }
+
+    pub(super) fn admit_session_open(
+        &self,
+        open: &mut super::OpenSession,
+        policy: &SessionOpenPolicy,
+        rights: Authority,
+    ) -> Result<()> {
+        self.check_open_writer(open)?;
+        if open.data.recorded_rights(&policy.actor)?.is_none() {
+            let mut data = open.data.clone();
+            let entry = super::history_commit::make_entry(
+                &data,
+                &Scope {
+                    actor: policy.actor.clone(),
+                    ..Scope::session(&data.id)
+                },
+                policy.writer,
+                Draft::new(
+                    "actor.grant",
+                    false,
+                    json!({
+                        "actor": policy.actor, "kind": policy.kind, "authority": rights, "operatorAdmission": true
+                    }),
+                ),
+            );
+            data.position = Some(entry.id.clone());
+            data.entries.push(entry);
+            self.commit(open, &data)?;
+            open.data = data;
+        }
+        Ok(())
+    }
+
     pub(super) fn limit_rights(
         &self,
         data: &SessionData,
