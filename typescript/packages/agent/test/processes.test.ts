@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
+import { beforeTempDirCleanup, testTempDir } from "./fixtures/temp-dir.js";
 
 const envLocal = import.meta.resolve("@modular-agent/env-local");
 const alive = (pid: number) => {
@@ -19,6 +19,14 @@ const until = async (check: () => boolean, ms = 5000) => {
 	for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 50))) if (check()) return true;
 	return false;
 };
+
+function stopAgentAfterTest(t: TestContext, agent: ReturnType<typeof spawn>): void {
+	const closed = new Promise<void>(resolve => agent.once("close", () => resolve()));
+	beforeTempDirCleanup(t, async () => {
+		agent.kill("SIGKILL");
+		await closed;
+	});
+}
 
 /** An agent process that starts commands, then is killed with SIGKILL. */
 function agentScript(dir: string, home: string, platform = process.platform): string {
@@ -37,10 +45,10 @@ console.log("ready");
 }
 
 for (const platform of new Set<NodeJS.Platform>([process.platform, "darwin"])) test(`${platform}: agent SIGKILL stops background commands in their group`, async t => {
-	const dir = mkdtempSync(join(tmpdir(), "ma-proc-"));
-	const home = mkdtempSync(join(tmpdir(), "ma-h-"));
+	const dir = testTempDir(t, "ma-proc-");
+	const home = testTempDir(t, "ma-h-");
 	const agent = spawn(process.execPath, [agentScript(dir, home, platform)], { stdio: ["ignore", "pipe", "inherit"] });
-	t.after(() => { agent.kill("SIGKILL"); });
+	stopAgentAfterTest(t, agent);
 	await new Promise<void>((r, reject) => {
 		agent.once("exit", code => reject(new Error(`agent exited before ready: ${code}`)));
 		agent.stdout.on("data", (d) => String(d).includes("ready") && r());
@@ -58,8 +66,8 @@ for (const platform of new Set<NodeJS.Platform>([process.platform, "darwin"])) t
 	if (escaped !== undefined) assert.ok(await until(() => !alive(escaped!)), "the process that left its group died too");
 });
 
-test("Linux cannot start a command if the owner dies before registering its group", { skip: process.platform !== "linux" }, async () => {
-	const dir = mkdtempSync(join(tmpdir(), "ma-launch-barrier-"));
+test("Linux cannot start a command if the owner dies before registering its group", { skip: process.platform !== "linux" }, async (t) => {
+	const dir = testTempDir(t, "ma-launch-barrier-");
 	const script = `import { writeFileSync } from 'node:fs';
 		import { LocalEnvironment, ProcessTracker } from ${JSON.stringify(envLocal)};
 		class InterruptedTracker extends ProcessTracker {
@@ -75,10 +83,10 @@ test("Linux cannot start a command if the owner dies before registering its grou
 });
 
 test("Darwin groups stop on timeout, cancellation and session close", async t => {
-	const dir = mkdtempSync(join(tmpdir(), "ma-proc-"));
+	const dir = testTempDir(t, "ma-proc-");
 	const { LocalEnvironment, ProcessTracker } = await import(envLocal);
 	const tracker = new ProcessTracker(undefined, "darwin");
-	t.after(async () => { await tracker.stopAll(); });
+	beforeTempDirCleanup(t, async () => { await tracker.stopAll(); });
 	const local = new LocalEnvironment(dir, tracker);
 	assert.equal(local.containment, "processGroup");
 	assert.deepEqual(local.platforms, ["darwin"]);
@@ -110,10 +118,11 @@ test("Darwin groups stop on timeout, cancellation and session close", async t =>
 	assert.equal(timeout.timedOut, true);
 });
 
-test("if the watcher dies too, the next agent to start cleans up", { skip: process.platform !== "linux" && "reads /proc" }, async () => {
-	const dir = mkdtempSync(join(tmpdir(), "ma-proc-"));
-	const home = mkdtempSync(join(tmpdir(), "ma-h-"));
+test("if the watcher dies too, the next agent to start cleans up", { skip: process.platform !== "linux" && "reads /proc" }, async (t) => {
+	const dir = testTempDir(t, "ma-proc-");
+	const home = testTempDir(t, "ma-h-");
 	const agent = spawn(process.execPath, [agentScript(dir, home)], { stdio: ["ignore", "pipe", "inherit"] });
+	stopAgentAfterTest(t, agent);
 	await new Promise<void>((r) => agent.stdout.on("data", (d) => String(d).includes("ready") && r()));
 	const bg = Number(readFileSync(join(dir, "bg.pid"), "utf8"));
 	// Find the watcher: the process whose command line names this home's run directory.
@@ -139,7 +148,7 @@ test("if the watcher dies too, the next agent to start cleans up", { skip: proce
 });
 
 test("an agent killed but not yet reaped (a zombie) counts as dead, so its leftovers are swept", { skip: process.platform !== "linux" && "reads /proc" }, async (t) => {
-	const home = mkdtempSync(join(tmpdir(), "ma-h-"));
+	const home = testTempDir(t, "ma-h-");
 	const run = join(home, "run");
 	mkdirSync(run);
 	// The shell starts a child, then execs into `sleep`, which never reaps. The child dies only once the exec is seen,

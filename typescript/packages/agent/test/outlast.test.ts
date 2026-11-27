@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { type Harness, type InputRequest, type Plugin, type PluginApi, type RuntimeHost, type TurnInput, type TurnOutcome, textOf, WAITING_NOTE } from "@modular-agent/harness";
 import { TransientRuntime } from "@modular-agent/runtime-transient";
 import { questionTool } from "@modular-agent/tools-question";
 import { createAgent } from "../src/index.js";
+import { beforeTempDirCleanup, testDirs } from "./fixtures/temp-dir.js";
 
 function fakeUi() {
 	const requests: InputRequest[] = [];
@@ -23,7 +21,6 @@ function fakeUi() {
 		},
 	};
 }
-const dirs = () => ({ project: mkdtempSync(join(tmpdir(), "ma-p-")), home: mkdtempSync(join(tmpdir(), "ma-h-")) });
 async function agent(d: { project: string; home: string }, responses: FauxResponseStep[], ui: Plugin, ...plugins: Plugin[]): Promise<Harness> {
 	const faux = fauxProvider();
 	const models = createModels();
@@ -35,8 +32,8 @@ const pay = () => fauxToolCall("ask_user", { question: "Confirm payment?" });
 const kinds = (h: Harness, s: string, k: string) => h.api("t").history(s).filter((e) => e.kind === k);
 const turnData = (h: Harness, s: string) => kinds(h, s, "turnEnd").map((e) => e.data as { outcome: { kind: string }; result: { openToolCalls: string[]; text?: string } });
 
-test("a question outlasts its turn; a late allow runs the call and the agent carries on", async () => {
-	const d = dirs();
+test("a question outlasts its turn; a late allow runs the call and the agent carries on", async (t) => {
+	const d = testDirs(t);
 	const ui = fakeUi();
 	const call = pay();
 	const h = await agent(d, [fauxAssistantMessage([call], { stopReason: "toolUse" }), fauxAssistantMessage([fauxText("Paid.")])], ui.plugin);
@@ -89,8 +86,8 @@ test("the Harness preserves a committed pending call when the Runtime reply is l
 	const runtime: Plugin = { name: "lost-reply-runtime", replaces: "runtime-transient", setup(api) { api.provide("runtime", new LostReplyRuntime()); } };
 	const ui = fakeUi();
 	const call = pay();
-	const h = await agent(dirs(), [fauxAssistantMessage([call], { stopReason: "toolUse" }), fauxAssistantMessage([fauxText("Continued.")])], ui.plugin, runtime);
-	t.after(() => h.stop());
+	const h = await agent(testDirs(t), [fauxAssistantMessage([call], { stopReason: "toolUse" }), fauxAssistantMessage([fauxText("Continued.")])], ui.plugin, runtime);
+	beforeTempDirCleanup(t, () => h.stop());
 	const api = h.api("t");
 	const s = await api.startSession();
 	await api.input(s, { content: "pay", actorId: "user" });
@@ -107,8 +104,8 @@ test("the Harness preserves a committed pending call when the Runtime reply is l
 	assert.equal(continuation.continuesTurnId, first.turnId);
 });
 
-test("new input while a call is open sees a stand-in result; the real one later replaces the stand-in at the original call", async () => {
-	const d = dirs();
+test("new input while a call is open sees a stand-in result; the real one later replaces the stand-in at the original call", async (t) => {
+	const d = testDirs(t);
 	const ui = fakeUi();
 	const call = pay();
 	const seen: string[] = [];
@@ -144,8 +141,8 @@ test("new input while a call is open sees a stand-in result; the real one later 
 	await h.stop();
 });
 
-test("a late decline is passed to the question tool and the agent carries on", async () => {
-	const d = dirs();
+test("a late decline is passed to the question tool and the agent carries on", async (t) => {
+	const d = testDirs(t);
 	const ui = fakeUi();
 	const h = await agent(d, [fauxAssistantMessage([pay()], { stopReason: "toolUse" }), fauxAssistantMessage([fauxText("Understood, not paying.")])], ui.plugin);
 	const api = h.api("t");
@@ -162,8 +159,8 @@ test("a late decline is passed to the question tool and the agent carries on", a
 	await h.stop();
 });
 
-test("a question waiting past its turn survives a restart, with a transient Runtime", async () => {
-	const d = dirs();
+test("a question waiting past its turn survives a restart, with a transient Runtime", async (t) => {
+	const d = testDirs(t);
 	const first = fakeUi();
 	let h = await agent(d, [fauxAssistantMessage([pay()], { stopReason: "toolUse" })], first.plugin);
 	let api = h.api("t");

@@ -31,11 +31,34 @@ both=false; if want rust && want typescript; then both=true; fi
 . "$repo/scripts/check-slot.sh"
 take_check_slots 1 || exit
 
-# A check run keeps its logs and its steps' scratch on disk, so a full /tmp cannot fail it.
-export TMPDIR="${TMPDIR:-$HOME/.cache/ma-std-tmp}"
-mkdir -p "$TMPDIR" || exit 1
-TMPDIR="$(cd "$TMPDIR" && pwd -P)"
-logs="$(mktemp -d "$TMPDIR/check-XXXXXX")" || exit 1
+terminate() { kill -TERM "$1" 2>/dev/null || true; }
+
+kill_tree() { # pid: stop it and every process below it, deepest first
+  local child
+  for child in $(pgrep -P "$1"); do kill_tree "$child"; done
+  terminate "$1"
+}
+
+stop_child=kill_tree
+stop_run() { # exit status
+  local child
+  trap '' INT TERM
+  for child in $(jobs -pr); do "$stop_child" "$child"; done
+  wait
+  exit "$1"
+}
+
+# Each check keeps its logs on disk and gives its steps disposable scratch.
+base_tmp="${TMPDIR:-$HOME/.cache/ma-std-tmp}"
+mkdir -p "$base_tmp" || exit 1
+base_tmp="$(cd "$base_tmp" && pwd -P)" || exit 1
+logs="$(mktemp -d "$base_tmp/check-XXXXXX")" || exit 1
+run_tmp="$logs/tmp"
+trap 'rm -rf -- "$run_tmp"' EXIT
+trap 'stop_run 130' INT
+trap 'stop_run 143' TERM
+mkdir "$run_tmp" || exit 1
+export TMPDIR="$run_tmp"
 printf 'Step logs: %s\n' "$logs"
 start_run=$SECONDS
 
@@ -50,11 +73,6 @@ if ! worktree_roots >"$logs/worktrees-before"; then
 fi
 
 step_limit=${MA_CHECK_STEP_LIMIT:-1800}
-kill_tree() { # pid: stop it and every process below it, deepest first
-  local child
-  for child in $(pgrep -P "$1"); do kill_tree "$child"; done
-  kill -TERM "$1" 2>/dev/null || true
-}
 
 step() { # lane, name, command...
   local lane="$1" name="$2"; shift 2
@@ -74,6 +92,7 @@ step() { # lane, name, command...
   guard=$!
   wait "$pid"; status=$?
   kill_tree "$guard"
+  wait "$guard" 2>/dev/null || true
   if (( status == 0 )); then
     printf '[%s] %-58s ok    %4ss\n' "$lane" "$name" $((SECONDS - start))
   else
@@ -188,13 +207,22 @@ else
   plan setup
   plan docs
   pids=()
+  # Each lane stops its own step before it exits, so it cannot start another
+  # one while the parent is tearing down the run.
+  stop_child=terminate
   for language in "${languages[@]}"; do
-    { drop_check_slots; plan "$language"; } &
+    {
+      stop_child=kill_tree
+      trap 'stop_run 143' TERM
+      drop_check_slots
+      plan "$language"
+    } &
     pids+=("$!")
   done
   for i in "${!pids[@]}"; do
     if ! wait "${pids[i]}"; then failures+=("${languages[i]} lane stopped"); fi
   done
+  stop_child=kill_tree
   plan shared
 fi
 selection=serial step shared "tests: no environment refs in the enclosing repository" check_test_refs

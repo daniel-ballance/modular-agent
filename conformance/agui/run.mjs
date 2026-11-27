@@ -2,8 +2,8 @@
 import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { constants, createWriteStream } from 'node:fs';
-import { mkdir, mkdtemp, open, rm, writeFile } from 'node:fs/promises';
+import { constants, createWriteStream, mkdtempSync } from 'node:fs';
+import { mkdir, open, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -76,10 +76,19 @@ async function waitGroup(pid) {
   }
 }
 
-async function managed(command, name, scenario) {
-  const folder = await mkdtemp(join(process.env.TMPDIR || tmpdir(), 'agui-'));
+function managed(command, name, scenario, signal) {
+  const folder = mkdtempSync(join(process.env.TMPDIR || tmpdir(), 'agui-'));
+  const fixture = prepare(folder, command, name, scenario, signal);
+  return {
+    folder,
+    launch: async () => (await fixture).launch(),
+    cleanup: async () => (await fixture.catch(() => undefined))?.cleanup(),
+  };
+}
+
+async function prepare(folder, command, name, scenario, interrupted) {
   const [home, data, project, tmp] = ['home', 'data', 'project', 'tmp'].map(v => join(folder, v));
-  await Promise.all([home, data, project, tmp].map(v => mkdir(v)));
+  for (const dir of [home, data, project, tmp]) await mkdir(dir);
   const model = join(folder, 'model.json');
   const policy = join(folder, 'fixture.json');
   const controlFile = join(folder, 'control.token');
@@ -101,19 +110,21 @@ async function managed(command, name, scenario) {
   let stop, lines;
   const cleanup = async () => { await stop?.(); };
   async function launch() {
+    interrupted.throwIfAborted();
     const child = spawn(command[0], command.slice(1), { cwd: project, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let spawnError;
     const closed = new Promise(resolve => {
       child.once('error', error => { spawnError = error; });
       child.once('close', (code, signal) => resolve({ code, signal }));
     });
-    stop = async () => {
+    let stopped;
+    stop = () => stopped ??= (async () => {
       if (child.pid) {
         try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH' && !(process.platform === 'darwin' && error.code === 'EPERM')) throw error; }
       }
       await closed;
       if (child.pid) await waitGroup(child.pid);
-    };
+    })();
     const stdout = createWriteStream(join(folder, 'stdout.log'), { flags: 'a', mode: 0o600 });
     child.stdout.pipe(stdout);
     child.stderr.pipe(createWriteStream(join(folder, 'stderr.log'), { flags: 'a', mode: 0o600 }));
@@ -136,7 +147,7 @@ async function managed(command, name, scenario) {
     return { origin: base, tokens, api: at(base, tokens.owner), control,
       restart: async () => { await cleanup(); return launch(); } };
   }
-  return { launch, cleanup, folder };
+  return { launch, cleanup };
 }
 
 async function main() {
@@ -160,14 +171,24 @@ async function main() {
   }
   let passed = 0;
   let current;
+  const interrupt = new AbortController();
+  let stopping;
   const stop = signal => {
-    void (async () => {
-      try { await current?.cleanup(); }
+    if (interrupt.signal.aborted) return;
+    interrupt.abort();
+    const active = current;
+    stopping = (async () => {
+      try {
+        if (active) {
+          try { await active.cleanup(); }
+          finally { await rm(active.folder, { recursive: true, force: true }); }
+        }
+      }
       finally { process.exit(signal === 'SIGINT' ? 130 : 143); }
     })();
   };
-  process.once('SIGINT', stop);
-  process.once('SIGTERM', stop);
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
   try {
     for (const name of names) {
       const scenario = cases[name];
@@ -181,23 +202,29 @@ async function main() {
           peer = { origin: base, tokens, api: at(base, tokens.owner),
             control: scenario.control && values.control ? controls(values.control, await token(values['control-token-file'])) : undefined };
         } else {
-          current = await managed(positionals, name, scenario);
+          current = managed(positionals, name, scenario, interrupt.signal);
           peer = await current.launch();
         }
         await scenario.run(peer);
+        if (stopping) return;
         failed = false;
         passed++; console.log(`PASS  ${name}`);
       } catch (error) {
+        if (stopping) return;
         // Never print arbitrary server payloads, assertion actuals, or a token.
         console.error(`FAIL  ${name}: ${error.message.split('\n')[0]}`);
         if (current) console.error(`      fixture logs: ${current.folder}`);
       } finally {
-        await current?.cleanup();
-        if (!failed && current) await rm(current.folder, { recursive: true, force: true });
+        if (!stopping) {
+          await current?.cleanup();
+          if (!failed && current) await rm(current.folder, { recursive: true, force: true });
+        }
         current = undefined;
       }
+      if (stopping) return;
     }
   } finally {
+    await stopping;
     process.off('SIGINT', stop);
     process.off('SIGTERM', stop);
   }

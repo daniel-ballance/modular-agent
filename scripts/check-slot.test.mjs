@@ -237,6 +237,45 @@ test("check.sh killed outright frees its slot while its lanes still run", async 
   assert.match(next.stderr, /after 0s/);
 });
 
+for (const [signal, status, args] of [
+  [null, 0, ["--quick", "rust"]],
+  ["SIGINT", 130, ["--quick", "--serial", "rust"]],
+  ["SIGTERM", 143, ["--quick", "rust"]],
+]) {
+  test(`check.sh removes step scratch and preserves logs on ${signal ?? "normal exit"}`, async (t) => {
+    const box = machine(t, 1);
+    const bin = join(box.env.HOME, "bin");
+    const callerTmp = join(box.env.HOME, "caller-tmp");
+    mkdirSync(bin);
+    for (const tool of ["node", "npm"]) writeFileSync(join(bin, tool), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    writeFileSync(join(bin, "mise"), `#!/bin/sh
+scratch=$(mktemp -d) || exit
+echo "$scratch"
+${signal ? "exec sleep 60" : ""}
+`, { mode: 0o755 });
+    const check = box.start("scripts/check.sh", args, {
+      PATH: `${bin}:${process.env.PATH}`, ...(signal ? { TMPDIR: callerTmp } : {}),
+    });
+    await waitFor(check, /^Step logs: .+\n/m, "out");
+    const logs = check.out.match(/^Step logs: (.+)$/m)[1];
+    const base = signal ? callerTmp : join(box.env.HOME, ".cache/ma-std-tmp");
+    assert.ok(readdirSync(base).some(name => join(base, name) === logs && name.startsWith("check-")));
+    const stepLog = join(logs, "rust__build_ma_and_fixture_program.log");
+    if (signal) {
+      for (let waited = 0; !existsSync(stepLog) || !readFileSync(stepLog, "utf8").includes("\n"); waited += 50) {
+        assert.ok(waited < 10_000, `the rust step did not start: ${check.out}${check.err}`);
+        await delay(50);
+      }
+      assert.equal(check.kill(signal), true);
+    }
+    assert.equal(await Promise.race([check.done, delay(10_000)]), status, check.err);
+    const lines = readFileSync(stepLog, "utf8").trim().split("\n");
+    assert.ok(lines.every(path => path.startsWith(join(logs, "tmp") + "/")), lines.join("\n"));
+    assert.equal(existsSync(join(logs, "tmp")), false);
+    assert.equal(existsSync(join(box.env.HOME, ".cache/ma-std-tmp/slots/slot-1.lock")), true);
+  });
+}
+
 test("stress.sh reads its arguments before it waits for slots", async (t) => {
   const box = machine(t, 1);
   const holder = box.hold();

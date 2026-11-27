@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -8,17 +7,16 @@ import { approval } from "@modular-agent/approval";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { type HistoryEntry, type HistoryStore, type InputRequest, type InputRequestDraft, type Plugin, type Provider, type ToolContext } from "@modular-agent/harness";
 import { createAgent, conformanceProvider } from "../src/index.js";
+import { beforeTempDirCleanup, testTempDir } from "./fixtures/temp-dir.js";
 
 function folder(t: TestContext) {
-	const dir = mkdtempSync(join(tmpdir(), "ma-r4-"));
-	t.after(() => rmSync(dir, { recursive: true, force: true }));
-	return dir;
+	return testTempDir(t, "ma-r4-");
 }
 
 async function start(t: TestContext, options: Parameters<typeof createAgent>[0] = {}) {
 	const home = options.home ?? folder(t);
 	const h = await createAgent({ project: home, home, model: "conformance/echo", ...options, plugins: [conformanceProvider(), ...(options.plugins ?? [])] });
-	t.after(() => h.stop());
+	beforeTempDirCleanup(t, () => h.stop());
 	return { h, api: h.api("test"), home };
 }
 

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { client, methods } from "@agentclientprotocol/sdk";
 import { ALL_AUTHORITY, text, textOf, zeroUsage, type HistoryStore, type Plugin, type Provider, type Runtime } from "@modular-agent/harness";
 import { acpInterface } from "@modular-agent/interface-acp";
 import { conformanceProvider, createAgent } from "../src/index.js";
+import { beforeTempDirCleanup, testTempDir } from "./fixtures/temp-dir.js";
 
 function pulse() {
 	let release!: () => void;
@@ -15,14 +15,13 @@ function pulse() {
 }
 
 function folders(t: TestContext) {
-	const root = mkdtempSync(join(tmpdir(), "ma-r6-"));
-	t.after(() => rmSync(root, { force: true, recursive: true }));
+	const root = testTempDir(t, "ma-r6-");
 	return { project: root, home: join(root, "state") };
 }
 
 async function agent(t: TestContext, plugins: Plugin[] = [], dirs = folders(t), model = "conformance/echo") {
 	const h = await createAgent({ ...dirs, model, plugins: [conformanceProvider(), ...plugins] });
-	t.after(() => h.stop());
+	beforeTempDirCleanup(t, () => h.stop());
 	return { h, api: h.api("test"), dirs };
 }
 
@@ -30,7 +29,7 @@ async function acpAgent(t: TestContext, ...plugins: Plugin[]) {
 	const acp = acpInterface();
 	const fixture = await agent(t, [acp, ...plugins]);
 	const connection = client({ name: "test" }).connect(acp.acp.app);
-	t.after(() => connection.close());
+	beforeTempDirCleanup(t, () => connection.close());
 	await connection.agent.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
 	const { sessionId } = await connection.agent.request(methods.agent.session.new, { cwd: fixture.dirs.project, mcpServers: [] });
 	const ext = (name: string, params: Record<string, unknown> = {}) => connection.agent.request(`_modular-agent/${name}`, { sessionId, ...params });

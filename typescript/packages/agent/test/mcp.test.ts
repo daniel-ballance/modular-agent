@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { client, methods } from "@agentclientprotocol/sdk";
@@ -9,6 +8,7 @@ import type { Harness, Plugin } from "@modular-agent/harness";
 import { acpInterface } from "@modular-agent/interface-acp";
 import { mcpTools } from "@modular-agent/tools-mcp";
 import { createAgent } from "../src/index.js";
+import { testDirs } from "./fixtures/temp-dir.js";
 
 /** A minimal MCP server over stdio, with one tool: add. */
 function calcServer(dir: string): string {
@@ -29,7 +29,6 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 	return file;
 }
 
-const dirs = () => ({ project: mkdtempSync(join(tmpdir(), "ma-p-")), home: mkdtempSync(join(tmpdir(), "ma-h-")) });
 async function agent(d: { project: string; home: string }, responses: FauxResponseStep[], plugins: Plugin[]): Promise<Harness> {
 	const faux = fauxProvider();
 	const models = createModels();
@@ -44,8 +43,8 @@ const lastResult: FauxResponseFactory = (c) => {
 const lastText = (h: Harness, s: string) => (h.api("t").history(s).filter((e) => e.kind === "turnEnd").at(-1)!.data as { result: { text?: string } }).result.text;
 const toolNames = (h: Harness, s?: string) => h.api("t").tools(s).map((t) => t.name);
 
-test("MCP: a server from the global settings gives every session its tools", async () => {
-	const d = dirs();
+test("MCP: a server from the global settings gives every session its tools", async (t) => {
+	const d = testDirs(t);
 	const server = calcServer(d.home);
 	writeFileSync(join(d.home, "settings.json"), JSON.stringify({ plugins: { "tools-mcp": { servers: { calc: { command: process.execPath, args: [server] } } } } }));
 	const h = await agent(d, [fauxAssistantMessage([fauxToolCall("mcp__calc__add", { a: 2, b: 3 })], { stopReason: "toolUse" }), lastResult], [mcpTools()]);
@@ -60,8 +59,8 @@ test("MCP: a server from the global settings gives every session its tools", asy
 	await h.stop();
 });
 
-test("MCP: a project's servers start only once the project is trusted", async () => {
-	const d = dirs();
+test("MCP: a project's servers start only once the project is trusted", async (t) => {
+	const d = testDirs(t);
 	const server = calcServer(d.home);
 	mkdirSync(join(d.project, ".modular-agent"));
 	writeFileSync(join(d.project, ".modular-agent", "settings.json"), JSON.stringify({ plugins: { "tools-mcp": { servers: { calc: { command: process.execPath, args: [server] } } } } }));
@@ -75,8 +74,8 @@ test("MCP: a project's servers start only once the project is trusted", async ()
 	await h.stop();
 });
 
-test("MCP over ACP: servers a client passes serve only that session", async () => {
-	const d = dirs();
+test("MCP over ACP: servers a client passes serve only that session", async (t) => {
+	const d = testDirs(t);
 	const server = calcServer(d.home);
 	const acp = acpInterface();
 	const h = await agent(d, [fauxAssistantMessage([fauxToolCall("mcp__calc__add", { a: 40, b: 2 })], { stopReason: "toolUse" }), lastResult], [mcpTools(), acp]);

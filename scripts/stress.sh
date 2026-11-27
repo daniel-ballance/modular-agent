@@ -22,16 +22,17 @@ cd "$repo"
 # The runs must overlap to load the machine, so all of them wait for their slots together.
 . scripts/check-slot.sh
 take_check_slots "$count" || exit
-export TMPDIR="${TMPDIR:-$HOME/.cache/ma-std-tmp}"
-mkdir -p "$TMPDIR"
-TMPDIR="$(cd "$TMPDIR" && pwd -P)"
-root="$(mktemp -d "$TMPDIR/stress-XXXXXX")"
+base_tmp="${TMPDIR:-$HOME/.cache/ma-std-tmp}"
+mkdir -p "$base_tmp"
+base_tmp="$(cd "$base_tmp" && pwd -P)"
+root="$(mktemp -d "$base_tmp/stress-XXXXXX")"
 printf 'Stress logs: %s\n' "$root"
 
 # Copy tracked sources as they are on disk. Each run needs its own build outputs
 # and node_modules (npm ci removes the old tree).
 (
   drop_check_slots
+  export TMPDIR="$root"
   git ls-files -z | tar -cf "$root/source.tar" --null -T -
   for ((run = 1; run <= count; run++)); do
     src="$root/$run/src"
@@ -52,7 +53,7 @@ check() {
       exec scripts/check.sh "$@"
   ) >"$dir/check.log" 2>&1 || status=$?
   printf '%s\n' "$status" >"$dir/status"
-  # Keep logs and test scratch, not the disposable build trees.
+  # check.sh removes its step scratch. Keep the logs and remove the build tree.
   if ! rm -rf -- "$dir/src"; then
     printf 'Could not remove the build tree: %s\n' "$dir/src" >&2
   fi

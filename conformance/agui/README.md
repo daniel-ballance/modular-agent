@@ -92,7 +92,7 @@ The kit starts the command in a new process group, with a fresh home, working di
 | `MODULAR_AGENT_DATA_DIR` | Keep the same store across a restart. Do not erase or truncate it on startup. |
 | `MA_AGUI_FIXTURE` | JSON file with `{ name, tokenFiles, offer, project, controlTokenFile }`. `name` identifies the case. `offer` is the browser's exact tool offer. The other fields supply disposable config paths. |
 
-Print one line to stdout when the listener is ready. For a basic case print its origin, or `{"url":"http://127.0.0.1:PORT"}`. For a controlled case print `{"url":"http://127.0.0.1:PORT","control":"http://127.0.0.1:OTHER_PORT/fixture"}`. Send diagnostics to stderr. The kit keeps stdout and stderr in files on failure. It kills the fixture's group and waits for surviving processes before starting a replacement. Use a fresh port on restart.
+Print one line to stdout when the listener is ready. For a basic case print its origin, or `{"url":"http://127.0.0.1:PORT"}`. For a controlled case print `{"url":"http://127.0.0.1:PORT","control":"http://127.0.0.1:OTHER_PORT/fixture"}`. Send diagnostics to stderr. The kit keeps stdout and stderr in its fixture folder on failure. `scripts/check.sh` removes that folder with its per-run `TMPDIR` when the check ends. Run the kit on its own to keep the failed fixture folder. The kit kills the fixture's group and waits for surviving processes before starting a replacement. Use a fresh port on restart.
 
 Configure `acp: true` on the same listener, at the root WebSocket path. Use default same-origin browser policy. Enable attachment of the fixture's in-scope actors. Set the creation project and tenant on the operator side. The token roles are:
 

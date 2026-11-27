@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
-import { existsSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai";
@@ -10,12 +9,12 @@ import type { Harness, InputRequest, Plugin, PluginApi } from "@modular-agent/ha
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { subagents } from "@modular-agent/subagents";
 import { createAgent } from "../src/index.js";
+import { beforeTempDirCleanup, testDirs } from "./fixtures/temp-dir.js";
 
 type Context = Parameters<FauxResponseFactory>[0];
 const textOfMessage = (m: { content: unknown }) => (typeof m.content === "string" ? m.content : (m.content as { type: string; text?: string }[]).filter((p) => p.type === "text").map((p) => p.text).join(""));
 const users = (c: Context) => c.messages.filter((m) => m.role === "user").map(textOfMessage);
 const hasResult = (c: Context) => c.messages.some((m) => m.role === "toolResult");
-const dirs = () => ({ project: mkdtempSync(join(tmpdir(), "ma-p-")), home: mkdtempSync(join(tmpdir(), "ma-h-")) });
 
 /** One model for every session: what it says depends on the conversation it is shown. */
 function router(child: (c: Context) => ReturnType<FauxResponseFactory>, delegateInput: Record<string, string | boolean>): FauxResponseFactory {
@@ -47,8 +46,8 @@ async function settle(h: Harness, s: string) {
 }
 
 test("a background subagent: its result arrives as a job report and wakes the parent", { timeout: 30_000 }, async t => {
-	const h = await agent(dirs(), router(() => fauxAssistantMessage([fauxText("one two three")]), { task: "count to three", label: "counter" }), [subagents()]);
-	t.after(() => h.stop());
+	const h = await agent(testDirs(t), router(() => fauxAssistantMessage([fauxText("one two three")]), { task: "count to three", label: "counter" }), [subagents()]);
+	beforeTempDirCleanup(t, () => h.stop());
 	const api = h.api("t");
 	const s = await api.startSession();
 	// Becoming idle after delegation says nothing about when the job will report.
@@ -57,7 +56,7 @@ test("a background subagent: its result arrives as a job report and wakes the pa
 	const stop = api.follow(s, { recipient: "t", raw: true }, e => {
 		if (e.type === "turn.ended" && ++turns === 2) events.emit("reportTurnEnded");
 	});
-	t.after(stop);
+	beforeTempDirCleanup(t, stop);
 	await Promise.all([
 		once(events, "reportTurnEnded", { signal: t.signal }),
 		api.input(s, { content: "please delegate", actorId: "user" }),
@@ -69,8 +68,8 @@ test("a background subagent: its result arrives as a job report and wakes the pa
 	assert.notEqual(child, s);
 });
 
-test("a subagent with wait returns its answer in the call", async () => {
-	const h = await agent(dirs(), router(() => fauxAssistantMessage([fauxText("one two three")]), { task: "count to three", wait: true }), [subagents()]);
+test("a subagent with wait returns its answer in the call", async (t) => {
+	const h = await agent(testDirs(t), router(() => fauxAssistantMessage([fauxText("one two three")]), { task: "count to three", wait: true }), [subagents()]);
 	const api = h.api("t");
 	const s = await api.startSession();
 	await api.input(s, { content: "please delegate", actorId: "user" });
@@ -80,8 +79,8 @@ test("a subagent with wait returns its answer in the call", async () => {
 	await h.stop();
 });
 
-test("a subagent's approval goes to the parent, which passes it to its user", async () => {
-	const d = dirs();
+test("a subagent's approval goes to the parent, which passes it to its user", async (t) => {
+	const d = testDirs(t);
 	const requests: InputRequest[] = [];
 	let uiApi!: PluginApi;
 	const ui: Plugin = { name: "ui", setup(a) { uiApi = a; a.provide("interface", { id: "ui", actorId: "user", onInputRequest: (r: InputRequest) => requests.push(r) }); } };
@@ -119,8 +118,8 @@ async function stopDuringChild(d: { project: string; home: string }) {
 	return s;
 }
 
-test("transient subagents: after a restart, the parent hears the subagent's outcome is unknown", async () => {
-	const d = dirs();
+test("transient subagents: after a restart, the parent hears the subagent's outcome is unknown", async (t) => {
+	const d = testDirs(t);
 	const s = await stopDuringChild(d);
 	const h = await agent(d, router(() => fauxAssistantMessage([fauxText("never asked")]), { task: "count to three" }), [subagents()]);
 	const api = h.api("t");
@@ -130,8 +129,8 @@ test("transient subagents: after a restart, the parent hears the subagent's outc
 	await h.stop();
 });
 
-test("durable subagents: after a restart, the subagent carries on and the parent gets its real result", async () => {
-	const d = dirs();
+test("durable subagents: after a restart, the subagent carries on and the parent gets its real result", async (t) => {
+	const d = testDirs(t);
 	const s = await stopDuringChild(d);
 	const h = await agent(d, router(() => fauxAssistantMessage([fauxText("one two three")]), { task: "count to three" }), [subagents({ durable: true }), durableRuntime()]);
 	const api = h.api("t");
@@ -143,8 +142,8 @@ test("durable subagents: after a restart, the subagent carries on and the parent
 	await h.stop();
 });
 
-test("a subagent's subagent asks for approval: the question climbs to the top user", async () => {
-	const d = dirs();
+test("a subagent's subagent asks for approval: the question climbs to the top user", async (t) => {
+	const d = testDirs(t);
 	const requests: InputRequest[] = [];
 	let uiApi!: PluginApi;
 	const ui: Plugin = { name: "ui", setup(a) { uiApi = a; a.provide("interface", { id: "ui", actorId: "user", onInputRequest: (r: InputRequest) => requests.push(r) }); } };
@@ -171,7 +170,7 @@ test("a subagent's subagent asks for approval: the question climbs to the top us
 	await h.stop();
 });
 
-test("the parent can message a finished subagent again, and it remembers its earlier work", async () => {
+test("the parent can message a finished subagent again, and it remembers its earlier work", async (t) => {
 	const seen: string[][] = [];
 	const route: FauxResponseFactory = (c) => {
 		const all = users(c);
@@ -184,7 +183,7 @@ test("the parent can message a finished subagent again, and it remembers its ear
 		if (results.length === 1) return fauxAssistantMessage([fauxToolCall("delegate", { task: "what was the number?", subagent: "memory", wait: true })], { stopReason: "toolUse" });
 		return fauxAssistantMessage([fauxText(`Parent saw: ${results.at(-1)}`)]);
 	};
-	const h = await agent(dirs(), route, [subagents()]);
+	const h = await agent(testDirs(t), route, [subagents()]);
 	const api = h.api("t");
 	const s = await api.startSession();
 	await api.input(s, { content: "go", actorId: "user" });

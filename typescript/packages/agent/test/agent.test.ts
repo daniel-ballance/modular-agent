@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { type AgentEvent, type Harness, type InputRequest, type OutputPayload, type Plugin, textOf } from "@modular-agent/harness";
 import { createAgent } from "../src/index.js";
+import { testDirs, testTempDir } from "./fixtures/temp-dir.js";
 
-function setup(responses: FauxResponseStep[], extra: Plugin[] = [], dirs?: { project: string; home: string }) {
-	const project = dirs?.project ?? mkdtempSync(join(tmpdir(), "ma-project-"));
-	const home = dirs?.home ?? mkdtempSync(join(tmpdir(), "ma-home-"));
+function setup(t: TestContext, responses: FauxResponseStep[], extra: Plugin[] = [], dirs?: { project: string; home: string }) {
+	const project = dirs?.project ?? testTempDir(t, "ma-project-");
+	const home = dirs?.home ?? testTempDir(t, "ma-home-");
 	const faux = fauxProvider();
 	const models = createModels();
 	models.setProvider(faux.provider);
@@ -22,8 +22,8 @@ function lastTurn(h: Harness, sessionId: string) {
 	return ends[ends.length - 1]?.data as { outcome: { kind: string }; result: { text?: string } };
 }
 
-test("a turn that reads a file and answers", async () => {
-	const { project, make } = setup([
+test("a turn that reads a file and answers", async (t) => {
+	const { project, make } = setup(t, [
 		fauxAssistantMessage([fauxToolCall("read", { path: "config.json" })], { stopReason: "toolUse" }),
 		fauxAssistantMessage([fauxText("It sets port to 8080.")]),
 	]);
@@ -43,7 +43,7 @@ test("a turn that reads a file and answers", async () => {
 	await h.stop();
 });
 
-test("approval as a plugin: a refusal wins, and with nobody to ask the call is refused", async () => {
+test("approval as a plugin: a refusal wins, and with nobody to ask the call is refused", async (t) => {
 	const approval: Plugin = {
 		name: "approval",
 		setup(api) {
@@ -54,7 +54,7 @@ test("approval as a plugin: a refusal wins, and with nobody to ask the call is r
 			});
 		},
 	};
-	const { project, make } = setup([
+	const { project, make } = setup(t, [
 		fauxAssistantMessage([fauxToolCall("bash", { command: "touch made.txt" })], { stopReason: "toolUse" }),
 		fauxAssistantMessage([fauxText("Done.")]),
 	], [approval]);
@@ -70,7 +70,7 @@ test("approval as a plugin: a refusal wins, and with nobody to ask the call is r
 	await h.stop();
 });
 
-test("an Interface answers an approval; a second answer is refused", async () => {
+test("an Interface answers an approval; a second answer is refused", async (t) => {
 	const requests: InputRequest[] = [];
 	let harnessApi: ReturnType<Harness["api"]> | undefined;
 	const ui: Plugin = {
@@ -85,7 +85,7 @@ test("an Interface answers an approval; a second answer is refused", async () =>
 			});
 		},
 	};
-	const { project, make } = setup([
+	const { project, make } = setup(t, [
 		fauxAssistantMessage([fauxToolCall("bash", { command: "echo hi > made.txt" })], { stopReason: "toolUse" }),
 		fauxAssistantMessage([fauxText("Made it.")]),
 	], [ui]);
@@ -101,8 +101,8 @@ test("an Interface answers an approval; a second answer is refused", async () =>
 	await h.stop();
 });
 
-test("input with a key is taken once", async () => {
-	const { make } = setup([fauxAssistantMessage([fauxText("one")]), fauxAssistantMessage([fauxText("two")])]);
+test("input with a key is taken once", async (t) => {
+	const { make } = setup(t, [fauxAssistantMessage([fauxText("one")]), fauxAssistantMessage([fauxText("two")])]);
 	const h = await make();
 	const api = h.api("test");
 	const s = await api.startSession();
@@ -115,12 +115,12 @@ test("input with a key is taken once", async () => {
 	await h.stop();
 });
 
-test("steering joins the running turn; cancelling hands queued input back and leaves jobs running", async () => {
+test("steering joins the running turn; cancelling hands queued input back and leaves jobs running", async (t) => {
 	let release!: () => void;
 	const gate = new Promise<void>((r) => (release = r));
 	let releaseSlow!: () => void;
 	const slow = new Promise<void>((r) => (releaseSlow = r));
-	const { make } = setup([
+	const { make } = setup(t, [
 		async () => {
 			await gate;
 			return fauxAssistantMessage([fauxToolCall("read", { path: "nope.txt" })], { stopReason: "toolUse" });
@@ -154,8 +154,8 @@ test("steering joins the running turn; cancelling hands queued input back and le
 	await h.stop();
 });
 
-test("a job's report enters the session as input and starts a turn", async () => {
-	const { make } = setup([fauxAssistantMessage([fauxText("Ready")]),
+test("a job's report enters the session as input and starts a turn", async (t) => {
+	const { make } = setup(t, [fauxAssistantMessage([fauxText("Ready")]),
 		(context) => fauxAssistantMessage([fauxText(`got: ${JSON.stringify(context.messages.at(-1))}`)])]);
 	const h = await make();
 	const api = h.api("test");
@@ -173,7 +173,7 @@ test("a job's report enters the session as input and starts a turn", async () =>
 	await h.stop();
 });
 
-test("the output gate can hold streamed pieces and redact a secret split across them", async () => {
+test("the output gate can hold streamed pieces and redact a secret split across them", async (t) => {
 	const guard: Plugin = {
 		name: "guardrail",
 		setup(api) {
@@ -189,7 +189,7 @@ test("the output gate can hold streamed pieces and redact a secret split across 
 			});
 		},
 	};
-	const { faux, make } = setup([], [guard]);
+	const { faux, make } = setup(t, [], [guard]);
 	faux.setResponses([fauxAssistantMessage([fauxText("Your number is ACCT44918821 ok")])]);
 	const h = await make();
 	const api = h.api("test");
@@ -208,9 +208,9 @@ test("the output gate can hold streamed pieces and redact a secret split across 
 	await h.stop();
 });
 
-test("a context overflow is compacted and retried", async () => {
+test("a context overflow is compacted and retried", async (t) => {
 	let calls = 0;
-	const env = setup([
+	const env = setup(t, [
 		fauxAssistantMessage([fauxText("first answer")]),
 		fauxAssistantMessage([fauxText("second answer")]),
 		() => {
@@ -233,9 +233,9 @@ test("a context overflow is compacted and retried", async () => {
 	await h.stop();
 });
 
-test("history survives a restart; moving the position is kept; an interrupted turn is repaired", async () => {
-	const dirs = { project: mkdtempSync(join(tmpdir(), "ma-p-")), home: mkdtempSync(join(tmpdir(), "ma-h-")) };
-	const first = setup([fauxAssistantMessage([fauxText("A")]), fauxAssistantMessage([fauxText("B")])], [], dirs);
+test("history survives a restart; moving the position is kept; an interrupted turn is repaired", async (t) => {
+	const dirs = testDirs(t);
+	const first = setup(t, [fauxAssistantMessage([fauxText("A")]), fauxAssistantMessage([fauxText("B")])], [], dirs);
 	let h = await first.make();
 	let api = h.api("test");
 	const s = await api.startSession();
@@ -253,7 +253,7 @@ test("history survives a restart; moving the position is kept; an interrupted tu
 	await api.append(s, { kind: "toolStarted", writer: "test", modelVisible: false, turnId: "t-crash", toolCallId: call.id });
 	await h.stop();
 
-	h = await setup([], [], dirs).make();
+	h = await setup(t, [], [], dirs).make();
 	api = h.api("test");
 	await api.openSession(s);
 	await api.waitForIdle(s);
@@ -266,8 +266,8 @@ test("history survives a restart; moving the position is kept; an interrupted tu
 	await h.stop();
 });
 
-test("reopen refuses an interrupted turn without its starter or tool offer", async () => {
-	const env = setup([]);
+test("reopen refuses an interrupted turn without its starter or tool offer", async (t) => {
+	const env = setup(t, []);
 	const h = await env.make(), api = h.api("test");
 	const ids = [];
 	for (const key of ["startedBy", "tools"]) {
@@ -284,9 +284,9 @@ test("reopen refuses an interrupted turn without its starter or tool offer", asy
 	finally { await reopened.stop(); }
 });
 
-test("erasure removes content from the record and leaves an erasure entry", async () => {
-	const dirs = { project: mkdtempSync(join(tmpdir(), "ma-p-")), home: mkdtempSync(join(tmpdir(), "ma-h-")) };
-	const env = setup([fauxAssistantMessage([fauxText("noted")])], [], dirs);
+test("erasure removes content from the record and leaves an erasure entry", async (t) => {
+	const dirs = testDirs(t);
+	const env = setup(t, [fauxAssistantMessage([fauxText("noted")])], [], dirs);
 	let h = await env.make();
 	let api = h.api("test");
 	const s = await api.startSession();
@@ -295,7 +295,7 @@ test("erasure removes content from the record and leaves an erasure entry", asyn
 	const input = api.history(s).find((e) => e.kind === "input")!;
 	await api.erase(s, [input.id], "user");
 	await h.stop();
-	h = await setup([], [], dirs).make();
+	h = await setup(t, [], [], dirs).make();
 	api = h.api("test");
 	await api.openSession(s);
 	const all = api.history(s, { all: true });
@@ -304,10 +304,11 @@ test("erasure removes content from the record and leaves an erasure entry", asyn
 	await h.stop();
 });
 
-test("erasure reaches a summary that copied the erased entry", async () => {
-	const dirs = { project: mkdtempSync(join(tmpdir(), "ma-p-")), home: mkdtempSync(join(tmpdir(), "ma-h-")) };
+test("erasure reaches a summary that copied the erased entry", async (t) => {
+	const dirs = testDirs(t);
 	let lastContext = "";
 	const env = setup(
+		t,
 		[
 			fauxAssistantMessage([fauxText("noted")]),
 			fauxAssistantMessage([fauxText("ok")]),
@@ -337,16 +338,16 @@ test("erasure reaches a summary that copied the erased entry", async () => {
 	assert.ok(!lastContext.includes("555-0100"), "the model no longer sees the erased number, from the input or the summary");
 	assert.ok(lastContext.includes("I like tea"), "what remains is shown in full instead of the erased summary");
 	await h.stop();
-	h = await setup([], [], dirs).make();
+	h = await setup(t, [], [], dirs).make();
 	api = h.api("test");
 	await api.openSession(s);
 	assert.ok(!JSON.stringify(api.history(s, { all: true })).includes("555-0100"), "the store has no copy left");
 	await h.stop();
 });
 
-test("a session started only to look leaves nothing behind", async () => {
-	const dirs = { project: mkdtempSync(join(tmpdir(), "ma-p-")), home: mkdtempSync(join(tmpdir(), "ma-h-")) };
-	const h = await setup([fauxAssistantMessage([fauxText("hi")])], [], dirs).make();
+test("a session started only to look leaves nothing behind", async (t) => {
+	const dirs = testDirs(t);
+	const h = await setup(t, [fauxAssistantMessage([fauxText("hi")])], [], dirs).make();
 	const api = h.api("test");
 	// What a host does to read the model list: start a session, read and change its settings, close it.
 	const look = await api.startSession({ settings: { cwd: dirs.project } });
@@ -360,7 +361,7 @@ test("a session started only to look leaves nothing behind", async () => {
 	await h.stop();
 });
 
-test("parallel results are recorded as they finish and reach the model in call order", async () => {
+test("parallel results are recorded as they finish and reach the model in call order", async (t) => {
 	const started = new Set<string>();
 	const waitFor = async (name: string) => {
 		for (let i = 0; i < 200 && !started.has(name); i++) await new Promise((r) => setTimeout(r, 2));
@@ -382,6 +383,7 @@ test("parallel results are recorded as they finish and reach the model in call o
 		},
 	};
 	const { make } = setup(
+		t,
 		[fauxAssistantMessage([fauxToolCall("first", {}), fauxToolCall("second", {})], { stopReason: "toolUse" }), (context) => {
 			const names = context.messages.flatMap((m) => m.role === "toolResult" ? [m.toolName] : []);
 			return fauxAssistantMessage([fauxText(names.join(", "))]);

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { ALL_AUTHORITY, textOf, type Harness } from "@modular-agent/harness";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { createAgent } from "../src/index.js";
+import { testDirs, testTempDir } from "./fixtures/temp-dir.js";
 
 async function agent(dirs: { project: string; home: string }, responses: FauxResponseStep[], durable: boolean): Promise<Harness> {
 	const faux = fauxProvider();
@@ -17,8 +17,8 @@ async function agent(dirs: { project: string; home: string }, responses: FauxRes
 }
 
 /** A session whose process stopped mid-step: read and bash had started, write had not. */
-async function crashedSession() {
-	const dirs = { project: mkdtempSync(join(tmpdir(), "ma-p-")), home: mkdtempSync(join(tmpdir(), "ma-h-")) };
+async function crashedSession(t: TestContext) {
+	const dirs = testDirs(t);
 	writeFileSync(join(dirs.project, "notes.txt"), "remember the milk");
 	const h = await agent(dirs, [], false);
 	const api = h.api("test");
@@ -44,9 +44,9 @@ function outcome(h: Harness, s: string) {
 	return (h.api("test").history(s).filter((e) => e.kind === "turnEnd").at(-1)!.data as { outcome: { kind: string } }).outcome.kind;
 }
 
-test("swap test: the same crashed session, reopened with a transient and then a durable Runtime", async () => {
-	const { dirs, s } = await crashedSession();
-	const copy = { project: dirs.project, home: mkdtempSync(join(tmpdir(), "ma-h2-")) };
+test("swap test: the same crashed session, reopened with a transient and then a durable Runtime", async (context) => {
+	const { dirs, s } = await crashedSession(context);
+	const copy = { project: dirs.project, home: testTempDir(context, "ma-h2-") };
 	cpSync(dirs.home, copy.home, { recursive: true });
 
 	// Transient: the turn ends as failed; started calls have an unknown outcome, the rest never started.

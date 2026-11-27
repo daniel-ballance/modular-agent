@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
@@ -16,15 +16,27 @@ import type { Scripted } from "./fixtures/faux-provider.js";
 
 const serveJs = fileURLToPath(import.meta.resolve("@modular-agent/services").replace(/index\.js$/, "serve.js"));
 const token = () => randomBytes(16).toString("hex");
-const services: ChildProcess[] = [];
+const stopServices: (() => Promise<void>)[] = [];
+const scratch: string[] = [];
+
+function suiteTempDir(prefix: string): string {
+	const dir = mkdtempSync(join(tmpdir(), prefix));
+	scratch.push(dir);
+	return dir;
+}
 
 async function startService(kind: string, settings: Record<string, unknown>): Promise<{ url: string; token: string }> {
 	const t = token();
 	const child = spawn(process.execPath, [serveJs, kind, JSON.stringify({ ...settings, token: t })], { stdio: ["ignore", "pipe", "inherit"] });
-	services.push(child);
+	const closed = new Promise<void>(resolve => child.once("close", () => resolve()));
+	stopServices.push(async () => {
+		child.kill("SIGTERM");
+		await closed;
+	});
 	const url = await new Promise<string>((resolve, reject) => {
 		child.stdout!.once("data", (d) => resolve(JSON.parse(String(d).split("\n")[0]).url));
-		child.once("exit", (code) => reject(new Error(`${kind} service exited with ${code}`)));
+		child.once("error", reject);
+		child.once("close", (code) => reject(new Error(`${kind} service exited with ${code}`)));
 	});
 	return { url, token: t };
 }
@@ -48,22 +60,26 @@ let environment: { url: string; token: string };
 let gateway: { url: string; token: string };
 
 before(async () => {
-	project = mkdtempSync(join(tmpdir(), "ma-svc-project-"));
+	project = suiteTempDir("ma-svc-project-");
 	writeFileSync(join(project, "note.txt"), "a note in the sandbox");
-	historyDir = mkdtempSync(join(tmpdir(), "ma-svc-history-"));
-	flakyDir = mkdtempSync(join(tmpdir(), "ma-svc-flaky-"));
+	historyDir = suiteTempDir("ma-svc-history-");
+	flakyDir = suiteTempDir("ma-svc-flaky-");
 	[history, shortLease, flakyHistory, environment, gateway] = await Promise.all([
 		startService("history", { dir: historyDir }),
-		startService("history", { dir: mkdtempSync(join(tmpdir(), "ma-svc-short-")), leaseTtl: 800 }),
+		startService("history", { dir: suiteTempDir("ma-svc-short-"), leaseTtl: 800 }),
 		startService("history", { dir: flakyDir, dropAppendResponses: 3 }),
-		startService("environment", { root: project, runDir: mkdtempSync(join(tmpdir(), "ma-svc-run-")) }),
+		startService("environment", { root: project, runDir: suiteTempDir("ma-svc-run-") }),
 		startService("provider", { models: { module: new URL("./fixtures/scripted-models.js", import.meta.url).href, export: "scriptedModels", options: { routes } } }),
 	]);
 });
 const agents: Harness[] = [];
 after(async () => {
-	await Promise.all(agents.map((h) => h.stop().catch(() => undefined)));
-	services.forEach((s) => s.kill("SIGTERM"));
+	try {
+		await Promise.all(agents.map((h) => h.stop().catch(() => undefined)));
+		await Promise.all(stopServices.map(stop => stop()));
+	} finally {
+		for (const dir of scratch) rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 test("ma-service refuses unknown settings before listening or loading models", () => {
@@ -85,7 +101,7 @@ test("ma-service refuses unknown settings before listening or loading models", (
 // ---------- an agent that uses them, served over HTTP ----------
 
 async function agent(options: { history?: { url: string; token: string }; store?: HttpHistoryStore } = {}): Promise<{ h: Harness; url: string; token: string; home: string }> {
-	const home = mkdtempSync(join(tmpdir(), "ma-svc-home-"));
+	const home = suiteTempDir("ma-svc-home-");
 	const t = token();
 	const web = httpInterface({ token: t });
 	const client = options.history ?? history;
