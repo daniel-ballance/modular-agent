@@ -525,6 +525,13 @@ impl State {
                 api.install_recovery(id),
             )
             .await
+            .map_err(|error| {
+                if error.is::<SessionOpenInaccessible>() {
+                    OperationError::Forbidden(error.to_string()).into()
+                } else {
+                    error
+                }
+            })
     }
 
     async fn open_response(

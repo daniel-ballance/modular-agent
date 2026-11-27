@@ -204,60 +204,121 @@ async fn tenant_without_input_never_starts_a_provisional_session() -> anyhow::Re
 }
 
 #[tokio::test]
-async fn only_a_client_with_settings_can_change_one_threads_approval() -> anyhow::Result<()> {
-    use modular_agent::{Approval, Rights};
+async fn settings_checks_thread_visibility_and_rights_before_the_body() -> anyhow::Result<()> {
+    use modular_agent::{Approval, Durability, Rights, SessionOptions};
     let dir = tempfile::tempdir()?;
     let agent = Agent::builder()
         .project(dir.path())
+        .data_dir(dir.path().join("data"))
+        .durability(Durability::Kept)
+        .several_actors(true)
         .approval(Approval::Ask)
         .approval_covers_nested(true)
         .provider(scripted_provider(json!([{"text":"done"}])))
         .build()
         .await?;
-    let mut observer = actor(dir.path(), "observer", "observer-test-token")?;
-    observer.principal.actor.rights = Rights::only(&["watch"]);
-    let server = agent
-        .serve_agui(AguiOptions {
-            listen: "127.0.0.1:0".into(),
-            actors: vec![actor(dir.path(), "writer", TOKEN)?, observer],
+    let actors = [
+        ("writer", TOKEN),
+        ("observer", "observer-test-token"),
+        ("unrecorded", "unrecorded-test-token"),
+        ("out-of-scope", "out-of-scope-test-token"),
+        ("departed", "departed-test-token"),
+        ("no-watch", "no-watch-test-token"),
+    ];
+    let other_project = dir.path().join("other");
+    std::fs::create_dir(&other_project)?;
+    let mut clients = Vec::new();
+    for (id, token) in actors {
+        let mut client = actor(dir.path(), id, token)?;
+        client.principal.actor.id = id.into();
+        match id {
+            "observer" => client.principal.actor.rights = Rights::only(&["watch"]),
+            "no-watch" => client.principal.actor.rights = Rights::only(&["settings"]),
+            "out-of-scope" => client.principal.projects = Some(vec![other_project.clone()]),
+            "departed" => client.join_on_open = true,
+            _ => {}
+        }
+        clients.push(client);
+    }
+    let one = agent
+        .session_with(SessionOptions {
+            actors: [0, 1, 3, 4, 5]
+                .map(|i| clients[i].principal.actor.clone())
+                .into(),
             ..Default::default()
         })
         .await?;
-    let one = thread(&server).await?;
-    let two = thread(&server).await?;
-    let set = |payload: Value, token| {
-        reqwest::Client::new()
-            .post(url(&server, &format!("/threads/{one}/settings")))
+    let two = agent.session().await?;
+    one.prompt("Keep this thread").await?;
+    two.prompt("Keep another thread").await?;
+    one.leave("departed").await?;
+    let server = agent
+        .serve_agui(AguiOptions {
+            listen: "127.0.0.1:0".into(),
+            actors: clients,
+            ..Default::default()
+        })
+        .await?;
+    let http = reqwest::Client::new();
+    let set = |id: &str, token: &str, payload: &'static str| {
+        http.post(url(&server, &format!("/threads/{id}/settings")))
             .bearer_auth(token)
-            .json(&payload)
+            .header("Content-Type", "application/json")
+            .body(payload)
             .send()
     };
-    assert_eq!(
-        set(json!({"approval":"off"}), "observer-test-token")
-            .await?
-            .status(),
-        403
-    );
-    assert_eq!(
-        set(
-            json!({"approval":"off","approvalWait":"untilDeadline"}),
-            TOKEN
-        )
-        .await?
-        .status(),
-        400
-    );
-    assert_eq!(
-        set(json!({"approval":"never"}), TOKEN)
-            .await?
-            .error_for_status()?
-            .json::<Value>()
-            .await?,
-        json!({"approval":"never"})
-    );
-    for (id, policy) in [(&one, "never"), (&two, "ask")] {
-        exchange(&server, input(id, "prompt", json!("Check"))).await?;
-        assert_eq!(agent.session_info(id)?.settings["approval"], policy);
+    let membership = |history: Vec<Value>| {
+        history
+            .into_iter()
+            .filter(|row| matches!(row["kind"].as_str(), Some("actorJoined" | "actorLeft")))
+            .collect::<Vec<_>>()
+    };
+    let before = membership(one.history().await?);
+    assert!(!before.is_empty());
+    let valid = r#"{"approval":"never"}"#;
+    let invalid = ["{", r#"{"approval":"off","approvalWait":"untilDeadline"}"#];
+    for (phase, current) in [("live", "ask"), ("kept", "never")] {
+        for payload in [valid, invalid[0], invalid[1]] {
+            for (id, token, status, code) in [
+                ("missing", TOKEN, 404, "not_found"),
+                (one.id(), actors[2].1, 404, "not_found"),
+                (one.id(), actors[3].1, 404, "not_found"),
+                (one.id(), actors[4].1, 404, "not_found"),
+                (one.id(), actors[5].1, 404, "not_found"),
+                (one.id(), actors[1].1, 403, "refused"),
+            ] {
+                let reply = set(id, token, payload).await?;
+                assert_eq!(
+                    (reply.status().as_u16(), reply.json::<Value>().await?),
+                    (status, json!({"code":code})),
+                    "{phase} {token} {payload}"
+                );
+            }
+        }
+        assert_eq!(agent.session_info(one.id())?.settings["approval"], current);
+        for payload in invalid {
+            let reply = set(one.id(), TOKEN, payload).await?;
+            assert_eq!(
+                (reply.status().as_u16(), reply.json::<Value>().await?),
+                (400, json!({"code":"invalid_request"})),
+                "{phase} {payload}"
+            );
+        }
+        let (payload, policy) = if phase == "live" {
+            (valid, "never")
+        } else {
+            (r#"{"approval":"off"}"#, "off")
+        };
+        let reply = set(one.id(), TOKEN, payload).await?;
+        assert_eq!(
+            (reply.status().as_u16(), reply.json::<Value>().await?),
+            (200, json!({"approval":policy})),
+            "{phase}"
+        );
+        assert_eq!(membership(one.history().await?), before, "{phase}");
+        assert_eq!(agent.session_info(one.id())?.settings["approval"], policy);
+        assert_eq!(agent.session_info(two.id())?.settings["approval"], "ask");
+        one.close().await?;
     }
     server.close().await;
     agent.close().await?;

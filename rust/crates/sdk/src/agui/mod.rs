@@ -115,6 +115,9 @@ impl Fail {
 }
 impl From<anyhow::Error> for Fail {
     fn from(e: anyhow::Error) -> Self {
+        if e.is::<base::SessionOpenInaccessible>() {
+            return Self::Missing;
+        }
         match e.downcast_ref::<base::OperationError>() {
             Some(base::OperationError::Forbidden(_)) => Self::Refused,
             Some(base::OperationError::Busy(_)) => Self::Busy,
@@ -422,7 +425,7 @@ impl Service {
                 .inner
                 .history
                 .0
-                .load(id)
+                .inspect(id)
                 .map_err(|_| Fail::Missing)?
         };
         if !self.scope_ok(a, &data) {
@@ -441,23 +444,11 @@ impl Service {
             required,
             writer: "interface.agui",
         };
+        // Refuse before acquiring a writer, then recheck as part of opening under the lease.
+        self.h().check_session_open(&data, &policy)?;
         base::SESSION_OPEN_POLICY
             .scope(policy, self.h().install_recovery(id))
-            .await
-            .map_err(|error| {
-                if matches!(
-                    error.downcast_ref::<base::OperationError>(),
-                    Some(base::OperationError::Forbidden(_))
-                ) {
-                    if required.is_empty() {
-                        Fail::Missing
-                    } else {
-                        Fail::Refused
-                    }
-                } else {
-                    Fail::from(error)
-                }
-            })?;
+            .await?;
         self.watch(a, id)?;
         if !open {
             self.agent.attach(id).map_err(|_| Fail::Lost)?;
@@ -535,6 +526,7 @@ impl Service {
                     .trim_start_matches("/threads/")
                     .strip_suffix("/settings")
                     .ok_or(Fail::Invalid)?;
+                self.attach(&a, id, &["settings"]).await?;
                 let change = body(req).await?;
                 if change.as_object().is_none_or(|o| o.len() != 1)
                     || !matches!(
@@ -544,7 +536,7 @@ impl Service {
                 {
                     return Err(Fail::Invalid);
                 }
-                self.attach(&a, id, &["settings"]).await?;
+                self.watch(&a, id)?;
                 self.h().settings(
                     &scope(id, a.id()),
                     base::portable::settings_from_wire(&change),

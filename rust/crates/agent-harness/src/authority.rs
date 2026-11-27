@@ -52,22 +52,23 @@ impl Harness {
             ConnectionCeiling::for_discovery(&data.id, actor, rights.intersect(ceiling)),
         )
     }
-    pub(super) fn check_session_open(
+    /// Check access without admitting an actor or opening a writer.
+    pub fn check_session_open(
         &self,
         data: &SessionData,
         policy: &SessionOpenPolicy,
     ) -> Result<Authority> {
-        let denied = || OperationError::Forbidden("session inaccessible".into());
-        ensure!(policy.allows(data), denied());
+        ensure!(policy.allows(data), SessionOpenInaccessible);
         let rights = self.discovery_rights(
             data,
             &policy.actor,
             &policy.rights,
             policy.allows_join(data),
         )?;
+        ensure!(rights.has("watch"), SessionOpenInaccessible);
         ensure!(
-            rights.has("watch") && policy.required.iter().all(|right| rights.has(right)),
-            denied()
+            policy.required.iter().all(|right| rights.has(right)),
+            OperationError::Forbidden("missing right for the requested operation".into())
         );
         Ok(rights)
     }

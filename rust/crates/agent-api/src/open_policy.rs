@@ -1,6 +1,18 @@
 use crate::{Authority, SessionData};
 use std::path::PathBuf;
 
+/// The actor cannot see the session, independently of any operation-specific rights.
+#[derive(Debug)]
+pub struct SessionOpenInaccessible;
+
+impl std::fmt::Display for SessionOpenInaccessible {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("session inaccessible")
+    }
+}
+
+impl std::error::Error for SessionOpenInaccessible {}
+
 /// Operator policy for one Interface attachment. This is not a work grant.
 pub struct SessionOpenPolicy {
     pub session: String,
