@@ -186,7 +186,6 @@ Tracked in #37.
 - **Images:** They are attached as read, up to 4.5 MiB. They are not resized.
 - **MCP:** tools only, no OAuth negotiation. The official MCP plugin's changing catalog is local to this agent; the SDK does not yet serve that plugin over stdio. It can still connect to remote MCP servers.
 - **Terminal:** line-based, with no markdown rendering. Embedded reopening waits for recovery before reading another terminal line. ACP installs recovery before returning the session and does not wait for the recovered turn to finish.
-- **Credential staging:** the Rust base stores a named answer directly; it does not implement the full staged-secret transaction.
 
 <a id="where-the-specification-was-silent"></a>
 

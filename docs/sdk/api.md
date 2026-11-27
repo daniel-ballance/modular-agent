@@ -21,7 +21,7 @@ The shape of the API, in language-neutral terms. [Languages](languages.md) says 
 | `history` | a history store | chosen by `durability`: memory, or files under `dataDir` |
 | `runtime` | a Runtime | chosen by `durability` |
 | `environment` | a working environment | local, rooted at `project` |
-| `credentials` | a credential store | environment variables. To answer a `secret` question, use a writable store that implements [secret staging](#the-other-parts), such as `fileCredentials(path)`. |
+| `credentials` | a credential store | environment variables. To answer a `secret` question, use a writable store that accepts the secret name and implements [secret staging](#credential-writes), such as `fileCredentials(path)`. |
 | `providers` | Providers | none |
 | `tools` | tools | none |
 | `interfaceTools` | list of `{ sourceId, actorId, routeId, resultTimeoutMs, tools: ToolDefinition[] }` | none; no Interface tool source is registered |
@@ -37,7 +37,7 @@ The shape of the API, in language-neutral terms. [Languages](languages.md) says 
 | `pluginHost` | boolean | true if either plugin list is nonempty; otherwise false. A plugin host reads `MODULAR_AGENT_PLUGINS` after both lists. See [Placement](placement.md#a-plugin-in-another-process). |
 | `severalActors` | boolean | false. When true, the agent declares `severalActors`, and `session.join`, `leave`, `as` and proposed input work. When false they raise `not_supported` for any actor but the local one, as the [ACP binding](../bindings/acp.md#several-actors) requires. |
 | `sessionLimits` | boolean | false. When true, the agent declares `sessionLimits` and `session.setLimit` works; otherwise it raises `not_supported`. |
-| `tenants` | map of tenant name to `{ rights, tokens? }`, the shape of `MODULAR_AGENT_TENANTS` | none. Given, the agent declares `tenants`, and `session({ tenant })` places a session in one ([Limits and tenants](../contracts.md#limits-and-tenants)). |
+| `tenants` | operator-supplied map of tenant name to `{ rights, tokens? }` | none. Supplying the map enables the `tenants` declaration and lets `session({ tenant })` select a configured tenant. It sets tenant rights ceilings and optional token limits, not an Interface connection’s tenant access ([Limits and tenants](../contracts.md#limits-and-tenants)). |
 | `jobReportsStartTurns` | boolean | false: a job's report is parked until released ([Jobs](../contracts.md#jobs)) |
 | `agentName` | string | absent. A stable name for `gen_ai.agent.name`; omit the attribute and span name suffix when unset. |
 
@@ -48,6 +48,12 @@ Each option that names a part is shorthand for a plugin that provides it. `provi
 `createAgent` raises `invalid_composition` for combinations the [durability rules](placement.md#durability) forbid. With `ephemeral`, an explicit persistent history store or a history service raises `invalid_composition` whose message names `kept`. The rule applies whether the store comes from `history` or a plugin registration.
 
 `createAgent` also raises `invalid_composition` for `pluginHost: false` with a nonempty `processPlugins` or `servicePlugins` list, two plugins with the same name, or a [replacement](#replacing-a-part) the registration rules refuse. It raises `not_supported` for a plugin that needs something this agent cannot give. Failure to load, start, connect to, initialize or register a configured plugin fails the whole agent with `invalid_composition`: the SDK MUST NOT run without a configured part or substitute another for it ([Choosing plugins at start](../bindings/plugin.md#choosing-plugins-at-start)).
+
+### Builder inputs and application composition
+
+`settings` supplies defaults for new sessions. An application can read its own settings files and pass those defaults in, or install an in-process [Configuration](#replacing-a-part). Rust also has a file-backed builder input; TypeScript has no Configuration field on `createAgent`. The [language mappings](languages.md#configuration-and-prompts) describe the two paths. Project settings are not a grant of trust: the operator records trust outside the project, and application composition must check current trust before using project configuration to select launchable code ([Configuration and trust](../contracts.md#configuration-and-trust)).
+
+`credentials` selects the local store; `tenants` supplies deployment policy independently of project settings. Neither input loads `ma`’s configuration or infers trust or connection grants. The application chooses which files and credential backend to use, when to consult the trust ledger, and which prompt and tool plugins to install. For example, `ma` reads its settings and trust ledger in its application composition, supplies its own `auth.json` store, and installs a prompt plugin. This is [standard application configuration](../reference/standard-configuration.md), not a shared builder preset. A plugin contributes system text through `turn.before`; how to omit the Rust SDK’s default contribution is described in [Languages](languages.md#configuration-and-prompts).
 
 ### Tracing
 
@@ -288,7 +294,7 @@ A plugin replaces an earlier plugin's item by registering its own item of the sa
 - two plugins register the same item and the later one does not list it: an unlisted collision, including a second Runtime, working environment, history store, credential store or Configuration;
 - a process plugin lists an item that another process plugin registered.
 
-The SDK supplies a history store, credential store and Configuration before explicit plugins. A history store or credential store uses the default unless `createAgent` names one. Rust takes a Configuration in those options, through `AgentBuilder::configuration` ([Languages](languages.md#rust)). TypeScript uses the default Configuration unless a plugin replaces it. To replace one of these parts, register `historyStore`, `credentialStore` or `configuration` and list `history`, `credentials` or `configuration`. Each is a singleton. A listed replacement changes only that item. These parts and their items are in-process only.
+The SDK supplies a history store, credential store and Configuration before explicit plugins. These parts use their SDK defaults unless the application supplies a [builder input or replacement](#builder-inputs-and-application-composition). To replace one of these parts, register `historyStore`, `credentialStore` or `configuration` and list `history`, `credentials` or `configuration`. Each is a singleton. A listed replacement changes only that item. These parts and their items are in-process only.
 
 ## Contexts
 
@@ -477,10 +483,16 @@ These are written rarely. Each is an interface a plugin implements. Its operatio
 |---|---|---|
 | Working environment | `read`, `exists`, `write`, `exec`, `list` (optional), `savePoint`, `checkPoint`, `restorePoint`, `sessionEnded`, and its registration: `containment`, `platforms`, `points`, `confinesFiles` | [The host asks the working environment](../bindings/plugin.md#the-host-asks-the-working-environment). A missing file is `not_found`. An environment without `list` raises `not_supported` and the agent treats listing as absent. |
 | History store | `create(sessionId, metadata)`, `acquire`, `renew`, `release`, `append`, `read`, `list`, `erase` | [History service](../bindings/history-http.md). `create` is the binding's `PUT` of session metadata, which omits `id`; `read` and `list` take the binding's cursor and limit. A store declares its lease TTL and whether it is persistent. An `acquire` refused because another writer holds the session raises `held` with `retryAfterMs`. An `append` skips an entry JSON-equal to one already kept under its id; a different entry under a kept id raises `conflict`. A store that can lose writer access, for example when renewal fails, tells the agent as soon as it knows, even with no write in progress, so the agent can [interrupt the session](../contracts.md#recovery-and-repeating-work) at once rather than at its next write. |
-| Credential store | `read`, `stage`, `lookupStaged`, `activate`, `discard` | [Asking the credential store](../contracts.md#asking-the-credential-store) and [Secrets](../contracts.md#secrets) |
+| Credential store | `read`; direct writes where supported; `stage`, `lookupStaged`, `activate`, `discard` for secret answers | [Asking the credential store](../contracts.md#asking-the-credential-store) and [Credential writes](#credential-writes) |
 | Configuration | `settings(project)`, `trusted(project)` | [Configuration and trust](../contracts.md#configuration-and-trust) |
 | Runtime | `declaration`, `runTurn`, `resumeTurn`, `continueOpenCalls` | [The host asks the Runtime](../bindings/plugin.md#the-host-asks-the-runtime). `resumeTurn` receives the interrupted checkpoint, including the last answered step and any committed `step.after` decision, exactly as the binding defines it. The context offers the [Runtime callbacks](../bindings/plugin.md#runtime-callbacks). |
 | Interface | `start(agent)`, `stop()` | The only part given the whole Agent. It authenticates its own actors. |
+
+### Credential writes
+
+A **direct named write** is a local store operation, not a Session operation. In a writable store it changes the current value for that name without a separate activation. It does not take a question request or answerer, produce a staging receipt, or record a question answer in the session. A store can support direct writes without supporting secret answers. The default environment store is read-only; see [Languages](languages.md#credential-store-operations) for the local file stores and write methods.
+
+A **staged secret answer** follows the [Secrets contract](../contracts.md#secrets). The value is held durably under the request and is invisible to ordinary credential reads until activation. The Harness checks the receipt, commits `secretAnswerAccepted`, activates the stage, and commits the stored-name `inputAnswer` before acknowledging success. The store rejects activation as `superseded` if the slot generation changed; recovery handles activation and discard by request. The file stores described in [Languages](languages.md#credential-store-operations) advance the slot generation on a direct write, so a still-pending stage for that slot cannot overwrite it on first activation. A direct write cannot replace any step of the secret-answer protocol.
 
 ## Errors
 

@@ -20,6 +20,31 @@ How each language expresses the [API](api.md). The rule is the same throughout: 
 | Closed sets of values | enums with an `Unknown(String)` variant where shared data keeps unknown values | string unions |
 | Tool input | a type deriving `Deserialize` and `JsonSchema` | a [Standard Schema](https://standardschema.dev) or JSON Schema |
 
+## Configuration and prompts
+
+| Input | Rust | TypeScript |
+|---|---|---|
+| File-backed Configuration | `AgentBuilder::configuration(FilesConfiguration::new(global))`, where `global` is the operator settings file | No `createAgent` option. Load settings in the app and pass `settings`, or install a Configuration with a plugin. |
+| Local credential store | `AgentBuilder::credentials(store: impl CredentialStore)` | `createAgent({ credentials })`, with `credentials?: CredentialStore` |
+| Deployment tenants | `AgentBuilder::tenants(tenants: serde_json::Value)` | `createAgent({ tenants })`, with `tenants?: Record<string, { rights: Right[]; tokens?: number }>` |
+| Product system prompt | `AgentBuilder::default_prompt(false)` omits the SDK’s default prompt plugin; supply a `turn.before` contribution with `on_turn_before` | No equivalent switch or SDK default prompt plugin; supply a `turn.before` contribution with `registrar.on("turn.before", …)`. |
+
+In Rust, `FilesConfiguration` uses the `trusted-projects.json` ledger next to `global`. `trusted(&Path)` checks the canonical project path; `trust(&Path)` grants trust and is for explicit operator actions. `settings(&Path)` layers project defaults from `.modular-agent.json` even without a trust grant; reading them does not authorize launches. Keep the operator files outside the project. `Registrar::configuration(source: impl Configuration)` can instead install a Configuration whose `settings(&Path)` supplies defaults. For an ACP composition that gates projects on a Configuration, expose it separately through `AcpComposition::configuration`.
+
+In TypeScript, `registrar.configuration(source: ProjectConfiguration | Configuration)` accepts either a `ProjectConfiguration` with `trusted(project)` and `settings(project)` (each can return a promise), or the lower-level `Configuration` part. The registrar calls `settings(project)` on a `ProjectConfiguration` only when `trusted(project)` succeeds with `true`; a lower-level `Configuration` owns its own policy. The SDK does not create a project trust ledger for either form.
+
+To replace the SDK’s Configuration or credential store through an in-process registrar, list `configuration` or `credentials`, respectively, in `replaces`. Use `credential_store(store: impl CredentialStore)` in Rust and `credentialStore(store: CredentialStore)` in TypeScript.
+
+## Credential store operations
+
+| | Rust | TypeScript |
+|---|---|---|
+| SDK file store | `modular_agent::file_credentials(path) -> impl CredentialStore` | `fileCredentials(path: string): CredentialStore` from `@modular-agent/core` |
+| Direct named write on the SDK file store | `store.write(name: &str, value: &str) -> Result<()>` | `await store.modify(name, async () => value)` with a string value; `await store.delete(name)` removes the active value. |
+| Staging operations | `stage(receipt, value)`, `lookup_staged(&request)`, `activate(&request)`, `discard(&request)`, plus `writable()` returning `true` (or overriding `accepts(name)` to accept the secret name, since `writable()` defaults to `false`) | `stage(submission, value)`, `lookupStaged(scope)`, `activate(scope)`, `discard(scope)`, returning promises (presence of the four methods enables secret staging) |
+
+Both SDK file stores implement direct writes and staged transactions. So do Rust’s base `credentials_file::FileCredentials` (direct write: `agent_api::CredentialStore::put`) and the `AuthFile` used by Rust `ma` (`CredentialStore::write` or `AuthFile::put_answer`). TypeScript’s `ma` uses `AuthFile.credentials()` with `modify` and `delete`. The separate TypeScript `@modular-agent/credentials-file` package also supports staging and direct modification through `FileCredentialStore`; its `fileCredentials({ path })` returns a base plugin, not the SDK store returned by the core helper.
+
 ## Input receipts
 
 For an ordinary `send` with a key, Rust uses `session.send_with(input, timing, Some(key))`; TypeScript uses `session.send(input, timing, { key })`. Rust's `InputReceipt` has `input_id: String`, `taken: String`, and the booleans `duplicate` and `erased`. TypeScript uses `inputId: string` and `taken` as a string union; an ordinary first receipt omits `duplicate`, a retry sets `duplicate: true`, and neither receipt has `erased`. Cancellation hand-back leaves those receipts non-erased in both SDKs. See [Sessions and turns](api.md#sessions-and-turns).
@@ -62,7 +87,7 @@ Omit the timeout (`None` in Rust) to request no deadline. For served calls, the 
 - Use `agent.session_summary(id, &viewer)?` to read kept work without opening the session. An inaccessible or missing session returns `None`.
 - The core crate is `modular-agent`, imported as `modular_agent`. It requires Tokio.
 - A tool is built with `Tool::new(name, description).run(|input: T, cx| async move { … })`. Hints are builder methods: `.read_only()`, `.safe_to_repeat()`.
-- A plugin is built with `Plugin::new(name)` and chained registrations: `.tool(tool)`, `.on_tool_before(handler)`, `.replaces(item)`, `.config(settings)`, and `.setup(|r| …)` for items that depend on settings. `AgentBuilder::configuration` installs a settings file and project trust ledger as the Configuration. A plugin that registers a history store, credential store or Configuration lists `history`, `credentials` or `configuration` in `replaces`.
+- A plugin is built with `Plugin::new(name)` and chained registrations: `.tool(tool)`, `.on_tool_before(handler)`, `.replaces(item)`, `.config(settings)`, and `.setup(|r| …)` for items that depend on settings. For singleton parts such as history, see [Replacing a part](api.md#replacing-a-part).
 - For `turn.before`, `on_turn_before` returns a `TurnAddition`. Its `sources: Option<Vec<String>>` distinguishes `None` from `Some(vec![])`.
 - Each hook point is its own typed method, `on_tool_before` rather than `on("tool.before", …)`, with `on_<point>_with(Order::First, handler)` or `Order::Last` for explicit order. A gate answers `Gate::Allow` or `Gate::Refuse(reason)`; `Gate::Refuse` is also the `step.after` end decision.
 - A plugin program awaits `modular_agent::serve(plugin)` for stdio. For a single-token WebSocket listener use `serve_websocket(plugin, ServeOptions { listen, token_file, tls, projects })` or `serve_websocket_factory(factory, options)`. For named callers use `serve_websocket_named(|caller: AuthenticatedCaller| make_plugin(caller.caller_id), NamedServeOptions { listen, callers, ..Default::default() }).await?`. Each `PluginCaller::new(caller_id, token_file)` can set its own `projects`. The factory gets the authenticated ID on each new connection, not the token.
@@ -86,7 +111,7 @@ Omit the timeout (`None` in Rust) to request no deadline. For served calls, the 
 - Use `await agent.sessionSummary(id, viewer)` to read kept work without opening the session. An inaccessible or missing session returns `undefined`.
 - The core package is `@modular-agent/core`, an ES module with its own type declarations. It runs on Node.js 22 or later.
 - A tool is `tool({ name, description, input, run })`. Hints are fields: `readOnly: true`.
-- A plugin is an object: `{ name, replaces?, setup(registrar), stop? }`, or `definePlugin({ name, tools, hooks, … })` for the common case. `createAgent` has no Configuration option; the SDK installs the default. A plugin that registers a history store, credential store or Configuration lists `history`, `credentials` or `configuration` in `replaces`.
+- A plugin is an object: `{ name, replaces?, setup(registrar), stop? }`, or `definePlugin({ name, tools, hooks, … })` for the common case. For singleton parts such as history, see [Replacing a part](api.md#replacing-a-part).
 - `run` may return a value or a Promise. Streams are async iterables, used with `for await`. A tool refuses by calling `cx.refuse(reason)`, which throws and does not return.
 - Standard Schema validators must expose the Standard JSON Schema input export, for example Zod 4. For plain JSON Schema assigned to a variable, use `as const` so its keywords keep their literal types for inference.
 - For `turn.before`, return `{ add: { system?, context?, sources? } }`. Omit `sources` or leave it `undefined` for the default attribution; `sources: []` is an explicit empty list.
