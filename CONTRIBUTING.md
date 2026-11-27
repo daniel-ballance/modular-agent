@@ -231,7 +231,7 @@ export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:6006/v1/traces
 export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
 ```
 
-For `ma` launched by a host, set both variables in the host's launch configuration for `ma`. Query `http://127.0.0.1:6006/v1/projects/default/spans` for the same time window as the session history. After each wave of real `ma` runs (or roughly every 5–10 sessions outside waves), audit the session histories (Rust JSON files under `~/.local/state/modular-agent/rust/sessions/<id>.json` and TypeScript JSONL files under `~/.local/state/modular-agent/typescript/history/<project-folder>/<id>.jsonl`) and compare them with the spans. Use another harness or model and read history in place without reopening or changing sessions. Follow the [ma-meta-analysis skill](.agents/skills/ma-meta-analysis/SKILL.md) for measurements and issue filing.
+For `ma` launched by a host, set both variables in the host's launch configuration for `ma`. Query `http://127.0.0.1:6006/v1/projects/default/spans` for the same time window as the session history. After each wave of real `ma` runs (or roughly every 5–10 sessions outside waves), audit the session histories (Rust JSON files under `~/.local/state/modular-agent/rust/sessions/<id>.json` and TypeScript JSONL files under `~/.local/state/modular-agent/typescript/history/<project-folder>/<id>.jsonl`) and compare them with the spans. Keep this cadence until the operator turns it off. Use another harness or model and read history in place without reopening or changing sessions. Follow the [ma-meta-analysis skill](.agents/skills/ma-meta-analysis/SKILL.md) for measurements and issue filing.
 
 ## Commits
 
