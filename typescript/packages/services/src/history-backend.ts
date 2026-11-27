@@ -7,7 +7,9 @@ export interface HistorySessionPage { sessions: JsonObject[]; next?: string }
 type Awaitable<T> = T | Promise<T>;
 
 /** Storage half of history/1. The store owns atomicity, paging, durability, lease
- * fencing and restart exclusion. Preserve opaque fields and exact JSON numbers. */
+ * fencing and restart exclusion. Preserve opaque fields and exact JSON numbers.
+ * HTTP calls on separate connections can overlap. Yield during slow I/O and keep
+ * renewal independent of storage locks and queues held by other sessions. */
 export interface HistoryServiceStore {
   readonly ttlMs: number;
   readonly retention?: number | null;

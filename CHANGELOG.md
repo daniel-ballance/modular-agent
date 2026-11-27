@@ -22,7 +22,7 @@ The fourth release, and the first in two languages: Go and Python are removed fr
 - **A reopened session keeps its approval policy.** Base compositions that load approval by default set it off when they create a session, not when they reopen one. A malformed recorded policy is refused, not converted.
 - **Replacing a default part is explicit.** The SDK supplies a history store, credential store and Configuration before explicit plugins. A plugin that registers its own lists `history`, `credentials` or `configuration` in `replaces`; otherwise `createAgent` raises `invalid_composition` ([API](docs/sdk/api.md)). Rust takes a Configuration through `AgentBuilder::configuration`.
 - **History leases under load.**
-  - A renewal of a current lease no longer waits for another session's storage work, in either history service. A write that names a lease checks it immediately before commit ([history binding](docs/bindings/history-http.md)).
+  - In both built-in history services, a renewal of a current lease proceeds independently of another session's storage work. A write that names a lease checks it immediately before commit ([history binding](docs/bindings/history-http.md)).
   - In TypeScript, a request made under a lease ends when the lease is lost, not at the cutoff current when it was sent. A commit slower than that cutoff no longer loses the writer and reports `invalid_params`.
   - Each history handoff and interruption stage has its own deadline, so a later stage no longer times out on time an earlier stage used.
   - Both SDKs report `unavailable` when an HTTP history freshness check fails during a session handoff.

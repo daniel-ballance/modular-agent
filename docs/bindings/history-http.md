@@ -98,7 +98,7 @@ A service whose backing store holds no writer leases MUST NOT make a renewal of 
 
 In the same services, a write that names a lease is an append, an erase with a lease, a registry publication or a registry completion. It MUST check that its lease is current immediately before it commits, after any wait for storage. If the lease expired, was released or was invalidated while the write waited, the service MUST commit nothing and refuse the write as `lost`.
 
-This binding does not yet set either rule for a service whose backing store holds writer leases ([#82](https://github.com/daniel-ballance/modular-agent/issues/82)).
+For a backing store that holds writer leases, the per-session atomicity and lease transitions above govern the service. The Rust and TypeScript SDKs describe [how their adapters dispatch calls to these stores](../sdk/placement.md#services).
 
 The writer SHOULD use a monotonic clock that advances during suspension. Where the platform offers none to the writer, it MAY derive one: each reading advances by the larger of a monotonic clock's advance and the wall clock's advance since the previous reading, and if the wall clock moves back by more than a stated tolerance, the clock jumps far enough ahead that every lease measured before the jump is lost; the writer then subtracts that tolerance as its margin. Otherwise the writer MUST subtract an [operator-configured margin](../security.md#what-an-operator-configures) from each local lease deadline. The writer MUST schedule renewal by `ttlMs / 3` and treat the lease as lost at `ttlMs / 2`, both measured from sending the request for the latest successful grant or renewal and adjusted by that margin when applicable. It MUST treat a success received at or beyond the earlier of the existing loss cutoff (if any) and the loss cutoff measured from that request's send time as loss. It MUST check that cutoff immediately before every new effect. A reported `lost` or uncertain writer access ends dispatch authority. A repeated acquire after a lost reply MUST be followed by a timely renew before use. A lost generation MUST NOT be revived. See [core recovery](../contracts.md#recovery-and-repeating-work); no lease fences outside effects.
 
@@ -167,7 +167,7 @@ The client MUST check `GET /v1` before use and refuse a binding it does not spea
 
 ## Changes
 
-- **2026-11-25.** In a service whose backing store holds no writer leases, a renewal of a current lease must not wait for storage work on another session. In such a service, a write under a lease checks that lease immediately before it commits. The Go, Rust, TypeScript and Python services over their built-in stores meet both rules. A service whose backing store holds writer leases is left out of both for now; in Python and Go its renewal still waits, and Go's commits without a final check ([#82](https://github.com/daniel-ballance/modular-agent/issues/82)).
+- **2026-11-25.** In a service whose backing store holds no writer leases, a renewal of a current lease must not wait for storage work on another session. In such a service, a write under a lease checks that lease immediately before it commits. The Go, Rust, TypeScript and Python services over their built-in stores met both rules at the four-language checkpoint.
 
 - **2026-11-22.** Allow optional W3C trace context headers per authenticated request.
 
