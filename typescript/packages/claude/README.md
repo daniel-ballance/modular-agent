@@ -66,7 +66,9 @@ Only `catalog.json` in the `home` folder from `plugin/initialize`: the model lis
 
 The Provider registers `keepsState: false`, `runsTools: false`. Every `provider/request` starts one Claude Code process, gives it the whole request, reads one model message and closes the process. `sessionId` is accepted and passed to the hooks but not otherwise used. `provider/discard` has nothing to discard and answers `{}`; with `erase: true` it answers `outOfReach`, since copies Anthropic holds cannot be named or deleted from here.
 
-How the conversation is replayed: the Agent SDK accepts only user input, so earlier assistant turns and tool results cannot be handed to it as native history. A request with one or more trailing user messages and nothing before them is delivered as written. Anything earlier goes in as a marked text record in the same user turn (`<history:MARK>` with `<user>`, `<assistant>`, `<tool-call>` and `<tool-result>` entries), followed by the trailing user messages as written. The mark is a digest of the record, so text inside it cannot close the record. Images keep their place. This is the reference's own fallback, which it uses after every restart, compaction or branch, so it is known to work.
+The Agent SDK accepts only user input. Earlier messages go in as a marked text record in one user turn (`<history:MARK>` with `<user:MARK>`, `<assistant:MARK>`, `<tool-call:MARK>` and `<tool-result:MARK>` entries). Trailing user messages follow as written. Images keep their place. The reference uses this replay format after every restart, compaction or branch.
+
+The Provider hashes the first replayed entry to choose the mark. As messages are appended, the mark and existing record prefix stay the same for prompt caching unless a replayed entry contains the mark after a colon. When that happens, the Provider tries deterministic alternatives until it finds a mark that never follows a colon in the entries. This keeps quoted tags from acting as boundaries.
 
 The reference normally does something more involved: it keeps one Claude Code process alive per conversation and holds each tool call open until Pi supplies the result, which gives the model native history, its own thinking and a warm prompt cache. That is an optimisation there, not a necessity, and it would need the stateful Provider rules (`sessionId` on every request, exact-prefix proof, `provider/discard`, reset on move, fork, compaction and model change) plus a pool of long-lived processes. The stateless form is correct with none of that, so it was chosen. Its costs are listed under known gaps.
 
@@ -105,12 +107,12 @@ Which levels a model lists follows the reference: Fable 5.x cannot switch thinki
 
 ## Verification
 
-### Offline tests: 51 pass
+### Offline tests: 54 pass
 
 `npm test`, with a scripted fake in place of the SDK's `query()`:
 
 - `models.test.ts` (6): catalog shape, level mapping, nearest level, narrowing.
-- `transcript.test.ts` (6): ModelRequest to SDK input.
+- `transcript.test.ts` (9): ModelRequest to SDK input, replay prefix stability and boundary collisions.
 - `response.test.ts` (11): SDK output to the assistant message (text, thinking, tool calls, usage, stop reasons), error kinds, token scrubbing.
 - `provider.test.ts` (15): requests against the fake SDK, cancellation, catalog changes after readiness, and closing the probe on shutdown or at the deadline.
 - `api.test.ts` (3 offline, one gated live): the public constructor in process and over the plugin binding, including an API key source refusal.
