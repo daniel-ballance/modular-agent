@@ -233,7 +233,7 @@ async function main(argv: string[]) {
       chatgpt({ logins: auth, ...identity, modelOverrides: chatgptOverrides }),
       grok({ logins: auth, ...identity, modelOverrides: grokOverrides }),
     ];
-    const plugins = standardPlugins({ paths: p, serving, projectMcp, script });
+    const plugins = standardPlugins({ paths: p, project: cwd, serving, projectMcp, script });
     if (claudeProvider && (model?.startsWith("claude/") || opts.command === "models")) plugins.push(definePlugin({
       name: "provider.claude", setup: r => r.provider(claudeProvider), stop: claudeProvider.close,
     }));

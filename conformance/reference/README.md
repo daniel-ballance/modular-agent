@@ -27,6 +27,7 @@ Each implementation lists itself in `agents/<language>.json`: `language`, the `b
 | `reopen-approval` | A new default does not replace a recorded `off` policy. With the approval feature loaded, a session with no recorded policy reopens with `all`, including a session started without `--approval`. The check also uses `python3` to remove a policy from saved history. |
 | `codemode-nested` | Code reads and writes files through `tools`; the nested calls stay out of the model's view |
 | `codemode-tools-values` | `import tools`, a tool function held in a variable, and positional arguments make the same calls |
+| `find-ignore-and-globs` | Both builds apply parent, local, repository and global ignores and match name and path globs. |
 | `codemode-positional-order` | Positional arguments: required fields, then the rest in alphabetical order, as the prompt shows |
 | `codemode-no-ambient-access` | No wall clock, sleep, system entropy or files; a seeded generator works |
 | `codemode-results` | `exec` returns its dict for a non-zero exit and raises for a timeout; a bare tool name is a `NameError`; printing past 1 MiB stops the run with the error first |

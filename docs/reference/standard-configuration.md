@@ -202,7 +202,9 @@ The model is offered one tool, `codemode`, which runs Python in a [Monty](https:
 
 The table lists every function. As in Pi, there is no `ask_user` or other function through which the model asks the person a question; the model asks in its reply. Under a script, the [hooks for testing](#hooks-for-testing) add `test_ask_secret`.
 
-The inputs, limits and wording are Pi's, as the Rust `tools-files` crate has them. In the sandbox:
+The inputs, limits and wording are Pi's, as the Rust `tools-files` crate has them. `find` returns paths relative to the search directory. A glob without `/` matches the basename anywhere; a glob with `/` matches the relative path. `*` does not cross a directory separator; `**/` can match zero or more directories. The default local walker reads ancestor ignore files, including `.gitignore` at the repository root when searching a subdirectory. It applies `.ignore` before `.gitignore`, then `.git/info/exclude`, then global Git excludes. A `!` rule can keep an entry unless the walk has already skipped its directory. A leading `/` anchors an ignore pattern; a trailing `/` restricts it to directories.
+
+In the sandbox:
 
 - The Python is Monty's, at the same pinned version in every implementation, so a script behaves the same in both.
 - `tools` is there without an import. `import tools` gives the same functions, though not necessarily the identical module object. Functions are values: `f = tools.read` then `f(path='a.txt')` makes the same call as `tools.read(path='a.txt')`. A tool is reached only through `tools`: a bare `read(...)` raises `NameError`.

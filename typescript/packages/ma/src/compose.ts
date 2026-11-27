@@ -9,12 +9,13 @@ import { scriptTestTools } from "./script.js";
 
 export function standardPlugins(options: {
   paths: Paths;
+  project?: string;
   serving?: boolean;
   projectMcp: Parameters<typeof standardMcpTools>[0]["servers"];
   script?: Provider;
 }): Plugin[] {
   const plugins: Plugin[] = [
-    standardFileTools({ spill: join(options.paths.state, "output") }),
+    standardFileTools({ spill: join(options.paths.state, "output"), project: options.project }),
     codemode(),
     standardPrompt(options.paths),
   ];

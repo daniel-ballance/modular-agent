@@ -1,9 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, posix } from "node:path";
-import ignore from "ignore";
-import { minimatch } from "minimatch";
+import { join } from "node:path";
+import { findFiles } from "./find.js";
 import { definePlugin, tool, type ToolContext, type ToolOutput, type TextPart } from "@modular-agent/core";
 import { definitions } from "./standard-definitions.js";
 import { applyEdits, cut, formatSize, listing, MAX_BYTES, readWindow } from "./standard-text.js";
@@ -25,33 +24,7 @@ function imageMime(b: Buffer) {
   if (b.toString("ascii", 0, 4) === "RIFF" && b.toString("ascii", 8, 12) === "WEBP") return "image/webp";
 }
 
-async function walk(ctx: ToolContext, root: string, pattern: string) {
-  const files: string[] = [];
-  type Rules = { prefix: string; filter: ReturnType<typeof ignore> };
-  async function visit(rel: string, parents: Rules[]) {
-    ctx.cancelled.throwIfAborted();
-    const dir = posix.join(root, rel), rules = [...parents];
-    const file = posix.join(dir, ".gitignore");
-    if (await ctx.environment.exists(file)) rules.push({ prefix: rel ? rel + "/" : "", filter: ignore().add((await ctx.environment.read(file)).toString()) });
-    for (const item of await ctx.environment.list(dir)) {
-      if (item.name === ".git") continue;
-      const name = posix.join(rel, item.name);
-      const test = name + (item.kind === "directory" ? "/" : "");
-      let ignored = false;
-      for (const { prefix, filter } of rules) {
-        const result = filter.test(test.slice(prefix.length));
-        if (result.ignored || result.unignored) ignored = result.ignored;
-      }
-      if (ignored) continue;
-      if (item.kind === "directory") await visit(name, rules);
-      if (item.kind === "file" && minimatch(pattern.includes("/") ? name : item.name, pattern.replace(/^\.\//, ""), { nocomment: true, nonegate: true, noext: true, dot: true })) files.push(name);
-    }
-  }
-  await visit("", []);
-  return files.sort();
-}
-
-export function standardFileTools({ spill }: { spill: string }) {
+export function standardFileTools({ spill, project }: { spill: string; project?: string }) {
   const make = <const N extends keyof typeof definitions>(name: N,
     run: (input: { path?: string; limit?: number } & Record<string, unknown>, ctx: ToolContext) => Promise<string | ToolOutput>) => {
     const { description, input, readOnly } = definitions[name];
@@ -109,7 +82,7 @@ export function standardFileTools({ spill }: { spill: string }) {
       return `Successfully wrote ${Buffer.byteLength(content as string)} bytes to ${file}`;
     }),
     make("find", async ({ path = ".", pattern, limit }, ctx) => {
-      const max = limitOf(limit, 1000), files = await walk(ctx, clean(path), pattern as string);
+      const max = limitOf(limit, 1000), files = await findFiles(ctx.environment, ctx.cancelled, clean(path), pattern as string, project);
       return files.length ? listing(files, max, "results") : "No files found matching pattern";
     }),
     make("list", async ({ path = ".", limit }, ctx) => {
