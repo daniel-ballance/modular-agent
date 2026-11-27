@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { definePlugin, memoryHistory, serve, tool } from "@modular-agent/core";
+import { definePlugin, memoryHistory, serve, tool, type AcpActorToken } from "@modular-agent/core";
 import { testAgent } from "@modular-agent/core/testing";
 import { ACP_PROTOCOL, connectWebSocket } from "@modular-agent/plugin-wire";
 import { interruptedHistory } from "./fixtures/interrupted-history.js";
@@ -88,7 +88,8 @@ test("ACP parks even with a client attached and accepts an unchanged poll only o
     tools:[tool({name:"bump",description:"Increment",input:{type:"object"},run:()=>String(++effects)})],
     script:[{toolCalls:[{name:"bump",input:{amount:1}}]},{text:"Done"}]});
   t.after(()=>agent.close());
-  const server = await agent.serveAcp({listen:"127.0.0.1:0",actors:[{tokenFile,actor:{id:"worker",kind:"user",rights:["watch","approve","input","tools","settings"]}}]});
+  const actors = [{ tokenFile, actor: { id: "worker", kind: "user", rights: ["watch", "approve", "input", "tools", "settings"] } }] satisfies AcpActorToken[];
+  const server = await agent.serveAcp({ listen: "127.0.0.1:0", actors });
   const connect = async () => {
     const ws = await connectWebSocket(server.url,tokenFile,ACP_PROTOCOL,5000);
     t.after(()=>ws.close());
@@ -104,6 +105,11 @@ test("ACP parks even with a client attached and accepts an unchanged poll only o
   await request(first,"session/set_config_option",{sessionId:id,configId:"approvalWait",value:"untilDeadline"});
   const origin = await request(first,"session/prompt",{sessionId:id,prompt:[{type:"text",text:"Increment"}]});
   assert.equal(origin.stopReason,"end_turn"); assert.equal(effects,0); assert.equal(permissionRpcs,0);
+  const occupied = new URL(server.url).host;
+  const failedBind = () => assert.rejects(agent.serveAcp({ listen: occupied, actors }), { code: "invalid_composition", message: /EADDRINUSE/ });
+  await Promise.all([failedBind(), failedBind()]);
+  await agent.serveAcp({ listen: "127.0.0.1:0", actors });
+  await failedBind();
   const later = await connect(); await request(later,"session/resume",{sessionId:id,cwd:dir,mcpServers:[]});
   const [q]=(await request(later,"_modular-agent/requests",{sessionId:id})).requests;
   assert.equal(q.answerable,true); assert.equal(q.approvalWait,"untilDeadline"); assert.ok(Number.isSafeInteger(q.deadlineAt));
@@ -131,9 +137,11 @@ for (const reason of ["commitFailed", "writerLost"] as const) {
       script: [{ toolCalls: [{ name: "hold", input: {} }] }, { text: "Recovered" }],
     });
     t.after(() => agent.close());
-    const server = await agent.serveAcp({ listen: "127.0.0.1:0", actors: [
+    const actors: AcpActorToken[] = [
       { tokenFile, actor: { id: "local", kind: "user", rights: ["watch", "input", "tools", "settings"] } },
-    ] });
+    ];
+    const server = await agent.serveAcp({ listen: "127.0.0.1:0", actors });
+    const alternate = reason === "writerLost" ? await agent.serveAcp({ listen: "127.0.0.1:0", actors }) : undefined;
     t.after(() => server.close());
     const [a, b] = await Promise.all([1, 2].map(() => connectWebSocket(server.url, tokenFile, ACP_PROTOCOL, 5000)));
     await Promise.all([a, b].map(socket => request(socket, "initialize", { protocolVersion: 1 })));
@@ -161,8 +169,12 @@ for (const reason of ["commitFailed", "writerLost"] as const) {
     await pending;
     assert.deepEqual(listed.sessions.find((s: {sessionId:string}) => s.sessionId === sessionId)?._meta?.["modular-agent"]?.waiting,
       {questions:0, toolCalls:0, turn:"running"});
-    await request(a, "session/resume", { sessionId, cwd: dir });
-    assert.equal((await prompt("Fresh input")).stopReason, "end_turn");
+    const recovered = alternate ? await connectWebSocket(alternate.url, tokenFile, ACP_PROTOCOL, 5000) : a;
+    if (alternate) await request(recovered, "initialize", { protocolVersion: 1 });
+    await request(recovered, "session/resume", { sessionId, cwd: dir });
+    if (alternate) await assert.rejects(request(b, "session/close", { sessionId }), { code: "forbidden" });
+    const fresh = await request(recovered, "session/prompt", { sessionId, prompt: [{ type: "text", text: "Fresh input" }] });
+    assert.equal(fresh.stopReason, "end_turn");
   });
 }
 

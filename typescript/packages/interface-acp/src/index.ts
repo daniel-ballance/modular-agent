@@ -9,7 +9,6 @@ import {
 	type Actor,
 	type Authority,
 	type AgentEvent,
-	type ContentPart,
 	type HistoryEntry,
 	type InputRequest,
 	type InterfaceCapability,
@@ -22,9 +21,15 @@ import {
 	lowerReasoning,
 	parseModel,
 	thinkingLevels,
-	text,
 	textOf,
 } from "@modular-agent/harness";
+
+import { fromAcp, promptResponse, type Outcome, type Waiter } from "./messages.js";
+import { parseHostServers, type AcpMcpServer, type McpServers } from "./mcp.js";
+
+export { fromAcp } from "./messages.js";
+export { unchangedAcpApproval } from "./approval.js";
+export type { AcpMcpServer } from "./mcp.js";
 
 const { version } = createRequire(import.meta.url)("../../package.json") as { version: string };
 
@@ -34,36 +39,12 @@ export const BINDING = "modular-agent-acp/1";
 const NS = "modular-agent";
 const BINDING_V2 = "modular-agent-acp/2";
 const MAX_LINE_BYTES = 64 * 1024 * 1024;
-/** Reconstruct the polling view from the immutable entry, not the saved client response. */
-export async function unchangedAcpApproval(api: PluginApi, entry: HistoryEntry, recipient: string) {
-	const { request, call } = entry.data as { request: InputRequest; call: { name: string; input: object } };
-	const view = { id: request.id, kind: request.kind, question: request.question, toolCallId: entry.toolCallId,
-		call: { name: call.name, input: call.input }, ...(request.coversNested ? { coversNested: true } : {}), approvalWait: request.approvalWait, deadlineAt: request.deadlineAt };
-	const method = "_modular-agent/requests";
-	const reply = await api.gateOutput(entry.sessionId, recipient, "reply", { method, result: { requests: [structuredClone(view)] } });
-	return reply?.method === method && isDeepStrictEqual(reply.result.requests, [view]);
-}
 const bindingError = (code: string, message = code) => new RequestError(code === "lost" ? -32000 : -32602, message, { code });
 const notOpen = () => ({ accepted: false, reason: "not_open" });
 const EXTENSIONS = ["history", "input", "requests", "answer", "actors", "join", "leave", "release", "proposals", "withdraw", "limit", "tenant", "fork", "move", "jobs", "cancel-job", "erase", "interrupted"];
 
-interface Outcome { kind: string; error?: string; limit?: string }
-interface Waiter {
-	inputId: string;
-	turnId?: string;
-	duplicate?: boolean;
-	resolve(response: acp.PromptResponse): void;
-	reject(error: Error): void;
-}
-
-/** A turn's outcome as an ACP prompt response, with the binding's _meta. */
-function promptResponse(inputId: string, outcome: Outcome, extra: Record<string, unknown> = {}): acp.PromptResponse {
-	const stopReason: acp.StopReason =
-		outcome.kind === "cancelled" ? "cancelled" : outcome.kind === "limit" ? (["output", "tenantTokens", "sessionTokens"].includes(outcome.limit ?? "") ? "max_tokens" : "max_turn_requests") : outcome.kind === "failed" ? "refusal" : "end_turn";
-	return { stopReason, _meta: { [NS]: { inputId, outcome, ...extra } } };
-}
-
 interface SessionState {
+	unwatchClose?: () => void;
 	unfollow?: () => void;
 	writer?: AbortSignal;
 	waiters: Waiter[];
@@ -83,35 +64,11 @@ function kindOf(name: string): acp.ToolKind {
 }
 
 
-/** ACP prompt content, as our content parts. */
-export function fromAcp(blocks: acp.ContentBlock[]): ContentPart[] {
-	return blocks.map((b): ContentPart => {
-		switch (b.type) {
-			case "text":
-				return text(b.text);
-			case "image":
-				return { type: "image", data: b.data, mimeType: b.mimeType };
-			case "resource": {
-				const r = b.resource as { uri: string; text?: string; blob?: string };
-				return text(r.text !== undefined ? `<resource uri="${r.uri}">\n${r.text}\n</resource>` : `[resource ${r.uri}]`);
-			}
-			case "resource_link":
-				return text(`[resource link ${b.uri}${b.name ? ` (${b.name})` : ""}]`);
-			default:
-				// Kept intact in the record, even though the model can't use it.
-				return { ...(b as object), type: `acp:${(b as { type: string }).type}` };
-		}
-	});
-}
-
 /**
  * An Interface that speaks ACP (Agent Client Protocol) v1. An ACP client, such
  * as an editor or a host like T3 Code, drives the agent through it. Each ACP
  * session is one of our sessions, with the same id.
  */
-/** The "mcp-servers" capability, as the tools-mcp plugin provides it. */
-export type AcpMcpServer = { command: string; args?: string[]; env?: Record<string, string> } | { url: string; headers?: Record<string, string> };
-interface McpServers { attach(sessionId: string, servers: Record<string, AcpMcpServer>, cwd?: string): Promise<string[]> }
 export function localAcpActor(id = "acp-user"): Actor & { kind: "host" } {
 	return { id, kind: "host", authority: [...ALL_AUTHORITY] };
 }
@@ -132,7 +89,8 @@ export interface AcpOptions {
 	listOwner?(id: string): { api: PluginApi; allowJoin: boolean };
 	declaration?: (sessionId?: string) => Record<string, unknown>;
 	projectSettings?(project: string): Promise<Record<string, unknown>>;
-	project?(cwd: string, sessionId?: string): Promise<{ api: PluginApi; cwd: string }>;
+	project?(cwd: string, sessionId?: string, tools?: boolean): Promise<{ api: PluginApi; cwd: string }>;
+	claim?(sessionId: string, api: PluginApi): void;
 	associate?(sessionId: string, api: PluginApi): void;
 	attachMcp?(sessionId: string, project: string, servers: Record<string, AcpMcpServer>, api: PluginApi): Promise<unknown>;
 	showApproval?: boolean;
@@ -151,6 +109,7 @@ export class AcpInterface implements InterfaceCapability {
 	private initialized = false;
 	private deliveredPollApprovals = new Set<string>();
 	private clientCaps: acp.ClientCapabilities = {};
+	private opening = new Map<string, PluginApi | undefined>();
 	private sessions = new Map<string, SessionState>();
 	private pending = new Map<string, { abort(): void; sessionId: string; actorId: string }>();
 
@@ -162,14 +121,13 @@ export class AcpInterface implements InterfaceCapability {
 			connection.signal.addEventListener("abort", () => {
 				if (this.client !== connection.client) return;
 				this.client = undefined;
-				const ids = [...this.sessions.keys()];
-				for (const state of this.sessions.values()) {
-					state.unfollow?.();
-					for (const waiter of state.waiters) waiter.reject(bindingError("lost"));
+				for (const id of this.sessions.keys()) {
+					const api = this.apiFor(id);
+					this.detachView(id);
+					api.presenceChanged(id);
 				}
 				for (const pending of this.pending.values()) pending.abort();
-				this.sessions.clear();
-				for (const id of ids) { try { this.apiFor(id).presenceChanged(id); } catch { /* already closed */ } }
+				this.opening.clear();
 				this.projects.clear();
 			}, { once: true });
 		});
@@ -192,14 +150,25 @@ export class AcpInterface implements InterfaceCapability {
 		const actors = this.apiFor(sessionId).session(sessionId).actors;
 		return [...(this.sessions.get(sessionId)?.present ?? [])].filter(id => this.represents(id) && actors.some(a => a.id === id));
 	}
-	/** True while this connection holds or is opening the session. */ holds(sessionId: string): boolean { return this.sessions.has(sessionId); }
+	/** A provisional claim blocks all concurrent opens. Only other listeners are blocked by a live writer. */
+	holds(id: string, includeWriter: boolean): boolean {
+		const writer = this.sessions.get(id)?.writer;
+		return this.opening.get(id) === this.api || includeWriter && !!writer && !writer.aborted && this.apiFor(id) === this.api;
+	}
+	private claim(id: string, api: PluginApi): void {
+		if (!this.client) throw bindingError("lost", "The ACP connection ended");
+		this.options.claim?.(id, api);
+		this.opening.set(id, api);
+	}
 	private represents(id: string): boolean { return id === this.actorId || this.options.represents?.has(id) === true; }
 
 	private attached(id: string): boolean {
 		const state = this.sessions.get(id);
 		if (!this.client || !state) return false;
 		try {
-			const { project, tenant } = this.apiFor(id).session(id);
+			const api = this.apiFor(id);
+			if (state.writer && this.opening.get(id) !== api && state.writer !== api.sessionInterruption(id)) return false;
+			const { project, tenant } = api.session(id);
 			return this.options.allowAttached?.(project, tenant) ?? true;
 		} catch { return false; }
 	}
@@ -222,7 +191,6 @@ export class AcpInterface implements InterfaceCapability {
 		return api.use<McpServers>("mcp-servers");
 	}
 
-	/** Give the session the MCP servers the client passed. They are not recorded: their headers and env may hold secrets. */
 	private questionTrace() {
 		return this.options.traceTrusted !== false ? carrier(currentSpan()) : undefined;
 	}
@@ -231,19 +199,21 @@ export class AcpInterface implements InterfaceCapability {
 		return withTrace(this.options.traceTrusted !== false ? readTrace(meta) : undefined, work);
 	}
 
-	private async attachMcp(api: PluginApi, sessionId: string, servers: acp.McpServer[] | undefined, cwd: string | undefined): Promise<void> {
-		const mcp = this.mcp(api);
+	private hostServers(servers?: acp.McpServer[]) {
 		if (!servers?.length) return;
-		if (this.options.hostMcpServers === false || !this.hasRight(sessionId, this.actorId, "tools")) throw bindingError("forbidden");
-		if (!mcp && !this.options.attachMcp) throw bindingError("not_supported");
-		const configs = Object.fromEntries(servers.flatMap((s): [string, AcpMcpServer][] => {
-			if ("command" in s) return [[s.name, { command: s.command, args: s.args, env: Object.fromEntries(s.env.map((e) => [e.name, e.value])) }]];
-			if (s.type === "http") return [[s.name, { url: s.url, headers: Object.fromEntries(s.headers.map((h) => [h.name, h.value])) }]];
-			if (this.options.attachMcp) throw RequestError.invalidParams(undefined, "only stdio and Streamable HTTP MCP are supported");
-			return [];
-		}));
-		if (this.options.attachMcp) await this.options.attachMcp(sessionId, api.session(sessionId).project, configs, api);
-		else await mcp!.attach(sessionId, configs, cwd);
+		if (this.options.hostMcpServers === false || !this.actor().authority.includes("tools")) throw bindingError("forbidden");
+		return parseHostServers(servers, !!this.options.attachMcp);
+	}
+
+	private async attachMcp(api: PluginApi, id: string, configs: Record<string, AcpMcpServer> | undefined, cwd: string): Promise<void> {
+		if (!configs) return;
+		if (!this.hasRight(id, this.actorId, "tools")) throw bindingError("forbidden");
+		if (this.options.attachMcp) await this.options.attachMcp(id, api.session(id).project, configs, api);
+		else {
+			const mcp = this.mcp(api);
+			if (!mcp) throw bindingError("not_supported");
+			await mcp.attach(id, configs, cwd);
+		}
 	}
 
 	private register(): void {
@@ -280,19 +250,30 @@ export class AcpInterface implements InterfaceCapability {
 			const tenant = (params._meta?.[NS] as { tenant?: unknown } | undefined)?.tenant;
 			if (tenant !== undefined && typeof tenant !== "string") throw RequestError.invalidParams();
 			if (this.options.allowTenant && (!this.options.allowTenant(tenant ?? null) || !this.actor().authority.includes("input"))) throw bindingError("forbidden");
-			if (params.mcpServers?.length && (this.options.hostMcpServers === false || !this.actor().authority.includes("tools"))) throw bindingError("forbidden");
-			const sessionId = await this.checked(() => this.traced(params._meta, async () => {
-				const { api, cwd } = await this.options.project?.(params.cwd) ?? { api: this.api, cwd: params.cwd };
-				const overrides = await this.options.projectSettings?.(cwd);
-				return api.startSession({ tenant, settings: { ...overrides, cwd }, actor: this.actor(), prepare: async id => {
-					this.projects.set(id, api);
-					this.options.associate?.(id, api);
-					try { await this.attachMcp(api, id, params.mcpServers, params.cwd); }
-					catch (error) { this.projects.delete(id); throw error; }
-				} });
-			}));
-			this.open(sessionId);
-			return { sessionId, configOptions: await this.configOptions(sessionId), _meta: { [NS]: { declaration: this.bindingDeclaration(sessionId) } } };
+			const servers = this.hostServers(params.mcpServers);
+			let id: string | undefined;
+			try {
+				const sessionId = await this.checked(() => this.traced(params._meta, async () => {
+					const { api, cwd } = await this.options.project?.(params.cwd) ?? { api: this.api, cwd: params.cwd };
+					const overrides = await this.options.projectSettings?.(cwd);
+					return api.startSession({ tenant, settings: { ...overrides, cwd }, actor: this.actor(), onCreate: created => {
+						id = created;
+						this.claim(created, api);
+						this.projects.set(created, api);
+						this.options.associate?.(created, api);
+					}, prepare: created => this.attachMcp(api, created, servers, cwd) });
+				}));
+				if (!this.opening.has(sessionId)) throw bindingError("lost");
+				this.watchClose(sessionId, this.state());
+				const configOptions = await this.configOptions(sessionId);
+				this.open(sessionId);
+				return { sessionId, configOptions, _meta: { [NS]: { declaration: this.bindingDeclaration(sessionId) } } };
+			} finally {
+				if (id !== undefined) {
+					this.opening.delete(id);
+					if (!this.sessions.get(id)?.writer) this.detachView(id);
+				}
+			}
 		});
 
 		app.onRequest(methods.agent.session.load, async ({ params }) => {
@@ -331,9 +312,6 @@ export class AcpInterface implements InterfaceCapability {
 		app.onRequest(methods.agent.session.close, async ({ params }) => {
 			await this.requireAttachment(params.sessionId);
 			await this.checked(() => this.traced(params._meta, () => this.apiFor(params.sessionId).closeSession(params.sessionId, this.actorId, undefined, this.actor().authority)));
-			this.sessions.get(params.sessionId)?.unfollow?.();
-			this.sessions.delete(params.sessionId);
-			this.projects.delete(params.sessionId);
 			return {};
 		});
 
@@ -389,35 +367,33 @@ export class AcpInterface implements InterfaceCapability {
 	}
 
 	private async openForClient(params: { sessionId: string; cwd: string; mcpServers?: acp.McpServer[]; _meta?: unknown }, replay: boolean) {
-		const id = params.sessionId;
-		const previous = this.sessions.get(id);
-		const attached = !!previous && !previous.writer?.aborted;
-		await this.traced(params._meta, () => this.reopen(id, params.cwd, previous ? undefined : params.mcpServers, replay ? "load" : "resume"));
+		const id = params.sessionId, operation = replay ? "load" : "resume";
+		if (this.options.actor && !this.actor().authority.includes("watch")) throw bindingError("forbidden");
+		const servers = this.hostServers(params.mcpServers);
+		const { api, cwd } = await this.checked(async () =>
+			await this.options.project?.(params.cwd, id, !!servers) ?? { api: this.apiFor(id), cwd: params.cwd });
+		const previous = this.sessions.get(id), attached = !!previous?.writer && !previous.writer.aborted;
+		const state = previous ?? this.state();
+		if (this.opening.has(id)) throw bindingError("busy");
+		await this.checked(async () => {
+			this.claim(id, api);
+			this.projects.set(id, api);
+			this.sessions.set(id, state);
+			state.present.add(this.actorId);
+		});
 		try {
+			if (!this.opening.get(id)) throw bindingError("lost");
+			await this.checked(() => this.traced(params._meta, () =>
+				api.openSession(id, this.actor(), () => this.attachMcp(api, id, attached ? undefined : servers, cwd), operation)));
+			if (!attached) this.watchClose(id, state);
 			const result = await this.gateReply(id, replay ? "session/load" : "session/resume", await this.openResponse(id));
 			if (replay && !attached && this.hasRight(id, this.actorId, "watch")) await this.replay(id);
+			if (this.sessions.get(id) !== state) throw bindingError("lost");
 			if (!attached) this.open(id);
 			return result;
-		} catch (e) { if (!previous) this.sessions.delete(id); throw e; }
-	}
-
-	private async reopen(sessionId: string, cwd: string, servers?: acp.McpServer[], operation?: "load" | "resume"): Promise<void> {
-		if (this.options.actor && !this.actor().authority.includes("watch")) throw bindingError("forbidden");
-		const previous = this.sessions.get(sessionId);
-		if (!previous) {
-			const state = this.state();
-			state.present.add(this.actorId);
-			this.sessions.set(sessionId, state);
-		}
-		try {
-			await this.checked(async () => {
-				const api = (await this.options.project?.(cwd, sessionId))?.api ?? this.projects.get(sessionId) ?? this.api;
-				this.projects.set(sessionId, api);
-				await api.openSession(sessionId, this.actor(), id => this.attachMcp(api, id, servers, cwd), operation);
-			});
-		} catch (error) {
-			if (!previous) { this.sessions.delete(sessionId); this.projects.delete(sessionId); }
-			throw error;
+		} finally {
+			this.opening.delete(id);
+			if (!previous && !state.writer && this.sessions.get(id) === state) this.detachView(id);
 		}
 	}
 
@@ -742,9 +718,31 @@ export class AcpInterface implements InterfaceCapability {
 		return { waiters: [], ownInputs: new Set(), toolOutput: new Map(), present: new Set() };
 	}
 
+	private watchClose(id: string, state: SessionState): void {
+		if (!this.client || !this.opening.get(id)) throw bindingError("lost");
+		const signal = this.apiFor(id).sessionClosed(id);
+		const closed = () => {
+			if (this.opening.has(id)) this.opening.set(id, undefined);
+			this.detachView(id);
+		};
+		state.unwatchClose?.();
+		state.unwatchClose = () => signal.removeEventListener("abort", closed);
+		signal.addEventListener("abort", closed, { once: true });
+		this.sessions.set(id, state);
+	}
+
+	private detachView(id: string): void {
+		const state = this.sessions.get(id);
+		state?.unfollow?.();
+		state?.unwatchClose?.();
+		for (const waiter of state?.waiters ?? []) waiter.reject(bindingError("lost"));
+		this.sessions.delete(id);
+		this.projects.delete(id);
+	}
+
 	private open(sessionId: string): void {
-		const state = this.sessions.get(sessionId) ?? this.state();
-		this.sessions.set(sessionId, state);
+		const state = this.sessions.get(sessionId);
+		if (!state) throw bindingError("lost");
 		state.present.add(this.actorId);
 		state.unfollow?.();
 		state.writer = this.apiFor(sessionId).sessionInterruption(sessionId);
