@@ -2,17 +2,17 @@
 //! Protocol: https://agentclientprotocol.com/protocol/v1/overview
 mod binding;
 mod events;
+#[cfg(test)]
+mod initialize_tests;
 mod sessions;
 mod transport;
 use acp::{
-    UntypedMessage,
-    v1::{
-        ConnectionTo,
-        schema::{
-            CloseSessionRequest, CreateElicitationRequest, InitializeRequest, ListSessionsRequest,
-            LoadSessionRequest, NewSessionRequest, PromptRequest, RequestPermissionRequest,
-            ResumeSessionRequest, SessionNotification, SetSessionConfigOptionRequest,
-        },
+    ConnectionTo, UntypedMessage,
+    schema::ProtocolVersion,
+    v1::schema::{
+        CloseSessionRequest, CreateElicitationRequest, InitializeRequest, ListSessionsRequest,
+        LoadSessionRequest, NewSessionRequest, PromptRequest, RequestPermissionRequest,
+        ResumeSessionRequest, SessionNotification, SetSessionConfigOptionRequest,
     },
 };
 use agent_api::*;
@@ -453,10 +453,17 @@ impl State {
         request: UntypedMessage,
         cx: ConnectionTo<acp::Client>,
     ) -> Result<Value> {
-        let p = request.params;
+        let mut p = request.params;
         let method = request.method;
         if method == "initialize" {
-            let _: InitializeRequest = serde_json::from_value(p.clone())?;
+            // JSON Schema treats an integral number like 2.0 as an integer.
+            if let Some(version) = p["protocolVersion"].as_number().filter(|n| n.is_f64())
+                && let Some(version) = version.as_f64().filter(|n| n.fract() == 0.0)
+            {
+                p["protocolVersion"] = json!(version as i64);
+            }
+            let initialize: InitializeRequest =
+                serde_json::from_value(p.clone()).map_err(acp::Error::from)?;
             if self.client.lock().unwrap().is_some() {
                 return Err(
                     request_error("already_initialized", "connection already initialized").into(),
@@ -476,7 +483,7 @@ impl State {
                 })
                 .transpose()?
                 .unwrap_or("modular-agent-acp/1");
-            if p["protocolVersion"] != 1
+            if initialize.protocol_version < ProtocolVersion::V1
                 || !matches!(binding, "modular-agent-acp/1" | "modular-agent-acp/2")
             {
                 return Err(request_error(
@@ -501,7 +508,7 @@ impl State {
             );
             *client = Some(p["clientCapabilities"].clone());
             return Ok(
-                json!({"protocolVersion":1,"agentInfo":{"name":"modular-agent-rs","version":env!("CARGO_PKG_VERSION")},"authMethods":[],
+                json!({"protocolVersion":ProtocolVersion::V1,"agentInfo":{"name":"modular-agent-rs","version":env!("CARGO_PKG_VERSION")},"authMethods":[],
                 "agentCapabilities":{"loadSession":true,"mcpCapabilities":{"http":true,"sse":false},"promptCapabilities":{"image":false,"audio":false,"embeddedContext":false},"sessionCapabilities":{"list":{},"resume":{},"close":{}}},
                 "_meta":{"modular-agent":{"binding":binding,"declaration":declaration,"extensions":binding::EXTENSIONS,"actor":{"id":self.principal.id,"kind":self.principal.kind,"rights":self.principal.rights}}}}),
             );
@@ -882,8 +889,9 @@ async fn run_connection(
     let requests = state.clone();
     let notifications = state.clone();
     let closed = state.clone();
-    let result = acp::Agent
-        .v1()
+    // The SDK's v1 builder rewrites the offered version before dispatch. Use
+    // raw dispatch so the binding can validate and negotiate the original offer.
+    let result = acp::Builder::new(acp::Agent)
         .on_receive_request(
             async move |request: UntypedMessage, responder, cx: ConnectionTo<acp::Client>| {
                 // SDK callbacks are ordered dispatch work. Never await a turn here:
