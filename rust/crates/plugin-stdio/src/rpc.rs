@@ -248,7 +248,7 @@ struct Pending {
 }
 struct Incoming {
     cancel: CancellationToken,
-    callbacks: Option<mpsc::Sender<()>>,
+    callbacks: mpsc::Sender<()>,
 }
 struct Outgoing<'a> {
     peer: &'a Peer,
@@ -495,7 +495,7 @@ impl Peer {
                             key.clone(),
                             Incoming {
                                 cancel: cancel.clone(),
-                                callbacks: Some(callbacks),
+                                callbacks,
                             },
                         );
                         let p = p.clone();
@@ -509,10 +509,6 @@ impl Peer {
                                 cancel.run_until_cancelled(after.cancelled()).await;
                             }
                             let gate = endpoint.delivery(&p, &method, &params);
-                            let signal = cancel.clone();
-                            let session_work = scope_from_params(&params).is_some()
-                                || method == "provider/request"
-                                || gate.is_some();
                             let reply = if cancel.is_cancelled() {
                                 Err(Fault::new(
                                     "cancelled",
@@ -534,25 +530,14 @@ impl Peer {
                                     Err(Fault::new("internal", "plugin callback panicked"))
                                 })
                             };
-                            if let Some(incoming) = p.incoming.lock().unwrap().get_mut(&key) {
-                                incoming.callbacks.take();
-                            }
-                            let receipt = outbound::IncomingReply(Arc::downgrade(&p), key);
+                            // The handler has settled. A late cancel cannot change its reply.
+                            p.incoming.lock().unwrap().remove(&key);
                             // An endpoint can stop polling a callback on cancel.
                             // Its parent answer must still follow the callback's reply.
                             settled.recv().await;
                             if !p.closed.is_cancelled() {
                                 let end = shutdown_closes && method == "plugin/shutdown";
-                                let cancelled = signal.is_cancelled();
-                                let gate = if !cancelled && session_work {
-                                    Some(Box::new(move || {
-                                        !signal.is_cancelled()
-                                            && gate.as_ref().is_none_or(|check| check())
-                                    }) as Gate)
-                                } else {
-                                    gate
-                                };
-                                p.respond_frame(id, reply, end, gate, Some(receipt));
+                                p.respond_frame(id, reply, end, gate);
                             }
                         });
                     } else {
@@ -821,27 +806,30 @@ impl Peer {
                 .send((Err(Fault::new("lost", "plugin connection closed")), None));
         }
     }
-    pub fn notify(&self, method: &str, mut params: Value) {
+    pub fn notify(&self, method: &str, params: Value) {
+        self.notify_frame(method, params, None);
+    }
+    pub(crate) fn notify_scoped(&self, method: &str, params: Value, api: &Api, scope: &Scope) {
+        let gate = (!scope.session.is_empty()).then(|| scoped(api, scope, method));
+        self.notify_frame(method, params, gate);
+    }
+    fn notify_frame(&self, method: &str, mut params: Value, gate: Option<Gate>) {
         self.inject(method, &mut params, &telemetry::current());
-        let gate = self.parent_delivery(method, &params);
+        let parent = self.parent_delivery(method, &params);
+        let gate = match (parent, gate) {
+            (Some(parent), Some(scoped)) => Some(Box::new(move || parent() && scoped()) as Gate),
+            (parent, scoped) => parent.or(scoped),
+        };
         let _ = self.tx.send(Frame {
             message: json!({"jsonrpc":"2.0","method":method,"params":params}),
             end: false,
             gate,
-            receipt: None,
         });
     }
     fn respond(&self, id: Value, reply: Reply) {
-        self.respond_frame(id, reply, false, None, None);
+        self.respond_frame(id, reply, false, None);
     }
-    fn respond_frame(
-        &self,
-        id: Value,
-        reply: Reply,
-        end: bool,
-        gate: Option<Gate>,
-        receipt: Option<outbound::IncomingReply>,
-    ) {
+    fn respond_frame(&self, id: Value, reply: Reply, end: bool, gate: Option<Gate>) {
         let message = match reply {
             Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
             Err(e) => {
@@ -852,12 +840,7 @@ impl Peer {
                 json!({"jsonrpc":"2.0","id":id,"error":{"code":e.number,"message":e.message,"data":data}})
             }
         };
-        let _ = self.tx.send(Frame {
-            message,
-            end,
-            gate,
-            receipt,
-        });
+        let _ = self.tx.send(Frame { message, end, gate });
     }
     pub fn parent(&self, id: &Value) -> Option<Arc<Work>> {
         self.pending

@@ -174,9 +174,11 @@ impl AgentApi for Relay {
         match self.route {
             Route::Environment => {
                 if e.kind == "tool.progress" {
-                    self.peer.notify(
+                    self.peer.notify_scoped(
                         "host/env/output",
                         json!({"parentRequestId":self.id,"chunk":e.content.as_str().unwrap_or("")}),
+                        &self.inner,
+                        &e.scope,
                     );
                 }
                 return self.inner.emit(e).await;
@@ -189,9 +191,11 @@ impl AgentApi for Relay {
                     "model.end" => return self.inner.emit(e).await,
                     _ => return self.inner.emit(e).await,
                 };
-                self.peer.notify(
+                self.peer.notify_scoped(
                     "host/runtime/modelEvent",
                     json!({"parentRequestId":self.id,"event":{"type":kind,"delta":e.content}}),
+                    &self.inner,
+                    &e.scope,
                 );
                 return self.inner.emit(e).await;
             }

@@ -59,6 +59,7 @@ export async function listDirectory(env: import("@modular-agent/harness").Workin
 import type { Delivery, WriteLine } from "./outbound.js";
 
 type CaptureDelivery = (method: string, params: any) => Delivery | undefined;
+type Incoming = { abort: AbortController; gate?: Delivery; settled: boolean };
 const withheld = () => new WireError("withheld", "Plugin delivery is no longer available");
 
 /** What handles one incoming request: its params, an abort signal for `$/cancel`, and the request's id. */
@@ -80,7 +81,7 @@ export class WirePeer {
 	private waiting = new Map<number | string, { resolve(v: unknown): void; reject(e: Error): void }>();
 	private trace?: { name: string; callbackScope?: (params: any) => Operation | undefined };
 	private sent = new Map<number | string, Operation>();
-	private running = new Map<number | string, { abort: AbortController; gate?: Delivery }>();
+	private running = new Map<number | string, Incoming>();
 	private outbound: (() => Promise<void>)[] = [];
 	private writing = false;
 	private captureRequest?: CaptureDelivery;
@@ -94,7 +95,10 @@ export class WirePeer {
 	constructor(private write: WriteLine, private onClose?: () => void,
 		private afterReply?: (method: string) => void, private allowRequest?: (method: string) => boolean) {
 		this.handle("$/ping", () => ({}));
-		this.onNotification("$/cancel", (p) => this.running.get(p?.id)?.abort.abort());
+		this.onNotification("$/cancel", p => {
+			const request = this.running.get(p?.id);
+			if (request && !request.settled) request.abort.abort();
+		});
 	}
 
 	configureDelivery(request: CaptureDelivery, reply: CaptureDelivery): void {
@@ -356,7 +360,7 @@ export class WirePeer {
 			return;
 		}
 		const abort = new AbortController();
-		const running: { abort: AbortController; gate?: Delivery } = { abort };
+		const running: Incoming = { abort, settled: false };
 		this.running.set(m.id!, running);
 		try {
 			await Promise.resolve();
@@ -366,20 +370,11 @@ export class WirePeer {
 			running.gate = this.captureReply?.(m.method!, m.params);
 			await this.incoming(m.method!, m.params, (params, parent) => {
 				const work = async () => {
-					const result = await handler(params ?? {}, { signal: abort.signal, id: m.id!, atReply: guard => { fence = guard; } });
-					const scoped = running.gate;
-					const wasCancelled = abort.signal.aborted;
-					const gate: Delivery = async send => {
-						const live = () => {
-							if (!wasCancelled && abort.signal.aborted && (scoped || m.params?.sessionId || m.params?.turn?.sessionId || m.params?.payload?.sessionId || m.params?.parentRequestId != null || m.method === "provider/request")) throw withheld();
-							send();
-						};
-						if (fence) {
-							// Provider preparation supplies its own final check and orders it with erasure.
-							await fence(live);
-						} else if (scoped) await scoped(live); else live();
-					};
-					await this.send({ jsonrpc: "2.0", id: m.id, result: result === undefined ? null : result }, gate);
+					let result: unknown;
+					try { result = await handler(params ?? {}, { signal: abort.signal, id: m.id!, atReply: guard => { fence = guard; } }); }
+					finally { running.settled = true; }
+					// Provider preparation supplies its own final check and orders it with erasure.
+					await this.send({ jsonrpc: "2.0", id: m.id, result: result === undefined ? null : result }, fence ?? running.gate);
 				};
 				if (!this.trace || !workMethod(m.method!)) return withTrace(undefined, work);
 				const span = this.workSpan(m.method!, params, SpanKind.SERVER, parent);
@@ -391,6 +386,7 @@ export class WirePeer {
 			});
 			if (!this.closed) this.afterReply?.(m.method!);
 		} catch (error) {
+			running.settled = true;
 			const e = abort.signal.aborted && !(error instanceof WireError) ? new WireError("cancelled", "Cancelled") : error;
 			const code = e instanceof WireError ? e.code : "internal";
 			const errorReply = { code: e instanceof WireError ? e.rpcCode : -32000, message: e instanceof Error ? e.message : String(e), data: { ...(e instanceof WireError ? e.data : {}), code } };

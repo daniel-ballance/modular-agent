@@ -7,22 +7,9 @@ pub(super) struct Frame {
     pub message: Value,
     pub end: bool,
     pub gate: Option<Gate>,
-    pub receipt: Option<IncomingReply>,
-}
-
-// Keep cancellation addressable until the queued reply reaches the transport.
-pub(super) struct IncomingReply(pub std::sync::Weak<Peer>, pub String);
-
-impl Drop for IncomingReply {
-    fn drop(&mut self) {
-        if let Some(peer) = self.0.upgrade() {
-            peer.incoming.lock().unwrap().remove(&self.1);
-        }
-    }
 }
 
 pub(super) struct Prepared {
-    receipt: Option<IncomingReply>,
     bytes: Option<Vec<u8>>,
     gate: Option<Gate>,
     refusal: Option<Vec<u8>>,
@@ -70,7 +57,6 @@ impl Prepared {
         });
         Some(Self {
             bytes: Some(bytes),
-            receipt: frame.receipt,
             gate: frame.gate,
             refusal,
             on_refusal,
@@ -89,7 +75,6 @@ impl Prepared {
 
     pub fn websocket(mut self) -> Option<String> {
         self.recheck();
-        self.receipt.take();
         self.bytes
             .map(|bytes| String::from_utf8(bytes).expect("serialized JSON is UTF-8"))
     }
@@ -104,7 +89,6 @@ impl Prepared {
             }
         })
         .await?;
-        self.receipt.take();
         if let Some(bytes) = self.bytes {
             if written == 0 {
                 return Err(std::io::ErrorKind::WriteZero.into());
@@ -136,7 +120,7 @@ impl Peer {
                 .lock()
                 .unwrap()
                 .get(&id.to_string())
-                .and_then(|request| request.callbacks.clone())
+                .map(|request| request.callbacks.clone())
         });
         let gate = if let Some(parent) = self.parent_delivery(method, &params) {
             Some(parent)
@@ -187,7 +171,6 @@ impl Peer {
             message: frame,
             end: false,
             gate,
-            receipt: None,
         });
         let mut outgoing = Outgoing {
             peer: self,
@@ -230,7 +213,6 @@ impl Peer {
             .lock()
             .unwrap()
             .get(&id)
-            .filter(|request| request.callbacks.is_some())
             .map(|request| request.cancel.clone());
         let settles = matches!(
             method,
