@@ -1,0 +1,27 @@
+{
+  "scenario": "tool-content",
+  "about": "A tool's mixed image and text content survives in its recorded result.",
+  "rules": ["sdk/api.md#tools", "bindings/data.md#content"],
+  "agent": { "durability": "ephemeral", "plugins": ["chart"] },
+  "model": [
+    { "toolCalls": [{ "name": "chart", "input": {} }] },
+    { "text": "Here is the chart." }
+  ],
+  "steps": [
+    {
+      "prompt": "Show me the chart.",
+      "expect": {
+        "outcome": "completed",
+        "toolResults": [{
+          "name": "chart",
+          "status": "completed",
+          "text": "Sample chart",
+          "content": [
+            { "type": "image", "mimeType": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==" },
+            { "type": "text", "text": "Sample chart" }
+          ]
+        }]
+      }
+    }
+  ]
+}

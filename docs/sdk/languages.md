@@ -40,6 +40,19 @@ A tool's input and output are written as types or schema objects, never as hand-
 
 The SDK checks input against the schema before calling the tool, so the tool receives a typed value.
 
+## Scoped command execution
+
+These are the tool and Command context APIs, not the result of calling the standard `exec` tool.
+
+| SDK | Call and timeout | Successful SDK return |
+|---|---|---|
+| Rust | `environment.exec(command, timeout).await`; `timeout: Option<Duration>` (`std::time::Duration`) | `CommandOutput { exit_code: Option<i64>, output: String, timed_out: bool, status: ToolStatus }` |
+| TypeScript | `await environment.exec(command, { timeout })`; optional `timeout` in milliseconds | `{ exitCode: number \| null, output: string, timedOut: boolean }` |
+
+Rust takes `status` from the working environment in process. For a served call that returns a result, Rust derives `Completed` from exit code zero with `timed_out == false` and `Failed` otherwise. The served reply does not carry a separate cancellation status. TypeScript exposes no command `status` field in either placement. Neither SDK exposes a signal name or number; when there is no numeric exit code, Rust returns `None` and TypeScript returns `null`. These shapes describe returned results, not SDK errors.
+
+Omit the timeout (`None` in Rust) to request no deadline. For served calls, the binding uses positive whole milliseconds. Rust converts a supplied duration to whole milliseconds, with a minimum of one; TypeScript callers must pass a positive safe integer if supplying a timeout over the binding.
+
 ## Rust
 
 - Use `agent.session_summary(id, &viewer)?` to read kept work without opening the session. An inaccessible or missing session returns `None`.

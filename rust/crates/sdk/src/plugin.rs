@@ -1074,16 +1074,6 @@ impl base::ToolSource for Source {
         let Some(settled) = execute(&tool, call.input.clone(), cx).await else {
             return base::ToolResult::new(&call, base::ToolStatus::Waiting, "question left open");
         };
-        // ToolResult::new words a refusal itself.
-        let mut result = base::ToolResult::new(&call, settled.status.to_base(), settled.text);
-        // Preserve the distinction between an omitted value and JSON null, and
-        // keep developer-owned objects opaque even if they contain `_pluginWire`.
-        result.value = settled
-            .value
-            .map(|value| json!({"_pluginWire":{"value":value}}));
-        match settled.content {
-            Some(content) => result.with_content(content),
-            None => result,
-        }
+        settled.into_local_result(&call)
     }
 }

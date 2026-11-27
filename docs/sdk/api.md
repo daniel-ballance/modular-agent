@@ -302,7 +302,7 @@ A plugin reaches the agent only through the context passed to the call it is ser
 | `ask(question, wait?)` | tool | yes |
 | `ask(question, wait?)` | command | in process only |
 | `requestModel(request: ModelRequest) -> AssistantMessage`: one [auxiliary model request](#commands) using the session's current model | command with `usesModel` | in process only |
-| `environment`: the session's working environment, scoped to this call: `read` and `write` of bytes, `list`, and `exec(command, { timeout })` returning exit code, output and whether it timed out, with output as progress for a tool call. A command has no `toolCallId`, so its exec output comes back only in the result. Relative paths resolve against the session's project; an operation the environment lacks raises `not_supported`. | tool, command | yes; an ignore-aware file walk, where offered, is in process only |
+| `environment`: [call-scoped file operations and command execution](#working-environment) | tool, command | yes, except the native file walk |
 | `tools.list()`, `tools.call(name, input)`: [nested calls](../contracts.md#nested-calls) | tool | yes |
 | `jobs.start(kind, detail, key?)` | tool, command | yes |
 | `jobs.unfinished()`, `jobs.resume(job)` | `session.start` hook of a job owner | yes |
@@ -310,6 +310,14 @@ A plugin reaches the agent only through the context passed to the call it is ser
 | `credential(name)`: a named credential | tool, Provider | in process only |
 
 `history` is the raw record a loaded plugin may read ([Authority](../bindings/plugin.md#authority)), not an actor's gated view. A context is valid only until its call settles; using it afterwards raises `invalid_request`. A plugin that needs to act later starts a [job](#jobs); a Job handle stays valid until its job ends.
+
+### Working environment
+
+The scoped environment offers byte reads and writes, `exists`, directory listing and `exec`. Relative paths resolve against the session's project. Unsupported operations report `not_supported`. A native ignore-aware file walk is optional in Rust and is not available over the plugin binding.
+
+`exec` returns command output as text, an exit code if the environment reports one, and a timeout flag. A missing exit code is not a signal field: it can indicate signal termination, but does not identify a signal or prove why the command stopped. See [Languages](languages.md#scoped-command-execution) for each SDK's result fields, status and timeout input. Live output reported during a tool call can surface as tool progress. An SDK Command has no `toolCallId`, so its exec output is not tool progress.
+
+File tools are a layer above these operations. Image attachment for supported files, text slicing, glob matching, listing limits and command output truncation are behaviors of the [standard file tools](../reference/standard-configuration.md#tools), not features of the scoped environment. The standard `exec` tool takes its timeout in seconds in both languages. Rust's `find` tries the native walk, then falls back to command execution on `not_supported`, including when served. It tries Git's file listing with standard excludes, then a plain file search excluding `.git` contents if Git's listing fails. The plain search does not apply ignore rules. Rust's `list` also falls back to a command on `not_supported`. TypeScript's standard `find` implements its own walk using the scoped `list`, `exists` and `read` operations, applying `.gitignore` rules without the native walk or a shell fallback.
 
 ## Tools
 
@@ -341,6 +349,8 @@ The function receives the input, already checked against the schema and converte
 | stops because `cancelled` fired | `cancelled` | that the call was cancelled |
 
 One SDK MUST word a given tool's result identically in process and served; different SDKs MAY word diagnostics differently, so programs branch on the status, not the text. Every result that is not `completed` MUST say what failed or may have happened ([Tool result](../bindings/data.md#tools)); the SDK supplies the wording where the tool gives none. `notStarted` is the agent's to report, not a tool's.
+
+In both SDKs, in-process and served tools can return shared [Content](../bindings/data.md#content) in `ToolOutput.content`. The SDK carries those parts, in order, into `ToolResult.content`, including image media types and base64 data. In Rust, when `ToolOutput` supplies `content`, the parts determine the result text instead of the separate `text` field. This describes normal result settlement, not a result replaced by a hook, cancellation or a settlement error. `text()` is a text-only convenience; use `content` for the full result. Model and recipient projections can omit parts they cannot represent.
 
 **Questions from a tool.** `ask(question)` opens a question and waits for its answer. It returns:
 

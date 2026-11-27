@@ -105,6 +105,7 @@ Every SDK implements these identically and serves them from a fixture program, `
 | Plugin | Registers | Behavior |
 |---|---|---|
 | `tide` | tool `tide`, input `{ harbour: string }`, read-only | Returns `High tide at <harbour> is 14:02.` |
+| `chart` | tool `chart`, input `{}`, read-only | Returns a fixed PNG image part followed by the text part `Sample chart` in a ToolOutput. |
 | `counter` | tool `bump`, input `{ hold?: boolean, note?: string }`, not safe to repeat | Adds one to a count kept in the file named by its config `path`, then returns the new count as text. With `hold: true` it then waits until cancelled, so a crash lands after its effect. |
 | `confirm` | tool `confirm`, input `{ question: string }` | Asks a `choice` question with options `yes` and `no` and returns the answer. |
 | `gate` | hook `tool.before` | Refuses any call whose input, as JSON text, contains `forbidden`, with the reason `the gate refused it`. |
@@ -164,7 +165,7 @@ and can have `expect`:
 |---|---|
 | `outcome` | the last turn's outcome kind matches |
 | `text` | the last turn's result text is exactly this |
-| `toolResults` | the last turn's tool results, in order, have these `name` and `status`, `text` if given (exact), and `contains` if given (a substring, for diagnostics an SDK may word in its own way) |
+| `toolResults` | the last turn's tool results, in order, have these `name` and `status`, `text` if given (exact), `contains` if given (a substring, for diagnostics an SDK may word in its own way), and `content` if given (the exact ordered array of shared parts) |
 | `records` | these record kinds appear in the session's history in this order, not necessarily adjacent |
 | `count` | the `counter` fixture's count is this number |
 | `error` | the step itself raised this error code |

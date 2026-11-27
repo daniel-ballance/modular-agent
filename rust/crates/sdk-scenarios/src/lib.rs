@@ -1,4 +1,5 @@
 //! A runner for the shared SDK scenarios (docs/sdk/testing.md#the-shared-scenarios).
+mod assertions;
 pub mod telemetry;
 pub mod waiting;
 use modular_agent::{
@@ -686,23 +687,7 @@ async fn run_at(
                         ),
                     );
                 }
-                let actual = g.text();
-                if let Some(text) = w["text"].as_str()
-                    && actual != text
-                {
-                    fail(
-                        index,
-                        format!("toolResult text: want {text:?}, got {actual:?}"),
-                    );
-                }
-                if let Some(part) = w["contains"].as_str()
-                    && !actual.contains(part)
-                {
-                    fail(
-                        index,
-                        format!("toolResult text: want substring {part:?}, got {actual:?}"),
-                    );
-                }
+                assertions::tool_content(w, g, |what| fail(index, what));
             }
         }
         if let Some(want) = expect["records"].as_array() {
