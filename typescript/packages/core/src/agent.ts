@@ -202,8 +202,8 @@ export class Agent {
   #stopAcp?: () => Promise<void>;
   /** Set once a plain ACP WebSocket listener serves; later listeners share its project MCP part. */
   #acpService?: { projectMcp: ServeAcpOptions["projectMcp"]; mcp: ReturnType<typeof standardMcpTools> };
-  /** The ACP listener whose connections hold each open session of this Agent. */
-  #acpClaims = new Map<string, { listener: object; holders: Set<object> }>();
+  /** Every ACP connection served by this Agent, with the listener that accepted it. */
+  #acpConnections = new Set<{ listener: object; holds(id: string): boolean }>();
   #project: string;
   #conformance = false;
   #approval = false;
@@ -754,16 +754,14 @@ export class Agent {
     const prepareConnection = (scope: Awaited<ReturnType<typeof makeScope>>, network: boolean) => {
       const attached = new Map<PluginApi, { detach(): void; agent: Agent }>();
       let disconnected = false;
-      const holder = {}, claims = new Set<string>();
-      // A session open on this Agent belongs to one listener. Call only after the scope checks.
+      // A session open on this Agent belongs to one listener's connections. Call only after the scope checks.
+      // The check and the claim run together, so of two listeners racing to open a session, one wins.
+      const claimed = new Set<string>();
       const claim = (id: string) => {
-        const held = this.#acpClaims.get(id);
-        if (held && held.listener !== listener && held.holders.size && this.#h.liveSessionInfo(id)) {
-          throw new AgentError("busy", "Session is open on another ACP listener");
+        for (const other of this.#acpConnections) {
+          if (other.listener !== listener && other.holds(id)) throw new AgentError("busy", "Session is open on another ACP listener");
         }
-        if (held?.listener === listener) held.holders.add(holder);
-        else this.#acpClaims.set(id, { listener, holders: new Set([holder]) });
-        claims.add(id);
+        claimed.add(id);
       };
       const attach = (agent: Agent) => {
         if (disconnected) throw new AgentError("lost", "The ACP connection ended");
@@ -826,16 +824,13 @@ export class Agent {
         },
       });
       attach(this);
+      const connection = { listener, holds: (id: string) => claimed.has(id) && binding.acp.holds(id) };
+      this.#acpConnections.add(connection);
       return { binding, detach: () => {
         disconnected = true;
+        this.#acpConnections.delete(connection);
         for (const part of attached.values()) part.detach();
         attached.clear();
-        for (const id of claims) {
-          const held = this.#acpClaims.get(id);
-          if (held?.listener !== listener) continue;
-          held.holders.delete(holder);
-          if (!held.holders.size) this.#acpClaims.delete(id);
-        }
       } };
     };
     const resumeOpen = async (scope?: Pick<Awaited<ReturnType<typeof makeScope>>, "allowProject" | "allowTenant">) => {

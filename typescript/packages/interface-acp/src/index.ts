@@ -192,7 +192,7 @@ export class AcpInterface implements InterfaceCapability {
 		const actors = this.apiFor(sessionId).session(sessionId).actors;
 		return [...(this.sessions.get(sessionId)?.present ?? [])].filter(id => this.represents(id) && actors.some(a => a.id === id));
 	}
-
+	/** True while this connection holds or is opening the session. */ holds(sessionId: string): boolean { return this.sessions.has(sessionId); }
 	private represents(id: string): boolean { return id === this.actorId || this.options.represents?.has(id) === true; }
 
 	private attached(id: string): boolean {

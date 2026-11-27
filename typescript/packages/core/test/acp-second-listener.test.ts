@@ -48,7 +48,8 @@ test("a second ACP listener on one Agent checks scope before refusing an open se
   const principal = (tokenFile: string, tenants: (string | null)[]) => ({ tokenFile, actor, tenants, projects: [project] });
   const first = await agent.serveAcp({ listen: "127.0.0.1:0", actors: [principal(allowed, [null])] });
   const second = await agent.serveAcp({ listen: "127.0.0.1:0", actors: [principal(allowed, [null]), principal(denied, ["another-tenant"])] });
-  assert.notEqual(first.url, second.url);
+  const third = await agent.serveAcp({ listen: "127.0.0.1:0", actors: [principal(allowed, [null])] });
+  assert.equal(new Set([first.url, second.url, third.url]).size, 3);
   await assert.rejects(agent.serveAcp({ listen: "127.0.0.1:0", actors: [principal(allowed, [null])], projectMcp: async () => ({}) }),
     { code: "invalid_composition" });
 
@@ -80,18 +81,20 @@ test("a second ACP listener on one Agent checks scope before refusing an open se
   await request(peer, "session/resume", params);
   await prompt(writer, sessionId, "continue");
 
-  // Once no connection on the first listener holds the session, the other listener may open it.
+  // Once no connection on the first listener holds the session, another listener may open it.
+  // Two listeners racing for it: exactly one opens, the other gets busy.
   writer.close(); peer.close();
   const deadline = Date.now() + 10_000;
   let reopened: Socket | undefined;
   while (!reopened) {
-    const ws = await connect(second.url, allowed);
-    try { await request(ws, "session/resume", params); reopened = ws; }
-    catch (error) {
-      assert.equal((error as { code?: string }).code, "busy");
-      if (Date.now() > deadline) throw error;
-      await new Promise(resolve => setTimeout(resolve, 50));
-    }
+    const racers = await Promise.all([connect(second.url, allowed), connect(third.url, allowed)]);
+    const results = await Promise.allSettled(racers.map(ws => request(ws, "session/resume", params)));
+    for (const r of results) if (r.status === "rejected") assert.equal((r.reason as { code?: string }).code, "busy");
+    const won = results.flatMap((r, i) => r.status === "fulfilled" ? [racers[i]] : []);
+    assert.ok(won.length <= 1, "both listeners opened the session");
+    if (won.length) { reopened = won[0]; break; }
+    assert.ok(Date.now() < deadline, "the first listener never let go of the session");
+    await new Promise(resolve => setTimeout(resolve, 50));
   }
   await prompt(reopened, sessionId, "after the first listener let go");
 });
