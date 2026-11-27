@@ -286,17 +286,20 @@ pub fn normalize(response: &Value) -> Result<ModelResponse> {
     } else {
         "finished"
     };
+    let usage = &response["usage"];
+    let input_tokens = usage["input_tokens"].as_u64().unwrap_or(0);
+    let cached_tokens = usage["input_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .unwrap_or(0);
     Ok(ModelResponse {
         parts,
         opaque: json!({"output":output}),
         stop: stop.into(),
-        usage_reported: response["usage"].is_object(),
+        usage_reported: usage.is_object(),
         usage: Usage {
-            input_tokens: response["usage"]["input_tokens"].as_u64().unwrap_or(0),
-            output_tokens: response["usage"]["output_tokens"].as_u64().unwrap_or(0),
-            cached_tokens: response["usage"]["input_tokens_details"]["cached_tokens"]
-                .as_u64()
-                .unwrap_or(0),
+            input_tokens: input_tokens.saturating_sub(cached_tokens),
+            output_tokens: usage["output_tokens"].as_u64().unwrap_or(0),
+            cached_tokens,
             ..Usage::default()
         },
     })

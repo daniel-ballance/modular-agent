@@ -1,4 +1,4 @@
-import { AgentError, ModelFailure, type AssistantMessage, type ContentPart, type ModelError, type ModelRequest, type Provider, type ProviderContext } from "@modular-agent/core";
+import { AgentError, ModelFailure, type AssistantMessage, type ContentPart, type ModelError, type ModelRequest, type Provider, type ProviderContext, type Usage } from "@modular-agent/core";
 import { chatgptAccount, chatgptOAuth, grokOAuth, loopback, type OAuthTestOptions, type SubscriptionProviderId } from "./oauth.js";
 import type { Login, SubscriptionLogins } from "./logins.js";
 import { resolveClientIdentity, type ClientIdentityOptions } from "./client-identity.js";
@@ -104,6 +104,14 @@ async function readStream(res: Response, ctx: ProviderContext, label: string) {
   if ((!Array.isArray(completed.output) || !completed.output.length) && items.length) completed.output = items;
   return completed;
 }
+function responseUsage(raw: unknown): Usage | undefined {
+  if (!object(raw)) return undefined;
+  const usage = raw as { input_tokens?: number; output_tokens?: number; input_tokens_details?: { cached_tokens?: number } };
+  const cacheRead = usage.input_tokens_details?.cached_tokens ?? 0;
+  return { input: Math.max(0, (usage.input_tokens ?? 0) - cacheRead), output: usage.output_tokens ?? 0,
+    cacheRead, cacheWrite: 0, cost: 0 };
+}
+
 function message(provider: SubscriptionProviderId, raw: Record<string, unknown>): AssistantMessage {
   const content: ContentPart[] = [];
   if (!Array.isArray(raw.output)) throw new Error("the model response has no output");
@@ -127,10 +135,9 @@ function message(provider: SubscriptionProviderId, raw: Record<string, unknown>)
       default: content.push(item);
     }
   }
-  const usage = raw.usage as { input_tokens?: number; output_tokens?: number; input_tokens_details?: { cached_tokens?: number } } | undefined;
+  const usage = responseUsage(raw.usage);
   return { role: "assistant", stop: raw.status === "incomplete" ? "length" : content.some(p => p.type === "toolCall") ? "toolUse" : "finished", content,
-    providerData: { provider, output: raw.output }, usage: { input: usage?.input_tokens ?? 0, output: usage?.output_tokens ?? 0,
-      cacheRead: usage?.input_tokens_details?.cached_tokens ?? 0, cacheWrite: 0, cost: 0 } };
+    providerData: { provider, output: raw.output }, ...(usage && { usage }) };
 }
 
 export interface ResponsesProviderOptions extends ClientIdentityOptions {

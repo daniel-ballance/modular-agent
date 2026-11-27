@@ -52,7 +52,8 @@ for (const [name, provider, endpoint, credential] of [
       for await (const chunk of req) chunks.push(chunk);
       const body = Buffer.concat(chunks).toString();
       requests.push({ path: req.url, key: req.headers.authorization ?? String(req.headers["x-api-key"]), body });
-      if (calls++) {
+      const call = ++calls;
+      if (call > (name === "openai" ? 2 : 1)) {
         res.writeHead(401, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { type: "authentication_error", message: "Test key rejected" } }));
         return;
@@ -62,7 +63,9 @@ for (const [name, provider, endpoint, credential] of [
       const emitted = name === "openai" ? [
         { type: "response.output_item.added", output_index: 0, item: message },
         { type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "Test reply." },
-        { type: "response.completed", response: { status: "completed", usage: { input_tokens: 2, output_tokens: 3 } } },
+        { type: "response.completed", response: { status: "completed", usage: call === 1 ? {
+          input_tokens: 1000, output_tokens: 3, input_tokens_details: { cached_tokens: 700 },
+        } : undefined } },
       ] : [
         { type: "message_start", message: { ...message, model, usage: { input_tokens: 2, output_tokens: 0 } } },
         { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
@@ -95,6 +98,16 @@ for (const [name, provider, endpoint, credential] of [
     for await (const e of s.promptStream("Test")) if (e.type === "text") deltas.push(e.data.delta);
     assert.deepEqual(deltas, ["Test reply."]);
     assert.equal((await s.lastTurn())?.text, "Test reply.");
+    if (name === "openai") {
+      const reply = (await s.history()).findLast(e => e.kind === "response")?.message;
+      assert.equal(reply?.role, "assistant");
+      assert.equal(reply.usage?.input, 300);
+      assert.equal(reply.usage?.cacheRead, 700);
+      assert.equal((await s.prompt("Without usage")).text, "Test reply.");
+      const unmetered = (await s.history()).findLast(e => e.kind === "response")?.message;
+      assert.equal(unmetered?.role, "assistant");
+      assert.equal(unmetered.usage, undefined);
+    }
     assert.equal((await s.prompt("Fail")).outcome?.kind, "failed");
     const message = (await s.history()).findLast(e => e.kind === "response")?.message;
     assert.equal(message?.role, "assistant");

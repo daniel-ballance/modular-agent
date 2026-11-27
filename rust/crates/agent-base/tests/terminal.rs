@@ -153,7 +153,8 @@ fn openai_adapter_preserves_opaque_reasoning_tool_ids_and_unknown_content_offlin
     ],"usage":{"input_tokens":12,"output_tokens":7,"input_tokens_details":{"cached_tokens":4}}});
     let normalized = provider_openai::normalize(&response).unwrap();
     assert_eq!(normalized.tool_calls()[0].id, "call1");
-    assert_eq!(normalized.usage.input_tokens, 12);
+    assert_eq!(normalized.usage.input_tokens, 8);
+    assert_eq!(normalized.usage.cached_tokens, 4);
     let request = ModelRequest {
         thinking: "low".into(),
         output_limit: 512,

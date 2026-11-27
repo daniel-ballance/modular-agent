@@ -180,14 +180,21 @@ pub fn response(id: &str, response: &Value) -> Result<AssistantMessage> {
     } else {
         "finished"
     };
-    let usage = &response["usage"];
-    Ok(AssistantMessage(json!({
+    let mut message = json!({
         "role":"assistant", "content":parts, "stop":stop,
-        "providerData":{"provider":id,"output":output},
-        "usage":{
-            "input":usage["input_tokens"].as_u64().unwrap_or(0),
+        "providerData":{"provider":id,"output":output}
+    });
+    let usage = &response["usage"];
+    if usage.is_object() {
+        let input = usage["input_tokens"].as_u64().unwrap_or(0);
+        let cache_read = usage["input_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap_or(0);
+        message["usage"] = json!({
+            "input":input.saturating_sub(cache_read),
             "output":usage["output_tokens"].as_u64().unwrap_or(0),
-            "cacheRead":usage["input_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0)
-        }
-    })))
+            "cacheRead":cache_read, "cacheWrite":0, "cost":0
+        });
+    }
+    Ok(AssistantMessage(message))
 }
