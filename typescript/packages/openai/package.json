@@ -1,11 +1,11 @@
 {
   "name": "@modular-agent/openai",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "license": "MIT",
   "type": "module",
   "exports": "./dist/src/index.js",
   "dependencies": {
-    "@modular-agent/core": "0.4.0",
-    "@modular-agent/provider-pi-ai": "0.4.0"
+    "@modular-agent/core": "0.5.0",
+    "@modular-agent/provider-pi-ai": "0.5.0"
   }
 }

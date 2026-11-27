@@ -1,6 +1,6 @@
 {
   "name": "@modular-agent/context-compaction",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "license": "MIT",
   "type": "module",
   "main": "dist/src/index.js",
@@ -12,6 +12,6 @@
     }
   },
   "dependencies": {
-    "@modular-agent/harness": "0.4.0"
+    "@modular-agent/harness": "0.5.0"
   }
 }

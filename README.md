@@ -8,7 +8,7 @@ This repository holds three things:
 - **`ma`, a coding agent** with Pi's feature set, built on each SDK: the same program in both languages.
 - **The specification** they are built from, with kits that check a build against it.
 
-Status: **0.4.0, for developers to try, on Linux and macOS.** Nothing is published to a package registry; use the code from this repository as shown below. It is not production software: see [Known gaps](#known-gaps).
+Status: **0.5.0, for developers to try, on Linux and macOS.** Nothing is published to a package registry; use the code from this repository as shown below. It is not production software: see [Known gaps](#known-gaps).
 
 ## Build an agent
 
