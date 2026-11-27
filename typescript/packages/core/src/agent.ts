@@ -548,10 +548,8 @@ export class Agent {
     return checked(async () => {
       const stored = await this.#api.listSessions(filter?.project ? await realpath(filter.project) : null);
       return Promise.all(stored.map(async ({ id }) => {
-        const { project, settings, lastEntry } = await this.#savedSession(id);
-        // Last activity is the last entry's time in append order. A session with no entries has none,
-        // and so does one whose last entry is erased: a tombstone has no time.
-        return { id, project, updated: lastEntry ?? 0, model: parseModel(settings.model), title: typeof settings.title === "string" ? settings.title : undefined };
+        const { project, settings, updated } = await this.#savedSession(id);
+        return { id, project, updated, model: parseModel(settings.model), title: typeof settings.title === "string" ? settings.title : undefined };
       }));
     });
   }
@@ -566,12 +564,9 @@ export class Agent {
   async sessionInfo(id: string): Promise<SessionInfo> {
     this.#check();
     if (!/^[\w-]+$/.test(id)) throw new AgentError("invalid_params", "Invalid session id");
-    return checked(async () => {
-      const { lastEntry, ...info } = await this.#savedSession(id);
-      return { ...info, updated: lastEntry ?? info.created };
-    });
+    return checked(() => this.#savedSession(id));
   }
-  async #savedSession(id: string): Promise<Omit<SessionInfo, "updated"> & { lastEntry?: number }> {
+  async #savedSession(id: string): Promise<SessionInfo> {
     const store = this.#h.use<HistoryStore>("history-store")!;
     const { meta, entries } = await store.load(id);
     const settings: Settings = {};
@@ -580,7 +575,10 @@ export class Agent {
       settings[change.key] = change.value;
     }
     const tenant = (entries.find(e => e.kind === "tenant" && !e.erased)?.data as { tenant?: string } | undefined)?.tenant;
-    return { ...meta, lastEntry: entries.at(-1)?.time, settings, ...(tenant === undefined ? {} : { tenant }) };
+    // Last activity is the last entry's time in append order. A tombstone has no time.
+    const last = entries.at(-1);
+    const updated = last?.erased ? 0 : last?.time ?? 0;
+    return { ...meta, updated, settings, ...(tenant === undefined ? {} : { tenant }) };
   }
   /** Refresh served catalogs; /1 has a query, not a catalog-change notification. */
   async refreshModels(): Promise<ModelInfo[]> {

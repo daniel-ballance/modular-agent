@@ -61,7 +61,7 @@ There is no `createAgent` switch to turn tracing on or off. Without an OpenTelem
 |---|---|
 | `session(options?)` | a new Session. Options: `settings`, `tenant`, `actors`. |
 | `openSession(id)` | an existing Session, reopened. It installs interrupted work for recovery, as the Runtime declares, before admitting fresh work. An embedded agent MAY wait for the recovered work before returning; `serveAcp` MUST NOT, as [ACP](../bindings/acp.md#sessions) requires. |
-| `sessions(filter?)` | stored sessions, without opening them or starting recovery: id, canonical project, selected model, title if any, last activity. Last activity is the time of the last stored entry. A session has none when it has no entries or its last entry is erased, because a [tombstone](../bindings/data.md#entry-fields-and-tombstones) has no time. |
+| `sessions(filter?)` | stored sessions, without opening them or starting recovery: id, canonical project, selected model, title if any, last activity |
 | `sessionSummary(id, viewer)` | Read a kept session without opening it. Return its id, canonical project, last change time and per-viewer waiting summary, or no result for an inaccessible or missing session. Apply the viewer's scope, grant, rights ceiling and executor route. Do not register presence or start recovery. |
 | `sessionInfo(id)` | one stored session's project, settings, creation time and last activity, without opening it or starting recovery |
 | `declaration()` | what this agent supports, as a [Declaration](../contracts.md#declaration) |
@@ -70,6 +70,8 @@ There is no `createAgent` switch to turn tracing on or off. Without an OpenTelem
 | `connectInterfaceTools(sessionId, { actor, routeId, onHandoff, defer? })` | a handle for a trusted binding's authenticated executor in an open session. The binding checks project and tenant scope before connecting. The handle does not join an actor or grant rights. |
 | `serveAcp(options?)` | serves the agent over [ACP](../bindings/acp.md). On stdio it returns when the client disconnects. With `listen`, `actors` and optional `tls`, it returns a listener with `url` and `close()` once ready ([Placement](placement.md#the-whole-agent)). See composition options below. |
 | `close()` | closes open sessions, stops plugins in reverse load order and releases what it holds |
+
+`sessions(filter?)` and `sessionInfo(id)` both report last activity as the time of the last entry in the order the entries were stored. Both report `0` when the session has no entries or its last entry is erased. A [tombstone](../bindings/data.md#entry-fields-and-tombstones) has no time, so neither operation uses an earlier entry's time or the session's creation time instead.
 
 The Interface tool handle supports `advertise(definitions)`, `release(callId)`, `reportInterfaceToolResult(report)` and `disconnect()`. Definitions must exactly match the registered offer; an empty list clears it. Without `defer`, the Harness calls `onHandoff({ sessionId, turnId, call, deadline })` synchronously at delivery. With `defer`, `release(callId)` rechecks permission and returns whether it delivered. A report uses the shared Interface result shape. Its disposition has status `accepted`, `alreadySettled` or `refused`. A valid report before the originating turn ends has status `refused` and reason `notReady`; it can be retried after that end. Disconnect clears presence without settling an open call.
 
