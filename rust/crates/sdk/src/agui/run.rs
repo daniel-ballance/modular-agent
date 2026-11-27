@@ -766,7 +766,7 @@ impl Exchange {
                     out.extend(self.custom(ty, d.clone()).await?);
                 }
             }
-            "toolOutput" | "jobProgress" | "audio" => {
+            "toolOutput" | "jobProgress" => {
                 out.extend(self.custom(&event.event_type, d.clone()).await?)
             }
             _ => (),

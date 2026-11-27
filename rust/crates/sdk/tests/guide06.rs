@@ -1,13 +1,15 @@
 use futures_util::StreamExt;
 use modular_agent::{
-    Agent, AssistantMessage, Code, CredentialStore, Error, ModelError, ModelErrorKind, ModelInfo,
-    ModelRef, ModelRequest, Piece, Provider, ProviderContext, ProviderSupport, Result,
+    Agent, AssistantMessage, Code, CredentialStore, Error, Event, ModelError, ModelErrorKind,
+    ModelInfo, ModelRef, ModelRequest, Piece, Provider, ProviderContext, ProviderSupport, Result,
 };
 use modular_agent::{CatalogNotifier, Plugin};
+use serde_json::json;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Duration;
 
 #[path = "fixtures/git_project.rs"]
 mod git_project;
@@ -56,10 +58,53 @@ impl Provider for Beacon {
         if key != "offline-key" {
             return Ok(ModelError::new(ModelErrorKind::Credentials, "Key rejected").failed());
         }
+        cx.emit("beacon.audio", json!({"clip":"sample"})).await?;
         cx.piece(Piece::Text, "Beacon ", None).await?;
         cx.piece(Piece::Text, "ready.", None).await?;
         Ok(AssistantMessage::text("Beacon ready."))
     }
+}
+
+#[tokio::test]
+async fn provider_audio_arrives_as_a_custom_session_event() -> Result<()> {
+    for served in [false, true] {
+        let plugin = Plugin::new("beacon").provider(Beacon);
+        let builder = modular_agent::testing::test_agent()
+            .model("beacon/demo")
+            .credentials(TestKey("offline-key"));
+        let agent = if served {
+            builder.over_wire(plugin)
+        } else {
+            builder.plugin(plugin)
+        }
+        .build()
+        .await?;
+        let session = agent.session().await?;
+        let mut events = session.events(None)?;
+        assert_eq!(
+            session.prompt("Check the beacon.").await?.text,
+            "Beacon ready."
+        );
+        let kind = if served {
+            "plugin.beacon.beacon.audio"
+        } else {
+            "beacon.audio"
+        };
+        let event = tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = events.next().await.transpose()? {
+                if event.event_type == kind {
+                    return Ok::<_, Error>(Some(event));
+                }
+            }
+            Ok(None)
+        })
+        .await
+        .unwrap_or_else(|_| panic!("Timed out waiting for {kind}"))?
+        .unwrap_or_else(|| panic!("Session stream ended before {kind}"));
+        assert!(matches!(event, Event::Custom(info) if info.data == json!({"clip":"sample"})));
+        agent.close().await?;
+    }
+    Ok(())
 }
 
 struct DynamicBeacon {

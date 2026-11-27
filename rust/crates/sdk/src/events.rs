@@ -140,7 +140,6 @@ event_data!(TurnStartedData { input_id: Option<String>, system: Option<String>, 
 event_data!(TurnEndedData { outcome: crate::Outcome, result: crate::TurnOutput, usage: Option<crate::Usage> });
 event_data!(StepEvent { usage: Option<crate::Usage>, response: Option<crate::AssistantMessage> });
 event_data!(ToolInputData { delta: String, tool_call_id: Option<String> });
-event_data!(AudioData { delta: Value });
 event_data!(ToolCallData {
     call: crate::ToolCall
 });
@@ -167,7 +166,7 @@ event_types!(
     InputAccepted: "inputAccepted" => InputEvent, InputWithdrawn: "inputWithdrawn" => InputEvent,
     InputHandedBack: "inputHandedBack" => InputEvent, TurnStarted: "turnStarted" => TurnStartedData,
     TurnEnded: "turnEnded" => TurnEndedData, StepStarted: "stepStarted" => StepEvent, StepEnded: "stepEnded" => StepEvent,
-    ToolInput: "toolInput" => ToolInputData, Audio: "audio" => AudioData, ToolCall: "toolCall" => ToolCallData,
+    ToolInput: "toolInput" => ToolInputData, ToolCall: "toolCall" => ToolCallData,
     ToolStarted: "toolStarted" => ToolCallData, ToolOutput: "toolOutput" => ToolOutputData, ToolResult: "toolResult" => crate::ToolSettlement,
     QuestionOpened: "questionOpened" => Question, QuestionAnswered: "questionAnswered" => QuestionResponse,
     QuestionClosed: "questionClosed" => QuestionResponse, QuestionNoLongerAnswerable: "questionNoLongerAnswerable" => QuestionResponse,
@@ -203,6 +202,7 @@ impl Event {
         let (kind, data) = match e.kind.as_str() {
             // Internal stream/turn markers; the final gated result ends the turn.
             "model.end" | "turn.end" => return None,
+            "model.audio" => return None,
             "turn.result" => {
                 let result: base::TurnResult = serde_json::from_value(e.content.clone()).ok()?;
                 let mut data = base::wire::turn_outcome(&result);
@@ -210,14 +210,7 @@ impl Event {
                 data["usage"] = json!(crate::Usage::from(result.usage));
                 ("turnEnded", data)
             }
-            "model.tool_input" | "model.audio" => {
-                let kind = if e.kind == "model.audio" {
-                    "audio"
-                } else {
-                    "toolInput"
-                };
-                (kind, json!({"delta":e.content}))
-            }
+            "model.tool_input" => ("toolInput", json!({"delta":e.content})),
             "tool.started" => (
                 "toolStarted",
                 json!({

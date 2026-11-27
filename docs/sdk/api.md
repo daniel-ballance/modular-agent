@@ -180,13 +180,15 @@ A structured result is requested with `options.result`, a JSON Schema 2020-12 sc
 | Session | `sessionStarted`, `sessionEnded`, `sessionInterrupted`, `actorJoined`, `actorLeft` |
 | Input | `inputAccepted`, `inputWithdrawn`, `inputHandedBack` |
 | Turns and steps | `turnStarted`, `turnEnded`, `stepStarted`, `stepEnded` |
-| Model output | `text`, `reasoning`, `toolInput`, `audio` |
+| Model output | `text`, `reasoning`, `toolInput` |
 | Tools | `toolCall` (requested), `toolStarted`, `toolOutput` (progress as `content`, including plain text), `toolResult` (ended) |
 | Questions | `questionOpened`, `questionAnswered`, `questionClosed`, `questionNoLongerAnswerable` |
 | Jobs | `jobStarted`, `jobProgress`, `jobEnded` |
 | History | `entry`, `positionMoved`, `entriesErased` |
 | Changes | `settingChanged`, `pluginLoaded`, `pluginReplaced`, `pluginUnloaded` |
 | Plugins | the plugin's own type, which contains a dot |
+
+Until [shared data](../bindings/data.md#output-events) defines an audio payload, a Provider or plugin that streams audio emits it as a custom event with its own dotted type, such as `myprovider.audio`.
 
 The agent emits every standard event for the actions and states it supports ([Following a session](../contracts.md#following-a-session)). `questionNoLongerAnswerable` is distinct from `questionClosed`: the first says no eligible actor can answer any more, the second that the question has a recorded closure. `sessionInterrupted` says this agent stopped writing the session, with `data.reason` `commitFailed` or `writerLost`; it is live only, never recorded, and a `prompt` or `promptStream` waiting on the session fails with `lost`. Reopen the session to recover its work ([Recovery](../contracts.md#recovery-and-repeating-work)).
 

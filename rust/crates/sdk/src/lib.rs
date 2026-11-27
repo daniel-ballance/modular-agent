@@ -75,7 +75,7 @@ pub use environment::{
 };
 pub use error::{Code, Error, Result};
 pub use events::{
-    ActorEvent, AudioData, ErasureEvent, Event, EventData, EventPayload, HistoryEvent, InputEvent,
+    ActorEvent, ErasureEvent, Event, EventData, EventPayload, HistoryEvent, InputEvent,
     Interruption, InterruptionReason, JobEndedData, JobStartedData, PluginEvent, PositionEvent,
     Question, QuestionKind, QuestionReply, QuestionResponse, SessionEvent, SettingEvent, StepEvent,
     ToolCallData, ToolInputData, ToolOutputData, TurnEndedData, TurnStartedData,
