@@ -24,6 +24,9 @@ impl Scope {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Entry {
     pub id: String,
+    /// Input association kept after erasing an entry's payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_id: Option<String>,
     pub parent: Option<String>,
     pub scope: Scope,
     pub writer: String,
@@ -32,6 +35,19 @@ pub struct Entry {
     pub visible: bool,
     pub copies: Vec<String>,
     pub content: Option<Value>,
+}
+impl Entry {
+    pub fn erase_payload(&mut self) {
+        if let Some(data) = self.content.take() {
+            let input = match self.kind.as_str() {
+                "input.accepted" | "input" => Some(data["inputId"].as_str().unwrap_or(&self.id)),
+                "input.returned" | "input.withdrawn" => data["input"].as_str(),
+                _ => None,
+            };
+            self.input_id = input.map(str::to_owned);
+        }
+        self.visible = false;
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Draft {
@@ -89,10 +105,12 @@ impl SessionData {
         let mut pending = Vec::<(&str, &Entry)>::new();
         for entry in &self.entries {
             let Some(v) = &entry.content else {
-                if entry.kind == "input.returned"
-                    && entry.writer == "rust.tombstone.inputHandedBack"
+                if matches!(
+                    entry.kind.as_str(),
+                    "input.returned" | "input" | "input.accepted"
+                ) && let Some(input) = &entry.input_id
                 {
-                    pending.retain(|(id, _)| !entry.copies.iter().any(|settled| settled == id));
+                    pending.retain(|(id, _)| *id != input);
                 }
                 continue;
             };
@@ -239,6 +257,7 @@ pub fn record_erasure(data: &mut SessionData, entry_ids: Vec<String>, input_keys
             let entry = Entry {
                 id: id(),
                 parent: data.position.clone(),
+                input_id: None,
                 scope: request.scope.clone(),
                 writer: "harness".into(),
                 at: now(),
@@ -263,6 +282,7 @@ pub fn record_erasure(data: &mut SessionData, entry_ids: Vec<String>, input_keys
             let entry = Entry {
                 id: id(),
                 parent: data.position.clone(),
+                input_id: None,
                 scope,
                 writer: "harness".into(),
                 at: now(),
@@ -280,6 +300,7 @@ pub fn record_erasure(data: &mut SessionData, entry_ids: Vec<String>, input_keys
     let entry = Entry {
         id: id(),
         parent: data.position.clone(),
+        input_id: None,
         scope: Scope::session(&data.id),
         writer: "harness".into(),
         at: now(),

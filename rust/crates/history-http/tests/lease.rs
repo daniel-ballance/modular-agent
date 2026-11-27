@@ -130,6 +130,7 @@ fn reopen_waits_for_the_old_lease_and_late_renewal_cannot_restore_authority() {
     data.entries.push(Entry {
         id: "new".into(),
         parent: None,
+        input_id: None,
         scope: Scope::session("foreign"),
         writer: "test".into(),
         at: 1,

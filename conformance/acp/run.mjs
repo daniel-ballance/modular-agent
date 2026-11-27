@@ -10,6 +10,7 @@ import { createInterface } from "node:readline";
 import { client, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import { historyService } from "./history.mjs";
 import { portableProblems, validActor } from "./portable.mjs";
+import { malformedHistoryChecks } from "./portable-intake.mjs";
 import { finishAgents, manageServices, trackProcess } from "./service.mjs";
 import { capacity, erasure, isolation } from "./production.mjs";
 import { coveredApproval } from "./covered.mjs";
@@ -1675,13 +1676,6 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 		};
 		const load = async (sessionId) => within(await reopenWatchdog(), s.ctx.request(methods.agent.session.load, { sessionId, cwd: project, mcpServers: [] }), "seeded portable load").catch((e) => e);
 		const forbidden = (r) => r?.code === -32602 && r?.data?.code === "forbidden";
-		for (const mode of ["incomplete-report", "nested-id", "missing-ceiling", "missing-disposition", "failed-position"]) {
-			const sid = await seed(mode), before = await store.pages(sid);
-			const reply = await load(sid);
-			check(`portable: refuse ${mode} without scheduling work or rewriting history`, Number.isInteger(reply?.code) && equal(await store.pages(sid), before),
-				JSON.stringify({ code: reply?.code, data: reply?.data, message: reply?.message }));
-			if (!reply?.code && !(reply instanceof Error)) await closeSession(s, sid);
-		}
 		const revoked = await seed("revoked");
 		const denied = await load(revoked);
 		check("portable: a revoked configured actor cannot reopen on another branch", forbidden(denied));
@@ -1760,6 +1754,7 @@ if (portableChecks) await attempt("portable authority fixture", async () => {
 				(kept.indexOf(admission) > kept.indexOf(end) || fresh.taken === "after"));
 		} else console.log("SKIP  recovered queue receipt (session does not declare queuedInputAfterRestart: run)");
 		await closeSession(s, queued);
+		await malformedHistoryChecks({ store, s, canConfigure, connect: env => connect(second, env), project, seed, within, reopenWatchdog, check, closeSession, stop });
 	} finally { await stop(s); }
 });
 

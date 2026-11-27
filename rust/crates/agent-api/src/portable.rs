@@ -3,6 +3,8 @@ use crate::{wire::*, *};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
+mod intake;
+
 fn kind(native: &str) -> String {
     match native {
         "model.response" => "response",
@@ -234,8 +236,8 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
                 erased[key] = json!(value);
             }
         }
-        if e.kind == "input.returned" && e.writer == "rust.tombstone.inputHandedBack" {
-            erased["inputIds"] = json!(e.copies);
+        if let Some(input) = &e.input_id {
+            erased["inputId"] = json!(input);
         }
         if copied {
             erased["sources"] = json!(sources);
@@ -288,38 +290,17 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
                     value[key] = item.clone();
                 }
             }
-            for key in ["authority", "sponsor", "taken", "resultShape"] {
-                if let Some(item) = optional(c, key) {
-                    value[format!("rust.{key}")] = item.clone();
-                }
+            if let Some(shape) = optional(c, "resultShape") {
+                value["rust.resultShape"] = shape.clone();
             }
-            if c["releasedBy"].is_string() && c["authority"].is_array() {
-                value["rights"] = c["authority"].clone();
-            }
-            if let Some(job) = &e.scope.job
-                && (report.is_some() || c["key"] == format!("job:{job}"))
-            {
-                value["authorizers"] = json!([{"sessionId":e.scope.session,"jobId":job}]);
-                value["rights"] = c
-                    .get("authority")
-                    .cloned()
-                    .unwrap_or_else(|| json!(Authority::only(&["watch"])));
-            }
+            value["rights"] = c["authority"].clone();
+            value["authorizers"] = admission_authorizers(&e.scope, c);
             value
         }
         "input.returned" | "input.withdrawn" => {
-            let mut returned = if let Some(ids) = c["inputIds"].as_array() {
-                v["inputIds"] = json!(ids);
-                json!({"inputIds":ids})
-            } else {
-                v["inputId"] = c["input"].clone();
-                json!({"inputIds":[c["input"]]})
-            };
-            if let Some(reason) = optional(c, "reason") {
-                returned["reason"] = reason.clone();
-                v.as_object_mut().unwrap().remove("turnId");
-            }
-            returned
+            v["inputId"] = c["input"].clone();
+            v.as_object_mut().unwrap().remove("turnId");
+            json!({"reason":c["reason"].as_str().unwrap_or(if e.kind == "input.withdrawn" { "withdrawn" } else { "cancelled" })})
         }
         "model.request" => {
             let model = optional(c, "model")
@@ -354,7 +335,7 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
             v.as_str().map(|name|json!({"name":name})).unwrap_or_else(||v.clone())
         }).collect::<Vec<_>>()}),
         "job.start" => {
-            let mut value = json!({"kind":c["kind"],"detail":c["detail"],"rights":c["authority"],"rust.report":c["report"]});
+            let mut value = json!({"kind":c["kind"],"detail":c["detail"],"rights":c["authority"],"rust.report":c["report"],"authorizers":admission_authorizers(&e.scope,c)});
             if let Some(key) = optional(c, "key") {
                 value["key"] = key.clone();
             }
@@ -474,7 +455,7 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
             if let Some(shape) = c["settings"].get("result_shape") {
                 start["resultShape"] = shape.clone();
             }
-            for key in ["point", "context", "traceContext"] {
+            for key in ["point", "context", "traceContext", "rights", "authorizers"] {
                 if let Some(value) = c.get(key) {
                     start[key] = value.clone();
                 }
@@ -527,9 +508,7 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
             if q.covers_nested() {
                 request["coversNested"] = json!(true);
             }
-            if q.waits_for_approval() {
-                request["askedBy"] = json!(q.scope.actor);
-            }
+            request["askedBy"] = json!(q.scope.actor);
             request["rust.route"] = json!(q.route);
             request["rust.responders"] = json!(q.responders);
             request["rust.extra"] = q.extra.clone();
@@ -541,6 +520,7 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
             }
             if let Some(ms) = q.timeout_ms {
                 request["timeLimitMs"] = json!(ms);
+                request["deadlineAt"] = json!(e.at.saturating_add(ms));
             }
             if let Some(name) = q.credential {
                 request["credential"] = json!(name);
@@ -624,6 +604,16 @@ pub fn entry(e: &Entry, session: &SessionData) -> Result<Value> {
 /// Rebuild a native working view from a session metadata object and kept order.
 /// Synthetic call and step entries only exist in memory. They are never sent back.
 pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
+    intake::validate(meta, entries)?;
+    decode(meta, entries)
+}
+
+/// Project one live entry without requiring the rest of the session's associations.
+pub fn projection(meta: &Value, entry: &Value) -> Result<SessionData> {
+    decode(meta, std::slice::from_ref(entry))
+}
+
+fn decode(meta: &Value, entries: &[Value]) -> Result<SessionData> {
     let id = string(meta, "id")?.to_owned();
     let mut data = SessionData {
         id: id.clone(),
@@ -664,9 +654,10 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
     );
     let mut copied = data.origin.is_some();
     for v in entries {
-        copied &= v["sources"]
-            .as_array()
-            .is_some_and(|sources| !sources.is_empty());
+        copied &= v["erased"] == true
+            || v["sources"]
+                .as_array()
+                .is_some_and(|sources| !sources.is_empty());
         let k = string(v, "kind")?;
         let mut payload = v["data"].clone();
         if matches!(k, "inputAccepted" | "input") && v["inputId"].is_string() && v["erased"] != true
@@ -683,6 +674,7 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
         let mut e = Entry {
             id: string(v, "id")?.into(),
             parent: field("parentId"),
+            input_id: field("inputId"),
             scope: Scope {
                 session: id.clone(),
                 actor: field("actorId")
@@ -727,22 +719,6 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
             && !matches!(k, "actorJoined" | "actorLeft" | "limit" | "tenant")
         {
             e.kind = native_identity_kind(k).into();
-            if k == "inputHandedBack" {
-                let ids = v["inputId"]
-                    .as_str()
-                    .or_else(|| d["inputId"].as_str())
-                    .map(|id| vec![id.to_owned()])
-                    .or_else(|| {
-                        serde_json::from_value::<Vec<String>>(
-                            v.get("inputIds").unwrap_or(&d["inputIds"]).clone(),
-                        )
-                        .ok()
-                    });
-                if let Some(ids) = ids {
-                    e.writer = "rust.tombstone.inputHandedBack".into();
-                    e.copies = ids;
-                }
-            }
             e.visible = false;
             data.entries.push(e);
             continue;
@@ -764,7 +740,7 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
             "inputAccepted" => {
                 let content = input_content(d);
                 let mut accepted = json!({"inputId":d["inputId"],"text":text(&content),"content":content,"timing":d["when"],"key":d["key"],
-                    "releasedBy":d["releasedBy"],"submittedBy":d["submittedBy"],"authority":d["rust.authority"],"sponsor":d["rust.sponsor"],"taken":d.get("taken").unwrap_or(&d["rust.taken"]),"parked":d["parked"]});
+                    "releasedBy":d["releasedBy"],"submittedBy":d["submittedBy"],"authority":d["rights"],"authorizers":d["authorizers"],"sponsor":d["submittedBy"],"taken":d["taken"],"parked":d["parked"]});
                 if let Some(shape) = d.get("rust.resultShape") {
                     accepted["resultShape"] = shape.clone();
                 }
@@ -843,9 +819,7 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
             }
             "input" => {
                 let input = string(d, "inputId")?;
-                if !copied && !e.copies.iter().any(|id| id == input) {
-                    e.copies.insert(0, input.into());
-                }
+
                 (
                     "input",
                     json!({"text":text(&v["message"]["content"]),"message":v["message"],"inputId":input,"key":d["key"],"sponsor":d["rust.sponsor"],"releasedBy":d["rust.releasedBy"],"authority":optional(d, "rust.authority").cloned().unwrap_or_else(||json!(Authority::full()))}),
@@ -872,7 +846,7 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                 if let Some(shape) = d.get("resultShape") {
                     settings["result_shape"] = shape.clone();
                 }
-                let mut start = json!({"startedBy":d["startedBy"],"model":model,"system":d["system"],"tools":tools,"settings":settings,"resume":optional(d, "rust.resume").cloned().unwrap_or(json!([])),"point":d["point"],"context":d["context"]});
+                let mut start = json!({"startedBy":d["startedBy"],"model":model,"system":d["system"],"tools":tools,"settings":settings,"resume":optional(d, "rust.resume").cloned().unwrap_or(json!([])),"point":d["point"],"context":d["context"],"rights":d["rights"],"authorizers":d["authorizers"]});
                 if let Some(origin) = optional(v, "continuesTurnId") {
                     start["continuesTurnId"] = origin.clone();
                 }
@@ -1092,6 +1066,7 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
                 data.entries.push(Entry {
                     id: format!("{}.derived.{}", base.id, call.id),
                     parent: Some(base.id.clone()),
+                    input_id: None,
                     scope,
                     writer: "rust.derived".into(),
                     at: base.at,

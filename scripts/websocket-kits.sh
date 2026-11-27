@@ -4,13 +4,19 @@
 # its named-caller fixture (one listener, several tokens; ADR 0035),
 # and `ma --acp --listen` with two actors and a shared history service.
 #
-#   scripts/websocket-kits.sh rust|typescript
+#   scripts/websocket-kits.sh rust|typescript [--portable-core]
 #
 # Needs that language built as scripts/check.sh builds it, and npm ci in conformance/acp.
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-language="${1:?usage: websocket-kits.sh rust|typescript}"
+language="${1:?usage: websocket-kits.sh rust|typescript [--portable-core]}"
+group=websocket-retries
+case "${2:-}" in
+  "") ;;
+  --portable-core) group=core ;;
+  *) echo "unknown option: $2" >&2; exit 2 ;;
+esac
 case "$language" in
   rust) plugin=("$repo/rust/target/debug/modular-agent" --serve-plugin)
     named=("$repo/rust/target/debug/examples/named_callers") ;;
@@ -65,45 +71,54 @@ service() { # parts (or ""), name, token file, optional project and state direct
   [ -s "$out" ] || { echo "the $2 service did not report its URL" >&2; cat "$log" >&2; exit 1; }
   read -r service_url <"$out"
 }
-service "" full "$work/token"; full=$service_url
-service runtime runtime "$work/token"; runtime=$service_url
-service durable-runtime durable "$work/token"; durable=$service_url
+binding_kits() {
+  service "" full "$work/token"; full=$service_url
+  service runtime runtime "$work/token"; runtime=$service_url
+  service durable-runtime durable "$work/token"; durable=$service_url
 
-(cd "$repo/conformance/plugin" && node run.mjs --connect "$full" --token-file "$work/token" \
-  --runtime-url "$runtime" --durable-runtime-url "$durable")
+  (cd "$repo/conformance/plugin" && node run.mjs --connect "$full" --token-file "$work/token" \
+    --runtime-url "$runtime" --durable-runtime-url "$durable")
 
-(umask 077 && openssl rand -hex 32 >"$work/second-token")
-mkdir -m 700 "$work"/{project-a,project-b,state-a,state-b,fixture-home}
-service "" a "$work/token" "$work/project-a" "$work/state-a"; first=$service_url
-service "" b "$work/second-token" "$work/project-b" "$work/state-b"; second=$service_url
-(cd "$repo/conformance/plugin" && node run.mjs --connect "$first" --token-file "$work/token" \
-  --second-connect "$second" --isolation-checks "$work/second-token" \
-  "$work/project-a" "$work/project-b" "$work/fixture-home")
+  (umask 077 && openssl rand -hex 32 >"$work/second-token")
+  mkdir -m 700 "$work"/{project-a,project-b,state-a,state-b,fixture-home}
+  service "" a "$work/token" "$work/project-a" "$work/state-a"; first=$service_url
+  service "" b "$work/second-token" "$work/project-b" "$work/state-b"; second=$service_url
+  (cd "$repo/conformance/plugin" && node run.mjs --connect "$first" --token-file "$work/token" \
+    --second-connect "$second" --isolation-checks "$work/second-token" \
+    "$work/project-a" "$work/project-b" "$work/fixture-home")
 
-(cd "$repo/conformance/plugin" && node run.mjs --named-callers -- "${named[@]}")
+  (cd "$repo/conformance/plugin" && node run.mjs --named-callers -- "${named[@]}")
+
+  printf '\n=== %s: ACP WebSocket core ===\n' "$language"
+  printf -v service_command '%q ' "${ma[@]}" --acp --approval off
+  (cd "$repo/conformance/acp" && node run.mjs --group core --crash-checks --probe-checks --job-checks \
+    --connect "ws://127.0.0.1:$(free_port)/" --token-file "$work/token" \
+    --service-command "exec $service_command --listen \"\$MODULAR_AGENT_CONFORMANCE_URL\" --token-file \"\$MODULAR_AGENT_CONFORMANCE_TOKEN_FILE\"") || core_status=$?
+
+}
 
 core_status=0
-printf '\n=== %s: ACP WebSocket core ===\n' "$language"
-printf -v service_command '%q ' "${ma[@]}" --acp --approval off
-(cd "$repo/conformance/acp" && node run.mjs --group core --crash-checks --probe-checks --job-checks \
-  --connect "ws://127.0.0.1:$(free_port)/" --token-file "$work/token" \
-  --service-command "exec $service_command --listen \"\$MODULAR_AGENT_CONFORMANCE_URL\" --token-file \"\$MODULAR_AGENT_CONFORMANCE_TOKEN_FILE\"") || core_status=$?
-
-printf '\n=== %s: ACP WebSocket portability with two credentials ===\n' "$language"
+if [ "$group" = websocket-retries ]; then
+  binding_kits
+fi
+printf '\n=== %s: ACP WebSocket %s with two credentials ===\n' "$language" "$group"
 history_service "$language" "$work/history"
 openssl rand -hex 32 >"$work/acp-writer-token"
 openssl rand -hex 32 >"$work/acp-peer-token"
 actor=kit-portable-writer
 node -e '
-  const id = process.argv[1];
+  const [id, group] = process.argv.slice(1);
+  const rights = group === "core"
+    ? ["watch", "propose", "input", "answer", "approve", "tools", "cancel", "settings", "erase", "grant", "jobs", "delegate", "administer"]
+    : ["watch", "input", "settings", "grant"];
   console.log(JSON.stringify({ actors: [
-    { tokenFile: "acp-writer-token", actor: { id, kind: "user", rights: ["watch", "input", "settings", "grant"] } },
+    { tokenFile: "acp-writer-token", actor: { id, kind: "user", rights } },
     { tokenFile: "acp-peer-token", actor: { id: "kit-portable-reopener", kind: "user", rights: ["watch", "input"] } },
   ] }));
-' "$actor" >"$work/acp-policy.json"
+' "$actor" "$group" >"$work/acp-policy.json"
 printf -v service_command '%q ' "${ma[@]}" --acp --approval off --policy "$work/acp-policy.json"
 (cd "$repo/conformance/acp" && MODULAR_AGENT_HISTORY_URL="$history_url" MODULAR_AGENT_HISTORY_TOKEN_FILE="$work/history/token" \
-  node run.mjs --group websocket-retries --portable-checks \
+  node run.mjs --group "$group" --portable-checks \
   --connect "ws://127.0.0.1:$(free_port)/" --token-file "$work/acp-writer-token" \
   --actor "$actor" --other-token-file "$work/acp-peer-token" \
   --service-command "exec $service_command --listen \"\$MODULAR_AGENT_CONFORMANCE_URL\"")

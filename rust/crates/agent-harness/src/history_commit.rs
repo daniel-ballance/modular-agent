@@ -38,6 +38,7 @@ pub(super) fn make_entry(data: &SessionData, scope: &Scope, writer: &str, draft:
     Entry {
         id,
         parent: data.position.clone(),
+        input_id: None,
         scope: scope.clone(),
         writer: writer.into(),
         at: now(),
@@ -274,33 +275,31 @@ impl Harness {
         }
         let mut next = open.data.clone();
         let mut entries = vec![];
-        for draft in drafts {
+        let mut report = None;
+        for mut draft in drafts {
+            if draft.kind == "job.end"
+                && draft.content["report"] == true
+                && let Some((text, _)) = &input
+            {
+                let content = draft
+                    .content
+                    .get("wireResult")
+                    .cloned()
+                    .unwrap_or_else(|| json!([{"type":"text","text":text}]));
+                draft.content["wireResult"] = content.clone();
+                report = Some(content);
+            }
             let entry = make_entry(&next, scope, writer, draft);
             next.position = Some(entry.id.clone());
             next.entries.push(entry.clone());
             entries.push(entry);
         }
-        let report_content = entries
-            .iter()
-            .rev()
-            .find(|e| e.kind == "job.end")
-            .and_then(|e| e.content.as_ref()?.get("wireResult"))
-            .cloned();
         let queued = input.map(|(text, actor)| {
-            let input_scope = Scope {
-                actor: actor.clone(),
-                ..scope.clone()
-            };
-            let mut value = json!({"text":text,"key":key,"timing":Timing::After,"authority":cap});
-            if report_content.is_some() {
-                value["parked"] = json!(
-                    !self.registry.read().unwrap().declaration()["job_reports_start_turns"]
-                        .as_bool()
-                        .unwrap_or(false)
-                );
-            }
-            if let Some(content) = report_content {
+            let input_scope = Scope { actor: actor.clone(), ..scope.clone() };
+            let mut value = json!({"text":text,"key":key,"timing":Timing::After,"authority":cap,"taken":"after"});
+            if let Some(content) = report {
                 value["content"] = content;
+                value["parked"] = json!(!self.registry.read().unwrap().declaration()["job_reports_start_turns"].as_bool().unwrap_or(false));
             }
             let entry = make_entry(
                 &next,

@@ -610,7 +610,7 @@ impl Engine {
                 );
                 let (source, definition) = registration.as_ref().unwrap();
                 let mut start = json!({"call":changed,"safeToRepeat":repeat,"openWorld":definition.open_world(),
-                    "source":source,"definition":wire::registered_definition(definition)});
+                    "source":source,"definition":wire::registered_definition(definition),"rights":work_authority(api.as_ref(), scope)?,"authorizers":work_authorizers(&session, scope)});
                 if let Some(cover) = &reply.approval_cover
                     && cover.tool_call_id != call.id
                 {

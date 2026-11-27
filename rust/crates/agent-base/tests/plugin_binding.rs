@@ -9,7 +9,6 @@ use std::{
 };
 use support::Events;
 use tokio::sync::Notify;
-
 static KIT_RUN: Mutex<()> = Mutex::new(());
 
 fn executable() -> &'static str {
@@ -970,6 +969,7 @@ async fn history_sends_an_entry_that_fits_alone_with_its_cursor() {
     let sample = Entry {
         id: agent_api::id(),
         parent: before.position.clone(),
+        input_id: None,
         scope: scope.clone(),
         writer: "test".into(),
         at: now(),

@@ -513,7 +513,13 @@ impl Harness {
             settings["result_shape"] = shape.clone();
             system.push_str(&format!("\n\nFor the final answer, return only one JSON value matching this schema:\n{shape}"));
         }
-        let mut start = json!({"startedBy":started_by,"model":info,"system":system,"tools":tools,"settings":settings,"resume":resume,"context":context});
+        let authorizers = admission_authorizers(
+            scope,
+            source
+                .and_then(|e| e.content.as_ref())
+                .unwrap_or(&Value::Null),
+        );
+        let mut start = json!({"rights":cap,"authorizers":authorizers,"startedBy":started_by,"model":info,"system":system,"tools":tools,"settings":settings,"resume":resume,"context":context});
         if let Some(interface) = interface {
             start["continuesTurnId"] = json!(interface.origin);
         } else if let Some(origin) = resume
@@ -531,16 +537,15 @@ impl Harness {
             start["point"] = json!(point);
         }
         let mut entries = vec![];
-        let input_id =
-            if resume.is_empty() || interface.is_some() {
-                input.id.clone()
-            } else {
-                let input_id = id();
-                entries.push(Draft::new("input.accepted", false,
-                json!({"inputId":input_id,"text":input.text,"timing":"now","authority":cap}))
+        let input_id = if resume.is_empty() || interface.is_some() {
+            input.id.clone()
+        } else {
+            let input_id = id();
+            entries.push(Draft::new("input.accepted", false,
+                json!({"inputId":input_id,"text":input.text,"timing":"now","taken":"now","authority":cap,"authorizers":authorizers}))
                 .copying(vec![input.id.clone()]));
-                input_id
-            };
+            input_id
+        };
         // Only system and context additions can carry history into turnStart.
         // A contribution can declare its sources, including an empty list for
         // static content. Without lineage, conservatively keep real records.
@@ -608,7 +613,12 @@ impl Harness {
             }
         }
         if interface.is_none() {
-            entries.push(Draft::new("input", true, taken).copying(vec![input.id]));
+            let parent = if input_id == input.id {
+                source.map(|e| e.id.clone()).unwrap_or(input.id)
+            } else {
+                input_id
+            };
+            entries.push(Draft::new("input", true, taken).copying(vec![parent]));
         }
         op.run(async {
             if let Err(err) = self.publish(scope, "harness", entries, None, None) {

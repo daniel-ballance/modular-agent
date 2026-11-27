@@ -431,6 +431,7 @@ impl Harness {
             value["timing"] = json!(timing);
             value["authority"] = json!(cap);
             value["releasedBy"] = json!(scope.actor);
+            value.as_object_mut().unwrap().remove("authorizers");
             value["taken"] = json!(taken);
             (
                 source.scope.clone(),
@@ -530,17 +531,16 @@ impl Harness {
         for input in &inputs {
             let data = self.snapshot(&scope.session)?;
             let mut cap = self.authority(&scope.session, &input.actor)?;
-            let accepted = data
-                .entries
-                .iter()
-                .rev()
-                .find(|e| {
-                    e.kind == "input.accepted"
-                        && e.content
-                            .as_ref()
-                            .is_some_and(|v| v["inputId"] == input.id || e.id == input.id)
-                })
-                .and_then(|e| e.content.as_ref());
+            let accepted = data.entries.iter().rev().find(|e| {
+                e.kind == "input.accepted"
+                    && e.content
+                        .as_ref()
+                        .is_some_and(|v| v["inputId"] == input.id || e.id == input.id)
+            });
+            let admission_id = accepted
+                .map(|e| e.id.clone())
+                .unwrap_or_else(|| input.id.clone());
+            let accepted = accepted.and_then(|e| e.content.as_ref());
             if let Some(v) = accepted {
                 cap = admitted_authority(self, &scope.session, cap, v)?;
             }
@@ -564,7 +564,7 @@ impl Harness {
             self.append(
                 &input_scope,
                 "harness",
-                Draft::new("input", true, taken).copying(vec![input.id.clone()]),
+                Draft::new("input", true, taken).copying(vec![admission_id]),
             )?;
         }
         Ok(inputs)

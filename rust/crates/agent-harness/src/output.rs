@@ -178,9 +178,9 @@ pub fn encode(event: &Event, api: &dyn AgentApi) -> Result<Value> {
 fn entry_projection(wire: &Value, original: &Value, session: &str) -> Result<Value> {
     // This projection is for field names and shapes, not a reconstruction
     // of the recorded session.
-    let rebuilt = portable::session(
+    let rebuilt = portable::projection(
         &json!({"id":wire["sessionId"].as_str().unwrap_or(session), "project":""}),
-        std::slice::from_ref(wire),
+        wire,
     )?;
     let mut mapped = json!(
         rebuilt

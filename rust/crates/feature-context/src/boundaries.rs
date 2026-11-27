@@ -4,6 +4,7 @@ fn entry(id: &str, kind: &str, value: Value) -> Entry {
     Entry {
         id: id.into(),
         parent: None,
+        input_id: None,
         scope: Scope::default(),
         writer: "test".into(),
         at: 0,

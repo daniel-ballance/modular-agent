@@ -198,8 +198,7 @@ impl FileHistory {
                     .iter()
                     .any(|e| kept.contains(&e.id) && e.kind == "settings");
                 for e in next.entries.iter_mut().filter(|e| kept.contains(&e.id)) {
-                    e.content = None;
-                    e.visible = false;
+                    e.erase_payload();
                 }
                 if settings {
                     next.settings = next

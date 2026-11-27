@@ -38,7 +38,7 @@ test("portable receipts survive reopening even when input is handed back, and an
 	const missing = { provider: "missing", id: "chosen" };
 	const sid = await seed(store, dirs.project, [
 		joined(), setting("model", missing),
-		draft("inputAccepted", { actorId: "user", inputId: "receipt", data: { key: "retry", when: "after", taken: "after", content: [text("not run")] } }),
+		draft("inputAccepted", { actorId: "user", inputId: "receipt", data: { key: "retry", when: "after", taken: "after", content: [text("not run")], rights: ALL_AUTHORITY, authorizers: [{ sessionId: "portable", actorId: "user" }] } }),
 	]);
 	await api.openSession(sid);
 	assert.deepEqual(api.recoveredInput(sid).map((q) => q.id), ["receipt"]);
@@ -64,7 +64,7 @@ test("portable input reservations keep submitter and attributed actor distinct",
 	const sid = await seed(store, dirs.project, [
 		joined(),
 		draft("actorJoined", { data: { actor: { id: "delegate", kind: "program", rights: ALL_AUTHORITY } } }),
-		draft("inputAccepted", { actorId: "user", inputId: "erased", data: { key: "same", when: "propose", taken: "proposed", content: [text("old")], submittedBy: "delegate" } }),
+		draft("inputAccepted", { actorId: "user", inputId: "erased", data: { key: "same", when: "propose", taken: "proposed", content: [text("old")], submittedBy: "delegate", rights: ALL_AUTHORITY, authorizers: [{ sessionId: "portable", actorId: "user" }, { sessionId: "portable", actorId: "delegate" }] } }),
 		draft("erasure", { data: { entryIds: ["e2"], inputKeys: [{ inputId: "erased", key: "same", actorId: "user", submittedBy: "delegate" }] } }),
 	]);
 	await api.openSession(sid);
@@ -172,7 +172,7 @@ test("durable reopen sends committed result feedback in its next request", async
 	const reason = "Please cite the source";
 	const sid = await seed(store, dirs.project, [
 		joined(), setting("model", model),
-		draft("inputAccepted", { inputId: "admission", actorId: "user", data: { when: "now", taken: "now", content: [text("Question")] } }),
+		draft("inputAccepted", { inputId: "admission", actorId: "user", data: { when: "now", taken: "now", content: [text("Question")], rights: ALL_AUTHORITY, authorizers: [{ sessionId: "portable", actorId: "user" }] } }),
 		draft("turnStart", { turnId, actorId: "user", data: { model, tools: [], system: "", settings: {}, startedBy: { kind: "actor", id: "user" }, rights: ALL_AUTHORITY } }),
 		draft("input", { turnId, inputId: "admission", actorId: "user", modelVisible: true, message: { role: "user", content: [text("Question")] } }),
 		draft("modelRequest", { turnId, stepId: "first", data: { model, tools: [], safeToRepeat: false } }),
