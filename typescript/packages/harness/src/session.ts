@@ -94,6 +94,7 @@ export class Session {
 	/** The process stopped its part in this session; nothing more is recorded here. */
 	suspended = false;
 	readonly interruption = new AbortController();
+	readonly closeSignal = new AbortController();
 	unwatchWriter?: () => void;
 	/** Commits run one at a time, so each entry follows the one before it. */
 	committing: Promise<unknown> = Promise.resolve();

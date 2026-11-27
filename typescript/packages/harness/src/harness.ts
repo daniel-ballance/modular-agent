@@ -650,6 +650,7 @@ export class Harness {
 			},
 			cancelJob: (sessionId, jobId) => this.jobWork.cancelJob(this.session(sessionId), jobId),
 			sessionInterruption: id => this.session(id).interruption.signal,
+			sessionClosed: id => this.session(id).closeSignal.signal,
 			follow: (sessionId, options, listener) => this.follow(this.session(sessionId), options, listener),
 			flushOutput: async (id, recipient) => {
 				const followers = [...(this.sessions.get(id)?.followers ?? [])].filter((f) => f.recipient === recipient);
@@ -829,8 +830,8 @@ export class Harness {
 	}
 
 	/** Discovery is the open authority check without joining or taking a writer lease. */
-	canDiscoverSession(id: string, actor: Actor, severalActors: boolean): Promise<boolean> {
-		return this.lifecycle.canDiscoverSession(id, actor, severalActors);
+	canDiscoverSession(id: string, actor: Actor, severalActors: boolean, required?: readonly Authority[]): Promise<boolean> {
+		return this.lifecycle.canDiscoverSession(id, actor, severalActors, required);
 	}
 
 	/** A host read never joins the viewer, takes a writer or starts recovery. Capture the

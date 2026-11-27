@@ -29,7 +29,16 @@ export interface CommandContext {
 }
 export interface Command { description: string; usesModel?: boolean; run(args: string, context: CommandContext): Promise<string | void> | string | void }
 
-export interface SessionStartOptions { tenant?: string; settings?: Record<string, unknown>; actor?: Actor; forkFrom?: { sessionId: string; entryId: string }; parentSessionId?: string; prepare?: SessionPrepare }
+export interface SessionStartOptions {
+	tenant?: string;
+	settings?: Record<string, unknown>;
+	actor?: Actor;
+	forkFrom?: { sessionId: string; entryId: string };
+	parentSessionId?: string;
+	/** Called synchronously when the session is installed, before its asynchronous setup. */
+	onCreate?(id: string): void;
+	prepare?: SessionPrepare;
+}
 export type SessionPrepare = (id: string) => Promise<void>;
 
 export interface InputOptions { resultShape?: Record<string, unknown>; content: ContentPart[] | string; when?: InputTiming; key?: string; actorId: string; kind?: string; delegatedBy?: string; startedBy?: QueuedInput["startedBy"]; sources?: string[] }
@@ -107,6 +116,7 @@ export interface PluginApi {
 	forkSession(sessionId: string, entryId: string): Promise<string>;
 	closeSession(sessionId: string, actorId?: string, delegatedBy?: string, authority?: readonly Authority[]): Promise<void>;
 	sessionInterruption(sessionId: string): AbortSignal;
+	sessionClosed(sessionId: string): AbortSignal;
 	session(sessionId: string): { id: string; project: string; tenant?: string; settings: Record<string, unknown>; position: string | null; busy: boolean; actors: Actor[]; ephemeral: boolean };
 	input(sessionId: string, options: InputOptions): Promise<InputReceipt & { handled?: boolean; output?: string }>;
 	withdraw(sessionId: string, inputId: string): QueuedInput | undefined;

@@ -200,6 +200,13 @@ export class Agent {
   #acp = false;
   #agui = false;
   #stopAcp?: () => Promise<void>;
+  /** Set once a plain ACP WebSocket listener serves; later listeners share its project MCP part. */
+  #acpService?: { projectMcp: ServeAcpOptions["projectMcp"]; mcp: ReturnType<typeof standardMcpTools> };
+  #acpApprovalRoutes = new Map<string, { users: number; remove(): void }>();
+  #serviceStarts = new Set<Promise<void>>();
+  #serviceAbort = new AbortController();
+  /** Every ACP connection served by this Agent, with the listener that accepted it. */
+  #acpConnections = new Set<{ listener: object; holds(id: string, includeWriter: boolean): boolean }>();
   #project: string;
   #conformance = false;
   #approval = false;
@@ -622,9 +629,18 @@ export class Agent {
   }
   async #serve(options: (ServeAcpOptions & { listen?: never }) | ServeAcpServiceOptions, agui?: ServeAguiOptions): Promise<void | ServiceServer> {
     this.#check();
-    if (this.#acp || this.#open.size || this.#opening.size) throw new AgentError("busy", "ACP must start before opening sessions");
+    // Another WebSocket ACP listener may join one that already serves this Agent.
+    const again = !!this.#acpService && options.listen !== undefined && !agui;
+    if (this.#acp && !again || this.#open.size || this.#opening.size) throw new AgentError("busy", "ACP must start before opening sessions");
+    if (again && options.projectMcp !== this.#acpService!.projectMcp) {
+      throw new AgentError("invalid_composition", "Every ACP listener on one Agent must share its projectMcp");
+    }
+    let finishStartup!: () => void;
+    const startup = options.listen === undefined ? undefined : new Promise<void>(resolve => { finishStartup = resolve; });
+    if (startup) this.#serviceStarts.add(startup);
     this.#acp = true;
-    this.#agui = !!agui;
+    if (!again) this.#agui = !!agui;
+    const listener = {};
     const agents = new Map<string, Promise<Agent>>();
     const sessions = new Map<string, Agent>();
     const attachments = new Map<PluginApi, ReturnType<typeof standardMcpTools>>();
@@ -638,9 +654,11 @@ export class Agent {
           agent.#defaults.model = { id, provider };
         }
       }
+      if (agent === this && this.#acpService) { attachments.set(agent.#api, this.#acpService.mcp); return; }
       const mcp = standardMcpTools({ servers: async project => await options.projectMcp?.(project) ?? {} });
       await agent.#plugin(mcp);
       attachments.set(agent.#api, mcp);
+      if (agent === this && options.listen !== undefined && !agui) this.#acpService = { projectMcp: options.projectMcp, mcp };
     };
     const disposeProjects = async () => {
       await Promise.allSettled([...agents.values()].map(async pending => {
@@ -684,8 +702,21 @@ export class Agent {
           return principal === scope.actor.id && (actor === principal || scope.represents.has(actor)) &&
             scope.allowProject(session.project) && scope.allowTenant(session.tenant ?? null) ? scope.actor.authority : [];
         };
-        if (!agui || agui.acp) cleanRoutes.push(api.registerApprovalRoute({ id: acpRouteId(scope), ceiling,
-          unchanged: entry => unchangedAcpApproval(api, entry, scope.actor.id) }));
+        if (!agui || agui.acp) {
+          const id = acpRouteId(scope);
+          const routes = agent.#acpApprovalRoutes;
+          let route = routes.get(id);
+          if (!route) {
+            route = { users: 0, remove: api.registerApprovalRoute({ id, ceiling,
+              unchanged: entry => unchangedAcpApproval(api, entry, scope.actor.id) }) };
+            routes.set(id, route);
+          }
+          const shared = route;
+          shared.users++;
+          cleanRoutes.push(() => {
+            if (--shared.users === 0) { routes.delete(id); shared.remove(); }
+          });
+        }
         if (agui && scope.clientId) {
           const p = scope as Principal;
           for (const surface of ["run", "snapshot"] as const) cleanRoutes.push(api.registerApprovalRoute({ id: "agui:" + surface + ":" + p.clientId, ceiling: (id, actor, principal) =>
@@ -751,14 +782,14 @@ export class Agent {
       };
       const { actor } = scope;
       const inaccessible = () => new AgentError("forbidden", "Session is inaccessible");
-      const authorize = async (id: string) => {
+      const authorize = async (id: string, tools = false) => {
         const owner = sessions.get(id) ?? this;
         const saved = owner.#h.liveSessionInfo(id) ?? await this.sessionInfo(id).catch(error => {
           if (error instanceof AgentError && error.code === "not_found") throw inaccessible();
           throw error;
         });
         if (!scope.allowProject(saved.project) || !scope.allowTenant(saved.tenant ?? null) ||
-            !await owner.#h.canDiscoverSession(id, actor, !network || owner.#authority.severalActors)) throw inaccessible();
+            !await owner.#h.canDiscoverSession(id, actor, !network || owner.#authority.severalActors, tools ? ["watch", "tools"] : ["watch"])) throw inaccessible();
         return saved;
       };
       const binding = acpInterface({
@@ -778,28 +809,39 @@ export class Agent {
         traceTrusted: scope.traceTrusted ?? !network,
         declaration: id => (id && sessions.get(id) || this).declaration(),
         projectSettings: options.projectSettings ? async project => await options.projectSettings!(project) : undefined,
-        associate: (id, api) => { sessions.set(id, attached.get(api)?.agent ?? this); },
-        project: async (cwd, id) => {
-          const saved = id ? await authorize(id) : undefined;
+        claim: (id, api) => {
+          if (api !== this.#api) return;
+          for (const other of this.#acpConnections) {
+            if (other === connection) continue;
+            const crossListener = other.listener !== listener;
+            if (other.holds(id, crossListener)) throw new AgentError("busy", crossListener ? "Session is open on another ACP listener" : "Session is opening");
+          }
+        },
+        associate: (id, api) => {
+          const agent = attached.get(api)?.agent;
+          if (agent && agent !== this) sessions.set(id, agent);
+        },
+        project: async (cwd, id, tools) => {
+          const saved = id ? await authorize(id, tools) : undefined;
           const project = await checked(() => realpath(cwd), "invalid_params");
           if (!(await stat(project)).isDirectory()) throw new AgentError("invalid_params", "Project must be a directory");
           if (!scope.allowProject(project)) throw inaccessible();
           if (saved && saved.project !== project) throw new AgentError("wrong_project", "Session belongs to a different project");
           const selected = await selectProject(project, id, saved);
           attach(selected);
-          if (id) sessions.set(id, selected);
+          if (id && selected !== this) sessions.set(id, selected);
           return { api: selected.#api, cwd: project };
         },
         async attachMcp(id, project, servers, api) {
-          if (Object.values(servers).some(s => "command" in s && !isAbsolute(s.command))) {
-            throw new AgentError("invalid_params", "ACP MCP executable paths must be absolute");
-          }
           await attachments.get(api)?.attach(id, project, servers);
         },
       });
       attach(this);
+      const connection = { listener, holds: (id: string, includeWriter: boolean) => binding.acp.holds(id, includeWriter) };
+      this.#acpConnections.add(connection);
       return { binding, detach: () => {
         disconnected = true;
+        this.#acpConnections.delete(connection);
         for (const part of attached.values()) part.detach();
         attached.clear();
       } };
@@ -878,6 +920,7 @@ export class Agent {
       }
       for (const { value } of actors) installRoutes(value);
       await installMcp(this);
+      this.#check();
       const server = await listenWebSocket(options, ACP_PROTOCOL, actors, agui && !agui.acp ? undefined : async (ws, scope) => {
         const { binding, detach } = prepareConnection(scope, true);
         try {
@@ -888,25 +931,44 @@ export class Agent {
             controlTimeoutMs, lose: () => ws.terminate(),
           });
         } finally { detach(); if (ws.readyState === ws.OPEN) ws.close(1000); }
-      }, http, options.resumeOpen ? () => resumeOpen() : undefined);
+      }, http, options.resumeOpen ? () => resumeOpen() : undefined, this.#serviceAbort.signal);
       const stopListener = async () => { for (const off of cleanRoutes.splice(0)) off(); http?.close(); await server.close(); };
-      this.#stopAcp = async () => { await stopListener(); await disposeProjects(); };
+      if (this.#close) {
+        await stopListener();
+        throw new AgentError("not_open", "Agent is closed");
+      }
+      const stopPrevious = this.#stopAcp;
+      this.#stopAcp = async () => { await stopListener(); await disposeProjects(); await stopPrevious?.(); };
       if (agui) { serving = true; return { url: new URL(server.url.replace(/^ws/, "http")).origin, close: stopListener }; }
       serving = true;
       return { url: server.url, close: () => this.close() };
     } catch (error) { throw new AgentError("invalid_composition", messageOf(error), undefined, error); }
     finally {
-      if (!serving) { await disposeProjects(); await this.close(); }
+      try {
+        if (!serving) { for (const off of cleanRoutes.splice(0)) off(); await disposeProjects(); }
+      } finally {
+        if (startup) {
+          this.#serviceStarts.delete(startup);
+          finishStartup();
+        }
+      }
+      // Release the startup barrier before closing an Agent whose first bind failed.
+      if (!serving && !again && !this.#close) await this.close();
     }
   }
   close(): Promise<void> {
-    return this.#close ??= (async () => {
-      await this.#stopAcp?.();
-      await Promise.allSettled(this.#opening.values());
-      for (const s of [...this.#open.values()]) await s.close().catch(() => {});
-      for (const part of this.#startedInterfaces.reverse()) await Promise.resolve().then(() => part.stop?.()).catch(() => {});
-      await this.#h.stop();
-      await rm(this.#scratch, { recursive: true, force: true });
-    })();
+    if (!this.#close) {
+      this.#close = Promise.resolve().then(async () => {
+        await this.#stopAcp?.();
+        await Promise.all(this.#serviceStarts);
+        await Promise.allSettled(this.#opening.values());
+        for (const s of [...this.#open.values()]) await s.close().catch(() => {});
+        for (const part of this.#startedInterfaces.reverse()) await Promise.resolve().then(() => part.stop?.()).catch(() => {});
+        await this.#h.stop();
+        await rm(this.#scratch, { recursive: true, force: true });
+      });
+      this.#serviceAbort.abort(new AgentError("not_open", "Agent is closed"));
+    }
+    return this.#close;
   }
 }

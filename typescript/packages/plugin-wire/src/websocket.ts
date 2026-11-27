@@ -90,6 +90,7 @@ export async function listenWebSocket<T>(options: ListenOptions, protocol: strin
 	connection: ((ws: WebSocket, value: T, tokenKey: string) => Promise<void>) | undefined,
 	http?: { request(req: IncomingMessage, res: ServerResponse, principal?: T): void; allowOrigin(req: IncomingMessage): boolean },
 	beforeListen?: () => Promise<void>,
+	signal?: AbortSignal,
 ): Promise<ServiceServer> {
 	const { url, port, host } = listenAddress(options);
 	const entries = await Promise.all(actors.map(async ({ tokenFile, value }) => ({ value, key: digest(`Bearer ${await tokenFrom(tokenFile)}`) })));
@@ -113,6 +114,7 @@ export async function listenWebSocket<T>(options: ListenOptions, protocol: strin
 	const active = new Set<Promise<void>>();
 	const connections = new Set<Socket>();
 	server.on("connection", socket => {
+		if (signal?.aborted) { socket.destroy(); return; }
 		connections.add(socket);
 		socket.once("close", () => connections.delete(socket));
 	});
@@ -133,10 +135,28 @@ export async function listenWebSocket<T>(options: ListenOptions, protocol: strin
 			void done.then(() => active.delete(done));
 		});
 	});
+	signal?.throwIfAborted();
 	await beforeListen?.();
+	signal?.throwIfAborted();
 	await new Promise<void>((resolve, reject) => {
-		server.once("error", reject);
-		server.listen(port, host, () => { server.off("error", reject); resolve(); });
+		const cleanup = () => {
+			signal?.removeEventListener("abort", abortBind);
+			server.off("error", failed);
+		};
+		const failed = (error: unknown) => { cleanup(); reject(error); };
+		const abortBind = () => {
+			server.close(() => failed(signal!.reason));
+			for (const socket of connections) socket.destroy();
+		};
+		server.once("error", failed);
+		signal?.addEventListener("abort", abortBind, { once: true });
+		try {
+			server.listen(port, host, () => {
+				if (signal?.aborted) { server.close(); return; }
+				cleanup();
+				resolve();
+			});
+		} catch (error) { failed(error); }
 	});
 	const bound = server.address();
 	if (bound && typeof bound !== "string") url.port = String(bound.port);

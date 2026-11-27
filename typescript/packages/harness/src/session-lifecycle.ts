@@ -144,6 +144,7 @@ export class SessionLifecycle {
 		}
 		this.watchWriter(s);
 		try {
+			options.onCreate?.(s.id);
 			if (options.forkFrom) {
 				const departed = new Set(ancestor?.order.map((id) => ancestor.entries.get(id)!).flatMap((e) => e.kind === "actorLeft" ? [(e.data as { actorId: string }).actorId] : []));
 				for (const id of departed) if (!ancestor?.actors.has(id)) drafts.push({ kind: "actorLeft", writer: "harness", modelVisible: false, data: { actorId: id } });
@@ -304,9 +305,10 @@ export class SessionLifecycle {
 		return id;
 	}
 
-	async canDiscoverSession(id: string, actor: Actor, severalActors: boolean): Promise<boolean> {
+	async canDiscoverSession(id: string, actor: Actor, severalActors: boolean, required: readonly Authority[] = ["watch"]): Promise<boolean> {
 		const s = this.operations.sessions().get(id) ?? await this.loadInto(id);
-		return !!s && this.discoveryRights(s, actor, severalActors).includes("watch");
+		const rights = s ? this.discoveryRights(s, actor, severalActors) : [];
+		return required.every(right => rights.includes(right));
 	}
 
 	async hostView(id: string, actor: Actor, scope: (project: string, tenant: string | null) => boolean) {
@@ -462,6 +464,7 @@ export class SessionLifecycle {
 		await s.committing;
 		await this.closeWriter(s);
 		this.operations.sessions().delete(s.id);
+		if (s.closed) s.closeSignal.abort();
 	}
 
 	private async closeWriter(s: Session): Promise<void> {
