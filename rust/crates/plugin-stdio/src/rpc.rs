@@ -824,6 +824,7 @@ impl Peer {
             message: json!({"jsonrpc":"2.0","method":method,"params":params}),
             end: false,
             gate,
+            cancelled: None,
         });
     }
     fn respond(&self, id: Value, reply: Reply) {
@@ -840,7 +841,12 @@ impl Peer {
                 json!({"jsonrpc":"2.0","id":id,"error":{"code":e.number,"message":e.message,"data":data}})
             }
         };
-        let _ = self.tx.send(Frame { message, end, gate });
+        let _ = self.tx.send(Frame {
+            message,
+            end,
+            gate,
+            cancelled: None,
+        });
     }
     pub fn parent(&self, id: &Value) -> Option<Arc<Work>> {
         self.pending

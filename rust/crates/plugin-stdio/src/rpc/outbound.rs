@@ -7,13 +7,15 @@ pub(super) struct Frame {
     pub message: Value,
     pub end: bool,
     pub gate: Option<Gate>,
+    pub cancelled: Option<Gate>,
 }
 
 pub(super) struct Prepared {
     bytes: Option<Vec<u8>>,
     gate: Option<Gate>,
+    cancelled: Option<Gate>,
     refusal: Option<Vec<u8>>,
-    on_refusal: Option<Box<dyn FnOnce() + Send>>,
+    on_refusal: Option<Box<dyn FnOnce(&'static str, &'static str) + Send>>,
 }
 
 impl Prepared {
@@ -46,18 +48,21 @@ impl Prepared {
                 error(id, "withheld", "plugin delivery is no longer available")
             }
         });
-        let on_refusal = id.filter(|_| request && frame.gate.is_some()).map(|id| {
-            let key = id.to_string();
-            let peer = Arc::downgrade(peer);
-            Box::new(move || {
-                if let Some(peer) = peer.upgrade() {
-                    peer.refuse(&key);
-                }
-            }) as Box<dyn FnOnce() + Send>
-        });
+        let on_refusal = id
+            .filter(|_| request && (frame.gate.is_some() || frame.cancelled.is_some()))
+            .map(|id| {
+                let key = id.to_string();
+                let peer = Arc::downgrade(peer);
+                Box::new(move |code, message| {
+                    if let Some(peer) = peer.upgrade() {
+                        peer.refuse(&key, code, message);
+                    }
+                }) as Box<dyn FnOnce(&'static str, &'static str) + Send>
+            });
         Some(Self {
             bytes: Some(bytes),
             gate: frame.gate,
+            cancelled: frame.cancelled,
             refusal,
             on_refusal,
         })
@@ -66,9 +71,17 @@ impl Prepared {
     fn recheck(&mut self) {
         if self.gate.as_ref().is_some_and(|check| !check()) {
             self.gate = None;
+            self.cancelled = None;
             self.bytes = self.refusal.take();
             if let Some(refuse) = self.on_refusal.take() {
-                refuse();
+                refuse("withheld", "plugin delivery is no longer available");
+            }
+        } else if self.cancelled.as_ref().is_some_and(|check| check()) {
+            self.gate = None;
+            self.cancelled = None;
+            self.bytes = None;
+            if let Some(refuse) = self.on_refusal.take() {
+                refuse("cancelled", "cancelled before transport handoff");
             }
         }
     }
@@ -122,19 +135,28 @@ impl Peer {
                 .get(&id.to_string())
                 .map(|request| request.callbacks.clone())
         });
-        let gate = if let Some(parent) = self.parent_delivery(method, &params) {
-            Some(parent)
+        let (gate, cancelled) = if let Some((parent_gate, parent_cancelled)) =
+            self.parent_delivery_parts(method, &params)
+        {
+            let caller = cancel.clone();
+            let cancelled: Gate = Box::new(move || {
+                caller.is_cancelled() || parent_cancelled.as_ref().is_some_and(|c| c())
+            });
+            (Some(parent_gate), Some(cancelled))
         } else if let Some(w) = work.as_ref().filter(|w| !w.scope.session.is_empty()) {
             let scoped = w
                 .api
                 .upgrade()
                 .map(|api| outbound::scoped(&api, &w.scope, method));
+            let caller = cancel.clone();
             let signal = w.cancel.clone();
-            Some(Box::new(move || {
-                !signal.is_cancelled() && scoped.as_ref().is_some_and(|check| check())
-            }) as Gate)
+            (
+                Some(Box::new(move || scoped.as_ref().is_some_and(|check| check())) as Gate),
+                Some(Box::new(move || caller.is_cancelled() || signal.is_cancelled()) as Gate),
+            )
         } else {
-            None
+            let caller = cancel.clone();
+            (None, Some(Box::new(move || caller.is_cancelled()) as Gate))
         };
         {
             let mut pending = self.pending.lock().unwrap();
@@ -171,6 +193,7 @@ impl Peer {
             message: frame,
             end: false,
             gate,
+            cancelled,
         });
         let mut outgoing = Outgoing {
             peer: self,
@@ -201,6 +224,13 @@ impl Peer {
     }
 
     pub(crate) fn parent_delivery(&self, method: &str, params: &Value) -> Option<Gate> {
+        let (gate, cancelled) = self.parent_delivery_parts(method, params)?;
+        Some(Box::new(move || {
+            gate() && !cancelled.as_ref().is_some_and(|c| c())
+        }))
+    }
+
+    fn parent_delivery_parts(&self, method: &str, params: &Value) -> Option<(Gate, Option<Gate>)> {
         if method == "tools/changed" {
             return None;
         }
@@ -225,22 +255,18 @@ impl Peer {
                 | "host/env/exists"
                 | "host/runtime/record"
         ) || method == "host/runtime/hook" && params["hook"] == "turn.end";
-        Some(Box::new(move || {
-            token
-                .as_ref()
-                .is_some_and(|token| settles || !token.is_cancelled())
-        }))
+        let has_parent = token.is_some();
+        let gate: Gate = Box::new(move || has_parent);
+        let cancelled = (!settles).then(|| {
+            let token = token.clone();
+            Box::new(move || token.as_ref().is_some_and(|t| t.is_cancelled())) as Gate
+        });
+        Some((gate, cancelled))
     }
 
-    pub(super) fn refuse(&self, key: &str) {
+    pub(super) fn refuse(&self, key: &str, code: &'static str, message: &'static str) {
         if let Some(pending) = self.pending.lock().unwrap().remove(key) {
-            let _ = pending.reply.send((
-                Err(Fault::new(
-                    "withheld",
-                    "plugin delivery is no longer available",
-                )),
-                None,
-            ));
+            let _ = pending.reply.send((Err(Fault::new(code, message)), None));
         }
     }
 }

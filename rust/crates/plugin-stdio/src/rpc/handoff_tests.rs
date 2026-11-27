@@ -184,6 +184,7 @@ async fn connect(websocket: bool, host: Arc<Host>, pause: Arc<Pause>) -> (Arc<Pe
 #[derive(Clone, Copy, Debug)]
 enum Change {
     LateCancel,
+    CancelOutgoing,
     Revoke,
     LoseLease,
     PublishErasure,
@@ -238,7 +239,7 @@ async fn run(websocket: bool, change: Change) -> Result<()> {
         "tools/call",
         json!({"sessionId":session,"input":"private tool input"}),
         Some(work),
-        cancel,
+        cancel.clone(),
     );
     tokio::pin!(request);
     assert!(futures_util::poll!(&mut request).is_pending());
@@ -252,6 +253,10 @@ async fn run(websocket: bool, change: Change) -> Result<()> {
     host.cancel_read.notified().await;
     match change {
         Change::LateCancel => {}
+        Change::CancelOutgoing => {
+            cancel.cancel();
+            assert!(futures_util::poll!(&mut request).is_pending());
+        }
         Change::Revoke => api.grant(&owner, &scope.actor, Authority::default())?,
         Change::LoseLease => {
             history.lease.lock().unwrap().take();
@@ -280,6 +285,12 @@ async fn run(websocket: bool, change: Change) -> Result<()> {
             .send(json!({"jsonrpc":"2.0","id":outbound["id"],"result":{}}))
             .await;
         assert_eq!(request.await.unwrap(), json!({}));
+    } else if matches!(change, Change::CancelOutgoing) {
+        assert_eq!(client.recv().await["params"]["chunk"], "private progress");
+        let reply = client.recv().await;
+        assert_eq!(reply["id"], 2);
+        assert_eq!(reply["result"]["status"], "completed");
+        assert_eq!(request.await.unwrap_err().code, "cancelled");
     } else {
         let reply = client.recv().await;
         assert_eq!(reply["id"], 2);
@@ -292,10 +303,11 @@ async fn run(websocket: bool, change: Change) -> Result<()> {
     client
         .send(json!({"jsonrpc":"2.0","id":3,"method":"$/ping"}))
         .await;
-    assert_eq!(
-        client.recv().await,
-        json!({"jsonrpc":"2.0","id":3,"result":{}})
-    );
+    let mut final_reply = client.recv().await;
+    if matches!(change, Change::CancelOutgoing) && final_reply["method"] == "$/cancel" {
+        final_reply = client.recv().await;
+    }
+    assert_eq!(final_reply, json!({"jsonrpc":"2.0","id":3,"result":{}}));
     peer.close();
     Ok(())
 }
@@ -341,6 +353,7 @@ async fn queued_frames_recheck_the_live_harness_on_stdio_and_websocket() {
     for websocket in [false, true] {
         for change in [
             Change::LateCancel,
+            Change::CancelOutgoing,
             Change::Revoke,
             Change::LoseLease,
             Change::PublishErasure,
