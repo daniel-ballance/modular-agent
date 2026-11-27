@@ -205,6 +205,7 @@ pub struct SessionInfo {
     pub model: Option<crate::ModelRef>,
     pub title: Option<String>,
     pub created_at: u64,
+    /// Time of the last stored entry, or 0 if there are no entries or the last is erased.
     pub last_active: u64,
     /// A committed start on the active branch has no matching end.
     pub unfinished_turn: bool,

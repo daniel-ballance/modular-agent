@@ -19,9 +19,9 @@ async function find(dir: string, name: string): Promise<string | undefined> {
   }
 }
 
-// docs/reference/standard-configuration.md, "Listing sessions": last activity is the
-// last entry's time in append order, and a session with no entries has none.
-test("sessions() gives a session with no entries no last activity", async t => {
+// docs/sdk/api.md, "The agent": last activity is the last entry's time in append
+// order, and a session with no entries has none.
+test("sessions() and sessionInfo() agree for empty and timed sessions", async t => {
   const project = await mkdtemp(join(tmpdir(), "ma-list-"));
   t.after(() => rm(project, { recursive: true, force: true }));
   const options = { project, dataDir: project, durability: "kept" as const, model: "a/test", providers: [provider] };
@@ -35,6 +35,9 @@ test("sessions() gives a session with no entries no last activity", async t => {
   const file = await find(project, `${session.id}.jsonl`);
   assert.ok(file, "the session is kept in a file");
   const header = JSON.parse((await readFile(file, "utf8")).split("\n", 1)[0]);
+  const store = new JsonlHistoryStore(dirname(dirname(file)));
+  const last = (await store.load(session.id)).entries.at(-1)!;
+  assert.ok(last.time > 0);
   const empty = "emptysession";
   await writeFile(join(dirname(file), `${empty}.jsonl`), JSON.stringify({ ...header, meta: { ...header.meta, id: empty, created: Date.now() + 60_000 } }) + "\n");
 
@@ -42,13 +45,17 @@ test("sessions() gives a session with no entries no last activity", async t => {
   t.after(() => second.close());
   const listed = new Map((await second.sessions()).map(s => [s.id, s.updated]));
   assert.equal(listed.get(empty), 0);
-  assert.ok((listed.get(session.id) ?? 0) > 0);
+  const emptyInfo = await second.sessionInfo(empty);
+  assert.ok(emptyInfo.created > 0);
+  assert.equal(emptyInfo.updated, 0);
+  assert.equal(listed.get(session.id), last.time);
+  assert.equal((await second.sessionInfo(session.id)).updated, last.time);
 });
 
 // An erased entry has no time, so a session whose last entry is erased has no last
 // activity and lists with the sessions that have no entries. The store erases in
 // place, with no erasure record after the entry.
-test("sessions() gives a session whose last entry is erased no last activity", async t => {
+test("sessions() and sessionInfo() give an erased last entry no last activity", async t => {
   const project = await mkdtemp(join(tmpdir(), "ma-list-"));
   t.after(() => rm(project, { recursive: true, force: true }));
   const options = { project, dataDir: project, durability: "kept" as const, model: "a/test", providers: [provider] };
@@ -68,7 +75,9 @@ test("sessions() gives a session whose last entry is erased no last activity", a
   const last = (await store.load(newer.id)).entries.at(-1)!;
   assert.ok(last.time > 0);
   await store.erase(newer.id, [last.id]);
-  const tail = (await store.load(newer.id)).entries.at(-1)!;
+  const { entries } = await store.load(newer.id);
+  assert.ok(entries.slice(0, -1).some(entry => !entry.erased && entry.time > 0));
+  const tail = entries.at(-1)!;
   assert.equal(tail.id, last.id);
   assert.equal(tail.erased, true);
 
@@ -76,5 +85,6 @@ test("sessions() gives a session whose last entry is erased no last activity", a
   t.after(() => second.close());
   const listed = new Map((await second.sessions()).map(s => [s.id, s.updated]));
   assert.equal(listed.get(newer.id), 0);
+  assert.equal((await second.sessionInfo(newer.id)).updated, 0);
   assert.ok((listed.get(older.id) ?? 0) > 0);
 });
