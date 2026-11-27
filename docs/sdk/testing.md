@@ -171,7 +171,7 @@ and can have `expect`:
 | `toolResults` | the last turn's tool results, in order, have these `name` and `status`, `text` if given (exact), `contains` if given (a substring, for diagnostics an SDK may word in its own way), and `content` if given (the exact ordered array of shared parts) |
 | `records` | these record kinds appear in the session's history in this order, not necessarily adjacent |
 | `recordCounts` | every named record kind appears exactly this many times in the session's history |
-| `receipt` | `send` returns exactly this admission ID, `taken` and `duplicate` for non-erased input; omitted `duplicate` counts as false |
+| `receipt` | `send` returns exactly this admission ID, `taken` and `duplicate` for non-erased input; a returned receipt without `duplicate` counts as false; the expectation names `duplicate` |
 | `handedBack` | `cancel` returns exactly this ordered array of `{ inputId, content }` |
 | `turnSources` | the result's `turnStart` has exactly these sources: `"branch"` for all intact ancestors, or an array selecting records by `kind` and zero-based `index` among intact ancestors of that kind, in oldest-first order. Compare IDs without regard to order; duplicates fail. A missing record source list counts as empty. |
 | `systemIncludes`, `context` | the same snapshot contains the given system text substring and, if supplied, the exact ordered context parts |
