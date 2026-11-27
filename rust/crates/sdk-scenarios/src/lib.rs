@@ -714,6 +714,17 @@ async fn run_at(
                 }
             }
         }
+        if expect.get("turnSources").is_some() {
+            let (_, session, _) = current.as_ref().unwrap();
+            match session.history().await {
+                Ok(entries) => {
+                    assertions::turn_sources(expect, &entries, r.turn_id.as_deref(), |w| {
+                        fail(index, w)
+                    })
+                }
+                Err(e) => fail(index, format!("read turn sources: {e}")),
+            }
+        }
         if let Some(want) = expect["count"].as_u64() {
             let got = fixtures::count(&run.counter());
             if got != want {

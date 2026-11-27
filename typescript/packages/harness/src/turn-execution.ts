@@ -136,7 +136,9 @@ export class TurnExecution {
 		const jobs = new Set([...(queued.authorityJobs ?? []), ...(queued.startedBy.kind === "job" ? [queued.startedBy.id] : [])]);
 		const authority = { startingRights: queued.startingRights ?? [], connectionRights: queued.connectionRights };
 		const withAuthority = <T>(work: () => T) => this.operations.turnAuthority().run({ sessionId: s.id, actors, jobs, state: authority }, work);
-		let contributions: { system?: string; context?: ContentPart[] }[] = [];
+		type Addition = { system?: string; context?: ContentPart[]; sources?: string[] };
+		let contributions: Addition[] = [];
+		let hookSources: string[] = [];
 		let failure: string | undefined;
 		let limited = false;
 		try {
@@ -149,7 +151,23 @@ export class TurnExecution {
 					point = await env.save();
 				}
 				await this.operations.erasure().admitHistory(s);
-				contributions = await withAuthority(() => this.operations.hooks().collect("turn.before", { sessionId: s.id, turnId, input: queued.content }));
+				const additions = await withAuthority(() => this.operations.hooks().collect<Addition>("turn.before", { sessionId: s.id, turnId, input: queued.content }));
+				const history = new Set(s.branch().filter(e => !e.erased).map(e => e.id));
+				const used = new Set<string>();
+				let usesBranch = false;
+				for (const { system, context, sources } of additions) {
+					if (!system?.length && !context?.length) continue;
+					if (sources == null) usesBranch = true;
+					else {
+						if (!Array.isArray(sources)) throw new Error("Before-turn sources must be an array");
+						for (const id of sources) {
+							if (!history.has(id)) throw new Error("Unknown before-turn source");
+							used.add(id);
+						}
+					}
+				}
+				hookSources = [...(usesBranch ? history : used)];
+				contributions = additions;
 			}
 		} catch (error) { failure = String(error); }
 		const context = contributions.flatMap((c) => c.context ?? []);
@@ -158,10 +176,12 @@ export class TurnExecution {
 			system: contributions.map((c) => c.system).filter(Boolean).join("\n\n"), tools, settings,
 			...(context.length ? { context } : {}),
 		};
+		let sources = [...new Set([...(queued.sources ?? []), ...hookSources])];
 		const unit = this.operations.reservations().limits.settlementBytes;
-		if (resourceBytes({ ...snapshot, resultShape, point }) + 2048 > unit) {
+		if (resourceBytes({ ...snapshot, resultShape, point, sources }) + 2048 > unit) {
 			failure = "Turn preparation exceeds reserved capacity";
 			snapshot = { model: ref ?? null, system: "", settings: {}, tools: [] };
+			sources = queued.sources ?? [];
 		}
 		const state: TurnState = { ...snapshot, ...authority, interfaceOffer, interfaceAllowances: new Map(), dispatched: new Set(), steps: new Map(), sources: new Map(), actors, jobs };
 		const span = this.turnSpan(s, turnId, queued.trace ?? null, undefined, continuesTurnId);
@@ -172,7 +192,7 @@ export class TurnExecution {
 				const store = this.operations.use<HistoryStore>("history-store");
 				const traceContext = store && store.supports.persistent !== false ? carrier(span.spanContext) : undefined;
 				const [start] = await this.operations.commit(s, [
-					{ kind: "turnStart", writer: "harness", modelVisible: false, turnId, continuesTurnId, actorId: queued.actorId, sources: queued.sources, data: { ...snapshot, ...(traceContext ? { traceContext } : {}), startedBy: queued.startedBy, resultShape: failure ? undefined : resultShape, point, rights: state.startingRights,
+					{ kind: "turnStart", writer: "harness", modelVisible: false, turnId, continuesTurnId, actorId: queued.actorId, sources: sources.length ? sources : undefined, data: { ...snapshot, ...(traceContext ? { traceContext } : {}), startedBy: queued.startedBy, resultShape: failure ? undefined : resultShape, point, rights: state.startingRights,
 						authorizers: [...actors].map(actorId => ({ sessionId: s.id, actorId })), ...(continuing ? { authorityActors: [...actors], authorityJobs: [...jobs] } : {}) } },
 					...(continuing ? [] : [this.inputEntry(s, queued, turnId)]),
 				]);
@@ -466,7 +486,7 @@ export class TurnExecution {
 					const prepared: ModelRequest = feedback.length ? { ...transformed, messages: [...transformed.messages,
 						...feedback.map((e): ModelMessage => ({ role: "user", content: [text((e.data as { reason: string }).reason)] }))] } : transformed;
 					// Hooks may copy or transform messages, so conservatively name their visible sources.
-					state.sources.set(stepId, [...new Set([...branch.filter((e) => !e.erased && ((e.modelVisible && e.kind !== "resultFeedback") || e.kind === "summary" || (e.kind === "turnStart" && e.turnId === turnId && state.context?.length))), ...feedback].map((e) => e.id))]);
+					state.sources.set(stepId, [...new Set([...branch.filter((e) => !e.erased && ((e.modelVisible && e.kind !== "resultFeedback") || e.kind === "summary" || (e.kind === "turnStart" && ((e.data as TurnSnapshot)?.context?.length || (e.turnId === turnId && state.system))))), ...feedback].map((e) => e.id))]);
 					return prepared;
 				});
 			},

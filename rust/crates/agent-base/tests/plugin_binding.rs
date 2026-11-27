@@ -1955,7 +1955,7 @@ async fn standard_hook_payloads_and_commands_translate_without_losing_request_ex
     assert_eq!(rig.turn(&id, "prompt").await.outcome, Outcome::Completed);
     let data = rig.h.snapshot(&id).unwrap();
     assert!(data.entries.iter().any(|e| {
-        e.kind == "input"
+        e.kind == "turn.start"
             && e.content
                 .as_ref()
                 .is_some_and(|c| c["context"][0]["text"] == "wire context")

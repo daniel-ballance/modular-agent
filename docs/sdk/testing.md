@@ -108,6 +108,7 @@ Every SDK implements these identically and serves them from a fixture program, `
 | `chart` | tool `chart`, input `{}`, read-only | Returns a fixed PNG image part followed by the text part `Sample chart` in a ToolOutput. |
 | `counter` | tool `bump`, input `{ hold?: boolean, note?: string }`, not safe to repeat | Adds one to a count kept in the file named by its config `path`, then returns the new count as text. With `hold: true` it then waits until cancelled, so a crash lands after its effect. |
 | `confirm` | tool `confirm`, input `{ question: string }` | Asks a `choice` question with options `yes` and `no` and returns the answer. |
+| `turn-sources` | hook `turn.before` | Adds system text with omitted or empty sources, or copies the first response as context and names its entry twice. A separate prompt returns an unknown ID. |
 | `gate` | hook `tool.before` | Refuses any call whose input, as JSON text, contains `forbidden`, with the reason `the gate refused it`. |
 | `quay` | tool `moor`, input `{ harbour: string }` | Refuses with the reason `the quay is closed`, through the tool context's `refuse`. |
 | `note` | tool `note`, input `{ question: string }` | Asks a `text` question. Returns `value: ` followed by the answer, or `declined` if the question was declined. |
@@ -167,6 +168,8 @@ and can have `expect`:
 | `text` | the last turn's result text is exactly this |
 | `toolResults` | the last turn's tool results, in order, have these `name` and `status`, `text` if given (exact), `contains` if given (a substring, for diagnostics an SDK may word in its own way), and `content` if given (the exact ordered array of shared parts) |
 | `records` | these record kinds appear in the session's history in this order, not necessarily adjacent |
+| `turnSources` | the result's `turnStart` has exactly these sources: `"branch"` for all intact ancestors, or an array selecting records by `kind` and zero-based `index` among intact ancestors of that kind, in oldest-first order. Compare IDs without regard to order; duplicates fail. A missing record source list counts as empty. |
+| `systemIncludes`, `context` | the same snapshot contains the given system text substring and, if supplied, the exact ordered context parts |
 | `count` | the `counter` fixture's count is this number |
 | `error` | the step itself raised this error code |
 

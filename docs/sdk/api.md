@@ -406,7 +406,7 @@ The `openai()` and `anthropic()` constructors make API-key Providers for the Res
 | `plugin.load` | gate | the plugin about to load and its origin | `allow`, or `refuse(reason)` |
 | `session.start` / `session.end` | observe | the session, and whether it was reopened | none |
 | `input` | transform | the input, its actor and timing | `change(content)`, or `handle()` to take it without a turn; in process only, `handle({ command })` to run a command instead |
-| `turn.before` | collect | the input starting the turn | `add({ system?, context? })` |
+| `turn.before` | collect | the input starting the turn | `add({ system?, context?, sources? })` |
 | `turn.start` / `turn.end` | observe | the turn; at the end its outcome and result | none |
 | `step.before` | transform | the prepared ModelRequest and model limits; in process, also history and usage | `change(request)`: context, offered tools, settings; in process, also the Provider-tool allowance |
 | `step.after` | gate | the step's recorded response | `continue`, or `end(reason)`: a gate refusal, which ends the turn `failed` |
@@ -417,6 +417,14 @@ The `openai()` and `anthropic()` constructors make API-key Providers for the Res
 | `provider.request` | transform | the ModelRequest a Provider is about to send | `change(request)` |
 | `provider.response` | observe | the complete response | none |
 | `output` | gate | events about to reach a recipient | `redact(events)`, or `block` |
+
+**History sources for `turn.before`.** A handler MAY supply `sources` alongside `system` and `context` in the same addition. This applies both in process and over the [plugin binding](../bindings/plugin.md#from-core-hooks-to-wire-hooks). An answer with neither nonempty system text nor nonempty context contributes no sources.
+
+- Omit `sources` to conservatively attribute the addition to all intact records on the current history branch when turn preparation collects its sources.
+- Pass `sources: []` to declare that the addition used no session history. This addition adds no history sources to the snapshot.
+- Pass history entry IDs to attribute the addition to just those entries. Each ID MUST name an intact record on the current branch. An invalid source fails turn preparation rather than recording the addition.
+
+The Harness records the union of the additions' source IDs on `turnStart`. These links participate in [erasure](../contracts.md#erasure): erasing a source also erases the snapshot that used it. A list describes only this addition. It does not remove other provenance from the turn or from work using the turn's input and model context.
 
 **In process only:** `session.prepare`, which runs when a session opens and before recovery, so a plugin can install per-session resources that `session.end` releases; the session's project and the callable tool definitions in the `turn.before` payload, for prompt building (a snapshot that grants no authority); `session.join` and `session.leave`; `provider.piece`, for each piece of a Provider's response; `pending` as an answer to `tool.before`; `handle({ command })` on `input`; history and usage in the `step.before` payload; and every point a plugin defines with `defineHook`. The [plugin binding](../bindings/plugin.md#from-core-hooks-to-wire-hooks) carries none of these. A served handler that needs history reads it through its context.
 

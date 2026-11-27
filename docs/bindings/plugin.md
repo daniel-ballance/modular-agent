@@ -188,7 +188,7 @@ The first column names the operation in [Contracts](../contracts.md#hook-points)
 | Session joined or left | Not carried | | |
 | Session ends | `session.end` | `{ sessionId }` | `null` |
 | Input arrives | `input` | `{ sessionId, actorId, content: Content, when: InputWhen }` | Transform, or `{ value: payload, stop: true }` to handle the input |
-| Before a turn | `turn.before` | `{ sessionId, turnId, input: Content }` | `null` or `{ system?: string, context?: Content }` |
+| Before a turn | `turn.before` | `{ sessionId, turnId, input: Content }` | `null` or `{ system?: string, context?: Content, sources?: Id[] }` |
 | Turn starts | `turn.start` | `{ sessionId, turnId }` | `null` |
 | Before each step | `step.before` | `{ sessionId, turnId, stepId, model: ModelInfo, request: ModelRequest }` | Transform |
 | After each step | `step.after` | `{ sessionId, turnId, stepId, response: AssistantMessage }` | Gate; refusal ends the turn |
@@ -202,7 +202,7 @@ The first column names the operation in [Contracts](../contracts.md#hook-points)
 | Complete Provider response, wire projection | `provider.response` | `{ sessionId: Id \| null, provider: Id, model: ModelRef, message: AssistantMessage }`; see [Provider callback validation](#the-host-asks-a-provider) | `null` |
 | Before output reaches a recipient | `output` | `{ sessionId: Id \| null, recipient: Id, events: OutputEvent[], final: true }` | `null`, `{ events: OutputEvent[] }` or `{ block: true }` |
 
-`AssistantMessage` and `ModelError` use [Messages](data.md#messages). For sessionless Provider work, the host MUST normalize an omitted `sessionId` to `null`. `turn.before` collects additions before the turn is recorded; `turn.start` observes the start. The wire step hook carries the prepared request and model limits, not a history or usage snapshot. Permitted handlers can read recorded input, history and usage through `host/history`.
+`AssistantMessage` and `ModelError` use [Messages](data.md#messages). For sessionless Provider work, the host MUST normalize an omitted `sessionId` to `null`. `turn.before` collects additions before the turn is recorded; `turn.start` observes the start. On an addition with nonempty system text or context, an omitted `sources` names all intact records on the current branch, `[]` names none, and a nonempty list names the intact branch entries with those IDs. The host MUST reject an invalid source on such an addition. The wire step hook carries the prepared request and model limits, not a history or usage snapshot. Permitted handlers can read recorded input, history and usage through `host/history`.
 
 - The host MUST combine handlers according to the [core hook rules](../contracts.md#hook-execution), with registration order breaking ties within one plugin. The host MUST reject registration of hooks not carried here. This binding has no plugin-defined hooks.
 - The host MUST treat an illegal answer as a handler failure under those same rules. A transform MUST leave the enclosing scope, identity and authority fields unchanged. An `input` transform MUST leave every field except `content` unchanged. The host MUST treat `stop: true` as a handled input under [Input](../contracts.md#input), without sending it to the model. This shape carries no command reply.

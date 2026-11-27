@@ -1,0 +1,14 @@
+{
+  "scenario": "turn-before-sources",
+  "about": "Turn additions distinguish omitted sources, no sources, and a named history record.",
+  "rules": ["sdk/api.md#hooks", "bindings/plugin.md#from-core-hooks-to-wire-hooks"],
+  "agent": { "durability": "ephemeral", "plugins": ["turn-sources"] },
+  "model": [{ "text": "Seed response." }, { "text": "Omitted." }, { "text": "Static." }, { "text": "Named." }, { "text": "Invalid addition reached the model." }],
+  "steps": [
+    { "prompt": "Seed history", "expect": { "outcome": "completed", "text": "Seed response." } },
+    { "prompt": "Omit sources", "expect": { "outcome": "completed", "turnSources": "branch", "systemIncludes": "Omitted addition." } },
+    { "prompt": "No sources", "expect": { "outcome": "completed", "turnSources": [], "systemIncludes": "Static addition." } },
+    { "prompt": "Name a source", "expect": { "outcome": "completed", "turnSources": [{ "kind": "response", "index": 0 }], "context": [{ "type": "text", "text": "Seed response." }] } },
+    { "prompt": "Unknown source", "expect": { "outcome": "failed" } }
+  ]
+}

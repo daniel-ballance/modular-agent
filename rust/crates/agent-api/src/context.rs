@@ -23,13 +23,25 @@ pub fn context_entries(branch: &[Entry]) -> Vec<&Entry> {
     let mut rows = BTreeMap::new();
     let mut positions = BTreeMap::new();
     let mut unavailable = BTreeSet::new();
+    let input_turns: BTreeSet<_> = branch
+        .iter()
+        .filter(|e| e.kind == "input" && e.visible && e.content.is_some())
+        .filter_map(|e| e.scope.turn.as_deref())
+        .collect();
     for (i, entry) in branch.iter().enumerate() {
         let id = entry.id.as_str();
         if entry.content.is_none() {
             unavailable.insert(id);
             continue;
         }
-        if !entry.visible {
+        if !(entry.visible
+            || has_turn_context(entry)
+                && entry
+                    .scope
+                    .turn
+                    .as_deref()
+                    .is_some_and(|turn| input_turns.contains(turn)))
+        {
             continue;
         }
         let mut position = i;
@@ -57,6 +69,29 @@ pub fn context_entries(branch: &[Entry]) -> Vec<&Entry> {
         rows.insert(position, entry);
     }
     rows.into_values().collect()
+}
+
+fn has_turn_context(entry: &Entry) -> bool {
+    entry.kind == "turn.start"
+        && entry.content.as_ref().is_some_and(|v| {
+            v["context"]
+                .as_array()
+                .is_some_and(|parts| !parts.is_empty())
+        })
+}
+
+/// Include the stored contributions from this turn's system prompt and from
+/// the branch's model context, even though snapshots are not visible inputs.
+pub fn step_history_source(entry: &Entry, turn: Option<&str>) -> bool {
+    entry.content.is_some()
+        && (entry.visible && entry.kind != "resultFeedback"
+            || has_turn_context(entry)
+            || entry.kind == "turn.start"
+                && entry.scope.turn.as_deref() == turn
+                && entry
+                    .content
+                    .as_ref()
+                    .is_some_and(|v| v["system"].as_str().is_some_and(|s| !s.is_empty())))
 }
 
 pub fn pending_result_feedback<'a>(
@@ -91,6 +126,15 @@ pub fn messages_with_origins(entries: &[&Entry], branch: &[Entry]) -> Result<Vec
             continue;
         };
         match e.kind.as_str() {
+            "turn.start" if has_turn_context(e) => {
+                let wire = json!({"role":"user","content":value["context"]});
+                result.push(Message {
+                    role: "user".into(),
+                    parts: crate::wire::parts(&wire["content"])?,
+                    opaque: json!({"_pluginWire":wire}),
+                    call: None,
+                });
+            }
             "input" | "feedback" => {
                 let wire = portable::input_message(value);
                 result.push(Message {
