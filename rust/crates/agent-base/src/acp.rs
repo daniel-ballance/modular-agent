@@ -12,6 +12,14 @@ pub struct Factory {
     pub settings: Value,
     pub pool: Arc<agent_harness::ReservationPool>,
 }
+impl Factory {
+    fn history(&self) -> Result<Box<dyn HistoryStore>> {
+        Ok(match history_http::HttpHistory::from_env()? {
+            Some(http) => Box::new(http),
+            None => Box::new(history_fs::FileHistory::new(&self.options.history)?),
+        })
+    }
+}
 #[async_trait::async_trait]
 impl interface_acp::Factory for Factory {
     async fn declaration(&self) -> Result<Value> {
@@ -38,10 +46,13 @@ impl interface_acp::Factory for Factory {
         Ok(agent)
     }
     fn list(&self, project: Option<&Path>) -> Result<Vec<SessionData>> {
-        match history_http::HttpHistory::from_env()? {
-            Some(http) => http.list(project),
-            None => history_fs::FileHistory::new(&self.options.history)?.list(project),
-        }
+        self.history()?.list(project)
+    }
+    fn list_kept(&self, project: Option<&Path>) -> Result<Vec<SessionData>> {
+        let store = self.history()?;
+        let mut visible = store.list(project)?;
+        visible.retain(|session| store.check_erasure(session).is_ok());
+        Ok(visible)
     }
     fn project_settings(&self, _: &Path) -> Result<Value> {
         Ok(self.settings.clone())
