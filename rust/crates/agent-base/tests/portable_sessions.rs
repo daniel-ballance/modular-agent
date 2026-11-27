@@ -161,6 +161,7 @@ async fn reopen(served: bool) {
             json!({"data":{"to":"started-repeatable"}}),
         ),
     ];
+    history_fs::FileHistory::new(&root).unwrap();
     std::fs::write(root.join("foreign.json"),json!({"historyBinding":"modular-agent-data/1","id":"foreign","project":project.path(),"entries":entries,"plugins":[]}).to_string()).unwrap();
     let fake = std::sync::Arc::new(provider_fake::FakePlugin::new(vec![
         provider_fake::Script::response(ModelResponse::text("carried on")),
