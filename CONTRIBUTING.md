@@ -63,7 +63,7 @@ repo=repos/daniel-ballance/modular-agent
 gh api --paginate "$repo/pulls?state=open"
 gh api "$repo/pulls/$N" --jq .head.sha
 gh api --paginate "$repo/pulls/$N/files" --jq '.[].filename'
-gh api -X POST "$repo/issues/$N/comments" -f body=@"$BODY_FILE"
+gh api -X POST "$repo/issues/$N/comments" -F body=@"$BODY_FILE"
 gh api -X PATCH "$repo/issues/$N" -F milestone="$MILESTONE_NUMBER"
 ```
 
@@ -142,7 +142,7 @@ scripts/check.sh --serial     # one step at a time, in the original order
 scripts/stress.sh 3           # three independent full checks at once, on three check slots
 ```
 
-The syntax is `scripts/check.sh [--quick] [--serial] [rust|typescript ...]`. With no language argument, it runs both languages. The docs lane runs with either language and there is no `docs` argument. For a docs-only change, run these commands from the repository root:
+The syntax is `scripts/check.sh [--quick] [--serial] [rust|typescript ...]`. With no language argument, it runs both languages. The docs lane runs with either language and there is no `docs` argument. For a docs-only change outside `docs/reference/standard-configuration.md` (whose text blocks `conformance/reference/run.mjs` compares against `ma`, so changes there still run the reference checks or `scripts/check.sh`), run these commands from the repository root:
 
 ```sh
 npm ci --silent --prefix scripts
@@ -229,7 +229,7 @@ export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:6006/v1/traces
 export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
 ```
 
-For `ma` launched by a host, set both variables in the host's launch configuration for `ma`. Query `http://127.0.0.1:6006/v1/projects/default/spans` for the same time window as the session history. Periodically audit the JSONL files under `~/.local/state/modular-agent/<lang>/history/` and compare them with the spans. Read history in place without reopening or changing sessions. Follow the [ma-meta-analysis skill](.agents/skills/ma-meta-analysis/SKILL.md) for measurements and issue filing.
+For `ma` launched by a host, set both variables in the host's launch configuration for `ma`. Query `http://127.0.0.1:6006/v1/projects/default/spans` for the same time window as the session history. Periodically audit the session histories (Rust JSON files under `~/.local/state/modular-agent/rust/sessions/<id>.json` and TypeScript JSONL files under `~/.local/state/modular-agent/typescript/history/<project-folder>/<id>.jsonl`) and compare them with the spans. Read history in place without reopening or changing sessions. Follow the [ma-meta-analysis skill](.agents/skills/ma-meta-analysis/SKILL.md) for measurements and issue filing.
 
 ## Commits
 

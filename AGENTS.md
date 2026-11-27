@@ -14,8 +14,8 @@ Open work lives only in GitHub Issues. Read `gh issue list` before you start. Ev
 
 - Work in parallel only on files that no open pull request changes. If yours overlap one, wait for it to land or stack on it.
 - When parallel work hits GitHub's GraphQL rate limit, use the REST commands in [Working in parallel](CONTRIBUTING.md#working-in-parallel).
-- Install or rebuild the local `ma` from the permanent `main` checkout so its bin and sidecar links survive worktree cleanup.
-- During #20, export traces to local Phoenix and audit session histories read-only as described in [Evaluating ma on real work](CONTRIBUTING.md#evaluating-ma-on-real-work).
+- Install or rebuild the local `ma` from the permanent `main` checkout so its sidecar and npm bin links survive worktree cleanup.
+- When evaluating `ma` on real work, export traces to local Phoenix and audit session histories read-only as described in [Evaluating ma on real work](CONTRIBUTING.md#evaluating-ma-on-real-work).
 - `scripts/check.sh` and `scripts/stress.sh` wait for a free check slot on the machine by themselves. Leave `MA_CHECK_SLOTS` unset. Stop a run with `systemctl --user stop UNIT`.
 - Delegates keep scratch and worktrees in their own subfolder of `~/.cache/ma-std-tmp/`, not `/tmp`, and delete only that subfolder before they report. Never delete the shared folder, `check-slot.sh` or `slots/`. Never run tests under `git rebase -x`, `git bisect run` or anything else that exports `GIT_DIR`.
 - A gap, finding or follow-up that a user, a real repository or a real run can hit becomes an issue, with the `finding`, `layer:` and `lang:` labels that apply. It never becomes a README section, a TODO comment or a chat note. Search the open issues first and comment on a matching one instead of filing another. A finding that only contrived input reaches is a non-blocking note in the verdict, not an issue.
@@ -43,7 +43,7 @@ scripts/check.sh
 scripts/check.sh rust
 ```
 
-`scripts/check.sh [--quick] [--serial] [rust|typescript ...]` accepts only language lanes. For docs-only changes, run the five commands under [Checking a change](CONTRIBUTING.md#checking-a-change).
+`scripts/check.sh [--quick] [--serial] [rust|typescript ...]` accepts only language lanes. For docs-only changes outside `docs/reference/standard-configuration.md` (which the reference checks parse), run the five commands under [Checking a change](CONTRIBUTING.md#checking-a-change).
 
 `--quick` runs only part of each language's tests; a change outside them runs the full lane for that language, as `CONTRIBUTING.md` ("Checking a change") says. Read each command's own exit code; a pipe hides it. A suite run on its own in a fresh worktree first needs the setup steps `scripts/check.sh` runs, such as `npm ci` in `conformance/acp`, `conformance/tools` and `conformance/telemetry`.
 
