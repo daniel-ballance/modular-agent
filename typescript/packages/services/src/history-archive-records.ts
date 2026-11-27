@@ -1,4 +1,5 @@
 import type { HistoryEntry, HistoryStore, StoredSession } from "@modular-agent/harness";
+import { initialTenant } from "./history.js";
 import { BindingError, held, unavailable } from "./history-binding.js";
 import { parseJson, type JsonObject } from "./history-json.js";
 import { Records, validateMetadata, type HistoryTestControls } from "./history-records.js";
@@ -76,6 +77,10 @@ export class ArchiveRecords {
 			append: async (id, batch) => read(db => {
 				ensureWriter(id);
 				db.keep(known(db, id), parseJson(JSON.stringify(batch)) as JsonObject[], () => ensureWriter(id));
+			}),
+			erasureTenant: async id => read(db => {
+				const page = JSON.parse(db.read(known(db, id), undefined, 1)) as { entries: HistoryEntry[] };
+				return initialTenant(page.entries[0]);
 			}),
 			load: async id => read(db => {
 				const row = known(db, id);

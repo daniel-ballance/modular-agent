@@ -154,6 +154,10 @@ async function main(argv: string[]) {
   const p = paths(), auth = new AuthFile(p.config);
   if (["login", "logout", "auth"].includes(argv[0])) return authCommand(argv, auth, identity);
   const erasure = argv[0] === "erasure";
+  if (erasure && argv[1] === "retry" && ["--help", "-h"].includes(argv[2])) {
+    console.log("Usage: ma erasure retry [--session ID]... [--discover]");
+    return 0;
+  }
   const opts = parse(erasure ? [] : argv);
   if (opts.help) { console.log(HELP); return 0; }
   if (opts.version) { console.log(`ma ${version} (typescript)`); return 0; }

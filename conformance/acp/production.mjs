@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual as equal } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
+import { erasureTriggers } from "./erasure.mjs";
 import { upgradeStatus } from "../tools/websocket.mjs";
 
 const NS = "modular-agent";
@@ -476,6 +477,12 @@ async function holdLease(store, path) {
 export async function erasure(kit) {
 	const declaration = await kit.store?.json("/v1");
 	if (declaration?.pendingErasure !== 1) throw Error("erasure fixture requires the shared HTTP pendingErasure: 1 registry");
+	await kit.attempt("erasure: authorized retry triggers", async () => {
+		const proxy = await kit.store.observe({ beforeReply: erasureTriggers.capture });
+		const h = await host(kit, [scoped([kit.project], [null])], { extraEnv: { MODULAR_AGENT_HISTORY_URL: proxy.url } });
+		try { await erasureTriggers(kit, (await h.peer()).a, approvalOff); }
+		finally { await h.stop(); proxy.stop(); }
+	});
 	for (const cutoff of ["reported pending", "bookkeeping commit", "tombstone commit"]) {
 		await kit.attempt(`erasure: ${cutoff}`, () => eraseAcrossWriters(kit, cutoff, declaration.ttlMs));
 	}

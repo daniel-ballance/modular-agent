@@ -339,6 +339,11 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
             }
         }
     }
+    if matches!(remaining.as_slice(), [group, command, flag, ..] if group == "erasure" && command == "retry" && matches!(flag.as_str(), "--help" | "-h"))
+    {
+        println!("Usage: ma erasure retry [--session ID]... [--discover]");
+        return Ok(());
+    }
     let required = policy_file.is_some();
     let policy_file = policy_file.unwrap_or_else(|| standard.config.join("policy.json"));
     let mut policy = Policy::read(&policy_file, required).await?;

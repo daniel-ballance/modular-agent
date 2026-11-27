@@ -28,7 +28,7 @@ ma sessions [--all]          list saved sessions
 ma erasure retry [--session ID]... [--discover]  retry pending erasure
 ```
 
-`ma erasure retry` requires at least one `--session ID` or `--discover`. It does not wait for another writer. It prints one JSON report per session and exits `0` if all reports are `complete` or there are no sessions to reconcile. It exits `1` on an error or if any session is `pending`, `busy`, `lost`, `outOfScope` or `unavailable`. Discovery uses the local registry or the HTTP index, not a history scan. Supply explicit IDs if the HTTP service has no index.
+`ma erasure retry` requires at least one `--session ID` or `--discover`. It does not wait for another writer. It prints one JSON report per session and exits `0` if all reports are `complete` or successful discovery finds no sessions to reconcile. It exits `1` on an error or if any session is `pending`, `busy`, `lost`, `outOfScope` or `unavailable`. Discovery uses the local registry or a History service advertising `pendingErasureIndex: 1`, not a history scan. If neither discovery source is available, `--discover` fails with `unavailable` and exits `1`, even if explicit IDs are also given. To retry against a service without an index, give explicit IDs without `--discover`.
 
 | Option | Meaning |
 |---|---|

@@ -103,11 +103,16 @@ impl Service {
         &self,
         method: Method,
         path: &[&str],
-        project: Option<&Path>,
         body: Option<Value>,
-        after: Option<&str>,
-        revision: Option<&str>,
+        options: Exchange<'_>,
     ) -> Result<(StatusCode, Value)> {
+        let Exchange {
+            project,
+            after,
+            revision,
+            limit,
+            ..
+        } = options;
         ensure!(
             path.iter().all(|s| !matches!(*s, "." | "..")),
             "invalid history path segment"
@@ -127,7 +132,7 @@ impl Service {
                     portable_store::RequestOptions {
                         project,
                         after,
-                        limit: 500,
+                        limit: limit.unwrap_or(500),
                         revision,
                     },
                 )
@@ -145,6 +150,9 @@ impl Service {
         }
         if let Some(after) = after {
             query.push(format!("after={}", escape(after)));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
         }
         if !query.is_empty() {
             url.set_query(Some(&query.join("&")));
@@ -243,7 +251,7 @@ impl Service {
                 project,
                 after,
                 deadline,
-                revision: None,
+                ..Exchange::default()
             },
         )
     }
@@ -259,6 +267,7 @@ impl Service {
             after,
             deadline,
             revision,
+            limit,
         } = options;
         let service = self.clone();
         let path: Vec<_> = path.iter().map(|s| s.to_string()).collect();
@@ -272,10 +281,14 @@ impl Service {
             let send = service.send(
                 method,
                 &path,
-                project.as_deref(),
                 body,
-                after.as_deref(),
-                revision.as_deref(),
+                Exchange {
+                    project: project.as_deref(),
+                    after: after.as_deref(),
+                    revision: revision.as_deref(),
+                    limit,
+                    deadline,
+                },
             );
             let result = if let Some(deadline) = deadline {
                 match tokio::time::timeout(deadline.saturating_sub(now()), send).await {
@@ -341,6 +354,7 @@ struct Exchange<'a> {
     after: Option<&'a str>,
     deadline: Option<Duration>,
     revision: Option<&'a str>,
+    limit: Option<usize>,
 }
 fn positive_ms(value: &Value, key: &str) -> Result<u64> {
     value[key]
@@ -537,7 +551,7 @@ impl State {
                 let span = agent_api::telemetry::Operation::internal("modular_agent.history.lease.renew", &Scope::session(&session));
                 let renew = span.run(tokio::time::timeout(
                     old - sent,
-                    service.send(Method::POST, &path, None, None, None, None),
+                    service.send(Method::POST, &path, None, Exchange::default()),
                 ));
                 let reply = tokio::select! {
                     _ = stop.cancelled() => return,

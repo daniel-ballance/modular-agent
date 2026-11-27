@@ -95,7 +95,8 @@ export function historyService(raw, tokenFile) {
 							trace.retryAfterMs = heldRetryAfter(bytes);
 						}
 					}
-					await beforeReply?.({ method: req.method, path: req.url, ok: r.ok, entries });
+					await beforeReply?.({ method: req.method, path: req.url, ok: r.ok, entries,
+						lease: r.ok && req.method === "POST" && req.url.endsWith("/lease") ? JSON.parse(bytes).lease : undefined });
 					res.writeHead(r.status, headers).end(bytes);
 				} catch { res.destroy(); }
 			});

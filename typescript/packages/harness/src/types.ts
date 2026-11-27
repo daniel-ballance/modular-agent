@@ -351,6 +351,8 @@ export interface HistoryStore {
 	/** Keep these entries. All of them are kept, or none are. */
 	append(sessionId: string, batch: HistoryEntry[], options?: { forkErasureView?: string }): Promise<void>;
 	load(sessionId: string): Promise<{ meta: StoredSession; entries: HistoryEntry[] }>;
+	/** Read the initial tenant marker only, after the caller checks project metadata in list(). */
+	erasureTenant?(sessionId: string): Promise<string | undefined>;
 	list(filter?: { project?: string }): Promise<StoredSession[]>;
 	erase?(sessionId: string, entryIds: string[]): Promise<void>;
 }

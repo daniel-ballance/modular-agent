@@ -11,7 +11,7 @@ import { Worker } from "node:worker_threads";
 import { createAgent, definePlugin, fileHistory, httpHistory, serveHistory } from "@modular-agent/core";
 import { memoryEnvironment, testAgent } from "@modular-agent/core/testing";
 import { filePendingErasure } from "@modular-agent/harness";
-import { historyService } from "@modular-agent/services";
+import { HistoryArchive, historyService } from "@modular-agent/services";
 
 test("pending marks follow forks across held writers and survive restart", async t => {
   const dir = await mkdtemp(join(tmpdir(), "sdk-pending-"));
@@ -67,6 +67,69 @@ test("pending marks follow forks across held writers and survive restart", async
   assert.equal(current.pending.length, 0);
   assert.equal(current.erased.length, report.erased.length + report.pending.length);
   assert.equal((await resumed.history()).filter(entry => entry.kind === "erasure").length, 1);
+});
+
+test("quiet erasure checks project metadata and tenant setup before reading or writing history", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "sdk-erasure-scope-"));
+  const tokenFile = join(dir, "token");
+  await writeFile(tokenFile, "scope-fixture", { mode: 0o600 });
+  const origin = "http://127.0.0.1:14892";
+  const project = { id: "foreign-project", project: dir + "/other", created: 1 };
+  const tenant = { id: "foreign-tenant", project: dir, created: 1 };
+  const setup = { id: "setup", parentId: null, kind: "tenant", data: { tenant: "outside" } };
+  const payload = { id: "payload", parentId: "setup", kind: "fixture.private" };
+  const trace: string[] = [];
+  t.mock.method(globalThis, "fetch", async (input: string | URL, options?: RequestInit) => {
+    const url = new URL(input);
+    assert.equal(url.origin, origin);
+    trace.push(`${options?.method ?? "GET"} ${url.pathname}${url.search}`);
+    if (url.pathname === "/v1") return Response.json({ binding: "modular-agent-history/1", ttlMs: 30_000, pendingErasure: 1 });
+    if (url.pathname === "/v1/sessions") return Response.json({ sessions: [project, tenant] });
+    const session = [project, tenant].find(meta => url.pathname === `/v1/sessions/${meta.id}`);
+    if (!session) return Response.json({ code: "unavailable" }, { status: 503 });
+    return Response.json(url.searchParams.get("limit") === "1" ? { session, entries: [setup], next: "setup" } : { session, entries: [setup, payload] });
+  });
+  const a = await testAgent({ project: dir, durability: "kept", history: httpHistory(origin, tokenFile), script: [] });
+  t.after(async () => { await a.close(); await rm(dir, { recursive: true, force: true }); });
+  for (const sessionId of [project.id, tenant.id]) {
+    trace.length = 0;
+    assert.deepEqual(await a.reconcileErasure({ sessions: [sessionId] }), [{ sessionId, state: "outOfScope", erased: [], pending: [] }]);
+    assert.deepEqual(trace, ["GET /v1/sessions", ...(sessionId === tenant.id ? ["GET /v1/sessions/foreign-tenant?limit=1"] : [])]);
+  }
+  trace.length = 0;
+  await assert.rejects(a.reconcileErasure({ discover: true }), { code: "unavailable" });
+  assert.deepEqual(trace, []);
+});
+
+test("answer retries erasure without rebinding a delivered question", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "sdk-erasure-answer-"));
+  const archive = new HistoryArchive(join(dir, "history")), store = archive.store();
+  const a = await testAgent({ project: dir, durability: "kept", script: [{ text: "seed" }],
+    plugins: [definePlugin({ name: "answer-fixture", replaces: ["history"], setup(r) { r.historyStore(store); } })] });
+  t.after(async () => { await a.close(); await rm(dir, { recursive: true, force: true }); });
+  const session = await a.session();
+  const id = session.id;
+  await session.prompt("seed");
+  await session.close();
+  const { entries } = await store.load(id);
+  const turnId = entries.findLast(e => e.kind === "turnEnd")!.turnId;
+  await store.openForWriting(id);
+  for (const [requestId, parentId, question] of [["affected", entries.at(-1)!.id, "Private delivered question"], ["unaffected", "affected", "Independent delivered question"]]) {
+    await store.append(id, [{ id: requestId, parentId, sessionId: id, time: Date.now(), writer: "fixture", kind: "inputRequest", modelVisible: false, turnId, requestId,
+      data: { request: { id: requestId, sessionId: id, kind: "text", question, answerers: ["user"] } } }]);
+  }
+  await store.close(id);
+  const open = await a.openSession(id);
+  assert.deepEqual((await open.questions()).map(q => q.id).sort(), ["affected", "unaffected"]);
+  const registry = store.pendingErasure!;
+  await registry.exclusive(async () => registry.keep({ id: "mark", sessionId: id, actorId: "user", targets: ["affected"], copies: [{ sessionId: id, id: "affected", erased: false }] }));
+  await assert.rejects(open.answer("affected", { value: "do not bind" }));
+  assert.equal(registry.intents()[0].copies[0].erased, true);
+  assert.deepEqual((await open.questions()).map(q => q.id), ["unaffected"]);
+  await open.answer("unaffected", { value: "keep this answer" });
+  const kept = JSON.stringify((await store.load(id)).entries);
+  assert.doesNotMatch(kept, /do not bind|Private delivered question/);
+  assert.match(kept, /keep this answer/);
 });
 
 test("HTTP erasure refuses a history delivery waiting at its output gate", async t => {

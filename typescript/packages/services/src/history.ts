@@ -91,6 +91,13 @@ export function historyClientOptions(url: string, token: string): ClientOptions 
 type Lease = { value: string; ttl: number; cutoff: number; timer?: NodeJS.Timeout; abort: AbortController; watch?: Disposable };
 type Pending = { meta: StoredSession; entries: HistoryEntry[]; abort: AbortController };
 
+export function initialTenant(entry?: HistoryEntry): string | undefined {
+	if (entry?.kind !== "tenant") return;
+	const tenant = (entry.data as { tenant?: unknown } | undefined)?.tenant;
+	if (entry.erased || typeof tenant !== "string") throw unavailable("Invalid tenant setup record");
+	return tenant;
+}
+
 type Awaitable<T> = T | Promise<T>;
 export type HistoryMetadata = Omit<StoredSession, "id">;
 type ReadPage = { session: StoredSession; entries: HistoryEntry[]; next?: string };
@@ -300,8 +307,20 @@ class HistoryWriter implements HistoryStore {
 		}
 		const lease = this.leases.get(id);
 		this.checkWriter(id);
+		const tombstones = batch.filter(e => e.erased);
+		if (tombstones.length) {
+			if (!pending?.meta.forkedFrom || !this.port.erase) throw unavailable("Cannot store fork tombstones");
+			// The wire reserves `erased` for the service. Send only the already
+			// redacted envelope, then ask the service to project the tombstone.
+			batch = batch.map(e => {
+				if (!e.erased) return e;
+				const { erased: _erased, sources: _sources, sessionId: _sessionId, usage, jobKey, ...entry } = e;
+				return { ...entry, ...(usage && (entry.kind === "response" ? { message: { role: "assistant" as const, content: [], usage } } : { data: { usage } })), ...(jobKey && { data: { key: jobKey } }) } as HistoryEntry;
+			});
+		}
 		if (this.historyErasure) await this.guardedAppend(id, lease!, batch, pending?.meta.forkedFrom?.sessionId, options?.forkErasureView);
 		else await this.mutate(id, signal => this.port.append(id, lease!.value, batch, signal), lease);
+		if (tombstones.length) await this.erase(id, tombstones.map(e => e.id));
 	}
 	private async pendingIndex(): Promise<string[]> {
 		let revision: string | undefined, after: string | undefined;
@@ -413,6 +432,12 @@ class HistoryWriter implements HistoryStore {
 		const result = await this.readAll(id);
 		if (!result.entries.length) throw new ServiceError(404, "Session was not published", "unknown_session");
 		return result;
+	}
+	async erasureTenant(id: string): Promise<string | undefined> {
+		// A tenant marker precedes all other records, including in a copied fork prefix.
+		const page = await this.port.read(id, { limit: 1 }, timeout(10_000));
+		if (page.entries.length !== 1) throw unavailable("Invalid history scope page");
+		return initialTenant(page.entries[0]);
 	}
 	private async readAll(id: string) {
 		const entries: HistoryEntry[] = [];

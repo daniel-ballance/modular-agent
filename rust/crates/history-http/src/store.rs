@@ -174,6 +174,44 @@ impl HistoryStore for HttpHistory {
             .acquire_with_wait(self.ttl, false)?;
         Ok(lease)
     }
+    fn erasure_scope(
+        &self,
+        session: &str,
+        project: Option<&Path>,
+    ) -> Result<Option<Option<String>>> {
+        let (_, listed) = self.service.pages(&["v1", "sessions"], None, "sessions")?;
+        let meta = listed
+            .iter()
+            .find(|row| row["id"] == session)
+            .ok_or_else(|| OperationError::NotFound("unknown session".into()))?;
+        let saved_project = wire::string(meta, "project")?;
+        if project.is_some_and(|project| project != Path::new(saved_project)) {
+            return Ok(None);
+        }
+        let page = checked(self.service.exchange(
+            Method::GET,
+            &["v1", "sessions", session],
+            None,
+            Exchange {
+                limit: Some(1),
+                ..Exchange::default()
+            },
+        )?)?;
+        // The tenant, when set, is the first record (also copied first on forks).
+        let rows = page["entries"]
+            .as_array()
+            .ok_or_else(|| registry_unavailable("Missing scope entry"))?;
+        ensure!(
+            rows.len() == 1 && page["session"]["project"] == saved_project,
+            registry_unavailable("Invalid scope page")
+        );
+        let entry = &rows[0];
+        Ok(Some(if entry["kind"] == "tenant" {
+            Some(wire::string(&entry["data"], "tenant")?.to_owned())
+        } else {
+            None
+        }))
+    }
     fn inspect(&self, session: &str) -> Result<SessionData> {
         self.fetch(session).map(|(data, _)| data)
     }
@@ -247,6 +285,17 @@ impl HistoryStore for HttpHistory {
             .coordinated
             .then(|| self.check_append(data, &entries))
             .transpose()?;
+        let tombstones = entries
+            .iter_mut()
+            .filter_map(|entry| {
+                if entry["erased"] != true {
+                    return None;
+                }
+                // Append only the redacted envelope: the service owns the marker.
+                entry.as_object_mut().unwrap().remove("erased");
+                Some(entry["id"].clone())
+            })
+            .collect::<Vec<_>>();
         state.acquire(self.ttl)?;
         let appended = self.guarded_append(&data.id, &lease, &entries, revision.as_deref());
         let guard = state.lease.lock().unwrap();
@@ -258,6 +307,14 @@ impl HistoryStore for HttpHistory {
         }
         remote.check(&state.lost)?;
         checked(appended?)?;
+        drop(guard);
+        if !tombstones.is_empty() {
+            self.writer_post(
+                &state,
+                &["v1", "sessions", &data.id, "erase"],
+                json!({"lease":lease,"entryIds":tombstones}),
+            )?;
+        }
         kept.extend(
             entries
                 .drain(..)

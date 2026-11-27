@@ -86,7 +86,13 @@ impl PortableHistoryStore for RecordingStore {
         self.store.append(id, lease, entries).await
     }
     async fn read(&self, id: &str, after: Option<&str>, limit: usize) -> HistoryResult<EntryPage> {
-        self.store.read(id, after, limit).await
+        let page = self.store.read(id, after, limit).await?;
+        self.record(
+            id,
+            "read",
+            json!(page.entries.iter().map(|e| &e["kind"]).collect::<Vec<_>>()),
+        );
+        Ok(page)
     }
     async fn list(
         &self,
@@ -104,6 +110,75 @@ impl PortableHistoryStore for RecordingStore {
     ) -> HistoryResult<Vec<String>> {
         self.store.erase(id, lease, entries).await
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quiet_erasure_checks_metadata_before_reading_history() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let other = tempfile::tempdir()?;
+    let store = RecordingStore::new(root.path())?;
+    let journal = store.journal.clone();
+    for (id, project) in [
+        ("foreign-project", other.path()),
+        ("foreign-tenant", root.path()),
+    ] {
+        store
+            .create(id, json!({"project":project,"created":1}))
+            .await
+            .unwrap();
+        let lease = store.acquire(id, "fixture").await.unwrap().lease;
+        store.append(id, &lease, vec![
+            json!({"id":"setup","parentId":null,"kind":"tenant","data":{"tenant":"outside"}}),
+            json!({"id":"payload","parentId":"setup","kind":"fixture.private"}),
+        ]).await.unwrap();
+        store.release(id, &lease).await.unwrap();
+    }
+    let token = root.path().join("token");
+    fs::write(
+        &token,
+        "2b2c8752a74147759a4048d8a36b02fae045ad654b6043c2ae22d00e712a4852",
+    )?;
+    let mut options = ServeHistoryOptions::new("127.0.0.1:0".parse().unwrap(), &token);
+    options.lease_ttl = RECORDING_LEASE_TTL;
+    let server = listen_history(History::from_portable(store, true)?, options).await?;
+    let agent = test_agent()
+        .project(root.path())
+        .durability(Durability::Kept)
+        .history(http_history(&server.url, &token)?)
+        .build()
+        .await?;
+    fs::write(&journal, "")?;
+    for id in ["foreign-project", "foreign-tenant"] {
+        let report = agent
+            .reconcile_erasure(modular_agent::ReconcileErasureOptions {
+                sessions: vec![id.into()],
+                discover: false,
+            })
+            .await?
+            .pop()
+            .unwrap();
+        assert_eq!(report.state, modular_agent::ErasureRetryState::OutOfScope);
+        assert!(report.erased.is_empty() && report.pending.is_empty());
+        let trace = fs::read_to_string(&journal)?;
+        let expected = if id == "foreign-project" {
+            String::new()
+        } else {
+            format!("{}\n", json!([id, "read", ["tenant"]]))
+        };
+        assert_eq!(trace, expected);
+    }
+    assert_eq!(
+        agent
+            .reconcile_erasure(modular_agent::ReconcileErasureOptions {
+                discover: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Unavailable
+    );
+    Ok(())
 }
 
 #[tokio::test]

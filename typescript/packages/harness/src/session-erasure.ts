@@ -133,8 +133,10 @@ export class SessionErasure {
 		const remote = this.httpErasure();
 		if (options.discover) {
 			if (remote?.discover) for (const id of await remote.discover()) ids.add(id);
-			else for (const intent of this.pendingRegistry()?.intents() ?? []) {
-				for (const copy of intent.copies) if (!copy.erased) ids.add(copy.sessionId);
+			else {
+				const registry = this.operations.store()?.pendingErasure;
+				if (!registry) throw failure("unavailable", "Pending erasure discovery requires a local registry or pendingErasureIndex: 1");
+				for (const intent of registry.intents()) for (const copy of intent.copies) if (!copy.erased) ids.add(copy.sessionId);
 			}
 		}
 		const reports = [];
@@ -173,12 +175,18 @@ export class SessionErasure {
 				if (!this.operations.inScope(live.meta.project, live.tenant)) { report.state = "outOfScope"; return report; }
 			} else {
 				if (!store) return report;
-				const saved = await store.load(id);
-				const tenant = saved.entries.find(e => e.kind === "tenant" && !e.erased)?.data as { tenant?: string } | undefined;
-				if (!this.operations.inScope(saved.meta.project, tenant?.tenant)) { report.state = "outOfScope"; return report; }
+				const meta = (await store.list()).find(row => row.id === id);
+				if (!meta) return report;
+				if (!this.operations.inScope(meta.project)) { report.state = "outOfScope"; return report; }
+				if (!store.erasureTenant) return report;
+				if (!this.operations.inScope(meta.project, await store.erasureTenant(id))) { report.state = "outOfScope"; return report; }
 			}
 			view = live ?? await this.operations.loadInto(id);
 			if (!view) return report;
+			if (!this.operations.inScope(view.meta.project, view.tenant)) {
+				report.state = "outOfScope";
+				return report;
+			}
 			if (!(await copies()).some(c => !c.erased)) report.state = "complete";
 			else if (live) await reconcile(live, false);
 			else await this.operations.withQuietWriter(id, async () => {

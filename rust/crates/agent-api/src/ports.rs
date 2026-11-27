@@ -393,6 +393,16 @@ pub trait HistoryStore: Send + Sync {
     fn inspect(&self, session: &str) -> Result<SessionData> {
         self.load(session)
     }
+    /// Check project scope from metadata before reading the tenant setup marker.
+    /// Outer `None` means the project is out of scope, inner `None` means no tenant.
+    /// Do not load or replay the session. Unsupported stores must fail closed.
+    fn erasure_scope(
+        &self,
+        _session: &str,
+        _project: Option<&Path>,
+    ) -> Result<Option<Option<String>>> {
+        Err(OperationError::Unavailable("History store cannot inspect erasure scope".into()).into())
+    }
     fn save(&self, session: &SessionData) -> Result<()>;
     fn list(&self, project: Option<&Path>) -> Result<Vec<SessionData>>;
     fn erase(&self, entries: Vec<String>, held: &[String]) -> Result<Vec<SessionData>>;

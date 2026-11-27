@@ -670,7 +670,7 @@ function copyForkPrefix(branch: HistoryEntry[], sessionId: string, makeId: () =>
 		if (e.jobId) e.jobId = remap("job", e.jobId);
 		if (e.inputId) e.inputId = remap("input", e.inputId);
 		if (e.requestId) e.requestId = remap("request", e.requestId);
-		if (e.erased) { parentId = e.id; return e; }
+		if (e.erased) { delete e.sources; parentId = e.id; return e; }
 		if (e.message?.role === "assistant") for (const part of e.message.content) {
 			if (isToolCall(part)) part.id = remap("call", part.id);
 		}

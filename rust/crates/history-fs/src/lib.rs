@@ -183,6 +183,35 @@ impl FileHistory {
     }
 }
 impl HistoryStore for FileHistory {
+    fn erasure_scope(
+        &self,
+        session: &str,
+        project: Option<&Path>,
+    ) -> Result<Option<Option<String>>> {
+        #[derive(serde::Deserialize)]
+        struct Meta {
+            project: PathBuf,
+        }
+        // A local snapshot is one tracked file. Verify it without loading a session view.
+        let _lock = self.lock()?;
+        let bytes = self.read_tracked(&self.path(session)?)?;
+        let meta: Meta = serde_json::from_slice(&bytes)?;
+        if project.is_some_and(|project| project != meta.project) {
+            return Ok(None);
+        }
+        let snapshot: Value = serde_json::from_slice(&bytes)?;
+        let tenant = snapshot["entries"].as_array().and_then(|entries| {
+            entries
+                .iter()
+                .find(|row| row["kind"] == "tenant")
+                .and_then(|row| {
+                    row.get("data").or_else(|| row.get("content"))?["tenant"]
+                        .as_str()
+                        .map(str::to_owned)
+                })
+        });
+        Ok(Some(tenant))
+    }
     fn supports_erasure(&self) -> bool {
         true
     }

@@ -1087,7 +1087,6 @@ impl Session {
         Ok(ToolResult::from_base(name.into(), result))
     }
 
-    /// Move to a recorded entry without restoring the working environment.
     pub async fn move_to(&self, entry_id: &str) -> Result<Vec<String>> {
         self.move_to_with(entry_id, MoveOptions::default()).await
     }
@@ -1105,6 +1104,7 @@ impl Session {
             }
             return Ok(h.rewind(&self.scope(), entry_id.into()).await?);
         }
+        h.retry_open_erasure(&self.id).await?;
         h.move_position(&self.scope(), Some(entry_id.into()))?;
         Ok(vec![])
     }

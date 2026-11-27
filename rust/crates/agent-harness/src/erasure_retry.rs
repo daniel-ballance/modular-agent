@@ -38,10 +38,13 @@ impl Harness {
             .store()
             .ok_or_else(|| OperationError::Unavailable("No history store".into()))?;
         let mut ids: BTreeSet<_> = options.sessions.into_iter().collect();
-        if options.discover
-            && let Some(found) = store.pending_erasure_sessions()?
-        {
-            ids.extend(found);
+        if options.discover {
+            ids.extend(store.pending_erasure_sessions()?.ok_or_else(|| {
+                OperationError::Unavailable(
+                    "Pending erasure discovery requires a local registry or pendingErasureIndex: 1"
+                        .into(),
+                )
+            })?);
         }
         let mut reports = Vec::with_capacity(ids.len());
         for session in ids {
@@ -62,6 +65,17 @@ impl Harness {
             erased: vec![],
             pending: vec![],
         };
+        match store.erasure_scope(&session, self.project.as_deref()) {
+            Ok(Some(tenant))
+                if tenant
+                    .as_deref()
+                    .is_none_or(|name| self.check_tenant(name).is_ok()) => {}
+            Ok(_) => {
+                report.state = OutOfScope;
+                return report;
+            }
+            Err(_) => return report,
+        }
         let Ok(data) = store.inspect(&session) else {
             return report;
         };
@@ -91,6 +105,10 @@ impl Harness {
             let live = self.sessions.lock().unwrap().contains_key(&session);
             if live {
                 self.reconcile_idle_erasure(store, &session).await?;
+                let mut sessions = self.sessions.lock().unwrap();
+                let open = sessions.get_mut(&session).ok_or(super::SessionNotOpen)?;
+                self.check_open_writer(open)?;
+                store.check_erasure(&open.data)?;
                 return Ok(Complete);
             }
             let lease = store.acquire_for_erasure(&session)?;

@@ -9,7 +9,7 @@ import { historyRequest, type HistoryRequest } from "./history-request.js";
 type ThreadOptions = { dir?: string; restoreWitness?: string; controls?: HistoryTestControls } & (
 	{ archive: true; exclusion?: { epoch: number; until: number } } |
 	{ archive: false; ttl: number; retention: number | null; quota: number; profile: boolean });
-type LocalMethods = Pick<HistoryStore, "create" | "openForWriting" | "close" | "append" | "load" | "list" | "erase">;
+type LocalMethods = Pick<HistoryStore, "create" | "openForWriting" | "close" | "append" | "load" | "erasureTenant" | "list" | "erase">;
 type LocalCall = { [K in keyof LocalMethods]-?: [K, ...Parameters<NonNullable<LocalMethods[K]>>] }[keyof LocalMethods];
 type HistoryJob = { kind: "ready" | "detach" | "close" } |
 	{ kind: "attach"; ttl: number } |
@@ -105,6 +105,7 @@ function serveThread(config: ThreadOptions, failedState: Int32Array<SharedArrayB
 					case "create": return store.create(first);
 					case "list": return store.list(first);
 					case "load": return store.load(first);
+					case "erasureTenant": return store.erasureTenant!(first);
 					case "openForWriting": return store.openForWriting(first);
 					case "close": return store.close(first);
 				}

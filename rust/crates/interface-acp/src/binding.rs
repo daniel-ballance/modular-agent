@@ -441,7 +441,6 @@ pub(crate) async fn extension(
         "limit" => Some("sessionLimits"),
         "tenant" => Some("tenants"),
         "erase" => Some("erasure"),
-        "fork" => Some("forking"),
         _ => None,
     };
     if let Some(feature) = feature {
@@ -712,6 +711,13 @@ pub(crate) async fn extension(
             if q.kind == RequestKind::Secret {
                 return Ok(json!({"accepted":false,"reason":"ACP does not accept secret answers"}));
             }
+            api.retry_open_erasure(&q.scope.session).await?;
+            let after = api.snapshot(&q.scope.session)?;
+            if !questions(&after)?.iter().any(|current| {
+                current.id == q.id && current.answerable && json!(current) == json!(q)
+            }) {
+                return Ok(json!({"accepted":false,"reason":"not_open"}));
+            }
             match service
                 .answer(
                     session.api.clone(),
@@ -740,11 +746,17 @@ pub(crate) async fn extension(
         }
         "fork" | "move" => {
             require(api, &scope, "settings")?;
+            if method == "fork" {
+                require(api, &scope, "watch")?;
+            }
             let _guard = session
                 .gate
                 .try_lock()
                 .map_err(|_| request_error("busy", "session busy"))?;
             api.retry_open_erasure(&session.id).await?;
+            if method == "fork" {
+                require_feature(factory, &session, "forking")?;
+            }
             let data = session.api.snapshot(&session.id)?;
             let branch = data.branch();
             ensure!(
