@@ -1,6 +1,6 @@
 # The SDK specification
 
-**Status: 0.4, accepted.** [ADR 0027](../adr/0027-sdk-0-1-and-edition-4.md) accepted the first revision. At 0.4.0 the Rust and TypeScript SDKs each pass every shared scenario in every placement, and both `ma` builds pass the 37 reference checks and the binding kits ([Status](../status.md#040)).
+**Status: 0.5, accepted.** [ADR 0027](../adr/0027-sdk-0-1-and-edition-4.md) accepted the first revision. At 0.5.0 the Rust and TypeScript SDKs each pass every shared scenario in every placement, and both `ma` builds pass the 39 reference checks and the binding kits ([Status](../status.md#050)).
 
 Both SDKs implement the specification: [Rust](../../rust/crates/sdk/README.md) and [TypeScript](../../typescript/packages/core/README.md). Each SDK runs the [shared scenarios](../../conformance/sdk/README.md) in process and served by every SDK. See [Status](../status.md) for release results. Each SDK runs the [guide examples](guides/README.md) as tests.
 
