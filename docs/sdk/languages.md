@@ -92,7 +92,7 @@ Omit the timeout (`None` in Rust) to request no deadline. For served calls, the 
 - Each hook point is its own typed method, `on_tool_before` rather than `on("tool.before", …)`, with `on_<point>_with(Order::First, handler)` or `Order::Last` for explicit order. A gate answers `Gate::Allow` or `Gate::Refuse(reason)`; `Gate::Refuse` is also the `step.after` end decision.
 - A plugin program awaits `modular_agent::serve(plugin)` for stdio. For a single-token WebSocket listener use `serve_websocket(plugin, ServeOptions { listen, token_file, tls, projects })` or `serve_websocket_factory(factory, options)`. For named callers use `serve_websocket_named(|caller: AuthenticatedCaller| make_plugin(caller.caller_id), NamedServeOptions { listen, callers, ..Default::default() }).await?`. Each `PluginCaller::new(caller_id, token_file)` can set its own `projects`. The factory gets the authenticated ID on each new connection, not the token.
 - With the `agui` feature, `agent.serve_agui(AguiOptions { listen, actors, ..Default::default() }).await?` serves the host reads. Use the thread snapshot's `waitCursor` with `wait-closures?after=…` and, when it offers `runReceipts: 1`, `run-receipt?runId=…`. These are authenticated HTTP reads, not methods on an answerable `Session`.
-- For ACP use `agent.serve_acp(AcpOptions { compose })` on stdio, or `agent.serve_acp_websocket(options, AcpServiceOptions { listen, actors, tls })`. `compose` is an optional `Arc<dyn AcpComposition>`; the trait takes a canonical project and optional saved session id, supplies history, optional configuration (for reading trust and settings) and new-session settings, and attaches client-supplied MCP servers through `project_mcp(session, project, servers)`.
+- For ACP use `agent.serve_acp(options)` on stdio or `agent.serve_acp_websocket(options, AcpServiceOptions { listen, actors, tls })`; see [ACP project options](#acp-project-options).
 - Use `session.r#as(actor_id)?` to act for a joined actor.
 - `serve_history(file_history(dir)?, options)` keeps service records separate from native session files; it does not export existing native sessions. Create options with `ServeHistoryOptions::new(address, token_file)`. Set `options.lease_ttl` to a `Duration` to override the 15-second writer lease. The duration must be at least 1 ms and a whole number of milliseconds; the service declares it as `ttlMs`. To start the same service in a task or test, `listen_history(file_history(dir)?, options).await` returns a bound listener with `url` and async `close()`. An address with port zero selects a free port.
 - Public errors are `modular_agent::Error`, not `anyhow::Error`. Plugin code can return any error that converts into it.
@@ -118,7 +118,7 @@ Omit the timeout (`None` in Rust) to request no deadline. For served calls, the 
 - `registrar.on("tool.before", handler)` infers the payload and answer from the point. A gate can return `"allow"` or `{ refuse: reason }`.
 - A service can take `serve(() => makePlugin(), options)` for fresh plugin state per connection. `serveHistory(fileHistory(dir), { address, tokenFile, leaseTtl? })` resolves to `{ url, close }`; tests can ask for port `0` and await `close()` when done. `leaseTtl` is a whole number of milliseconds, at least 1, and defaults to 15,000.
 - Use `defineProvider` to get `changed()`. `agent.refreshModels()` explicitly refreshes served catalogs.
-- ACP's `compose(project, saved?)` takes an optional `SessionInfo`. `projectSettings(project)` and `projectMcp(project)` may be async. Without an explicit stdio `actor`, the actor ID comes from `actorId`, then `MODULAR_AGENT_ACTOR`, then `acp-user`.
+- Without an explicit stdio `actor`, the ACP actor ID comes from `actorId`, then `MODULAR_AGENT_ACTOR`, then `acp-user`. See [ACP project options](#acp-project-options).
 - One Agent can serve several `serveAcp({ listen, actors })` listeners. Start them before opening embedded sessions, and give every one the same `projectMcp`. The [ACP session rules](../bindings/acp.md#sessions) govern writer reuse and refusals across listeners. On the fixed project, another listener may open the session after the first listener releases its writer claim, including after a successful `session/close`. A composed Agent is refused by the history lease instead (`held`). Closing any listener's handle closes the Agent.
 - No default exports.
 - Subscription Providers come from `@modular-agent/subscription` (`subscriptionLogins(path)`, `chatgpt({ logins, … })`, `grok({ logins, … })`, `signIn(provider, logins, options)` and `signOut(provider, logins)`, with `provider` `"chatgpt"` or `"grok"`) and `@modular-agent/claude` (`claude(options)`, in process on Anthropic's Agent SDK). The Claude package also has the program the Rust SDK starts.
@@ -126,6 +126,33 @@ Omit the timeout (`None` in Rust) to request no deadline. For served calls, the 
 - Covered approvals: `createAgent({ approval: "ask", approvalCoversNested: true })`, default false. The approval view carries `coversNested`; each covered start records `approvalCoveredBy`.
 - For named plugin callers, use `await serve(({ callerId }) => makePluginFor(callerId), { listen, callers })`. Add `tls` for a TLS listener. Each operator entry is `{ callerId, tokenFile }`. The listener authenticates before calling the factory. Neither the token nor a caller claim goes in a plugin message.
 - `await agent.serveAgui({ listen, actors })` serves both host reads. From the thread snapshot, pass `waitCursor` as the `after` query value on `wait-closures`. When `runReceipts === 1`, pass the original `runId` as one query value on `run-receipt`. Use authenticated HTTP; neither read needs a presence stream.
+
+## ACP project options
+
+These are the language mappings for [ACP project composition](api.md#acp-project-composition).
+
+### Rust ACP
+
+Set `AcpOptions.compose` to `Some(factory)`, where `factory` is an `Arc<dyn AcpComposition>`, on stdio or WebSocket. Enable `plugin_host(true)` on the serving and composed Agents. Build the returned Agent for the requested canonical project.
+
+| `AcpComposition` method | Use |
+|---|---|
+| `compose(project: &Path, reopening: Option<&str>)` | Async. Receives `None` for a new session or the saved session ID for a reopen. Use `history()?.session_info(id)` to inspect saved settings before building the Agent. |
+| `history()` | Returns the `History` used by ACP for lookup and listing. Use the same underlying history for the Agents that write and reopen those sessions. |
+| `configuration()` | Optional. When supplied, the adapter calls `trusted(project)` before composing and refuses the build if it returns false. To allow untrusted projects without their launch config, leave this gate unset and check trust when selecting executable parts or project MCP sources. Rust `ma` does this for project MCP when building its Agent. |
+| `project_settings(project)` | New-session settings. By default it reads `configuration().settings(project)` if provided, or returns an empty object. |
+| `project_mcp(session, project, servers)` | Async attachment callback for **client-supplied** specifications. Its default refuses a nonempty list, as does a fixed-project Agent. Install a configured MCP source in `compose` instead. The SDK has no `hostMcpServers` option; a composition that supports client attachment must enforce the operator’s host MCP policy in its attachment path. |
+
+### TypeScript ACP
+
+Pass these options to `agent.serveAcp` on stdio or alongside `listen` and `actors` on WebSocket. Use `createAgent({ history })` on the serving Agent for the index, and use the same underlying history for the composed Agents. For the default file history, they can instead use the same `dataDir`.
+
+| Serve option | Use |
+|---|---|
+| `compose(project, saved?)` | Returns a `Promise<Agent>`. Receives the canonical project and, on reopen, a `SessionInfo` with the saved settings. Return an Agent for that project; use a fresh Agent if it is not the serving Agent itself. The SDK can reuse a selected Agent, so do not rely on `compose` as a per-request trust check. |
+| `projectSettings(project)` | Returns new-session settings, synchronously or asynchronously. It can be used without `compose`. |
+| `projectMcp(project)` | Returns a `Record<string, McpServerConfig>` synchronously or asynchronously. It supplies configured MCP servers, not client attachments, and can be used without `compose`. The application checks operator trust before returning project-defined servers; TypeScript `ma` checks its external ledger here. |
+| `hostMcpServers` | Controls whether the binding accepts client MCP specifications, independently of `projectMcp`. Defaults to `true` on stdio and `false` on WebSocket, for either a fixed-project or composed Agent. |
 
 ## Packages
 
