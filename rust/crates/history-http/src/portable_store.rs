@@ -52,6 +52,9 @@ pub type HistoryResult<T> = std::result::Result<T, HistoryFault>;
 /// A store owns the atomic boundary: every append and erase must check the
 /// supplied lease in the same transaction as the commit. Entry bodies are
 /// opaque except for ids, equality on append and tombstone projection.
+///
+/// HTTP calls on separate connections can overlap. Yield during slow I/O and
+/// keep renewal independent of storage locks and queues held by other sessions.
 #[async_trait]
 pub trait PortableHistoryStore: Send + Sync + 'static {
     fn ttl_ms(&self) -> u64;

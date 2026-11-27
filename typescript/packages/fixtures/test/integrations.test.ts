@@ -266,6 +266,56 @@ async function customHistory(url: string, token: string, signal: AbortSignal): P
   };
 }
 
+test("a served custom store renews while another session's append is blocked", { timeout: 30_000 }, async t => {
+  const start = testResources(t);
+  const dir = await start(() => mkdtemp(join(tmpdir(), "ma-custom-history-")), dir => rm(dir, { recursive: true, force: true }));
+  const token = randomBytes(32).toString("hex");
+  const tokenFile = join(dir, "token");
+  await writeFile(tokenFile, token, { mode: 0o600 });
+  const options = { address: "127.0.0.1:0", tokenFile };
+  const backing = await start(() => serveHistory(fileHistory(join(dir, "archive")), options), service => service.close());
+  const store = await customHistory(backing.url, token, t.signal);
+  let entered!: () => void, release!: () => void;
+  const appendEntered = new Promise<void>(resolve => { entered = resolve; });
+  const releaseAppend = new Promise<void>(resolve => { release = resolve; });
+  const service = await start(() => serveHistory({
+    ...store,
+    async append(id, lease, entries) {
+      entered();
+      await releaseAppend;
+      return store.append(id, lease, entries);
+    },
+  }, options), service => service.close());
+  const request = async (path: string, method: string, body?: object, signal = t.signal) => {
+    const reply = await fetch(`${service.url}/v1/sessions/${path}`, { method, signal, headers: {
+      authorization: `Bearer ${token}`, "content-type": "application/json",
+    }, body: body === undefined ? undefined : JSON.stringify(body) });
+    const data = await reply.json();
+    assert.equal(reply.status, 200, JSON.stringify(data));
+    return data;
+  };
+  const acquire = async (id: string) => {
+    await request(id, "PUT", { project: dir, created: 1 });
+    return (await request(`${id}/lease`, "POST", { owner: id }) as { lease: string }).lease;
+  };
+  const renewing = await acquire("renewing");
+  const writing = await acquire("writing");
+  let appended = false;
+  const write = request("writing/entries", "POST", { lease: writing, entries: [{ id: "entry", parentId: null }] })
+    .then(reply => { appended = true; return reply; });
+  try {
+    await Promise.race([appendEntered, write.then(() => assert.fail("append bypassed the custom store"))]);
+    const renewal = await request(`renewing/lease/${renewing}/renew`, "POST", undefined,
+      AbortSignal.any([t.signal, AbortSignal.timeout(5_000)]));
+    assert.deepEqual(renewal, { ttlMs: store.ttlMs });
+    assert.equal(appended, false, "append finished before the gate opened");
+  } finally {
+    release();
+    await write;
+  }
+  assert.deepEqual(await write, { kept: 1 });
+});
+
 for (const placement of ["file", "memory", "relay", "custom"] as const) {
   test(`SDK ${placement} history passes the history binding kit`, { timeout: 60_000 }, async t => {
     const start = testResources(t);

@@ -15,13 +15,21 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use tokio::sync::Notify;
 
 // Use a real persistent backend, recording mutation boundaries at the history port.
 struct RecordingStore {
     store: Arc<history_http::SnapshotStore>,
     journal: PathBuf,
+    append_gate: Option<Arc<AppendGate>>,
 }
 const RECORDING_LEASE_TTL: Duration = Duration::from_secs(30);
+
+#[derive(Default)]
+struct AppendGate {
+    entered: Notify,
+    release: Notify,
+}
 
 impl RecordingStore {
     fn new(root: &Path) -> Result<Self> {
@@ -32,6 +40,7 @@ impl RecordingStore {
                 100,
             )?),
             journal: root.join("mutations.jsonl"),
+            append_gate: None,
         })
     }
     fn record(&self, id: &str, op: &str, data: Value) {
@@ -69,6 +78,10 @@ impl PortableHistoryStore for RecordingStore {
         self.store.release(id, lease).await
     }
     async fn append(&self, id: &str, lease: &str, entries: Vec<Value>) -> HistoryResult<u64> {
+        if let Some(gate) = &self.append_gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         self.record(id, "append", json!(entries));
         self.store.append(id, lease, entries).await
     }
@@ -91,6 +104,95 @@ impl PortableHistoryStore for RecordingStore {
     ) -> HistoryResult<Vec<String>> {
         self.store.erase(id, lease, entries).await
     }
+}
+
+#[tokio::test]
+async fn served_custom_store_renews_while_another_sessions_append_is_blocked() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let token = "custom-history-test-token-not-for-deployment";
+    let token_file = root.path().join("token");
+    fs::write(&token_file, token)?;
+    let gate = Arc::new(AppendGate::default());
+    let mut store = RecordingStore::new(root.path())?;
+    store.append_gate = Some(gate.clone());
+    let mut options = ServeHistoryOptions::new("127.0.0.1:0".parse().unwrap(), token_file);
+    options.lease_ttl = RECORDING_LEASE_TTL;
+    let server = listen_history(History::from_portable(store, true)?, options).await?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let writing = format!("{}/v1/sessions/writing", server.url);
+    let renewing = format!("{}/v1/sessions/renewing", server.url);
+    let acquire = |session: String| {
+        let client = &client;
+        async move {
+            client
+                .put(&session)
+                .bearer_auth(token)
+                .json(&json!({"project":"/p","created":1}))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap();
+            client
+                .post(format!("{session}/lease"))
+                .bearer_auth(token)
+                .json(&json!({"owner":"test-writer"}))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json::<LeaseGrant>()
+                .await
+                .unwrap()
+        }
+    };
+    let renewing_lease = acquire(renewing.clone()).await.lease;
+    let writing_lease = acquire(writing.clone()).await.lease;
+    let append = tokio::spawn(
+        client
+            .post(format!("{writing}/entries"))
+            .bearer_auth(token)
+            .json(&json!({"lease":writing_lease,"entries":[{"id":"entry","parentId":null}]}))
+            .timeout(Duration::from_secs(25))
+            .send(),
+    );
+    tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())
+        .await
+        .expect("append did not reach the custom store");
+    let renewal = client
+        .post(format!("{renewing}/lease/{renewing_lease}/renew"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .expect("renewal waited for the blocked append")
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(renewal, json!({"ttlMs":RECORDING_LEASE_TTL.as_millis()}));
+    assert!(
+        !append.is_finished(),
+        "append finished before the gate opened"
+    );
+    gate.release.notify_one();
+    let appended = append
+        .await
+        .unwrap()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(appended, json!({"kept":1}));
+    server.close().await;
+    Ok(())
 }
 
 struct ServedRuntime;
