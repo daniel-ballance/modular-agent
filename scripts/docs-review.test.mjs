@@ -180,6 +180,143 @@ test("an issue URL tracks a section from a link destination, a definition or vis
   assert.deepEqual(repo.run("--all").at, ["README.md:1", "README.md:3"]);
 });
 
+// A bare definition does not track its own section: check-docs-state resolves the URL only at a use.
+test("a reference link tracks the section where it is used, not where its definition sits", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "## Known gaps", "",
+    "A gap in Go, see [the issue][go].", "",
+    "## Findings", "",
+    "A finding with no use.", "",
+    "[go]: https://github.com/o/r/issues/5", "",
+    "## Other gaps", "",
+    "A gap, see [the issue][go].", "",
+  ]);
+  repo.commit("Docs");
+  assert.deepEqual(repo.run("--all").at, ["README.md:5", "README.md:7"]);
+});
+
+test("a reference definition under an earlier heading tracks the section that uses it", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "## Notes", "",
+    "[go]: https://github.com/o/r/issues/5", "",
+    "## Known gaps", "",
+    "A gap in Go, see [the issue][go].", "",
+  ]);
+  repo.commit("Docs");
+  assert.deepEqual(repo.run("--all").at, []);
+});
+
+test("reference labels match by CommonMark identifier, for full, collapsed and shortcut links", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "## Known gaps", "",
+    "A gap, see [the issue][  GO   Issue  ].", "",
+    "## Gaps in Rust", "",
+    "A gap, see [Rust Issue][].", "",
+    "## Gaps in Python", "",
+    "A gap, see [Python   Issue].", "",
+    "## Definitions", "",
+    "[go issue]: https://github.com/o/r/issues/5",
+    "[rust issue]: https://github.com/o/r/issues/6",
+    "[python issue]: https://github.com/o/r/issues/7",
+    "",
+  ]);
+  repo.commit("Docs");
+  assert.deepEqual(repo.run("--all").at, []);
+});
+
+test("an image reference tracks the section where it is used", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "## Known gaps", "",
+    "A gap, see ![the issue][img].", "",
+    "## Gaps in Rust", "",
+    "A gap, see ![rust][].", "",
+    "## Gaps in Python", "",
+    "A gap, see ![python].", "",
+    "## Direct image gaps", "",
+    "A gap, see ![alt](https://github.com/o/r/issues/11).", "",
+    "## Definitions", "",
+    "[img]: https://github.com/o/r/issues/8",
+    "[rust]: https://github.com/o/r/issues/9",
+    "[python]: https://github.com/o/r/issues/10",
+    "",
+  ]);
+  repo.commit("Docs");
+  assert.deepEqual(repo.run("--all").at, []);
+});
+
+test("an undefined reference does not track a section, and the first definition of a label wins", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "## Known gaps", "",
+    "A gap, see [the issue][missing].", "",
+    "## Gaps in Rust", "",
+    "A gap, see [nope].", "",
+    "## Gaps in Python", "",
+    "A gap, see [the issue][py].", "",
+    "[py]: https://example.invalid",
+    "[py]: https://github.com/o/r/issues/5",
+    "",
+    "## Gaps in TypeScript", "",
+    "A gap, see [the issue][ts].", "",
+    "[ts]: https://github.com/o/r/issues/6",
+    "[ts]: https://example.invalid",
+    "",
+    "## Other gaps", "",
+    "A gap, see [the issue][titled].", "",
+    '[titled]: https://example.invalid "https://github.com/o/r/issues/7"',
+    "",
+    "## Image gaps", "",
+    "A gap, see ![missing][no-image].", "",
+  ]);
+  repo.commit("Docs");
+  assert.deepEqual(repo.run("--all").at, [
+    "README.md:1", "README.md:3",
+    "README.md:5", "README.md:7",
+    "README.md:9", "README.md:11",
+    "README.md:23", "README.md:25",
+    "README.md:29", "README.md:31",
+  ]);
+});
+
+test("a reference inside indented or fenced code does not track a section", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "## Known gaps", "",
+    "A gap in Go.", "",
+    "    [the issue][go]", "",
+    "```md",
+    "[the issue][go]",
+    "```",
+    "",
+    "A gap, see `[the issue][go]`.", "",
+    "[go]: https://github.com/o/r/issues/5", "",
+    "## Gaps in Rust", "",
+    "A gap, see [the issue][go].", "",
+  ]);
+  repo.commit("Docs");
+  assert.deepEqual(repo.run("--all").at, ["README.md:1", "README.md:3", "README.md:11"]);
+});
+
+test("a reference in a table tracks the section that uses it", (t) => {
+  const repo = checkout(t);
+  repo.track("README.md", [
+    "## Known gaps", "",
+    "| Item | Note |",
+    "| --- | --- |",
+    "| Go | A gap, see [the issue][go] |",
+    "",
+    "## Later", "",
+    "[go]: https://github.com/o/r/issues/5",
+    "",
+  ]);
+  repo.commit("Docs");
+  assert.deepEqual(repo.run("--all").at, []);
+});
+
 test("an issue number is read from the text a block shows, across links and emphasis", (t) => {
   const repo = checkout(t);
   repo.track("README.md", [

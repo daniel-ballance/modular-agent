@@ -77,7 +77,8 @@ const read = (file) => git("show", `HEAD:${file}`);
 
 const unread = ["code", "inlineCode", "html"];
 const blocks = ["heading", "paragraph", "tableRow"];
-const destinations = ["link", "image", "definition"];
+const destinations = ["link", "image"];
+const references = ["linkReference", "imageReference"];
 // Text reads as one string across links and emphasis, so [C](u)#5 shows C#5 and #**5** shows #5.
 // Code, HTML, images and line breaks show as a space; table cells are separated by one.
 function shownText(node) {
@@ -85,20 +86,36 @@ function shownText(node) {
   if (!node.children) return " ";
   return node.children.map(shownText).join(node.type === "tableRow" ? " " : "");
 }
-// A link, autolink, image or definition names an issue by its destination, never its title; a block by what it shows.
-const namesIssue = (node) => (destinations.includes(node.type) ? issueUrl.test(node.url) : blocks.includes(node.type) && (issueUrl.test(shownText(node)) || issueNumber.test(shownText(node))));
+// The parser's identifier folds case and collapses whitespace, as CommonMark does. The first
+// definition of a label wins. A bare definition does not name an issue: only a use does, and it
+// names one where it is used, even when the definition sits under another heading.
+function referenceUrls(tree) {
+  const definitions = new Map();
+  for (const node of walk(tree)) {
+    if (node.type === "definition" && !definitions.has(node.identifier)) definitions.set(node.identifier, node.url);
+  }
+  return (node) => destinations.includes(node.type) ? node.url : references.includes(node.type) ? definitions.get(node.identifier) : undefined;
+}
+// A link, autolink, image or reference names an issue by its destination, never its title; a block by what it shows.
+const namesIssue = (node, urlOf) => {
+  const url = urlOf(node);
+  if (url !== undefined) return issueUrl.test(url);
+  return blocks.includes(node.type) && (issueUrl.test(shownText(node)) || issueNumber.test(shownText(node)));
+};
 
 // Code, inline code, HTML and front matter are blanked in place, not removed, so each line keeps its number.
 function markdown(source) {
   const text = withoutFrontMatter(source);
+  const tree = parseMarkdown(text);
+  const urlOf = referenceUrls(tree);
   let shown = "";
   let at = 0;
   const headings = [];
   const issues = [];
   const blockOf = new Map();
-  for (const node of walk(parseMarkdown(text))) {
+  for (const node of walk(tree)) {
     const { start, end } = node.position;
-    if (namesIssue(node)) issues.push(start.line - 1);
+    if (namesIssue(node, urlOf)) issues.push(start.line - 1);
     if (unread.includes(node.type)) {
       shown += text.slice(at, start.offset) + text.slice(start.offset, end.offset).replace(/[^\r\n]/g, " ");
       at = end.offset;
