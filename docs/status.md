@@ -20,7 +20,20 @@ Rust and TypeScript are the two maintained SDKs and `ma` builds ([ADR 0037](adr/
 
 ## 0.5.0
 
-Recorded on 2026-11-27 for the release commit, from `scripts/check.sh` on Linux (Fedora 44, x86-64, 32 logical CPUs). `scripts/macos-check.sh` has not yet been run on macOS for 0.5.0.
+Recorded on 2026-11-27 for the release commit, from `scripts/check.sh` on Linux (Fedora 44, x86-64, 32 logical CPUs; 44 steps, all passed). `scripts/macos-check.sh` has not yet been run on macOS for 0.5.0.
+
+| Check | Rust | TypeScript |
+|---|---|---|
+| Shared SDK scenarios, every placement | pass | 240/240 |
+| Reference checks against `ma` | 39/39 | 39/39 |
+| ACP kit against `ma`: core, covered approvals, approvals that wait, stdio rights | 219, 2, 50, 20 | 219, 2, 50, 20 |
+| Over WebSocket: plugin kit, listener isolation, named callers, ACP kit, portability with two credentials | 158, 14, 29, 224, 9 | 158, 14, 29, 224, 9 |
+| [AG-UI kit](../conformance/agui/README.md) against `ma` and an SDK fixture | 51/51 | 51/51 |
+| [Telemetry check](../conformance/telemetry/README.md), as host: in process and with the other language's plugins | 16, 2 | 16, 2 |
+| [ADR 0030](adr/0030-production-gaps.md) kits: ACP and history | 424/424 | 424/424 |
+| Own suites | 555 tests | 782 in each of two layouts, 5 live skipped; Claude sidecar: 56 passed, 1 live skipped |
+
+Rust's scenario runner reports pass or fail, not a count of scenarios. Each language's agents passed the erasure checks on the other language's history service: 2 of 2 pairings. The [project notes demo](../demos/project-notes/README.md) passed its scripted and crash runs. The [ops desk](../demos/ops-desk/README.md) passed its eight scripted checks. Every result above used scripted models.
 
 ## 0.4.0
 
