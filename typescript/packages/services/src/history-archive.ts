@@ -1,4 +1,4 @@
-import { filePendingErasure, memoryPendingErasure, type HistoryStore, type PendingErasure } from "@modular-agent/harness";
+import { filePendingErasure, memoryPendingErasure, type HistoryStore } from "@modular-agent/harness";
 import { BindingError, unavailable } from "./history-binding.js";
 import { RenewalLeases } from "./history-leases.js";
 import { Records, type HistoryTestControls } from "./history-records.js";
@@ -8,12 +8,14 @@ const archiveCleanup = new FinalizationRegistry<HistoryThread>(thread => { void 
 
 export class HistoryArchive {
 	private thread?: HistoryThread;
-	private registry?: PendingErasure;
+	private registry?: ReturnType<typeof filePendingErasure>;
 	private nextOwner = 0;
+	private memoryRegistry = memoryPendingErasure();
 	private local = new Map<string, number>();
 	private remote?: RenewalLeases;
 	private bootUnavailable = false;
-	constructor(readonly dir?: string, private pendingErasureDir = dir) {}
+	private wasEmpty = false;
+	constructor(readonly dir?: string, private pendingErasureDir = dir, private restoreWitness?: string) {}
 	get persistent() { return this.dir !== undefined; }
 
 	private storage(controls?: HistoryTestControls) {
@@ -21,12 +23,12 @@ export class HistoryArchive {
 		let exclusion: { epoch: number; until: number } | undefined;
 		if (this.dir !== undefined) {
 			// Establish the archive before the local registry can create files beside it.
-			const db = new Records(this.dir, 0, null, 100_000);
-			try { db.check(); } catch { this.bootUnavailable = true; }
+			const db = new Records(this.dir, 0, null, 100_000, undefined, undefined, this.restoreWitness);
+			try { this.wasEmpty = db.empty(); } catch { this.bootUnavailable = true; }
 			finally { db.close(); }
 			exclusion = { epoch: db.ttlEpoch, until: db.holdUntil };
 		}
-		this.thread = new HistoryThread({ archive: true, dir: this.dir, exclusion, controls });
+		this.thread = new HistoryThread({ archive: true, dir: this.dir, exclusion, controls, restoreWitness: this.restoreWitness });
 		archiveCleanup.register(this, this.thread);
 		return this.thread;
 	}
@@ -35,7 +37,7 @@ export class HistoryArchive {
 		if (this.remote) throw new Error("This archive is already being served");
 		const thread = this.storage(controls);
 		this.remote = leases;
-		try { await thread.run({ kind: "attach", ttl }); }
+		try { await thread.run({ kind: "attach", ttl }); this.wasEmpty = false; }
 		catch (error) { this.remote = undefined; throw error; }
 		return { thread, detach: async () => {
 			try { await thread.run({ kind: "detach" }); }
@@ -47,12 +49,18 @@ export class HistoryArchive {
 		const thread = this.storage();
 		if (this.bootUnavailable || !thread.available) throw unavailable();
 		const owner = ++this.nextOwner;
+		const registry = this.pendingErasureDir === undefined ? undefined : this.registry ??= filePendingErasure(this.pendingErasureDir, {
+			requireExisting: !this.wasEmpty, restoreWitness: this.restoreWitness && `${this.restoreWitness}.registry`, root: this.dir,
+		});
+		registry?.check();
+		const run = thread.run.bind(thread);
+		const checked: typeof thread.run = job => { if (job.kind === "local" && job.call[0] !== "close") registry?.check(); return run(job); };
 		return {
 			supports: { portableSessions: this.persistent, persistent: this.persistent, erasure: true },
-			pendingErasure: this.registry ??= this.pendingErasureDir ? filePendingErasure(this.pendingErasureDir) : memoryPendingErasure(),
-			create: meta => thread.run({ kind: "local", owner, call: ["create", meta] }),
+			pendingErasure: registry ?? this.memoryRegistry,
+			create: meta => checked({ kind: "local", owner, call: ["create", meta] }),
 			openForWriting: async id => {
-				await thread.run({ kind: "local", owner, call: ["openForWriting", id] });
+				await checked({ kind: "local", owner, call: ["openForWriting", id] });
 				this.local.set(id, owner);
 			},
 			writerActive: id => thread.available && (this.local.has(id) || this.remote?.current(id) !== undefined),
@@ -64,10 +72,10 @@ export class HistoryArchive {
 				await thread.run({ kind: "local", owner, call: ["close", id] });
 				if (this.local.get(id) === owner) this.local.delete(id);
 			},
-			append: (id, batch) => thread.run({ kind: "local", owner, call: ["append", id, batch] }),
-			load: id => thread.run({ kind: "local", owner, call: ["load", id] }),
-			list: filter => thread.run({ kind: "local", owner, call: ["list", filter] }),
-			erase: (id, targets) => thread.run({ kind: "local", owner, call: ["erase", id, targets] }),
+			append: (id, batch) => checked({ kind: "local", owner, call: ["append", id, batch] }),
+			load: id => checked({ kind: "local", owner, call: ["load", id] }),
+			list: filter => checked({ kind: "local", owner, call: ["list", filter] }),
+			erase: (id, targets) => checked({ kind: "local", owner, call: ["erase", id, targets] }),
 		};
 	}
 }

@@ -6,7 +6,7 @@ import { HistoryLeases, leaseClock } from "./history-leases.js";
 import { Records, type HistoryTestControls } from "./history-records.js";
 import { historyRequest, type HistoryRequest } from "./history-request.js";
 
-type ThreadOptions = { dir?: string; controls?: HistoryTestControls } & (
+type ThreadOptions = { dir?: string; restoreWitness?: string; controls?: HistoryTestControls } & (
 	{ archive: true; exclusion?: { epoch: number; until: number } } |
 	{ archive: false; ttl: number; retention: number | null; quota: number; profile: boolean });
 type LocalMethods = Pick<HistoryStore, "create" | "openForWriting" | "close" | "append" | "load" | "list" | "erase">;
@@ -73,8 +73,8 @@ export class HistoryThread {
 }
 
 function serveThread(config: ThreadOptions, failedState: Int32Array<SharedArrayBuffer>) {
-	const archive = config.archive ? new ArchiveRecords(config.dir, config.exclusion, config.controls, failedState) : undefined;
-	let records = config.archive ? undefined : new Records(config.dir, config.ttl, config.retention, config.quota, config.controls, failedState);
+	const archive = config.archive ? new ArchiveRecords(config.dir, config.exclusion, config.controls, failedState, config.restoreWitness) : undefined;
+	let records = config.archive ? undefined : new Records(config.dir, config.ttl, config.retention, config.quota, config.controls, failedState, config.restoreWitness);
 	const nowUs = leaseClock(config.controls?.leaseClock);
 	let leases = config.archive ? undefined : new HistoryLeases(config.ttl, nowUs);
 	let ttl = config.archive ? 0 : config.ttl;

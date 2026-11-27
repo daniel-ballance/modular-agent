@@ -1,0 +1,4 @@
+[
+  { "change": "erasure", "recordKind": "erasure" },
+  { "change": "revocation", "recordKind": "actorLeft" }
+]

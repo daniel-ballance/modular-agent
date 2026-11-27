@@ -89,6 +89,13 @@ Omit the timeout (`None` in Rust) to request no deadline. For served calls, the 
 | Questions that outlast their turns | No builder switch. The SDK installs its questions plugin by default; it declares `questionsOutlastTurns` and `lateAnswersStartTurns` as true. | `createAgent({ questionsOutlastTurns: true })` enables both declarations. They default to false. |
 | Changing settings during a turn | No builder switch. The SDK declares `settingsDuringTurn: "refused"`; a `Session::set_setting` change during a running turn returns `Code::Busy`. | `createAgent` defaults to `settingsDuringTurn: "nextTurn"`. Set `settingsDuringTurn: "refused"` for `session.setSetting` to raise `busy` during a running turn. |
 
+## History restore witness
+
+- Rust: `file_history_with_options(dir, FileHistoryOptions { restore_witness: Some(path.into()) })`. Pass the configured store to `listen_history` or `serve_history` for the built-in HTTP snapshot service. The witness records the registry and snapshot digests, including snapshots carrying stored authority changes.
+- TypeScript: `fileHistory(dir, { restoreWitness: path })`. Pass it to `serveHistory` for the built-in HTTP SQLite service. `historyService({ dir, restoreWitness: path, ... })` also accepts it. The witness tracks the database that commits history, stored authority changes and HTTP erasure plans together. Direct file history additionally uses `path + ".registry"` to witness the separate pending-erasure registry. `pendingErasureDir` controls where that registry lives.
+
+Provision the witness with a new store. Use a unique path in an existing private directory outside the history and registry backup/rollback domain. Keep the witness current and configured across restarts; do not restore it from a history backup. Stop writers and the service before backup or restore, and run only one live store per witness. Both SDKs reject older or mismatched restores, including rollback across a deletion, pending erasure publication or stored authority revocation. They also reject a missing or unreadable configured witness. A crash between the witness update and the local commit can leave the store unavailable; recover only with state verified to match the witness, never by resetting it. Without a witness the SDK cannot detect a matching rollback. Custom stores and external authority sources must provide their own freshness proof.
+
 ## Rust
 
 - Use `agent.session_summary(id, &viewer)?` to read kept work without opening the session. An inaccessible or missing session returns `None`.

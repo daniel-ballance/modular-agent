@@ -1,3 +1,4 @@
+import { RestoreWitness } from "@modular-agent/harness";
 import { randomBytes } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -70,20 +71,26 @@ export type HistoryTestControls = {
 export class Records {
 	private db: DatabaseSync;
 	private failed = false;
+	private witness?: RestoreWitness;
 	private disk?: { path: string; dev: bigint; ino: bigint };
 	holdUntil = 0;
 	ttlEpoch = 0;
 
-	constructor(dir: string | undefined, ttl: number, readonly retention: number | null, private quota: number, private controls?: HistoryTestControls, private failedState?: Int32Array<SharedArrayBuffer>) {
+	constructor(dir: string | undefined, ttl: number, readonly retention: number | null, private quota: number, private controls?: HistoryTestControls, private failedState?: Int32Array<SharedArrayBuffer>, restoreWitness?: string) {
 		if (dir !== undefined) {
 			mkdirSync(dir, { recursive: true, mode: 0o700 });
 			if (readdirSync(dir).some((name) => name.endsWith(".jsonl"))) throw new Error("History directory has no verifiable lease bound; use a fresh directory");
+		}
+		if (restoreWitness !== undefined) {
+			if (dir === undefined) throw unavailable();
+			this.witness = new RestoreWitness(dir, restoreWitness);
 		}
 		const path = dir === undefined ? undefined : join(dir, "history.sqlite");
 		const marker = dir === undefined ? undefined : join(dir, "pending-erasure.profile");
 		const declared = marker !== undefined && existsSync(marker);
 		const existing = path !== undefined && existsSync(path);
 		if (declared !== existing) {
+			if (this.witness) throw unavailable();
 			// Do not create an empty archive in the place of an existing store.
 			this.db = new DatabaseSync(":memory:");
 			this.fail();
@@ -91,6 +98,7 @@ export class Records {
 		}
 		if (path && !existing) {
 			if (readdirSync(dir!).length) throw new Error("A new history store requires an empty directory");
+			this.witness?.reserve();
 			closeSync(openSync(path, "wx", 0o600));
 		}
 		this.db = new DatabaseSync(path ?? ":memory:");
@@ -122,6 +130,14 @@ export class Records {
 				this.revision();
 				this.db.prepare("SELECT seq,id,operation,copies,session_ids FROM registry_intents LIMIT 0");
 				this.db.prepare("SELECT session,intent,record,json FROM registry_plans LIMIT 0");
+			}
+			const enrolled = this.db.prepare("SELECT value FROM settings WHERE key='restore-witness'").get();
+			if (existing) {
+				if (Boolean(enrolled) !== Boolean(this.witness)) throw unavailable();
+				this.witness?.check(this.revision());
+			} else if (this.witness) {
+				this.db.exec("INSERT INTO settings VALUES ('restore-witness',1)");
+				this.witness.publish(this.revision());
 			}
 			const prior = this.db.prepare("SELECT value FROM settings WHERE key='ttl-bound'").get()?.value;
 			if (existing && prior === undefined) throw new Error("Stored TTL bound is missing");
@@ -157,14 +173,24 @@ export class Records {
 			this.bumpTtlEpoch();
 		});
 	}
-	check() { if (this.failed) throw unavailable(); }
+	empty() { this.check(); return !this.db.prepare("SELECT 1 FROM sessions LIMIT 1").get(); }
+	check() {
+		if (this.failed) throw unavailable();
+		if (this.witness) { this.witness.check(this.revision()); }
+	}
 	private commit<T>(operation: () => T, authorize?: () => void): T {
+		this.check();
 		this.db.exec("BEGIN IMMEDIATE");
 		let committing = false;
 		try {
+			const prior = this.witness && this.revision();
 			const result = operation();
 			authorize?.();
 			committing = true;
+			if (this.witness) {
+				const next = this.revision();
+				if (next !== prior) this.witness.publish(next);
+			}
 			this.db.exec("COMMIT");
 			return result;
 		} catch (error) {

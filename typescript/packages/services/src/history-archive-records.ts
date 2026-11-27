@@ -9,13 +9,13 @@ export class ArchiveRecords {
 	private local = new Map<string, number>();
 	private remote?: { leased(id: string): boolean; ttl: number };
 	constructor(readonly dir: string | undefined, private exclusion?: { epoch: number; until: number },
-		private controls?: HistoryTestControls, private failedState?: Int32Array<SharedArrayBuffer>) {}
+		private controls?: HistoryTestControls, private failedState?: Int32Array<SharedArrayBuffer>, private restoreWitness?: string) {}
 	get persistent() { return this.dir !== undefined; }
 
 	private db() {
 		if (this.failedState && Atomics.load(this.failedState, 0)) throw unavailable();
 		if (!this.records) {
-			this.records = new Records(this.dir, 0, null, 100_000, this.controls, this.failedState);
+			this.records = new Records(this.dir, 0, null, 100_000, this.controls, this.failedState, this.restoreWitness);
 			if (this.exclusion?.epoch === this.records.ttlEpoch) this.records.holdUntil = this.exclusion.until;
 			else this.exclusion = { epoch: this.records.ttlEpoch, until: this.records.holdUntil };
 		}
@@ -27,6 +27,7 @@ export class ArchiveRecords {
 	attach(leased: (id: string) => boolean, ttl: number) {
 		if (this.remote) throw new Error("This archive is already being served");
 		const records = this.db();
+		if (this.restoreWitness) records.check();
 		records.bindTtl(ttl);
 		this.remote = { leased, ttl };
 		return {

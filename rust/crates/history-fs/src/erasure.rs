@@ -16,24 +16,31 @@ struct Intent {
     confirmed: BTreeMap<String, Vec<String>>,
 }
 
-fn unavailable(error: impl std::fmt::Display) -> anyhow::Error {
+pub(super) fn unavailable(error: impl std::fmt::Display) -> anyhow::Error {
     OperationError::Unavailable(format!("pending erasure unavailable: {error}")).into()
 }
 
 impl FileHistory {
-    pub(super) fn initialize_registry(&self) -> Result<()> {
-        let _lock = self.lock()?;
-        match fs::create_dir(self.root.join(".erasure")) {
-            Ok(()) => {
-                self.write_registry(&Registry::default())?;
-                File::open(&self.root)?.sync_all()?;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                self.read_registry()?;
-            }
-            Err(e) => return Err(e.into()),
+    pub(super) fn initialize_registry(&self) -> Result<bool> {
+        let dir = self.root.join(".erasure");
+        if dir.try_exists()? {
+            self.read_registry()?;
+            return Ok(false);
         }
-        Ok(())
+        ensure!(
+            self.snapshots()?.is_empty(),
+            unavailable("missing registry for existing history")
+        );
+        if let Some(witness) = &self.witness {
+            witness.require_unused()?;
+        }
+        fs::create_dir(&dir)?;
+        self.replace(
+            &dir.join("intents"),
+            &serde_json::to_vec(&Registry::default())?,
+        )?;
+        File::open(&self.root)?.sync_all()?;
+        Ok(true)
     }
 
     fn read_registry(&self) -> Result<Registry> {
@@ -43,7 +50,7 @@ impl FileHistory {
 
     fn write_registry(&self, registry: &Registry) -> Result<()> {
         let dir = self.root.join(".erasure");
-        self.replace(&dir.join("intents"), &serde_json::to_vec(registry)?)
+        self.replace_tracked(&dir.join("intents"), &serde_json::to_vec(registry)?)
             .map_err(unavailable)
     }
 

@@ -300,8 +300,24 @@ pub fn portable_file_history(
 }
 
 pub fn file_history(dir: impl AsRef<Path>) -> Result<History> {
+    file_history_with_options(dir, FileHistoryOptions::default())
+}
+
+/// Options for native file history and the HTTP snapshot service built from it.
+#[derive(Clone, Debug, Default)]
+pub struct FileHistoryOptions {
+    pub restore_witness: Option<std::path::PathBuf>,
+}
+
+pub fn file_history_with_options(
+    dir: impl AsRef<Path>,
+    options: FileHistoryOptions,
+) -> Result<History> {
     Ok(History(
-        Arc::new(history_fs::FileHistory::new(dir.as_ref())?),
+        Arc::new(history_fs::FileHistory::with_restore_witness(
+            dir.as_ref(),
+            options.restore_witness.as_deref(),
+        )?),
         true,
         "file",
         None,

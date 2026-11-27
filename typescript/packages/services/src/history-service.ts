@@ -66,7 +66,7 @@ async function bodyBytes(req: IncomingMessage) {
 }
 
 export interface HistoryServiceOptions {
-	dir?: string; archive?: HistoryArchive; store?: HistoryServiceStore; token: string; port?: number; leaseTtl?: number; retention?: number | null;
+	dir?: string; restoreWitness?: string; archive?: HistoryArchive; store?: HistoryServiceStore; token: string; port?: number; leaseTtl?: number; retention?: number | null;
 	/** Permanent ID reservations count toward this operator-supplied limit. */
 	maxSessions?: number;
 	/** Fault injection for the history client tests. */
@@ -76,8 +76,11 @@ export interface HistoryServiceOptions {
 /** A single loopback HTTP listener. The operator must trust every local account,
  * provision a random bearer token, and keep this directory on durable local storage. */
 export async function historyService(options: HistoryServiceOptions, controls?: HistoryTestControls) {
-	checkSettings("history", options, "dir", "archive", "store", "token", "port", "leaseTtl", "retention", "maxSessions", "dropAppendResponses");
+	checkSettings("history", options, "dir", "restoreWitness", "archive", "store", "token", "port", "leaseTtl", "retention", "maxSessions", "dropAppendResponses");
 	const { leaseTtl } = options;
+	if (options.restoreWitness !== undefined && (options.dir === undefined || options.archive || options.store)) {
+		throw new Error("Configure restoreWitness on the built-in directory store");
+	}
 	if (leaseTtl !== undefined && (!Number.isSafeInteger(leaseTtl) || leaseTtl < 1)) {
 		throw new RangeError("leaseTtl must be a whole number of milliseconds, at least 1");
 	}
@@ -94,7 +97,7 @@ export async function historyService(options: HistoryServiceOptions, controls?: 
 	const profile = !options.store && (options.archive?.persistent ?? options.dir !== undefined);
 	const attached = await options.archive?.attach(leases, ttlMs, controls);
 	const thread = options.store ? undefined : attached?.thread ?? new HistoryThread({
-		archive: false, dir: options.dir, ttl: ttlMs, retention, quota, profile, controls,
+		archive: false, dir: options.dir, restoreWitness: options.restoreWitness, ttl: ttlMs, retention, quota, profile, controls,
 	});
 	if (thread && !attached) {
 		try { await thread.run({ kind: "ready" }); }

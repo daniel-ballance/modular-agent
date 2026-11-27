@@ -3,7 +3,7 @@ export { HistoryServiceError, parseHistoryJson, encodeHistoryJson, equalHistoryJ
   type HistoryServiceStore, type HistoryServiceErrorCode, type HistoryReadOptions, type HistoryPage,
   type HistorySessionPage, type HistoryJson, type HistoryJsonObject } from "@modular-agent/services";
 export { MemoryHistory } from "./history.js";
-export type { AgentOptions, Approval, Durability, ProcessPlugin, ServicePlugin, SessionInfo, SessionViewer, SessionListEntry, SessionOptions, ServeAguiOptions, ServeAcpOptions, ServeAcpServiceOptions, AcpActorToken } from "./agent.js";
+export type { AgentOptions, Approval, FileHistoryOptions, Durability, ProcessPlugin, ServicePlugin, SessionInfo, SessionViewer, SessionListEntry, SessionOptions, ServeAguiOptions, ServeAcpOptions, ServeAcpServiceOptions, AcpActorToken } from "./agent.js";
 export { durableRuntime, transientRuntime, localEnvironment, environmentCredentials, fileCredentials } from "./parts.js";
 export { advanceSecretSlot, secretStaging, withCredentialLock } from "@modular-agent/harness";
 export type * from "./parts.js";

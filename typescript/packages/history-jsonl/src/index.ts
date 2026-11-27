@@ -38,7 +38,13 @@ export class JsonlHistoryStore implements HistoryStore {
 	/** New sessions not yet worth a file: their header and batches so far. */
 	private unsaved = new Map<string, { meta: StoredSession; batches: HistoryEntry[][] }>();
 	private registry?: ReturnType<typeof filePendingErasure>;
-	get pendingErasure() { return this.registry ??= filePendingErasure(this.dir); }
+	get pendingErasure() {
+		return this.registry ??= filePendingErasure(this.dir, { requireExisting: this.hasRecords() });
+	}
+	private hasRecords(): boolean {
+		return existsSync(this.dir) && readdirSync(this.dir, { withFileTypes: true }).some(folder =>
+			folder.isDirectory() && readdirSync(join(this.dir, folder.name)).some(file => file.endsWith(".jsonl")));
+	}
 	constructor(private dir: string) {}
 
 	private fileFor(meta: { id: string; project: string }): string {
@@ -88,6 +94,7 @@ export class JsonlHistoryStore implements HistoryStore {
 	}
 
 	async openForWriting(id: string): Promise<void> {
+		this.pendingErasure.check();
 		if (this.held.has(id)) return;
 		if (this.unsaved.has(id)) {
 			this.held.add(id);
@@ -111,6 +118,7 @@ export class JsonlHistoryStore implements HistoryStore {
 	}
 
 	async append(id: string, batch: HistoryEntry[]): Promise<void> {
+		this.pendingErasure.check();
 		if (!batch.length) return;
 		if (!this.held.has(id)) throw Object.assign(new Error(`Session ${id} is not open for writing`), { code: "lost" });
 		const pending = this.unsaved.get(id);
@@ -161,12 +169,14 @@ export class JsonlHistoryStore implements HistoryStore {
 	}
 
 	async load(id: string): Promise<{ meta: StoredSession; entries: HistoryEntry[] }> {
+		this.pendingErasure.check();
 		const pending = this.unsaved.get(id);
 		if (pending) return { meta: pending.meta, entries: pending.batches.flat() };
 		return this.read(this.find(id));
 	}
 
 	async list(filter?: { project?: string }): Promise<StoredSession[]> {
+		this.pendingErasure.check();
 		if (!existsSync(this.dir)) return [];
 		const folders = filter?.project ? [slug(filter.project)] : readdirSync(this.dir, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name);
 		const out: StoredSession[] = [];
@@ -188,6 +198,7 @@ export class JsonlHistoryStore implements HistoryStore {
 
 	/** Erase the content of these entries in every line that holds it, and rewrite the file. */
 	async erase(id: string, entryIds: string[]): Promise<void> {
+		this.pendingErasure.check();
 		const pending = this.unsaved.get(id);
 		if (pending) {
 			const targets = new Set(entryIds);

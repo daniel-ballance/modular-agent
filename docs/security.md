@@ -61,7 +61,7 @@ See [Secrets](contracts.md#secrets) for credential access and storing secret ans
 
 See [The output gate](contracts.md#the-output-gate) for raw records, recipient views and when bypass is disallowed, [Shared data](bindings/data.md#output-events) for valid redactions, and [ACP](bindings/acp.md#output-gate) for withheld replies. Even without Provider-side tools or conversation state, a model request can disclose data, incur costs or leave records with the Provider.
 
-[Erasure](contracts.md#erasure) defines the Harness's role; [history HTTP](bindings/history-http.md#erasure) defines the service's. The operator MUST verify restored records against an authority and erasure freshness source independent of the restored backup. Without proof that newer revocations and deletions are enforced, the operator MUST keep the restore unavailable.
+[Erasure](contracts.md#erasure) defines the Harness's role; [history HTTP](bindings/history-http.md#erasure) defines the service's. The operator MUST verify restored records against an authority and erasure freshness source independent of the restored backup. Without proof that newer revocations and deletions are enforced, the operator MUST keep the restore unavailable. A matching history and registry backup is not proof. A configured witness must be kept outside their rollback domain and checked before records are served or writers admitted; it must not be reset to match a restore.
 
 [Authority](contracts.md#authority) lists the audit events and entries the operator needs. Operational logs SHOULD omit raw session content.
 

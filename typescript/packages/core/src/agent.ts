@@ -121,10 +121,12 @@ const local = { id: "user", kind: "user" as const, authority: ALL_AUTHORITY };
 let fileArchive: (store: FileHistory) => HistoryArchive;
 let openHttpHistory: (store: HttpHistory) => Promise<HistoryStore>;
 let httpUpstream: (store: HttpHistory) => Promise<{ url: string; token: string }>;
+export interface FileHistoryOptions { pendingErasureDir?: string; restoreWitness?: string }
 export class FileHistory {
   #archive: HistoryArchive;
-  constructor(dir: string, options?: { pendingErasureDir?: string }) {
-    this.#archive = new HistoryArchive(resolve(dir), options?.pendingErasureDir === undefined ? undefined : resolve(options.pendingErasureDir));
+  constructor(dir: string, options?: FileHistoryOptions) {
+    const { pendingErasureDir, restoreWitness } = options ?? {};
+    this.#archive = new HistoryArchive(resolve(dir), pendingErasureDir && resolve(pendingErasureDir), restoreWitness && resolve(restoreWitness));
   }
   static { fileArchive = store => store.#archive; }
 }
@@ -182,7 +184,7 @@ export async function serveHistory(store: FileHistory | MemoryHistory | HttpHist
       service.server.close(error => error ? reject(error) : resolve())) };
   });
 }
-export const fileHistory = (dir: string, options?: { pendingErasureDir?: string }): FileHistory => new FileHistory(dir, options);
+export const fileHistory = (dir: string, options?: FileHistoryOptions): FileHistory => new FileHistory(dir, options);
 export const memoryHistory = (): MemoryHistory => new MemoryHistory();
 
 export let createAgent: (options?: AgentOptions) => Promise<Agent>;
@@ -377,6 +379,7 @@ export class Agent {
       if (agent) await agent.close().catch(() => {});
       else await rm(scratch, { recursive: true, force: true });
       if ((modelError !== undefined && error === modelError) || error instanceof AgentError && error.code === "not_supported") throw error;
+      if ((error as { code?: string } | null)?.code === "unavailable") throw new AgentError("unavailable", messageOf(error), undefined, error);
       throw new AgentError("invalid_composition", messageOf(error), undefined, error);
     }
   }
