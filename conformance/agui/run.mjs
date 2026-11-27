@@ -16,8 +16,10 @@ import { receipts } from './receipts.mjs';
 import { waiting } from './waiting.mjs';
 import { at, deadline } from './wire.mjs';
 
-const cases = { ...basic, ...advanced, ...waiting, ...closures, ...receipts };
-const roles = ['owner', 'rotated', 'sibling', 'foreign', 'watch', 'tenant', 'project'];
+import { openPolicy } from "./open-policy.mjs";
+
+const cases = { ...basic, ...advanced, ...waiting, ...closures, ...receipts, "join-on-open": openPolicy };
+const roles = ['owner', 'rotated', 'sibling', 'foreign', 'watch', 'tenant', 'project', ...openPolicy.roles.filter(role => role !== 'foreign')];
 const usage = `node run.mjs [--only CASE[,CASE...]] -- /absolute/path/to/fixture [args...]
 node run.mjs --only CASE --url ORIGIN --token-file FILE [--ROLE-token-file FILE ...]
              [--control URL --control-token-file FILE]
@@ -93,7 +95,7 @@ async function prepare(folder, command, name, scenario, interrupted) {
   const policy = join(folder, 'fixture.json');
   const controlFile = join(folder, 'control.token');
   const tokens = {}, tokenFiles = {};
-  for (const role of roles) {
+  for (const role of roles.filter(role => role === 'foreign' || !openPolicy.roles.includes(role) || name === 'join-on-open')) {
     tokens[role] = randomBytes(32).toString('hex');
     tokenFiles[role] = join(folder, role + '.token');
     await writeFile(tokenFiles[role], tokens[role] + '\n', { mode: 0o600 });

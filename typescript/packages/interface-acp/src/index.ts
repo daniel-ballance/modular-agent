@@ -1,3 +1,4 @@
+import { localAcpActor, openPolicy, withSessionOpenPolicy } from "./open-policy.js";
 import { carrier, currentSpan, historyForPeer, readTrace, withTrace } from "@modular-agent/harness/telemetry";
 import { Readable, Writable } from "node:stream";
 import { createRequire } from "node:module";
@@ -69,15 +70,13 @@ function kindOf(name: string): acp.ToolKind {
  * as an editor or a host like T3 Code, drives the agent through it. Each ACP
  * session is one of our sessions, with the same id.
  */
-export function localAcpActor(id = "acp-user"): Actor & { kind: "host" } {
-	return { id, kind: "host", authority: [...ALL_AUTHORITY] };
-}
+export { localAcpActor } from "./open-policy.js";
 export interface AcpOptions {
 	/** Accept per-request trace context from this operator-trusted peer. */
 	traceTrusted?: boolean;
 	actorId?: string;
 	approvalRouteId?: string;
-	actor?: Actor;
+	actor?: Actor; joinOnOpen?: boolean;
 	allowTenant?(tenant: string | null): boolean;
 	allowAttached?(project: string, tenant?: string): boolean;
 	authorizeSession?(id: string): Promise<unknown>;
@@ -89,7 +88,7 @@ export interface AcpOptions {
 	listOwner?(id: string): { api: PluginApi; allowJoin: boolean };
 	declaration?: (sessionId?: string) => Record<string, unknown>;
 	projectSettings?(project: string): Promise<Record<string, unknown>>;
-	project?(cwd: string, sessionId?: string, tools?: boolean): Promise<{ api: PluginApi; cwd: string }>;
+	project?(cwd: string, sessionId?: string, tools?: boolean): Promise<{ api: PluginApi; cwd: string; severalActors?: boolean }>;
 	claim?(sessionId: string, api: PluginApi): void;
 	associate?(sessionId: string, api: PluginApi): void;
 	attachMcp?(sessionId: string, project: string, servers: Record<string, AcpMcpServer>, api: PluginApi): Promise<unknown>;
@@ -291,7 +290,7 @@ export class AcpInterface implements InterfaceCapability {
 			const sessions = [];
 			for (const {id, project:cwd} of all) {
 				if (project && project !== cwd || this.options.allowSession && !await this.options.allowSession(id, cwd)) continue;
-				const { api, allowJoin } = this.options.listOwner?.(id) ?? { api:this.apiFor(id), allowJoin:true };
+				const { api, allowJoin } = this.options.listOwner?.(id) ?? { api:this.apiFor(id), allowJoin:this.options.joinOnOpen ?? (this.options.actor === undefined) };
 				const inspect = () => api.sessionSummary(id, {
 					actor:this.actor(), allowJoin, scope:this.options.allowAttached, inTurn:this.attached(id) || undefined, secrets:true,
 					represented:[...this.options.represents ?? []], present:this.presentActors(id),
@@ -370,8 +369,8 @@ export class AcpInterface implements InterfaceCapability {
 		const id = params.sessionId, operation = replay ? "load" : "resume";
 		if (this.options.actor && !this.actor().authority.includes("watch")) throw bindingError("forbidden");
 		const servers = this.hostServers(params.mcpServers);
-		const { api, cwd } = await this.checked(async () =>
-			await this.options.project?.(params.cwd, id, !!servers) ?? { api: this.apiFor(id), cwd: params.cwd });
+		const { api, cwd, severalActors } = await this.checked(async () =>
+			await this.options.project?.(params.cwd, id, !!servers) ?? { api: this.apiFor(id), cwd: params.cwd, severalActors: true });
 		const previous = this.sessions.get(id), attached = !!previous?.writer && !previous.writer.aborted;
 		const state = previous ?? this.state();
 		if (this.opening.has(id)) throw bindingError("busy");
@@ -383,8 +382,9 @@ export class AcpInterface implements InterfaceCapability {
 		});
 		try {
 			if (!this.opening.get(id)) throw bindingError("lost");
-			await this.checked(() => this.traced(params._meta, () =>
-				api.openSession(id, this.actor(), () => this.attachMcp(api, id, attached ? undefined : servers, cwd), operation)));
+			const policy = openPolicy(id, cwd, this.options, severalActors, !!servers);
+			await this.checked(() => this.traced(params._meta, () => withSessionOpenPolicy(policy, () =>
+				api.openSession(id, this.actor(), () => this.attachMcp(api, id, attached ? undefined : servers, cwd), operation))));
 			if (!attached) this.watchClose(id, state);
 			const result = await this.gateReply(id, replay ? "session/load" : "session/resume", await this.openResponse(id));
 			if (replay && !attached && this.hasRight(id, this.actorId, "watch")) await this.replay(id);

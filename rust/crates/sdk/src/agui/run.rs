@@ -67,7 +67,7 @@ impl Service {
         headers: HeaderMap,
     ) -> R<Response> {
         let id = &req.thread;
-        let session = self.attach(&a, id).await?;
+        let session = self.attach(&a, id, &[]).await?;
         let c = self.client(id, &a)?;
         let guard = c.run.clone().try_lock_owned().map_err(|_| Fail::Conflict)?;
         let d = self.watch(&a, id)?;

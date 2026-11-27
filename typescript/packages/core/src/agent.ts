@@ -76,6 +76,8 @@ export interface ServeAcpOptions {
   /** Trusted operator identity; never taken from a client request. */
   actorId?: string;
   actor?: Actor;
+  /** Stdio only. Defaults to true for the single local principal. */
+  joinOnOpen?: boolean;
   projects?: readonly string[];
   tenants?: readonly (string | null)[];
   rights?: readonly Right[];
@@ -98,6 +100,8 @@ export function defaultAcpActor(): Actor {
 }
 export interface AcpActorToken {
   tokenFile: string;
+  /** Allow an eligible unrecorded actor to join on network open. Defaults to false. */
+  joinOnOpen?: boolean;
   /** Opt this authenticated network peer into trace context. */
   traceTrusted?: boolean;
   actor: Actor;
@@ -105,7 +109,7 @@ export interface AcpActorToken {
   projects?: readonly string[];
   represents?: readonly string[];
 }
-export interface ServeAcpServiceOptions extends ServeAcpOptions, ListenOptions {
+export interface ServeAcpServiceOptions extends Omit<ServeAcpOptions, "joinOnOpen">, ListenOptions {
   actors: readonly AcpActorToken[];
   controlTimeoutMs?: number;
 }
@@ -113,7 +117,7 @@ export interface ServeAguiOptions extends ServeAcpServiceOptions, AguiProjection
   actors: readonly (AcpActorToken & { clientId: string })[];
   acp?: boolean; tenant?: string; origins?: readonly string[];
 }
-export type SessionViewer = Omit<ListingViewer, "actor" | "allowJoin"> & { actor: Actor };
+export type SessionViewer = Omit<ListingViewer, "actor" | "allowJoin"> & { actor: Actor; joinOnOpen?: boolean };
 export interface SessionListEntry { id: string; project: string; updated: number; model?: ModelRef; title?: string }
 export interface SessionInfo { id: string; project: string; created: number; updated: number; settings: Settings; tenant?: string }
 const local = { id: "user", kind: "user" as const, authority: ALL_AUTHORITY };
@@ -568,7 +572,7 @@ export class Agent {
     this.#check();
     if (!/^[\w-]+$/.test(id)) throw new AgentError("invalid_params", "Invalid session id");
     const { rights, ...actor } = viewer.actor;
-    return checked(() => this.#api.sessionSummary(id, { ...viewer, actor:{...actor, authority:rights}, allowJoin:this.#authority.severalActors }));
+    return checked(() => this.#api.sessionSummary(id, { ...viewer, actor:{...actor, authority:rights}, allowJoin:viewer.joinOnOpen === true && this.#authority.severalActors }));
   }
   /** Read saved session metadata without opening it or starting recovery. */
   async sessionInfo(id: string): Promise<SessionInfo> {
@@ -773,7 +777,7 @@ export class Agent {
       selected ??= this;
       return selected;
     };
-    const prepareConnection = (scope: Awaited<ReturnType<typeof makeScope>>, network: boolean) => {
+    const prepareConnection = (scope: Awaited<ReturnType<typeof makeScope>> & { joinOnOpen?: boolean }, network: boolean) => {
       const attached = new Map<PluginApi, { detach(): void; agent: Agent }>();
       let disconnected = false;
       const attach = (agent: Agent) => {
@@ -783,7 +787,7 @@ export class Agent {
         const off = binding.acp.attach(agent.#api, agent === this);
         attached.set(agent.#api, { agent, detach() { off(); remove(); } });
       };
-      const { actor } = scope;
+      const { actor } = scope, joinOnOpen = scope.joinOnOpen === true;
       const inaccessible = () => new AgentError("forbidden", "Session is inaccessible");
       const authorize = async (id: string, tools = false) => {
         const owner = sessions.get(id) ?? this;
@@ -792,11 +796,12 @@ export class Agent {
           throw error;
         });
         if (!scope.allowProject(saved.project) || !scope.allowTenant(saved.tenant ?? null) ||
-            !await owner.#h.canDiscoverSession(id, actor, !network || owner.#authority.severalActors, tools ? ["watch", "tools"] : ["watch"])) throw inaccessible();
+            !await owner.#h.canDiscoverSession(id, actor, joinOnOpen && (!network || owner.#authority.severalActors || !!options.compose), tools ? ["watch", "tools"] : ["watch"])) throw inaccessible();
         return saved;
       };
       const binding = acpInterface({
         actor,
+        joinOnOpen,
         represents: scope.represents, approvalRouteId: acpRouteId(scope),
         connectionScope: run => scope.ceiling ? this.#h.withConnectionActor(actor, run) : run(),
         allowTenant: scope.allowTenant,
@@ -804,7 +809,7 @@ export class Agent {
         authorizeSession: authorize,
         listOwner: id => {
           const owner = sessions.get(id) ?? this;
-          return { api:owner.#api, allowJoin:!network || owner.#authority.severalActors };
+          return { api:owner.#api, allowJoin:joinOnOpen && (!network || owner.#authority.severalActors) };
         },
         listProject: cwd => realpath(cwd),
         showApproval: options.showApproval ?? this.#approval,
@@ -833,7 +838,7 @@ export class Agent {
           const selected = await selectProject(project, id, saved);
           attach(selected);
           if (id && selected !== this) sessions.set(id, selected);
-          return { api: selected.#api, cwd: project };
+          return { api: selected.#api, cwd: project, severalActors: !network || selected.#authority.severalActors };
         },
         async attachMcp(id, project, servers, api) {
           await attachments.get(api)?.attach(id, project, servers);
@@ -881,24 +886,24 @@ export class Agent {
         await installMcp(this);
         installRoutes(scope);
         await resumeOpen(scope);
-        const { binding, detach } = prepareConnection(scope, false);
+        const { binding, detach } = prepareConnection({ ...scope, joinOnOpen: options.joinOnOpen ?? options.actor === undefined }, false);
         try { await binding.acp.serveStdio(); } finally { detach(); }
         return;
       }
       const controlTimeoutMs = options.controlTimeoutMs ?? 5000;
       if (!Number.isSafeInteger(controlTimeoutMs) || controlTimeoutMs <= 0) throw new AgentError("invalid_params", "Invalid control timeout");
       const actors = await Promise.all(options.actors.map(async entry => ({
-        tokenFile: entry.tokenFile, value: { ...await makeScope(entry.actor, entry, true), clientId: (entry as { clientId?: string }).clientId ?? "" },
+        tokenFile: entry.tokenFile, value: { ...await makeScope(entry.actor, entry, true), joinOnOpen: entry.joinOnOpen === true, clientId: (entry as { clientId?: string }).clientId ?? "" },
       })));
       let http: AguiBinding | undefined;
       if (agui) {
         const keys = new Map<string, string>();
         for (const { value } of actors) {
-          if (!isId(value.clientId) || keys.has(value.clientId) && keys.get(value.clientId) !== value.scopeKey ||
+          if (!isId(value.clientId) || keys.has(value.clientId) && keys.get(value.clientId) !== JSON.stringify([value.scopeKey, value.joinOnOpen]) ||
               this.#sources.some(s => s.routeId === value.clientId && s.actorId !== value.actor.id)) {
             throw new AgentError("invalid_composition", "AG-UI needs a stable clientId unique to the actor and scope");
           }
-          keys.set(value.clientId, value.scopeKey);
+          keys.set(value.clientId, JSON.stringify([value.scopeKey, value.joinOnOpen]));
         }
         if (agui.origins && (!Array.isArray(agui.origins) || !agui.origins.every(o => { const u = new URL(o); return /^https?:$/.test(u.protocol) && o === u.origin; }))) {
           throw new AgentError("invalid_composition", "Invalid browser origin");
@@ -915,7 +920,7 @@ export class Agent {
             }) : undefined;
             const info = live ?? saved;
             if (info && (!p.allowProject(info.project) || !p.allowTenant(info.tenant ?? null))) fail("not_found");
-            if (id && !await owner.#h.canDiscoverSession(id, p.actor, !memberOnly && owner.#authority.severalActors)) fail("not_found");
+            if (id && !await owner.#h.canDiscoverSession(id, p.actor, !memberOnly && p.joinOnOpen === true && (owner.#authority.severalActors || !!options.compose))) fail("not_found");
             const agent = await selectProject(info?.project ?? this.#project, id, saved);
             if (id) sessions.set(id, agent);
             return target(agent);

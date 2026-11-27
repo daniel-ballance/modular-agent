@@ -150,7 +150,7 @@ fn identity(mut p: Principal) -> Result<Identity> {
         projects: p.projects,
         represents: p.represents,
         explicit_rights: true,
-        join_on_open: true,
+        join_on_open: false,
         network: false,
         trust_trace_context: None,
     })

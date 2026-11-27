@@ -295,6 +295,7 @@ async fn acp_receives_both_interruptions_and_lost_prompt_errors() -> Result<()> 
                     listen: "127.0.0.1:0".into(),
                     tls: None,
                     actors: vec![AcpActor {
+                        join_on_open: false,
                         token_file: token.clone(),
                         trust_trace_context: false,
                         actor: Actor {

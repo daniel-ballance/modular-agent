@@ -48,6 +48,8 @@ pub struct AcpOptions {
     /// Trust the launching stdio peer unless explicitly disabled.
     pub trust_trace_context: Option<bool>,
     pub actor: Option<crate::Actor>,
+    /// Defaults to true only for the single local stdio principal.
+    pub join_on_open: Option<bool>,
     pub projects: Option<Vec<std::path::PathBuf>>,
     pub tenants: Option<Vec<Option<String>>>,
     pub rights: Option<crate::Rights>,
@@ -57,6 +59,7 @@ pub struct AcpOptions {
 impl AcpOptions {
     fn identity(&self) -> Result<interface_acp::Identity> {
         let mut identity = interface_acp::Identity::local();
+        identity.join_on_open = self.join_on_open.unwrap_or(self.actor.is_none());
         identity.projects = validate_scope(self.projects.clone(), &self.tenants, &self.represents)?;
         identity.tenants = self.tenants.clone();
         identity.trust_trace_context = self.trust_trace_context;
@@ -83,6 +86,8 @@ impl AcpOptions {
 /// Omitted tenants permit only tenantless sessions, as does a list of just `None`.
 #[derive(Clone, Debug)]
 pub struct AcpActor {
+    /// Permit an eligible unrecorded network actor to join when opening a session. Defaults to false.
+    pub join_on_open: bool,
     pub token_file: std::path::PathBuf,
     pub trust_trace_context: bool,
     pub actor: crate::Actor,
@@ -102,6 +107,7 @@ impl AcpActor {
     pub fn local(token_file: std::path::PathBuf) -> Self {
         Self {
             token_file,
+            join_on_open: false,
             trust_trace_context: false,
             actor: crate::Actor {
                 id: base::ACP_HOST_ACTOR.into(),
@@ -258,6 +264,14 @@ impl interface_acp::Factory for ProjectFactory {
         Ok(harness)
     }
 
+    fn several_actors(&self, api: &dyn base::AgentApi) -> base::Result<bool> {
+        let agents = self.2.lock().unwrap();
+        Ok(agents
+            .get(&api_key(api))
+            .unwrap_or(&self.1)
+            .inner
+            .several_actors)
+    }
     fn owns_session_agent(&self) -> bool {
         self.3.is_none()
     }
@@ -380,7 +394,6 @@ impl Agent {
             }
             validate_actor(&actor)?;
             let projects = validate_scope(token.projects, &token.tenants, &token.represents)?;
-            let join_on_open = actor.id == base::ACP_HOST_ACTOR && actor.kind == "host";
             entries.push((
                 token.token_file,
                 interface_acp::Identity {
@@ -391,7 +404,7 @@ impl Agent {
                     projects,
                     represents: token.represents,
                     explicit_rights: true,
-                    join_on_open,
+                    join_on_open: token.join_on_open,
                     network: true,
                     trust_trace_context: Some(token.trust_trace_context),
                 },
@@ -438,7 +451,10 @@ impl Agent {
             actor: &principal.id,
             rights: &principal.rights,
             scope: &|_, _| principal.may_discover(data),
-            join_on_open: principal.join_on_open,
+            join_on_open: principal.join_on_open
+                && (!principal.network
+                    || self.inner.several_actors
+                    || base::actors(data).is_empty()),
             in_turn,
             route_id: None,
         };
@@ -575,6 +591,9 @@ impl interface_acp::Factory for Factory {
     }
     fn session_declaration(&self, _: &dyn base::AgentApi, session: &str) -> base::Result<Value> {
         Ok(self.0.declaration_for(Some(session), true)?)
+    }
+    fn several_actors(&self, _: &dyn base::AgentApi) -> base::Result<bool> {
+        Ok(self.0.inner.several_actors)
     }
     fn owns_session_agent(&self) -> bool {
         false

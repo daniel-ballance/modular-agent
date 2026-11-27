@@ -107,6 +107,8 @@ Configure `acp: true` on the same listener, at the root WebSocket path. Use defa
 
 Register `pick_color` from `offer` for actor `kit-owner`, route `kit-primary`, with `callers: ["model"]` and 60,000 ms result timeout. Do not register a handler. The fixture's `tool.before` changes `{"color":"draft-blue"}` to `{"color":"dispatch-blue"}` on the first pass; subsequent passes leave it unchanged. On successful reports `tool.after` replaces the report text with `Checked frontend result.`. Keep the error description on failed reports. Default to approval off except in the approval cases. Do not enable another answer route for those cases.
 
+The managed `join-on-open` case uses the shared AG-UI and ACP WebSocket listener on a session that supports a second member. It checks live and kept sessions, prospective discovery without a grant, recorded membership, explicit opt-in, and refusal without membership changes. The additional fixture tokens are `default-join` (the usual ACP host ID, with no opt-in), `outside` (a different project), `departed` (whose membership is revoked by the kit), and `no-watch` (whose ceiling has no `watch`). The `foreign` actor opts in.
+
 The `thread-listing` case starts with an empty store. It checks scoped discovery, change order, opaque paging, invalid parameters and the absence of conversation content. The frontend, approval and crash-before-handoff cases also inspect the counts and turn state before opening the thread.
 
 ## Fixture controls

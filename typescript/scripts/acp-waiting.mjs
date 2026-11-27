@@ -59,7 +59,9 @@ await harness.load([conformanceProvider(), conformanceTools(), localEnvironment(
   durableRuntime(), approval({policy:'all'}), { name:'fixture', setup(api) {
     api.provide('history-store',store);
     api.on('session.prepare', async ({sessionId,resumed}) => {
-      if (!resumed) for (const a of approvers) await api.openSession(sessionId,{id:a.id,kind:a.kind,authority:a.rights});
+      // The in-scope observers need their own recorded watch grants before attachment.
+      const members = [...approvers, ...others.filter(a => a.id !== 'tenant')];
+      if (!resumed) for (const a of members) await api.openSession(sessionId,{id:a.id,kind:a.kind,authority:a.rights});
     });
     api.on('turn.end', () => boundary('requestPending'));
     api.on('tool.before', () => boundary('beforeHandoff'), 'last');

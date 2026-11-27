@@ -231,6 +231,7 @@ impl Policy {
             (Some(actors), None) => Ok(actors
                 .into_iter()
                 .map(|p| AcpActor {
+                    join_on_open: false,
                     token_file: p.token_file,
                     trust_trace_context: p.trace_trusted,
                     actor: p.actor.into_actor(),

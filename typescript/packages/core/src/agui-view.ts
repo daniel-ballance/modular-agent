@@ -4,7 +4,7 @@ import { inputIdOf, isText, textOf, type Actor, type ContentPart, type HistoryEn
 import { cleanMessage, encode, fail, object, same } from "./agui-wire.js";
 
 export interface Principal {
-  actor: Actor & { kind: Exclude<Actor["kind"], "plugin"> }; clientId: string; traceTrusted?: boolean;
+  actor: Actor & { kind: Exclude<Actor["kind"], "plugin"> }; clientId: string; traceTrusted?: boolean; joinOnOpen?: boolean;
   allowProject(project: string): boolean; allowTenant(tenant: string | null): boolean;
 }
 export type InterruptView = { wire: Interrupt; request: InputRequest; inTurn: boolean };
