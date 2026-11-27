@@ -37,6 +37,8 @@ Use the same foreground command and disposable store rules as for `--restart`; a
 
 Stop any service you started and remove the scratch directory after use. Exit code 0 means all checks run passed.
 
+Both SDK suites also run [durable-byte-saturation.json](durable-byte-saturation.json) against their native file and HTTP stores. They set the ordinary limit to the encoded bytes already retained, verify that a refused commit and fork leave the store unchanged, and retry pending erasure with reserved control headroom. The SDKs also check that a rewind intent refuses before changing working files at the ordinary limit, and that completion, compensation and reopen recovery fit in control headroom when another session fills ordinary space during restore.
+
 What it checks:
 - Authentication errors, declaration, 1 to 128 byte leases with the permitted alphabet, JSON nesting at 64 and 65 levels, selected response envelopes, and input validation including raw and percent-encoded dot segments sent without URL normalization.
 - Exact metadata resend, conflict on changed metadata, project filtering and list order.

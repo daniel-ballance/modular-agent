@@ -63,7 +63,11 @@ impl HistoryStore for Store {
     fn confirmed_erasure(&self, id: &str) -> Result<Vec<String>> {
         self.0.store.confirmed_erasure(id)
     }
-    fn reconcile_erasure(&self, id: &str) -> Result<Option<(SessionData, Vec<String>)>> {
-        self.0.store.reconcile_erasure(id)
+    fn reconcile_erasure(
+        &self,
+        id: &str,
+        write: &mut base::ErasureWrite<'_>,
+    ) -> Result<Option<(SessionData, Vec<String>)>> {
+        self.0.store.reconcile_erasure(id, write)
     }
 }

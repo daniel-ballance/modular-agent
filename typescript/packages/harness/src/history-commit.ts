@@ -34,6 +34,10 @@ interface HistoryCommitOperations {
 	admission(): Pick<InputAdmission, "input">;
 }
 
+class ForkReservationFailure extends Error {
+	constructor(readonly refusal: ReturnType<typeof failure>) { super(refusal.message); }
+}
+
 export class HistoryCommit {
 	constructor(private readonly operations: HistoryCommitOperations) {}
 
@@ -60,6 +64,37 @@ export class HistoryCommit {
 			span.fail(status);
 			throw error;
 		} finally { span.end(); }
+	}
+
+	async observeFork<T>(s: Session, count: number, work: (span: Operation) => Promise<T>): Promise<T> {
+		return this.observeCommit(s, count, async span => {
+			try {
+				const result = await work(span);
+				this.operations.lifecycle().watchWriter(s);
+				return result;
+			} catch (error) {
+				// The staged fork never reached the store on a reservation refusal.
+				const cause = (error as Error | undefined)?.cause;
+				throw cause instanceof ForkReservationFailure ? cause.refusal : error;
+			}
+		});
+	}
+
+	reserveFork(s: Session, entries: HistoryEntry[]): void {
+		const sizes = entries.map(resourceBytes);
+		const metadata = resourceBytes(s.meta);
+		if (!this.fitsWrite(sizes) || !this.fitsWrite([metadata])) {
+			throw new ForkReservationFailure(failure("result_too_large", "Fork history exceeds the write size limit"));
+		}
+		// Even copies of control records are ordinary work when publishing a fork.
+		if (!this.operations.reservations().writeBatch(s, [...sizes, metadata].map(bytes => ({ bytes, keys: [], control: false })))) {
+			throw new ForkReservationFailure(failure("busy", "No history capacity for this fork"));
+		}
+	}
+
+	private fitsWrite(sizes: number[]): boolean {
+		const bounds = this.operations.reservations().limits;
+		return sizes.every(bytes => bytes <= bounds.entryBytes) && sizes.reduce((sum, bytes) => sum + bytes, 0) <= bounds.batchBytes;
 	}
 
 	commitNow(s: Session, drafts: EntryDraft[], pluginRecord = false): Promise<HistoryEntry[]> {
@@ -114,9 +149,9 @@ export class HistoryCommit {
 			position = entry.kind === "position" ? (entry.data as { to: string | null }).to : entry.id;
 			return entry;
 		});
-		const bytes = entries.reduce((sum, entry) => sum + resourceBytes(entry), 0);
-		const bounds = this.operations.reservations().limits;
-		if (entries.some(entry => resourceBytes(entry) > bounds.entryBytes) || bytes > bounds.batchBytes) {
+		const initial = firstAdmission ? [...s.order.map(id => s.entries.get(id)!), ...entries] : undefined;
+		const metadata = firstAdmission ? resourceBytes(s.meta) : 0;
+		if (!this.fitsWrite((initial ?? entries).map(resourceBytes)) || !this.fitsWrite([metadata])) {
 			const error = failure("result_too_large", "History batch or entry exceeds the write size limit");
 			if (entries.some(entry => ["turnEnd", "toolResult", "inputAnswer", "inputHandedBack", "jobEnded", "response"].includes(entry.kind))) {
 				this.operations.lifecycle().interruptSession(s, "commitFailed", error);
@@ -126,7 +161,9 @@ export class HistoryCommit {
 		}
 		const inputId = entries.find(e => e.kind === "input" && e.turnId)?.inputId;
 		const allocations = entries.map(entry => {
-			const control = !pluginRecord && ["actorLeft", "limit", "erasure", "jobCleanupUnconfirmed", "inputHandedBack"].includes(entry.kind);
+			// The initial rewind intent and moves without a restore are ordinary writes.
+			const control = !pluginRecord && (["actorLeft", "limit", "erasure", "jobCleanupUnconfirmed", "inputHandedBack"].includes(entry.kind) ||
+				entries.length === 1 && entry.kind === "position" && s.unresolvedRewind() !== undefined);
 			const keys: string[] = [];
 			const add = (kind: string, id: string | undefined) => { if (id) keys.push(`${kind}:${id}`); };
 			if (!pluginRecord) switch (entry.kind) {
@@ -147,6 +184,7 @@ export class HistoryCommit {
 			}
 			return { bytes: resourceBytes(entry), keys, control };
 		});
+		if (metadata !== 0) allocations.push({ bytes: metadata, keys: [], control: false });
 		if (!this.operations.reservations().writeBatch(s, allocations)) {
 			const error = failure("busy", "No history capacity for this write");
 			if (entries.some(e => ["turnEnd", "toolResult", "inputAnswer", "inputHandedBack", "jobEnded", "response"].includes(e.kind))) {
@@ -155,9 +193,8 @@ export class HistoryCommit {
 			}
 			throw error;
 		}
-		if (firstAdmission) {
+		if (initial) {
 			const store = this.operations.use<HistoryStore>("history-store")!;
-			const initial = [...s.order.map(id => s.entries.get(id)!), ...entries];
 			span.set("modular_agent.history.entry.count", initial.length);
 			await this.operations.lifecycle().write(s, async () => {
 				await store.create(s.meta);

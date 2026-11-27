@@ -1,5 +1,5 @@
 use crate::bytes::{self, ByteLimits};
-use agent_api::{ModelResponse, OperationError, Result, SessionData};
+use agent_api::{HistoryStore, ModelResponse, OperationError, Result, SessionData};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -230,6 +230,10 @@ impl Pool {
 
     pub fn rebuild(&self, data: &SessionData) {
         let mut charges = self.charges.lock().unwrap();
+        self.rebuild_charge(&mut charges, data);
+    }
+
+    fn rebuild_charge(&self, charges: &mut BTreeMap<String, Charge>, data: &SessionData) {
         let charge = charges
             .entry(data.id.clone())
             .or_insert_with(|| Charge::new(data));
@@ -238,7 +242,47 @@ impl Pool {
             charge.retained = bytes::size(data);
             charge.settlement = settlement(data, charge.committed);
         }
-        Self::prune(&mut charges, &data.id);
+        Self::prune(charges, &data.id);
+    }
+
+    pub(crate) fn reconcile_erasure(
+        &self,
+        store: &dyn HistoryStore,
+        id: &str,
+    ) -> Result<Option<(SessionData, Vec<String>)>> {
+        let Some(limits) = self.bytes else {
+            return store.reconcile_erasure(id, &mut |_, _, write| write());
+        };
+        // Match ordinary commits' lock order: the ledger precedes the store.
+        let mut charges = self.charges.lock().unwrap();
+        let result = store.reconcile_erasure(id, &mut |before, staged, write| {
+            self.rebuild_charge(&mut charges, before);
+            let retained = bytes::size(staged);
+            let growth = retained.saturating_sub(bytes::size(before));
+            if growth != 0 {
+                let used = self.byte_scopes(&charges, before, accounted);
+                for (used, cap) in
+                    used.into_iter()
+                        .zip([limits.session, limits.tenant, limits.agent])
+                {
+                    if used.saturating_add(growth) > cap.storage {
+                        return bytes::busy();
+                    }
+                }
+                // Keep this charge on uncertain writes until the store is read again.
+                charges
+                    .get_mut(id)
+                    .expect("durable history has a charge")
+                    .retained = retained;
+            }
+            let actual = write()?;
+            self.rebuild_charge(&mut charges, &actual);
+            Ok(actual)
+        })?;
+        if let Some((actual, _)) = &result {
+            self.rebuild_charge(&mut charges, actual);
+        }
+        Ok(result)
     }
 
     fn prune(charges: &mut BTreeMap<String, Charge>, session: &str) {
@@ -459,18 +503,24 @@ impl Pool {
                 .saturating_add(reserved)
                 .saturating_sub(before_bytes);
             if growth != 0 {
-                let added = after.entries.iter().skip(before.entries.len());
-                let control = added.clone().next().is_some()
-                    && added.clone().all(|e| {
-                        matches!(
-                            e.kind.as_str(),
-                            "actor.left"
-                                | "limit"
-                                | "erasure"
-                                | "cancel.requested"
-                                | "job.cleanup.unconfirmed"
-                        )
-                    });
+                let added = after
+                    .entries
+                    .get(before.entries.len()..)
+                    .unwrap_or_default();
+                // Only a position that settles an existing rewind can use headroom.
+                let control = matches!(added, [entry]
+                    if entry.kind == "position" && before.unresolved_rewind().is_some())
+                    || (!added.is_empty()
+                        && added.iter().all(|e| {
+                            matches!(
+                                e.kind.as_str(),
+                                "actor.left"
+                                    | "limit"
+                                    | "erasure"
+                                    | "cancel.requested"
+                                    | "job.cleanup.unconfirmed"
+                            )
+                        }));
                 let used = self.byte_scopes(&charges, after, accounted);
                 for (used, cap) in
                     used.into_iter()

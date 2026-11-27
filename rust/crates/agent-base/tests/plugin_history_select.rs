@@ -81,8 +81,12 @@ impl HistoryStore for Store {
     ) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
         self.files.mark_erasure(source, targets)
     }
-    fn reconcile_erasure(&self, session: &str) -> Result<Option<(SessionData, Vec<String>)>> {
-        self.files.reconcile_erasure(session)
+    fn reconcile_erasure(
+        &self,
+        session: &str,
+        write: &mut ErasureWrite<'_>,
+    ) -> Result<Option<(SessionData, Vec<String>)>> {
+        self.files.reconcile_erasure(session, write)
     }
     fn check_erasure(&self, data: &SessionData) -> Result<()> {
         ensure!(self.fresh.load(Ordering::SeqCst), PendingErasure);

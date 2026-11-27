@@ -3,7 +3,7 @@
   "conformance/plugin/run.mjs": 1361,
   "rust/crates/agent-api/src/portable.rs": 1110,
   "rust/crates/agent-base/tests/plugin_binding.rs": 1997,
-  "rust/crates/history-http/src/lib.rs": 1286,
+  "rust/crates/history-http/src/lib.rs": 1193,
   "rust/crates/history-http/src/server.rs": 1619,
   "rust/crates/plugin-stdio/src/host.rs": 2180,
   "rust/crates/plugin-stdio/src/runtime_host.rs": 1937,

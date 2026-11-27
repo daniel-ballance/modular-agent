@@ -262,6 +262,10 @@ impl TestAgentBuilder {
         self.builder = self.builder.durability(durability);
         self
     }
+    pub fn byte_limits(mut self, limits: crate::ByteLimits) -> Self {
+        self.builder = self.builder.byte_limits(limits);
+        self
+    }
     pub fn resource_limits(mut self, limits: crate::ResourceLimits) -> Self {
         self.builder = self.builder.resource_limits(limits);
         self

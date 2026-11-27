@@ -229,6 +229,13 @@ export class Session {
 		return modelView(entries, turnId);
 	}
 
+	unresolvedRewind() {
+		const entry = this.entries.get(this.order.at(-1) ?? "");
+		if (entry?.kind !== "position") return;
+		const data = entry.data as { to: string | null; restore?: { point: string; undo: string } };
+		if (data.restore) return { entry, to: data.to, restore: data.restore };
+	}
+
 	isBusy(): boolean {
 		return this.running !== undefined;
 	}

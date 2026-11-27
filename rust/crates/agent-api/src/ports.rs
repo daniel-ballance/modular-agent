@@ -347,6 +347,15 @@ impl std::fmt::Display for PendingErasure {
     }
 }
 impl std::error::Error for PendingErasure {}
+/// Authorize an erasure unit against the encoded state at its largest point,
+/// before invoking `write`. Return the retained state after confirmed writes.
+pub type ErasureWrite<'a> = dyn FnMut(
+        &SessionData,
+        &SessionData,
+        &mut dyn FnMut() -> Result<SessionData>,
+    ) -> Result<SessionData>
+    + 'a;
+
 pub trait HistoryStore: Send + Sync {
     fn supports_erasure(&self) -> bool {
         false
@@ -388,13 +397,18 @@ pub trait HistoryStore: Send + Sync {
     fn check_erasure(&self, _data: &SessionData) -> Result<()> {
         Ok(())
     }
-    /// Reconcile under an already acquired writer lease. The return value contains
-    /// the latest record and the IDs whose tombstones and bookkeeping are confirmed.
     /// Previously verified tombstones, without attempting another writer acquisition.
     fn confirmed_erasure(&self, _session: &str) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
-    fn reconcile_erasure(&self, _session: &str) -> Result<Option<(SessionData, Vec<String>)>> {
+    /// Reconcile under an already acquired writer lease. Run each unit that
+    /// adds encoded history through `write`. Return the latest state and the
+    /// IDs whose tombstones and bookkeeping are confirmed.
+    fn reconcile_erasure(
+        &self,
+        _session: &str,
+        _write: &mut ErasureWrite<'_>,
+    ) -> Result<Option<(SessionData, Vec<String>)>> {
         Ok(None)
     }
 }
