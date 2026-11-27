@@ -17,6 +17,9 @@ export function execTimeout(value: unknown): number | undefined {
 export const PLUGIN_BINDING = "modular-agent-plugin/1";
 /** The largest message either side sends or accepts. */
 export const MAX_MESSAGE = 64 * 1024 * 1024;
+// Match the Rust plugin peer. The writer holds at most one additional frame.
+export const OUTBOUND_FRAMES = 4096;
+export const OUTBOUND_BYTES = 2 * MAX_MESSAGE;
 
 export type ErrorCode = "withheld" | "invalid_request" | "not_found" | "unknown_handler" | "cancelled" | "not_supported" | "result_too_large" | "lost" | "internal" | "method_not_found" | "parse_error" | "turn_limit" | "busy";
 
@@ -58,6 +61,7 @@ export async function listDirectory(env: import("@modular-agent/harness").Workin
 
 import type { Delivery, WriteLine } from "./outbound.js";
 
+type Outbound = { bytes: number; run(): Promise<void>; reject(error: Error): void };
 type CaptureDelivery = (method: string, params: any) => Delivery | undefined;
 type Incoming = { abort: AbortController; gate?: Delivery; settled: boolean };
 const withheld = () => new WireError("withheld", "Plugin delivery is no longer available");
@@ -82,7 +86,9 @@ export class WirePeer {
 	private trace?: { name: string; callbackScope?: (params: any) => Operation | undefined };
 	private sent = new Map<number | string, Operation>();
 	private running = new Map<number | string, Incoming>();
-	private outbound: (() => Promise<void>)[] = [];
+	private outbound: Outbound[] = [];
+	private outboundBytes = 0;
+	private activeWrite?: Outbound;
 	private writing = false;
 	private captureRequest?: CaptureDelivery;
 	private captureReply?: CaptureDelivery;
@@ -92,7 +98,7 @@ export class WirePeer {
 	private frameBytes = 0;
 	private received = new Set<number | string>();
 
-	constructor(private write: WriteLine, private onClose?: () => void,
+	constructor(private write: WriteLine, private onClose?: (abortTransport: boolean) => void,
 		private afterReply?: (method: string) => void, private allowRequest?: (method: string) => boolean) {
 		this.handle("$/ping", () => ({}));
 		this.onNotification("$/cancel", p => {
@@ -211,15 +217,20 @@ export class WirePeer {
 	}
 
 	/** The connection ended: everything still waiting fails as lost, and running work is cancelled. */
-	close(reason = "the other side of the connection ended"): void {
+	close(reason = "the other side of the connection ended", abortTransport = false): void {
 		if (this.closedWith) return;
 		this.closedWith = new WireError("lost", reason);
 		for (const w of this.waiting.values()) w.reject(this.closedWith);
 		this.waiting.clear();
+		this.activeWrite?.reject(this.closedWith);
+		this.activeWrite = undefined;
+		for (const item of this.outbound) item.reject(this.closedWith);
+		this.outbound = [];
+		this.outboundBytes = 0;
 		for (const c of this.running.values()) c.abort.abort();
 		this.fragments = [];
 		this.frameBytes = 0;
-		this.onClose?.();
+		this.onClose?.(abortTransport);
 	}
 
 	/** True only up to the moment the answer is received, even within one input chunk. */
@@ -265,29 +276,36 @@ export class WirePeer {
 	private send(m: Message, gate?: Delivery): Promise<void> {
 		if (this.closedWith) return Promise.reject(this.closedWith);
 		let line = JSON.stringify(m);
-		if (Buffer.byteLength(line) > MAX_MESSAGE) {
+		let bytes = Buffer.byteLength(line);
+		if (bytes > MAX_MESSAGE) {
 			if (m.id === undefined || !("result" in m || "error" in m)) throw new WireError("result_too_large", "The message is too large to send");
 			const code = m.error?.data?.code ?? "result_too_large";
 			line = JSON.stringify({ jsonrpc: "2.0", id: m.id, error: { code: m.error?.code ?? -32000, message: code, data: { code } } });
-			if (Buffer.byteLength(line) > MAX_MESSAGE) {
+			bytes = Buffer.byteLength(line);
+			if (bytes > MAX_MESSAGE) {
 				this.close("Plugin response ID cannot fit the line limit");
 				return Promise.reject(this.closedWith);
 			}
 		}
-		return this.enqueue(line + "\n", gate);
+		return this.enqueue(line + "\n", gate, bytes + 1);
 	}
 
-	private enqueue(line: string, gate?: Delivery): Promise<void> {
+	private enqueue(line: string, gate?: Delivery, bytes = Buffer.byteLength(line)): Promise<void> {
+		if (this.outbound.length >= OUTBOUND_FRAMES || bytes > OUTBOUND_BYTES - this.outboundBytes) {
+			this.close("Plugin outbound queue exhausted", true);
+			return Promise.reject(this.closedWith);
+		}
+		this.outboundBytes += bytes;
 		return new Promise((resolve, reject) => {
-			this.outbound.push(async () => {
+			const run = async () => {
 				let written: Promise<void> | undefined;
 				const send = () => {
 					if (this.closedWith) throw this.closedWith;
 					try {
 						written = Promise.resolve(this.write(line)).then(() => {});
-						void written.catch(() => this.close("Plugin transport write failed"));
+						void written.catch(() => this.close("Plugin transport write failed", true));
 					} catch (error) {
-						this.close("Plugin transport write failed");
+						this.close("Plugin transport write failed", true);
 						throw error;
 					}
 				};
@@ -298,11 +316,17 @@ export class WirePeer {
 					await written;
 					resolve();
 				} catch (error) { reject(error); }
-			});
+			};
+			this.outbound.push({ bytes, run, reject });
 			if (!this.writing) {
 				this.writing = true;
 				queueMicrotask(async () => {
-					for (let item; (item = this.outbound.shift());) await item();
+					for (let item; (item = this.outbound.shift());) {
+						this.outboundBytes -= item.bytes;
+						this.activeWrite = item;
+						await item.run();
+						this.activeWrite = undefined;
+					}
 					this.writing = false;
 				});
 			}

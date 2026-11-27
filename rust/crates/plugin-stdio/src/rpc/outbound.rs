@@ -3,41 +3,63 @@ use std::{future::poll_fn, pin::Pin};
 
 pub type Gate = Box<dyn Fn() -> bool + Send + 'static>;
 
-pub(super) struct Frame {
-    pub message: Value,
-    pub end: bool,
-    pub gate: Option<Gate>,
-    pub cancelled: Option<Gate>,
+pub(super) struct Queued {
+    frame: Prepared,
+    _bytes: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Queued {
+    pub fn into_frame(self) -> Prepared {
+        self.frame
+    }
 }
 
 pub(super) struct Prepared {
-    bytes: Option<Vec<u8>>,
+    pub end: bool,
+    bytes: Option<Box<[u8]>>,
     gate: Option<Gate>,
     cancelled: Option<Gate>,
-    refusal: Option<Vec<u8>>,
-    on_refusal: Option<Box<dyn FnOnce(&'static str, &'static str) + Send>>,
+    refusal: Option<Box<[u8]>>,
+    request_key: Option<String>,
+    peer: Weak<Peer>,
+    overflowed: Option<CancellationToken>,
 }
 
 impl Prepared {
-    pub fn new(frame: Frame, peer: &Arc<Peer>) -> Option<Self> {
-        let id = frame.message.get("id");
-        let request = frame.message.get("method").is_some();
+    fn new(
+        message: Value,
+        end: bool,
+        gate: Option<Gate>,
+        cancelled: Option<Gate>,
+        request_key: Option<String>,
+    ) -> Result<Self, Fault> {
+        let id = message
+            .get("id")
+            .filter(|_| message.get("method").is_none());
         let error = |id, code, message| {
             serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,
             "error":{"code":-32000,"message":message,"data":{"code":code}}}))
             .unwrap()
         };
-        let mut bytes = serde_json::to_vec(&frame.message).ok()?;
+        let too_large = || {
+            let subject = if request_key.is_some() {
+                "request"
+            } else {
+                "message"
+            };
+            Fault::new("result_too_large", format!("{subject} exceeds 64 MiB"))
+        };
+        let mut bytes = serde_json::to_vec(&message).map_err(|e| Fault::new("internal", e))?;
         if bytes.len() > MAX_FRAME {
             bytes = error(
-                id.filter(|_| !request)?,
+                id.ok_or_else(too_large)?,
                 "result_too_large",
                 "result exceeds 64 MiB",
             );
         }
-        let refusal = id.filter(|_| !request && frame.gate.is_some()).map(|id| {
+        let refusal = id.filter(|_| gate.is_some()).map(|id| {
             // Preserve protocol rejection semantics but never stale error details.
-            let original = &frame.message["error"];
+            let original = &message["error"];
             if let (Some(number), Some(code)) =
                 (original["code"].as_i64(), original["data"]["code"].as_str())
             {
@@ -48,24 +70,43 @@ impl Prepared {
                 error(id, "withheld", "plugin delivery is no longer available")
             }
         });
-        let on_refusal = id
-            .filter(|_| request && (frame.gate.is_some() || frame.cancelled.is_some()))
-            .map(|id| {
-                let key = id.to_string();
-                let peer = Arc::downgrade(peer);
-                Box::new(move |code, message| {
-                    if let Some(peer) = peer.upgrade() {
-                        peer.refuse(&key, code, message);
-                    }
-                }) as Box<dyn FnOnce(&'static str, &'static str) + Send>
-            });
-        Some(Self {
-            bytes: Some(bytes),
-            gate: frame.gate,
-            cancelled: frame.cancelled,
-            refusal,
-            on_refusal,
+        if bytes.len() > MAX_FRAME
+            || refusal
+                .as_ref()
+                .is_some_and(|bytes| bytes.len() > MAX_FRAME)
+        {
+            return Err(too_large());
+        }
+        Ok(Self {
+            end,
+            bytes: Some(bytes.into_boxed_slice()),
+            gate,
+            cancelled,
+            refusal: refusal.map(Vec::into_boxed_slice),
+            request_key,
+            peer: Weak::new(),
+            overflowed: None,
         })
+    }
+
+    pub fn bind(&mut self, peer: &Arc<Peer>) {
+        self.peer = Arc::downgrade(peer);
+        self.overflowed = Some(peer.overflowed.clone());
+    }
+
+    fn queued_bytes(&self) -> u32 {
+        // Count retained alternatives as well as the stdio line delimiter.
+        (self.bytes.as_ref().map_or(0, |b| b.len())
+            + self.refusal.as_ref().map_or(0, |b| b.len())
+            + 1) as u32
+    }
+
+    fn refuse(&mut self, code: &'static str, message: &'static str) {
+        if let Some(key) = self.request_key.take()
+            && let Some(peer) = self.peer.upgrade()
+        {
+            peer.refuse(&key, code, message);
+        }
     }
 
     fn recheck(&mut self) {
@@ -73,23 +114,28 @@ impl Prepared {
             self.gate = None;
             self.cancelled = None;
             self.bytes = self.refusal.take();
-            if let Some(refuse) = self.on_refusal.take() {
-                refuse("withheld", "plugin delivery is no longer available");
-            }
+            self.refuse("withheld", "plugin delivery is no longer available");
         } else if self.cancelled.as_ref().is_some_and(|check| check()) {
             self.gate = None;
             self.cancelled = None;
             self.bytes = None;
-            if let Some(refuse) = self.on_refusal.take() {
-                refuse("cancelled", "cancelled before transport handoff");
-            }
+            self.refuse("cancelled", "cancelled before transport handoff");
         }
     }
 
     pub fn websocket(mut self) -> Option<String> {
+        // The socket writer may still hold one frame when a stalled peer is
+        // closed. Do not drain it on overload (normal shutdown can still drain).
+        if self
+            .overflowed
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return None;
+        }
         self.recheck();
         self.bytes
-            .map(|bytes| String::from_utf8(bytes).expect("serialized JSON is UTF-8"))
+            .map(|bytes| String::from_utf8(bytes.into_vec()).expect("serialized JSON is UTF-8"))
     }
 
     pub async fn stdio(mut self, writer: &mut (impl AsyncWrite + Unpin)) -> std::io::Result<()> {
@@ -115,6 +161,39 @@ impl Prepared {
 }
 
 impl Peer {
+    pub(super) fn send_frame(&self, message: Value, end: bool, gate: Option<Gate>) {
+        if !self.closed.is_cancelled() {
+            match Prepared::new(message, end, gate, None, None) {
+                Ok(frame) => self.enqueue(frame),
+                Err(_) => self.close(),
+            }
+        }
+    }
+
+    fn enqueue(&self, frame: Prepared) {
+        if self.closed.is_cancelled() {
+            return;
+        }
+        // Never await capacity: the same connection carries cancellation and
+        // settlement. Fail all waiters rather than delaying or dropping a frame.
+        if let Ok(bytes) = self
+            .outbound_bytes
+            .clone()
+            .try_acquire_many_owned(frame.queued_bytes())
+            && self
+                .tx
+                .try_send(Queued {
+                    frame,
+                    _bytes: bytes,
+                })
+                .is_ok()
+        {
+            return;
+        }
+        self.overflowed.cancel();
+        self.close();
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn send_call(
         &self,
@@ -125,6 +204,9 @@ impl Peer {
         event: Option<OnEvent>,
         context: telemetry::Context,
     ) -> Reply {
+        if self.closed.is_cancelled() {
+            return Err(Fault::new("lost", "plugin connection closed"));
+        }
         let id = format!("r{}", self.next.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = oneshot::channel();
         let key = json!(id).to_string();
@@ -158,8 +240,18 @@ impl Peer {
             let caller = cancel.clone();
             (None, Some(Box::new(move || caller.is_cancelled()) as Gate))
         };
+        let frame = Prepared::new(
+            json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}),
+            false,
+            gate,
+            cancelled,
+            Some(key.clone()),
+        )?;
         {
             let mut pending = self.pending.lock().unwrap();
+            if self.closed.is_cancelled() {
+                return Err(Fault::new("lost", "plugin connection closed"));
+            }
             if pending.is_empty() {
                 self.activity.notify_one();
             }
@@ -176,25 +268,7 @@ impl Peer {
                 },
             );
         }
-        if self.closed.is_cancelled() {
-            self.pending.lock().unwrap().remove(&key);
-            return Err(Fault::new("lost", "plugin connection closed"));
-        }
-        let frame = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
-        if serde_json::to_vec(&frame)
-            .map_err(|e| Fault::new("internal", e))?
-            .len()
-            > MAX_FRAME
-        {
-            self.pending.lock().unwrap().remove(&key);
-            return Err(Fault::new("result_too_large", "request exceeds 64 MiB"));
-        }
-        let _ = self.tx.send(Frame {
-            message: frame,
-            end: false,
-            gate,
-            cancelled,
-        });
+        self.enqueue(frame);
         let mut outgoing = Outgoing {
             peer: self,
             id: &id,
