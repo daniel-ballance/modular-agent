@@ -368,7 +368,9 @@ impl Session {
     pub fn r#as(&self, actor_id: &str) -> Result<Self> {
         if actor_id != LOCAL {
             self.check_actor_option()?;
-            if !base::actors(&self.snapshot()?).contains_key(actor_id) {
+            if !base::actors(&self.inner.harness.authority_snapshot(&self.id)?)
+                .contains_key(actor_id)
+            {
                 return Err(Error::new(Code::NotFound, "unknown actor"));
             }
         }

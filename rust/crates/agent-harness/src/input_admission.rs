@@ -130,7 +130,6 @@ impl Harness {
             }),
             OperationError::Forbidden("actor lacks input authority".into())
         );
-        self.retry_open_erasure(session).await?;
         let admission = self
             .admissions
             .lock()
@@ -146,6 +145,20 @@ impl Harness {
                 wait.run(admission.lock()).await
             }
         };
+        let own = self.authority(session, actor)?;
+        let authority = match sponsor {
+            Some(s) => own.intersect(&self.authority(session, s)?),
+            None => own.clone(),
+        };
+        ensure!(
+            authority.has(if timing == Timing::Propose {
+                "propose"
+            } else {
+                "input"
+            }),
+            OperationError::Forbidden("actor lacks input authority".into())
+        );
+        self.retry_open_erasure(session).await?;
         let _workspace = self.start_environment_work(session, true)?;
         let submitter = sponsor.unwrap_or(actor);
         if let Some(ref key) = key {

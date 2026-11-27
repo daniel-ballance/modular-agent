@@ -16,7 +16,7 @@ import { historyService } from "@modular-agent/services";
 test("pending marks follow forks across held writers and survive restart", async t => {
   const dir = await mkdtemp(join(tmpdir(), "sdk-pending-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const config = { project: dir, dataDir: dir, durability: "kept" as const, script: [{ text: "Derived" }] };
+  const config = { project: dir, dataDir: dir, durability: "kept" as const, severalActors: true, script: [{ text: "Derived" }] };
   const a = await testAgent(config);
   const b = await testAgent(config);
   t.after(() => Promise.all([a.close(), b.close()]));
@@ -29,11 +29,18 @@ test("pending marks follow forks across held writers and survive restart", async
   await second.close();
   const held = await b.openSession(firstId);
   const heldAgain = await b.openSession(secondId);
+  await held.join({ id: "observer", kind: "user", rights: ["watch"] });
+  const observer = held.as("observer");
   const original = (await origin.history()).find(e => e.kind === "input")!;
   const report = await origin.erase([original.id, original.id]);
   assert.ok(report.erased.some(copy => copy.sessionId === origin.id && copy.id === original.id));
   for (const sid of [firstId, secondId]) assert.ok(report.pending.some(copy => copy.sessionId === sid));
+  await assert.rejects(observer.setSetting("title", "must not retry"), { code: "forbidden" });
+  await assert.rejects(observer.runCommand("/bogus"), { code: "forbidden" });
+  await assert.rejects(observer.fork(), { code: "forbidden" });
+  await assert.rejects(observer.moveTo(original.id), { code: "forbidden" });
   assert.equal((await a.reconcileErasure({ sessions: [firstId] }))[0].state, "busy");
+  await observer.leave("observer");
   assert.ok(!(await a.sessions()).some(s => s.id === firstId));
   await assert.rejects(a.sessionInfo(firstId), { code: "unavailable" });
   await held.setSetting("title", "after retry");

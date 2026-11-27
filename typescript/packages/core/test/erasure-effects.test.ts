@@ -68,6 +68,7 @@ for (const pending of [false, true]) for (const confirm of [false, true]) {
     const project = await mkdtemp(join(tmpdir(), "sdk-erasure-job-"));
     t.after(() => rm(project, { recursive: true, force: true }));
     let cancels = 0;
+    let job: import("@modular-agent/core").Job | undefined;
     const plugin = definePlugin({ name: "erasure-jobs", setup(r) {
       r.jobs({ async cancel(_job, cx) {
         cancels++;
@@ -75,7 +76,8 @@ for (const pending of [false, true]) for (const confirm of [false, true]) {
         await cx.job.end({ kind: "cancelled" }, "must not enter history", true);
       } });
       r.tool(tool({ name: "lookup", description: "Start a job", input: { type: "object" }, async run(_, cx) {
-        return (await cx.jobs.start("lookup", {})).id;
+        job = await cx.jobs.start("lookup", {});
+        return job.id;
       } }));
     } });
     const options = { project, dataDir: project, durability: "kept" as const, plugins: [plugin], script: [{ text: "seed" }] };
@@ -104,7 +106,11 @@ for (const pending of [false, true]) for (const confirm of [false, true]) {
         assert.doesNotMatch(JSON.stringify(history), /must not enter history|erase this/);
       } else {
         await assert.rejects(destination.history(), { code: "unavailable" });
-        assert.ok((await new JsonlHistoryStore(join(project, "history")).load(destination.id)).entries.some(e => e.kind === "jobCleanupUnconfirmed"));
+        const store = new JsonlHistoryStore(join(project, "history"));
+        const before = await store.load(destination.id);
+        assert.ok(before.entries.some(e => e.kind === "jobCleanupUnconfirmed"));
+        await assert.rejects(job!.end({ kind: "completed" }, "stale payload", true), { code: "lost" });
+        assert.deepEqual((await store.load(destination.id)).entries, before.entries);
       }
       if (!pending) assert.equal(cancels, confirm ? 1 : 2);
     } finally { await Promise.allSettled([a.close(), ...(pending ? [b.close()] : [])]); }
@@ -142,6 +148,9 @@ for (const [retryByErase, served] of [[false, false], [true, false], [false, tru
   await destination.callTool("lookup", {});
   assert.ok((await source.erase([target])).pending.some(copy => copy.sessionId === fork.id));
   await assert.rejects(destination.history(), { code: "unavailable" });
+  assert.equal(cancels, 0);
+  // Explicit cancellation may settle the job; a history retry cannot.
+  await destination.close();
   assert.equal(cancels, 1);
   await b.close();
   await a.close();

@@ -94,7 +94,13 @@ async fn job_cleanup_is_required_for_direct_and_pending_erasure() -> Result<()> 
             }
             assert_eq!(
                 cancels.load(Ordering::SeqCst),
-                if !pending && !confirm { 2 } else { 1 }
+                if pending {
+                    0
+                } else if confirm {
+                    1
+                } else {
+                    2
+                }
             );
             let _ = a.close().await;
             if let Some(b) = b {

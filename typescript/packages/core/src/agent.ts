@@ -498,9 +498,7 @@ export class Agent {
       isOpen: () => this.#open.get(id) === s,
       fork: async entry => {
         this.#check();
-        const at = entry ?? this.#api.session(id).position;
-        if (!at || !(await this.#api.readHistory(id, { all: true })).some(e => e.id === at)) throw new AgentError("not_found", "No entry to fork");
-        const fork = await checked(() => this.#api.forkSession(id, at));
+        const fork = await checked(() => this.#api.forkSession(id, entry));
         return this.openSession(fork);
       },
       close: async (actor, delegatedBy) => {

@@ -173,7 +173,6 @@ impl Harness {
             .iter()
             .filter(|e| {
                 e.writer != "rust.derived"
-                    && e.content.is_some()
                     && e.kind != telemetry::TURN_TRACE
                     && !interface_handoff(e)
             })
@@ -205,7 +204,11 @@ impl Harness {
                     *v = json!(answer);
                 }
             }
-            entry.copies.insert(0, original.id.clone());
+            if entry.content.is_some() {
+                entry.copies.insert(0, original.id.clone());
+            } else {
+                entry.copies.clear();
+            }
             next.position = Some(entry.id.clone());
             next.entries.push(entry);
         }

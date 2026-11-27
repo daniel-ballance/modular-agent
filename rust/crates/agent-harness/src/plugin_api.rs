@@ -229,7 +229,12 @@ impl AgentApi for Harness {
                 "tenant" | "actor.grant" | "actor.left" | "limit"
             )
         });
-        data.settings = Value::Null;
+        data.settings =
+            json!({"_authority":data.settings["_authority"], "_parent":data.settings["_parent"]});
+        data.settings
+            .as_object_mut()
+            .unwrap()
+            .retain(|_, value| !value.is_null());
         Ok(data)
     }
     fn snapshot(&self, session: &str) -> Result<SessionData> {

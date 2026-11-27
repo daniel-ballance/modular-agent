@@ -413,7 +413,7 @@ export class Harness {
 			providers: () => this.useAll<Provider>("provider"),
 			checkWriter: s => this.lifecycle.checkWriter(s),
 			settleJobs: s => this.jobWork.settleForErasure(s),
-			jobsRunning: s => this.jobWork.runningJobs(s).some(({job}) => ![...s.entries.values()].some(e => e.kind === "jobCleanupUnconfirmed" && e.jobId === job.id)),
+			jobsRunning: s => !s.reopening && this.jobWork.runningJobs(s).some(({job}) => ![...s.entries.values()].some(e => e.kind === "jobCleanupUnconfirmed" && e.jobId === job.id)),
 			inScope: (project, tenant) => (!this.project || project === this.project) && (tenant === undefined || this.tenants.has(tenant)),
 			withQuietWriter: (id, work) => this.lifecycle.withQuietWriter(id, work),
 			invalidateErasedHandoffs: (...args) => this.interfaceTools.invalidateErasedHandoffs(...args),
@@ -853,7 +853,7 @@ export class Harness {
 	reconcileErasure(options: ReconcileErasureOptions) { return this.erasure.retrySessions(options); }
 	private activePlugins() { return this.loaded.map(({ plugin: { name, origin } }) => ({ name, ...(origin ? { origin } : {}) })); }
 
-	forkSession(sessionId: string, entryId: string) { return this.lifecycle.forkSession(sessionId, entryId); }
+	forkSession(sessionId: string, entryId?: string) { return this.lifecycle.forkSession(sessionId, entryId); }
 	closeSession(id: string, actorId?: string, delegatedBy?: string, authority?: readonly Authority[]) { return this.lifecycle.closeSession(id, actorId, delegatedBy, authority); }
 	/** Commit drafts to the session. All are kept, or none are. */
 	commit(s: Session, drafts: EntryDraft[], pluginRecord = false, guard?: () => boolean | Promise<boolean>): Promise<HistoryEntry[]> {

@@ -327,7 +327,17 @@ impl Harness {
             .map_err(|_| OperationError::Unavailable("Erasure is being reconciled".into()))?;
         match self.retry_open_erasure_now(session) {
             Err(error) if error.is::<PendingErasure>() => {
-                self.reconcile_idle_erasure(&store, session).await
+                match self.reconcile_idle_erasure(&store, session).await {
+                    Err(busy)
+                        if matches!(
+                            busy.downcast_ref::<OperationError>(),
+                            Some(OperationError::Busy(_))
+                        ) =>
+                    {
+                        Err(error)
+                    }
+                    result => result,
+                }
             }
             result => result,
         }

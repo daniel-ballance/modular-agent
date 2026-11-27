@@ -184,9 +184,10 @@ export class Jobs {
 	}
 
 	/** A lease or a lost owner is not evidence that a job stopped. */
-	async settleForErasure(s: Session): Promise<boolean> {
+	async settleForErasure(s: Session, specific?: string): Promise<boolean> {
 		const marked = new Set([...s.entries.values()].filter(e => e.kind === "jobCleanupUnconfirmed").map(e => e.jobId));
 		for (const { job } of this.runningJobs(s)) {
+			if (specific !== undefined && specific !== job.id) continue;
 			const record = s.jobs.get(job.id);
 			const handler = this.jobCleanups.get(job.plugin);
 			const cancel = record?.cancel ?? (handler && (() => handler(job.id, { sessionId: s.id, actorId: job.actorId })));
@@ -222,7 +223,12 @@ export class Jobs {
 	}
 
 	async cancelJob(s: Session, jobId: string): Promise<void> {
-		await this.operations.erasure().admitHistory(s);
+		try { await this.operations.erasure().admitHistory(s); }
+		catch (error) {
+			if (!(error as {pendingErasure?: boolean}).pendingErasure) throw error;
+			await this.settleForErasure(s, jobId);
+			return;
+		}
 		const kept = this.runningJobs(s).find(({ job }) => job.id === jobId);
 		if (!kept) { await s.jobs.get(jobId)?.ending; return; }
 		const handle = s.jobs.get(jobId)?.handle ?? this.jobHandle(s, kept);
