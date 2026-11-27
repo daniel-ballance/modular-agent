@@ -65,6 +65,15 @@ impl AgentApi for Relay {
     fn declaration(&self) -> Result<Value> {
         self.inner.declaration()
     }
+    fn writer_interruption(&self, session: &str) -> Result<CancellationToken> {
+        self.inner.writer_interruption(session)
+    }
+    fn delivery_generation(&self, session: &str) -> Result<CancellationToken> {
+        self.inner.delivery_generation(session)
+    }
+    fn delivery_epoch(&self, session: &str) -> Result<Option<String>> {
+        self.inner.delivery_epoch(session)
+    }
     fn check_writer(&self, s: &str) -> Result<()> {
         self.inner.check_writer(s)
     }

@@ -182,6 +182,21 @@ pub trait AgentApi: Send + Sync {
     fn check_writer(&self, _session: &str) -> Result<()> {
         Ok(())
     }
+    /// Retire queued deliveries when their open session is replaced.
+    fn delivery_generation(&self, session: &str) -> Result<CancellationToken> {
+        self.writer_interruption(session)
+    }
+    /// Witness the current writer and the erasure epoch without reconciling an old view.
+    fn delivery_epoch(&self, session: &str) -> Result<Option<String>> {
+        self.check_writer(session)?;
+        Ok(self
+            .snapshot(session)?
+            .entries
+            .into_iter()
+            .rev()
+            .find(|e| e.kind == "erasure")
+            .map(|e| e.id))
+    }
     fn cancellation(&self, session: &str) -> Result<CancellationToken>;
     fn capability(&self, name: &str) -> Result<Arc<dyn Any + Send + Sync>>;
     fn capability_names(&self, prefix: &str) -> Vec<String>;

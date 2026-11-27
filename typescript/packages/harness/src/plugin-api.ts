@@ -132,6 +132,7 @@ export interface PluginApi {
 	tenant(sessionId: string): Promise<TenantInfo>;
 	history(sessionId: string, options?: { all?: boolean }): HistoryEntry[];
 	checkPending(sessionId: string): Promise<string>;
+	deliveryWitness(sessionId: string): () => Promise<boolean>;
 	readHistory(sessionId: string, options?: { all?: boolean }): HistoryEntry[] | Promise<HistoryEntry[]>;
 	/** Inspect a fresh snapshot and register any follow-up observer without yielding. */
 	inspectHistory<T>(sessionId: string, options: { all?: boolean; retryErasure?: boolean }, inspect: (entries: HistoryEntry[]) => T): T | Promise<T>;

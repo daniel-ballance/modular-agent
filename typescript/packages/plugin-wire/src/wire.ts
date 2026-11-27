@@ -18,7 +18,7 @@ export const PLUGIN_BINDING = "modular-agent-plugin/1";
 /** The largest message either side sends or accepts. */
 export const MAX_MESSAGE = 64 * 1024 * 1024;
 
-export type ErrorCode = "invalid_request" | "not_found" | "unknown_handler" | "cancelled" | "not_supported" | "result_too_large" | "lost" | "internal" | "method_not_found" | "parse_error" | "turn_limit" | "busy";
+export type ErrorCode = "withheld" | "invalid_request" | "not_found" | "unknown_handler" | "cancelled" | "not_supported" | "result_too_large" | "lost" | "internal" | "method_not_found" | "parse_error" | "turn_limit" | "busy";
 
 /** An error as the binding carries it: a JSON-RPC error with `data.code`. */
 export class WireError extends Error {
@@ -56,6 +56,11 @@ export async function listDirectory(env: import("@modular-agent/harness").Workin
 	}
 }
 
+import type { Delivery, WriteLine } from "./outbound.js";
+
+type CaptureDelivery = (method: string, params: any) => Delivery | undefined;
+const withheld = () => new WireError("withheld", "Plugin delivery is no longer available");
+
 /** What handles one incoming request: its params, an abort signal for `$/cancel`, and the request's id. */
 export type Handler = (params: any, ctx: { signal: AbortSignal; id: number | string; atReply(fence: (send: () => void) => Promise<void>): void }) => unknown | Promise<unknown>;
 export type NoteHandler = (params: any) => void;
@@ -75,17 +80,40 @@ export class WirePeer {
 	private waiting = new Map<number | string, { resolve(v: unknown): void; reject(e: Error): void }>();
 	private trace?: { name: string; callbackScope?: (params: any) => Operation | undefined };
 	private sent = new Map<number | string, Operation>();
-	private running = new Map<number | string, AbortController>();
+	private running = new Map<number | string, { abort: AbortController; gate?: Delivery }>();
+	private outbound: (() => Promise<void>)[] = [];
+	private writing = false;
+	private captureRequest?: CaptureDelivery;
+	private captureReply?: CaptureDelivery;
 	private nextId = 1;
 	private closedWith?: Error;
 	private fragments: Buffer[] = [];
 	private frameBytes = 0;
 	private received = new Set<number | string>();
 
-	constructor(private write: (line: string) => void, private onClose?: () => void,
+	constructor(private write: WriteLine, private onClose?: () => void,
 		private afterReply?: (method: string) => void, private allowRequest?: (method: string) => boolean) {
 		this.handle("$/ping", () => ({}));
-		this.onNotification("$/cancel", (p) => this.running.get(p?.id)?.abort());
+		this.onNotification("$/cancel", (p) => this.running.get(p?.id)?.abort.abort());
+	}
+
+	configureDelivery(request: CaptureDelivery, reply: CaptureDelivery): void {
+		this.captureRequest = request;
+		this.captureReply = reply;
+	}
+
+	private delivery(method: string, params: any, signal?: AbortSignal): Delivery | undefined {
+		const parent = method === "tools/changed" ? undefined : this.running.get(params?.parentRequestId);
+		const gate = parent?.gate ?? this.captureRequest?.(method, params);
+		const settles = method === "host/runtime/record" || method === "host/runtime/hook" && params?.hook === "turn.end" || /^(host\/(history|session|declaration|tools\/list|env\/(read|list|exists)))$/.test(method);
+		if (!parent && !gate && !signal) return;
+		return async send => {
+			const live = () => {
+				if (signal?.aborted || !settles && parent?.abort.signal.aborted) throw new WireError("cancelled", "Cancelled before transport handoff");
+				send();
+			};
+			if (gate) await gate(live); else live();
+		};
 	}
 
 	configureTracing(name: string, callbackScope?: (params: any) => Operation | undefined): void {
@@ -142,7 +170,12 @@ export class WirePeer {
 			this.waiting.set(id, { resolve: resolve as (v: unknown) => void, reject });
 			try {
 				if (span) this.sent.set(id, span);
-				const send = () => this.send({ jsonrpc: "2.0", id, method, params: this.paramsWithTrace(method, params) });
+				const gate = this.delivery(method, params, signal);
+				const send = () => void this.send({ jsonrpc: "2.0", id, method, params: this.paramsWithTrace(method, params) }, gate).catch(error => {
+					const waiter = this.waiting.get(id);
+					this.waiting.delete(id);
+					waiter?.reject(error);
+				});
 				if (span) span.run(send); else send();
 			} catch (error) {
 				this.waiting.delete(id);
@@ -165,7 +198,8 @@ export class WirePeer {
 	}
 
 	notify(method: string, params?: unknown): void {
-		if (!this.closedWith) this.send({ jsonrpc: "2.0", method, params: this.paramsWithTrace(method, params) });
+		if (!this.closedWith) void this.send({ jsonrpc: "2.0", method, params: this.paramsWithTrace(method, params) },
+			this.delivery(method, params)).catch(() => {});
 	}
 
 	cancel(id: number | string): void {
@@ -178,7 +212,7 @@ export class WirePeer {
 		this.closedWith = new WireError("lost", reason);
 		for (const w of this.waiting.values()) w.reject(this.closedWith);
 		this.waiting.clear();
-		for (const c of this.running.values()) c.abort();
+		for (const c of this.running.values()) c.abort.abort();
 		this.fragments = [];
 		this.frameBytes = 0;
 		this.onClose?.();
@@ -196,7 +230,7 @@ export class WirePeer {
 	get pending(): boolean { return this.waiting.size > 0; }
 
 	abortRunning(except?: number | string): void {
-		for (const [id, controller] of this.running) if (id !== except) controller.abort();
+		for (const [id, controller] of this.running) if (id !== except) controller.abort.abort();
 	}
 
 	/** Receive exactly one WebSocket text message, including any embedded JSON whitespace. */
@@ -224,22 +258,57 @@ export class WirePeer {
 		}
 	}
 
-	private send(m: Message): void {
-		if (this.closed) return;
+	private send(m: Message, gate?: Delivery): Promise<void> {
+		if (this.closedWith) return Promise.reject(this.closedWith);
 		let line = JSON.stringify(m);
 		if (Buffer.byteLength(line) > MAX_MESSAGE) {
 			if (m.id === undefined || !("result" in m || "error" in m)) throw new WireError("result_too_large", "The message is too large to send");
 			const code = m.error?.data?.code ?? "result_too_large";
 			line = JSON.stringify({ jsonrpc: "2.0", id: m.id, error: { code: m.error?.code ?? -32000, message: code, data: { code } } });
-			if (Buffer.byteLength(line) > MAX_MESSAGE) return this.close("Plugin response ID cannot fit the line limit");
+			if (Buffer.byteLength(line) > MAX_MESSAGE) {
+				this.close("Plugin response ID cannot fit the line limit");
+				return Promise.reject(this.closedWith);
+			}
 		}
-		this.write(line + "\n");
+		return this.enqueue(line + "\n", gate);
+	}
+
+	private enqueue(line: string, gate?: Delivery): Promise<void> {
+		return new Promise((resolve, reject) => {
+			this.outbound.push(async () => {
+				let written: Promise<void> | undefined;
+				const send = () => {
+					if (this.closedWith) throw this.closedWith;
+					try {
+						written = Promise.resolve(this.write(line)).then(() => {});
+						void written.catch(() => this.close("Plugin transport write failed"));
+					} catch (error) {
+						this.close("Plugin transport write failed");
+						throw error;
+					}
+				};
+				try {
+					if (this.closedWith) throw this.closedWith;
+					if (gate) await gate(send); else send();
+					if (!written) throw withheld();
+					await written;
+					resolve();
+				} catch (error) { reject(error); }
+			});
+			if (!this.writing) {
+				this.writing = true;
+				queueMicrotask(async () => {
+					for (let item; (item = this.outbound.shift());) await item();
+					this.writing = false;
+				});
+			}
+		});
 	}
 
 	private receive(line: Buffer): void {
 		const validId = (id: unknown) => typeof id === "string" || typeof id === "number" && Number.isSafeInteger(id);
 		const fail = (id: unknown, rpc: number, code: string) => {
-			this.write(JSON.stringify({ jsonrpc: "2.0", id: validId(id) ? id : null, error: { code: rpc, message: code, data: { code } } }) + "\n");
+			void this.enqueue(JSON.stringify({ jsonrpc: "2.0", id: validId(id) ? id : null, error: { code: rpc, message: code, data: { code } } }) + "\n").catch(() => {});
 		};
 		let m: Message;
 		try {
@@ -283,21 +352,34 @@ export class WirePeer {
 	private async serve(m: Message): Promise<void> {
 		const handler = this.handlers.get(m.method!);
 		if (!handler) {
-			this.send({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: `Method not found: ${m.method}`, data: { code: "method_not_found" } } });
+			await this.send({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: `Method not found: ${m.method}`, data: { code: "method_not_found" } } }).catch(() => {});
 			return;
 		}
 		const abort = new AbortController();
-		this.running.set(m.id!, abort);
+		const running: { abort: AbortController; gate?: Delivery } = { abort };
+		this.running.set(m.id!, running);
 		try {
 			await Promise.resolve();
 			if (abort.signal.aborted) throw new WireError("cancelled", "Cancelled");
 			if (this.allowRequest && !this.allowRequest(m.method!)) throw new WireError("invalid_request", "The plugin is not registered");
-			let fence: ((send: () => void) => Promise<void>) | undefined;
+			let fence: Delivery | undefined;
+			running.gate = this.captureReply?.(m.method!, m.params);
 			await this.incoming(m.method!, m.params, (params, parent) => {
 				const work = async () => {
 					const result = await handler(params ?? {}, { signal: abort.signal, id: m.id!, atReply: guard => { fence = guard; } });
-					const send = () => this.send({ jsonrpc: "2.0", id: m.id, result: result === undefined ? null : result });
-					if (fence) await fence(send); else send();
+					const scoped = running.gate;
+					const wasCancelled = abort.signal.aborted;
+					const gate: Delivery = async send => {
+						const live = () => {
+							if (!wasCancelled && abort.signal.aborted && (scoped || m.params?.sessionId || m.params?.turn?.sessionId || m.params?.payload?.sessionId || m.params?.parentRequestId != null || m.method === "provider/request")) throw withheld();
+							send();
+						};
+						if (fence) {
+							// Provider preparation supplies its own final check and orders it with erasure.
+							await fence(live);
+						} else if (scoped) await scoped(live); else live();
+					};
+					await this.send({ jsonrpc: "2.0", id: m.id, result: result === undefined ? null : result }, gate);
 				};
 				if (!this.trace || !workMethod(m.method!)) return withTrace(undefined, work);
 				const span = this.workSpan(m.method!, params, SpanKind.SERVER, parent);
@@ -311,7 +393,14 @@ export class WirePeer {
 		} catch (error) {
 			const e = abort.signal.aborted && !(error instanceof WireError) ? new WireError("cancelled", "Cancelled") : error;
 			const code = e instanceof WireError ? e.code : "internal";
-			this.send({ jsonrpc: "2.0", id: m.id, error: { code: e instanceof WireError ? e.rpcCode : -32000, message: e instanceof Error ? e.message : String(e), data: { ...(e instanceof WireError ? e.data : {}), code } } });
+			const errorReply = { code: e instanceof WireError ? e.rpcCode : -32000, message: e instanceof Error ? e.message : String(e), data: { ...(e instanceof WireError ? e.data : {}), code } };
+			const reply = (error: Message["error"], gate?: Delivery) => this.send({ jsonrpc: "2.0", id: m.id, error }, gate);
+			try { await reply(errorReply, running.gate); }
+			catch {
+				// Preserve an ordinary rejection's code, but never its message or data
+				// when the work is now outside the delivery view.
+				await reply({ code: errorReply.code, message: code, data: { code } }).catch(() => {});
+			}
 		} finally {
 			this.running.delete(m.id!);
 		}

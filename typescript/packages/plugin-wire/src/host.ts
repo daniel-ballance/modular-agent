@@ -1,4 +1,7 @@
 import { historyPage } from "./history.js";
+import { WireEnvironment } from "./environment-host.js";
+import { configureHostDelivery, deliveryFor } from "./host-delivery.js";
+import { socketWriter, streamWriter } from "./outbound.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
@@ -8,8 +11,6 @@ import type {
 	Answer,
 	AssistantMessage,
 	CredentialStore,
-	DirEntry,
-	ExecResult,
 	HandlerOrder,
 	InterruptedTurn,
 	Runtime,
@@ -33,7 +34,7 @@ import { checkOutputSize, mapOutput } from "@modular-agent/harness";
 import { fromWire, toWire, wireEqual } from "./translate.js";
 import { WireProvider, type ProviderAttempt } from "./provider-host.js";
 import { connectWebSocket, PLUGIN_PROTOCOL, receiveMessages } from "./websocket.js";
-import { execTimeout, listDirectory, notFoundAsEnoent, optionalMethod, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
+import { execTimeout, listDirectory, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
 
 const { version } = createRequire(import.meta.url)("../../package.json") as { version: string };
 
@@ -101,7 +102,7 @@ export function pluginSpecsFromEnv(env: NodeJS.ProcessEnv = process.env): Plugin
  */
 export async function startExternalPlugin(spec: ExternalPluginSpec, info: { project: string; home: string }): Promise<ExternalPlugin> {
 	const child = spawn(spec.command[0], spec.command.slice(1), { stdio: ["pipe", "pipe", "inherit"], env: { PATH: process.env.PATH, ...(spec.env ?? {}) } });
-	const peer = new WirePeer((line) => child.stdin.write(line), () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
+	const peer = new WirePeer(streamWriter(child.stdin), () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
 	child.stdout.on("data", (chunk: Buffer) => peer.feed(chunk));
 	child.stdout.on("end", () => peer.close("The plugin closed its output"));
 	const exited = new Promise<void>((resolve) => child.on("close", () => resolve()));
@@ -139,7 +140,8 @@ export async function startPluginService(spec: ServicePluginSpec, info: { projec
 				.finally(() => { pingOutstanding = false; arm(); });
 		}, interval);
 	};
-	const peer = new WirePeer(line => { ws.send(line.slice(0, -1)); arm(); }, () => {
+	const write = socketWriter(ws);
+	const peer = new WirePeer(line => { const sent = write(line); arm(); return sent; }, () => {
 		clearTimeout(silence);
 		if (ws.readyState === ws.OPEN) ws.close();
 	});
@@ -215,6 +217,7 @@ const STANDARD_HOOKS = new Set("plugin.load session.start session.end input turn
 const RUNTIME_HOOKS = new Set("turn.start step.after tool.before tool.after model.failed turn.result turn.end".split(" "));
 
 interface Parent {
+	delivery?: ReturnType<typeof deliveryFor>;
 	actors?: string[];
 	jobs?: string[];
 	runtime?: boolean;
@@ -229,20 +232,21 @@ interface Parent {
 
 function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>): Plugin {
 	const parents = new Map<number | string, Parent>();
-	let workActors: PluginApi["workActors"];
-	let workJobs: PluginApi["workJobs"];
+	let api: PluginApi;
 	const changedBy = new Map<number, Promise<unknown>>();
 	const track = <T>(p: Promise<T> & { id: number }, parent: Parent): Promise<T> => {
-		parents.set(p.id, { ...parent, actors: parent.actors ?? (parent.sessionId ? workActors(parent.sessionId) : []), jobs: parent.sessionId ? workJobs(parent.sessionId) : [] });
+		const { sessionId } = parent;
+		const actors = parent.actors ?? (sessionId ? api.workActors(sessionId) : []), jobs = sessionId ? api.workJobs(sessionId) : [];
+		parents.set(p.id, { ...parent, actors, jobs, delivery: sessionId ? deliveryFor(api, sessionId, actors, jobs) : undefined });
 		return p.then(async (value) => { await changedBy.get(p.id)?.catch(() => undefined); return value; })
 			.finally(() => { parents.delete(p.id); changedBy.delete(p.id); });
 	};
 	return {
 		name: reg.name,
 		stop,
-		async setup(api: PluginApi) {
-			workActors = api.workActors;
-			workJobs = api.workJobs;
+		async setup(pluginApi: PluginApi) {
+			api = pluginApi;
+			configureHostDelivery(peer, api, parents);
 			const parentOf = (p: any): Parent => {
 				const parent = parents.get(p.parentRequestId);
 				if (!parent || !peer.isWaiting(p.parentRequestId)) throw new WireError("invalid_request", "There is no live parent");
@@ -936,73 +940,5 @@ class WireToolSource implements ToolSource {
 	}
 }
 
-class WireEnvironment implements WorkingEnvironment {
-	readonly id: string;
-	constructor(private peer: WirePeer, readonly cwd: string, readonly containment: string, readonly points: boolean,
-		private sessionId?: string, readonly confinesFiles = false) {
-		this.id = `plugin:${cwd}`;
-	}
-	at(cwd: string): WorkingEnvironment {
-		return new WireEnvironment(this.peer, cwd, this.containment, this.points, this.sessionId, this.confinesFiles);
-	}
-	forSession(sessionId: string): WorkingEnvironment {
-		return new WireEnvironment(this.peer, this.cwd, this.containment, this.points, sessionId, this.confinesFiles);
-	}
-	get safeToRepeat(): boolean { return this.containment === "strong"; }
-	async save(): Promise<string> {
-		return (await this.peer.request<{ point: string }>("env/save", { cwd: this.cwd, sessionId: this.sessionId })).point;
-	}
-	async hasPoint(point: string): Promise<boolean> {
-		return (await this.peer.request<{ exists: boolean }>("env/checkPoint", { cwd: this.cwd, sessionId: this.sessionId, point })).exists === true;
-	}
-	async restore(point: string): Promise<void> {
-		await this.peer.request("env/restore", { cwd: this.cwd, sessionId: this.sessionId, point });
-	}
-	async sessionEnded(sessionId: string): Promise<void> {
-		await this.peer.request("env/sessionEnded", { sessionId });
-	}
-	async readFile(path: string): Promise<Buffer> {
-		try {
-			return Buffer.from((await this.peer.request<{ data: string }>("env/read", { cwd: this.cwd, sessionId: this.sessionId, path })).data, "base64");
-		} catch (error) {
-			throw notFoundAsEnoent(error, path);
-		}
-	}
-	async writeFile(path: string, data: string | Buffer): Promise<void> {
-		await this.peer.request("env/write", { cwd: this.cwd, sessionId: this.sessionId, path, data: Buffer.from(data).toString("base64") });
-	}
-	async list(path: string): Promise<DirEntry[]> {
-		return (await this.peer.request<{ entries: DirEntry[] }>("env/list", { cwd: this.cwd, sessionId: this.sessionId, path }).catch(optionalMethod)).entries;
-	}
-	async exists(path: string): Promise<boolean> {
-		return (await this.peer.request<{ exists: boolean }>("env/exists", { cwd: this.cwd, sessionId: this.sessionId, path })).exists;
-	}
-	async exec(command: string, options: { signal: AbortSignal; timeoutMs?: number; onOutput?(chunk: string): void }): Promise<ExecResult> {
-		const req = this.peer.request<ExecResult>("env/exec", { cwd: this.cwd, sessionId: this.sessionId, command, timeoutMs: execTimeout(options.timeoutMs) }, options.signal);
-		const listen = (p: { parentRequestId: number; chunk: string }) => {
-			if (p.parentRequestId === req.id) options.onOutput?.(p.chunk);
-		};
-		WireEnvironment.listen(this.peer, req.id, listen);
-		try {
-			return await req;
-		} catch (error) {
-			if (options.signal.aborted) return { exitCode: null, output: "", timedOut: false };
-			throw error;
-		} finally {
-			WireEnvironment.listeners.get(this.peer)?.delete(req.id);
-		}
-	}
-	static listeners = new WeakMap<WirePeer, Map<number, (p: any) => void>>();
-	static listen(peer: WirePeer, id: number, fn: (p: any) => void): void {
-		let m = WireEnvironment.listeners.get(peer);
-		if (!m) {
-			m = new Map();
-			WireEnvironment.listeners.set(peer, m);
-			const all = m;
-			peer.onNotification("env/output", (p) => all.get(p?.parentRequestId)?.(p));
-		}
-		m.set(id, fn);
-	}
-}
 
 export type { Answer };

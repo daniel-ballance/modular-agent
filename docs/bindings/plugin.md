@@ -26,6 +26,7 @@ Either peer MAY send a valid, trusted context for the current operation in `para
 | -32000 | `not_found` | Named file does not exist or a saved point is unavailable in the requested scope; see [Paths and points](#paths-and-points) |
 | -32000 | `unknown_handler` | No such registered handler at this hook |
 | -32000 | `cancelled` | Request cancelled |
+| -32000 | `withheld` | Session delivery is no longer authorized or current |
 | -32000 | `not_supported` | Unsupported version or capability |
 | -32000 | `result_too_large` | The result does not fit its limit |
 | -32000 | `busy` | A new operation cannot reserve capacity; no start or admission was recorded |
@@ -36,6 +37,8 @@ Either peer MAY send a valid, trusted context for the current operation in `para
 A receiver MUST treat invalid UTF-8, invalid JSON and duplicate JSON keys as `parse_error` with null id. A parsed object with `result` or `error` is response-like and MUST close the connection if the response envelope is invalid, including if it also has `method`. A valid request envelope without `id` is a notification; the receiver MUST NOT answer it, even for an unknown method or bad params. For other malformed envelopes the receiver MUST return `invalid_request` using a valid request id if known, otherwise null. Invalid params use -32602. Senders MUST include `data.code`. Receivers MUST interpret that code without inferring retry safety.
 
 Each peer MUST bound queued work and reserve capacity for responses and cancellation. It MUST handle nested callbacks while awaiting a response, or reject cyclic routing with `internal` before dispatch. An overloaded peer MUST reject new requests with `internal` before admission. It MAY drop progress notifications, but MUST NOT silently drop a catalog invalidation. If it cannot process one, it MUST invalidate the source or close the connection. At the request-ID budget, a sender MUST drain and close rather than reuse ids; a reconnect has a new scope.
+
+Before handing a queued session frame to stdio or WebSocket, the sending peer MUST recheck the authority and freshness available to it. The host checks the current session and work authority, writer lease and erasure state against the prepared view. A served plugin checks the live request and its cancellation signal. Enqueueing a frame does not deliver it. If the check fails, the peer MUST NOT send the contents: it fails an unsent request locally, replaces a successful reply with a content-free `withheld` error or strips the details from an error reply, and drops a notification subject to the catalog invalidation rule above. This check cannot recall a frame whose transport handoff has begun.
 
 Both directions offer `$/ping` with params `{}`, result `{}` and no method-specific error. Either peer MAY use it to check liveness. Normal work has no transport timeout. The host MUST bound initialization, any ping it sends, shutdown acknowledgement and process exit, with a default of five seconds per wait, configurable by the operator.
 
