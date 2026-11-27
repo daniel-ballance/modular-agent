@@ -231,6 +231,7 @@ Moving back in a session with `rewind` also puts the project's files back as the
 ## Prompt, skills and MCP
 
 - **The prompt** has Pi's structure, in this order: the rules, the global `AGENTS.md`, project `AGENTS.md` (or `CLAUDE.md`) files from the outermost folder in, the skills listing, the `codemode` functions, a `<cwd>` section with the absolute working folder, and a `<date>` section with the local date as `YYYY-MM-DD`.
+- **The rules** tell the model to batch independent reads, searches and edits in one `codemode` script and print only short excerpts. They recommend quote-safe Python strings for shell commands and tell the model to reuse `AGENTS.md` and `CLAUDE.md` instructions already in the prompt unless verifying a change made during the session.
 - **Agent Skills** are found in the skills folders above. Each `SKILL.md` has a `name` and `description` in its front matter. The listing shows each skill's name, description and path. `/skill:NAME` puts that skill's body into the input. `ma skills` lists what was found and any that were skipped, with the reason.
 - **MCP** servers come from `mcp.json`, and from the project's `.mcp.json` once it is trusted, over stdio and Streamable HTTP. Tools only. A server that fails to start is skipped with a warning. One whose tool names are not letters, digits, `_` or `-`, or are longer than 64 characters with the prefix, is skipped whole.
 
