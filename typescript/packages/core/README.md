@@ -152,7 +152,7 @@ With several actors, retain the handle returned by `session.as(actorId)` for bot
 Use `agent.connectInterfaceTools(sessionId, { actor, routeId, onHandoff, defer? })` in a trusted embedding binding. Authenticate each connection independently, apply its rights ceiling in `actor.rights`, and check access to the session's project and tenant before attaching. Do not accept an actor or route from a result body. The handle is bound to that session, actor and route. It does not join the actor or grant rights.
 
 - Call `connection.advertise(definitions)` with the exact registered definitions. An empty list clears the advertisement. An advertisement is not authority.
-- `onHandoff({ sessionId, turnId, call, deadline })` is the synchronous delivery boundary, not a queue for later delivery. For a delayed send set `defer: true` and call `connection.release(callId)` when ready; the Harness checks the request again before calling `onHandoff`. Return `"withheld"` only when you abandon the call before attempting any executable write. For a terminal group abandoned before release, `connection.withholdStaged(turnId)` settles only that handle’s still-staged calls. A thrown write error does not prove non-delivery. Do not execute calls copied from events or history.
+- `onHandoff({ sessionId, turnId, call, deadline })` is the synchronous delivery boundary, not a queue for later delivery. For a delayed send set `defer: true` and call `connection.release(callId)` when ready; the Harness checks the request again before calling `onHandoff`. Do not execute calls copied from events or history.
 - Call `connection.reportInterfaceToolResult({ callId, status, content, value? })` after the originating turn ends. It returns `{ status: "accepted" }`, `{ status: "alreadySettled" }` or `{ status: "refused", reason?: "notReady" }`. An early report can be sent again after turn end. If result processing fails, the SDK commits a minimal result and raises the processing error. A report does not run a tool or grant authority.
 - Call `connection.disconnect()` when the connection ends. This clears the advertisement without settling the call. A new authenticated connection to the same actor and route may report without advertising, but it cannot receive the executable request again. No reconnect changes the deadline.
 
@@ -219,7 +219,7 @@ With `serveAgui({ resumeOpen:true, ... })` or `serveAcp({ resumeOpen:true, ... }
 
 #### Withheld handoffs and continuation capacity
 
-If the adapter abandons a final group, it sends `RUN_ERROR` if it can. The Harness records `notStarted` for calls the adapter can prove it never tried to write. Once an executable write is attempted, even a partial write or a failed terminal leaves the call open until a valid report, cancellation or its original deadline. No handoff is repeated.
+If the AG-UI adapter abandons a final group, it sends `RUN_ERROR` if it can. The adapter confirms definite pre-write non-delivery internally, and the Harness records `notStarted` for those calls. Once an executable write is attempted, the call remains open until a valid report, cancellation or its original deadline, even if the write is partial or the terminal event fails. No handoff is repeated.
 
 A waiting exchange receives `RUN_ERROR` with code `busy` if its ready continuation cannot reserve a turn. That refusal does not undo a committed result or start a different turn.
 

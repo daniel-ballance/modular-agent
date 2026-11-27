@@ -10,11 +10,11 @@ import { conversation, currentSpan, safeName, startOperation, toolAttributes, wi
 import { Follower } from "./output-gate.js";
 import { isDeepStrictEqual } from "node:util";
 import { HookRegistry } from "./hooks.js";
-import { INTERFACE_HANDOFF, INTERFACE_SOURCE, handoffRecords, isJson, sameDefinition, validReportContent, type HandoffData, type HandoffRecord, type InterfaceToolConnection, type InterfaceToolConnectionOptions, type InterfaceToolHandoff, type InterfaceToolReceipt, type InterfaceToolReport, type InterfaceToolSource } from "./interface-tools.js";
+import { INTERFACE_HANDOFF, INTERFACE_SOURCE, handoffRecords, isJson, sameDefinition, validReportContent, type HandoffData, type HandoffRecord, type AdapterInterfaceToolConnection, type AdapterInterfaceToolConnectionOptions, type InterfaceToolHandoff, type InterfaceToolReceipt, type InterfaceToolReport, type InterfaceToolSource } from "./interface-tools.js";
 import { type QueuedInput, Session } from "./session.js";
 import { type Actor, type AgentEvent, type Authority, type EntryDraft, type HistoryEntry, type Runtime, type ToolCall, type ToolDefinition, type ToolPending, type ToolResult, type ToolSource, type TurnOutcome, text } from "./types.js";
 
-export interface InterfaceConnection extends InterfaceToolConnectionOptions {
+export interface InterfaceConnection extends AdapterInterfaceToolConnectionOptions {
 	tools: Map<string, ToolDefinition>;
 }
 interface LiveHandoff {
@@ -120,7 +120,7 @@ export class InterfaceToolRoutes {
 		this.interfaceSources = definitions;
 	}
 
-	connectInterfaceTools(sessionId: string, options: InterfaceToolConnectionOptions): InterfaceToolConnection {
+	connectInterfaceTools(sessionId: string, options: AdapterInterfaceToolConnectionOptions): AdapterInterfaceToolConnection {
 		const s = this.operations.session(sessionId);
 		if (![...this.interfaceSources.values()].some(r => r.routeId === options.routeId && r.actorId === options.actor.id)) {
 			throw failure("forbidden", "No Interface tool route for this actor");
@@ -260,6 +260,9 @@ export class InterfaceToolRoutes {
 
 	private async deliverHandoff(s: Session, live: LiveHandoff, request: InterfaceToolHandoff): Promise<boolean> {
 		const { call, turnId } = request;
+		const work = this.interfaceWork.get(s);
+		// An attempted delivery cannot be repeated, even on a throw.
+		if (!work?.delete(call.id)) return false;
 		const span = startOperation(`execute_tool ${safeName(call.name) ?? "interface"}`, {
 			...conversation(s.id), "modular_agent.turn.id": turnId, "modular_agent.step.id": call.stepId, ...toolAttributes(call),
 			"gen_ai.agent.name": this.operations.agentName(), "modular_agent.tool.status": "pending",
@@ -269,8 +272,6 @@ export class InterfaceToolRoutes {
 			this.handoffSpans.set(s, spans);
 			spans.set(call.id, span.spanContext);
 		}
-		const work = this.interfaceWork.get(s)!;
-		work.delete(call.id); // An attempted delivery cannot be repeated, even on a throw.
 		try {
 			if (span.run(() => live.connection.onHandoff(structuredClone(request))) !== "withheld") return true;
 		} catch {

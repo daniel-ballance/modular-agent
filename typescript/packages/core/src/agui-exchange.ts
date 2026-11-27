@@ -1,7 +1,8 @@
 import type { ServerResponse } from "node:http";
-import { inputIdOf, isText, textOf, type AgentEvent, type HistoryEntry, type InputRequest, type InterfaceToolConnection, type ReceiptOperation, type TerminalClass, type ReleaseProof, type ToolCall } from "@modular-agent/harness";
+import { inputIdOf, isText, textOf, type AgentEvent, type HistoryEntry, type InputRequest, type ReceiptOperation, type TerminalClass, type ReleaseProof, type ToolCall } from "@modular-agent/harness";
 import type { Interrupt } from "@ag-ui/core";
-import type { Route } from "./agui.js";
+import type { AdapterInterfaceToolConnection, Route } from "./agui.js";
+import { checked } from "./errors.js";
 import { assistantId, content, displayEntry, toolId } from "./agui-view.js";
 import { MAX, errorCode, fail, frame, hash, object, same, sse, type WireEvent } from "./agui-wire.js";
 
@@ -27,7 +28,7 @@ export class Exchange {
   private initialState?: {revisionId: string; snapshot: unknown};
   private stateSerial = 0; private lastStateSerial = 0;
   inputId?: string; turn?: string; origin?: string; handled?: boolean;
-  constructor(readonly r: Route, readonly res: ServerResponse, readonly runId: string, readonly connection: InterfaceToolConnection | undefined,
+  constructor(readonly r: Route, readonly res: ServerResponse, readonly runId: string, readonly connection: AdapterInterfaceToolConnection | undefined,
     readonly setDeliver: (fn: (call: ToolCall) => void | "withheld") => void, readonly claim?:ReceiptOperation) {}
   get boundary() { return { threadId: this.r.id, runId: this.runId }; }
   eligible(q: InputRequest) { return this.turn !== undefined && q.turnId === this.turn; }
@@ -234,6 +235,8 @@ export class Exchange {
   private async withholdFinal(owned = this.heldConnection()) {
     try {
       if (this.turn) await (owned?.connection ?? this.connection)?.withholdStaged(this.turn);
+    } catch {
+      // Settlement can fail independently of delivery. Preserve the run's original error.
     } finally { this.dropHeld(owned); }
   }
   private async finish(kind: string, questions: Interrupt[] = []) {
@@ -249,7 +252,7 @@ export class Exchange {
       if (kind !== "interrupt") this.dropHeld(owned);
     }
   }
-  private async finishGroup(kind: string, questions: Interrupt[], connection: InterfaceToolConnection | undefined, owned: Route["c"]["held"]) {
+  private async finishGroup(kind: string, questions: Interrupt[], connection: AdapterInterfaceToolConnection | undefined, owned: Route["c"]["held"]) {
     const { r } = this;
     for (const step of new Set([...this.steps, ...this.streams.keys()])) await this.closeStep(step);
     if (kind === "failed") fail("unavailable");
@@ -288,6 +291,6 @@ export class Exchange {
       this.res.write(data);
       if (++next === calls.length) end();
     });
-    for (const [i, call] of calls.entries()) if (!await connection.release(call.toolCallId) || next !== i + 1) fail("refused");
+    for (const [i, call] of calls.entries()) if (!await checked(() => connection.release(call.toolCallId)) || next !== i + 1) fail("refused");
   }
 }

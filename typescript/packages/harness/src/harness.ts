@@ -25,7 +25,7 @@ import { Reservations, reservationLimits, type ReservationOptions } from "./rese
 import { RunReceipts, type ReceiptOperation } from "./run-receipts.js";
 import { randomUUID } from "node:crypto";
 import { HookRegistry } from "./hooks.js";
-import { INTERFACE_SOURCE, type InterfaceToolConnection, type InterfaceToolConnectionOptions, type InterfaceToolSource } from "./interface-tools.js";
+import { INTERFACE_SOURCE, type AdapterInterfaceToolConnection, type AdapterInterfaceToolConnectionOptions, type InterfaceToolConnection, type InterfaceToolConnectionOptions, type InterfaceToolSource } from "./interface-tools.js";
 import { Session } from "./session.js";
 import {
 	providerAvailability,
@@ -932,6 +932,16 @@ export class Harness {
 	}
 
 	connectInterfaceTools(sessionId: string, options: InterfaceToolConnectionOptions): InterfaceToolConnection {
+		const { onHandoff } = options;
+		const { advertise, release, reportInterfaceToolResult, disconnect } = this.interfaceTools.connectInterfaceTools(sessionId, {
+			...options,
+			onHandoff(request) { onHandoff.call(this, request); },
+		});
+		return { advertise, release, reportInterfaceToolResult, disconnect };
+	}
+
+	/** @internal Only the AG-UI adapter can attest to pre-write non-delivery. */
+	connectAdapterInterfaceTools(sessionId: string, options: AdapterInterfaceToolConnectionOptions): AdapterInterfaceToolConnection {
 		return this.interfaceTools.connectInterfaceTools(sessionId, options);
 	}
 

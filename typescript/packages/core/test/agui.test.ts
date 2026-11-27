@@ -7,6 +7,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
+import { Harness } from "@modular-agent/harness";
 import { createAgent, defaultAcpActor, definePlugin, tool, type Actor, type AgentOptions, type ServeAguiOptions } from "../src/index.js";
 import { memoryEnvironment, scriptedProvider } from "../src/testing.js";
 
@@ -361,6 +362,27 @@ for (const mode of ["final group", "turn end", "write preflight"]) test(`withhol
     [[start.toolCallId,"notStarted",undefined]]);
 });
 
+for (const mode of ["final group", "turn end"]) test(`a settlement error preserves AG-UI ${mode} withholding`, async t => {
+  const connect = Harness.prototype.connectAdapterInterfaceTools;
+  const withheld = t.mock.fn(() => { throw new Error("could not settle staged calls"); });
+  t.mock.method(Harness.prototype, "connectAdapterInterfaceTools", function(this: Harness, ...args: Parameters<typeof connect>) {
+    return { ...connect.apply(this, args), withholdStaged: withheld };
+  });
+  const gate = definePlugin({ name: "withhold-terminal", hooks: { output: ({ events }) => {
+    if (mode === "turn end" && events.some(e => e.type === "turnEnded")) return "block";
+    if (mode === "final group" && events.some(e => {
+      const data = e.data as {method?: string; result?: {type: string}[]};
+      return data?.method === "agui.events" && data.result?.some(f => f.type === "TOOL_CALL_START");
+    })) return "block";
+  } } });
+  const { thread, run } = await setup(t, { interfaceTools: [source], plugins: [gate],
+    providers: [scriptedProvider([{ toolCalls: [{ name: "pick", input: {} }] }])] });
+  const es = await events(await run(await thread(), [prompt("choose")], { tools: [definition] }));
+  assert.equal(withheld.mock.callCount(), 1);
+  assert.equal(es.at(-1).type, "RUN_ERROR");
+  assert.equal(es.at(-1).code, "output_withheld");
+});
+
 test("a partial AG-UI write stays ambiguous while a later unwritten call settles", async t => {
   const {agent, thread, run} = await setup(t, {interfaceTools:[source],
     providers:[scriptedProvider([{toolCalls:[{name:"pick",input:{n:1}},{name:"pick",input:{n:2}}]}])]});
@@ -389,6 +411,29 @@ test("a partial AG-UI write stays ambiguous while a later unwritten call settles
   const conn = agent.connectInterfaceTools(id,{actor:owner,routeId:source.routeId,onHandoff:() => assert.fail("replayed")});
   try { assert.deepEqual(await conn.reportInterfaceToolResult({callId:first,status:"completed",content:[]}),{status:"accepted"}); }
   finally { conn.disconnect(); }
+});
+
+test("a failed AG-UI terminal write leaves a fully written call reportable", async t => {
+  const { agent, thread, run } = await setup(t, { interfaceTools: [source],
+    providers: [scriptedProvider([{ toolCalls: [{ name: "pick", input: {} }] }])] });
+  const id = await thread();
+  const write = ServerResponse.prototype.write;
+  let terminalAttempted = false;
+  t.mock.method(ServerResponse.prototype, "write", function(this: ServerResponse, data: unknown, ...args: unknown[]) {
+    if (typeof data === "string" && data.includes('\ndata: {"type":"RUN_FINISHED"')) {
+      terminalAttempted = true;
+      throw new Error("terminal write failed");
+    }
+    return Reflect.apply(write, this, [data, ...args]);
+  });
+  const es = await events(await run(id, [prompt("choose")], { tools: [definition] }));
+  assert.ok(terminalAttempted);
+  assert.equal(es.at(-1).type, "RUN_ERROR");
+  const call = es.find(e => e.type === "TOOL_CALL_END");
+  assert.ok(call);
+  const connection = agent.connectInterfaceTools(id, { actor: owner, routeId: source.routeId, onHandoff: () => assert.fail("replayed") });
+  try { assert.deepEqual(await connection.reportInterfaceToolResult({ callId: call.toolCallId, status: "completed", content: [] }), { status: "accepted" }); }
+  finally { connection.disconnect(); }
 });
 
 test("an accepted report ends its waiting exchange with busy when the continuation cannot reserve a turn", { timeout: 10000 }, async t=>{

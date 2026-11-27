@@ -8,7 +8,7 @@ import { test, type TestContext } from "node:test";
 import { context, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { InMemorySpanExporter, SimpleSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
-import { createAgent, definePlugin, tool, transientRuntime, type AgentOptions, type InterfaceToolHandoff, type InterfaceToolReport } from "../src/index.js";
+import { createAgent, definePlugin, tool, transientRuntime, type AgentOptions, type InterfaceToolConnection, type InterfaceToolConnectionOptions, type InterfaceToolHandoff, type InterfaceToolReport } from "../src/index.js";
 import { memoryEnvironment, scriptedProvider, testResources } from "../src/testing.js";
 import { pick, picker, provider, remoteRuntime, requested, source } from "./fixtures/interface-tools.js";
 
@@ -32,6 +32,30 @@ async function fixture(t: TestContext, remote: boolean, extra: AgentOptions = {}
   conn.advertise([pick]);
   return { agent, session, conn, connect, handoffs };
 }
+
+test("the public Interface tool handle exposes only the documented methods and ignores callback returns", async t => {
+  const agent = await createAgent(options(false));
+  t.after(() => agent.close());
+  const session = await agent.session({ actors: [picker] });
+  const handoffs: InterfaceToolHandoff[] = [];
+  const onHandoff: InterfaceToolConnectionOptions["onHandoff"] = request => {
+    handoffs.push(request);
+    return "withheld"; // TypeScript permits a value from a callback whose result is ignored.
+  };
+  const connection = agent.connectInterfaceTools(session.id, { actor: picker, routeId: source.routeId, onHandoff });
+  const methods: Record<keyof InterfaceToolConnection, true> = {
+    advertise: true, release: true, reportInterfaceToolResult: true, disconnect: true,
+  };
+  assert.deepEqual(Object.keys(connection).sort(), Object.keys(methods).sort());
+  const returnsVoid: ReturnType<InterfaceToolConnectionOptions["onHandoff"]> extends void ? true : false = true;
+  assert.ok(returnsVoid);
+  connection.advertise([pick]);
+  const turn = await session.prompt("Pick.");
+  assert.deepEqual(turn.openToolCalls, handoffs.map(h => h.call.id));
+  assert.equal(handoffs.length, 1);
+  assert.deepEqual(await connection.reportInterfaceToolResult(report(handoffs[0].call.id)), completed);
+  await session.waitIdle();
+});
 
 for (const remote of [false, true]) {
   const placement = remote ? "remote Runtime" : "embedded Runtime";
