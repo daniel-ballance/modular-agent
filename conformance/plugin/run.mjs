@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 // Conformance kit for the plugin binding, modular-agent-plugin/1 (docs/bindings/plugin.md).
 // Usage: node run.mjs [--verbose] -- <command that serves the build's conformance plugin> [args...]
-// The kit plays the host. It starts the plugin, serves the host/* callbacks from a temporary folder,
-// and checks every applicable part of the conformance plugin. No external model. Exit code 0 means all passed.
+// The kit plays the host and checks each applicable plugin part without an external model.
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, mkdtempSync, openSync, readSync, readFileSync, rmSync, writeFileSync, statSync, mkdirSync } from "node:fs";
@@ -11,6 +10,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { realpathSync } from "node:fs";
 import { isDeepStrictEqual as equal } from "node:util";
 import { codeOf, rpcError } from "./peer.mjs";
+import { historyForSelector, lateSettlement } from "./history-select.mjs";
 import { namedCallers } from "./named-callers.mjs";
 import { checkUpgrades, CONTROL_MS, PLUGIN_PROTOCOL, socketPeer, upgradeStatus, websocketOptions } from "../tools/websocket.mjs";
 
@@ -203,7 +203,8 @@ function start(extraEnv = {}, connection = network) {
 				return state.reg?.providers?.some((x) => x.id === p.provider) ? reply(m.id, { credential: null }) : fail(m.id, "invalid_request");
 			case "host/history": {
 				if (p.sessionId !== "kit-session" && p.sessionId !== "s1") return fail(m.id, "invalid_request");
-				const all = p.sessionId === "kit-session" ? state.rt?.history?.() ?? [] : [];
+				const view = p.sessionId === "kit-session" ? state.rt?.history?.(p.all) ?? [] : [];
+				const all = historyForSelector(view, p.select, state.reg?.historySelect === 1);
 				const limit = p.limit ?? 500;
 				if (!Number.isInteger(limit) || limit < 1 || limit > 500) return send({ id: m.id, error: { code: -32602, message: "bad limit", data: { code: "invalid_request" } } });
 				let from = 0;
@@ -1081,24 +1082,20 @@ async function runtimeChecks(part) {
 		await q.request("plugin/shutdown", { reason: "stop" }).catch(() => undefined);
 		await q.stop();
 
-		// Shared data: Context and interrupted work. Synthetic history uses only standard kinds.
-		// One call never started; one started and is not safe to repeat; one started and is.
 		const notStarted = { stepId: "kit-step-1", id: "c-not-started", name: "read", input: { path: "b" }, started: false, safeToRepeat: false };
 		const startedCall = { stepId: "kit-step-1", id: "c-started", name: "bash", input: { command: "echo once" }, started: true, safeToRepeat: false };
 		const safeCall = { stepId: "kit-step-1", id: "c-safe", name: "read", input: { path: "c" }, started: true, safeToRepeat: true };
-		const t0e = Date.now() - 5000;
-		const entry = (kind, extra) => ({ id: `other-${kind}-${randomUUID()}`, parentId: null, sessionId: "kit-session", kind, time: t0e, writer: "another-build", modelVisible: false, turnId: "kit-turn", ...extra });
+		const entry = (kind, extra) => ({ id: `other-${kind}-${randomUUID()}`, parentId: null, sessionId: "kit-session", kind, time: Date.now() - 5000, writer: "another-build", modelVisible: false, turnId: "kit-turn", ...extra });
 		const toolCall = (c) => ({ type: "toolCall", id: c.id, name: c.name, arguments: c.input });
 		const rights = ["watch", "input", "tools"];
 		const authorizers = [{ sessionId: "kit-session", actorId: "kit" }];
-		const source = [{ type: "text", text: "do three things" }];
 		const recoveryTools = [
 			{ name: "read", description: "fixture read", parameters: true, hints: { safeToRepeat: true, openWorld: false } },
 			{ name: "bash", description: "fixture shell", parameters: true },
 		];
 		const before = [
 			entry("actorJoined", { turnId: undefined, data: { actor: { id: "kit", kind: "host", rights }, operatorAdmission: true } }),
-			entry("inputAccepted", { turnId: undefined, actorId: "kit", inputId: "kit-input", data: { content: source, when: "now", taken: "now", rights, authorizers } }),
+			entry("inputAccepted", { turnId: undefined, actorId: "kit", inputId: "kit-input", data: { content: [{ type: "text", text: "do three things" }], when: "now", taken: "now", rights, authorizers } }),
 			entry("turnStart", { data: { startedBy: { kind: "actor", id: "kit" }, model: { provider: "kit", id: "scripted" }, system: "kit", tools: ["read", "bash"].map((name) => ({ name, description: name, parameters: true })), settings: { maxSteps: 8 }, rights, authorizers } }),
 			entry("input", { modelVisible: true, actorId: "kit", message: { role: "user", content: [{ type: "text", text: "do three things" }] }, inputId: "kit-input" }),
 			entry("modelRequest", { stepId: "kit-step-1", data: { model: { provider: "kit", id: "scripted" }, safeToRepeat: false, tools: recoveryTools.map((t) => t.name) } }),
@@ -1111,7 +1108,7 @@ async function runtimeChecks(part) {
 		before[5].sources = [before[4].id];
 		const fresh = start({ MODULAR_AGENT_PLUGIN_PARTS: part });
 		try {
-			await fresh.request("plugin/initialize", initParams);
+			fresh.state.reg = await fresh.request("plugin/initialize", initParams);
 			rt = fresh.state.rt = runScenario({ model: () => say("carried on"), definitions: Object.fromEntries(recoveryTools.map((d) => [d.name, d])), before, abandoned: durable ? [startedCall] : [notStarted, startedCall, safeCall] });
 			o = await fresh.request("runtime/resumeTurn", { turn: turn(), interrupted: { turnId: "kit-turn", calls: durable ? [notStarted, safeCall] : [], lastStep: { stepId: "kit-step-1" } } });
 		} finally {
@@ -1121,6 +1118,8 @@ async function runtimeChecks(part) {
 		}
 		const settled = durable ? [startedCall] : [notStarted, startedCall, safeCall];
 		check(`${tag} The host asks the Runtime: no result is submitted again for a call already settled by the host`,
+			fresh.state.reg.historySelect === undefined &&
+			fresh.hostCalls.filter(c => c.method === "host/history").every(c => c.params.select === undefined) &&
 			!rt.submitted.some((e) => e.kind === "toolResult" && settled.some((c) => c.id === e.toolCallId)));
 		check(`${tag} resume: the started, unsafe call is not repeated`, !rt.toolCalls.some((c) => c.id === "c-started"), JSON.stringify(rt.toolCalls));
 		check(`${tag} resume: it gets one result, outcomeUnknown`, resultFor(rt, "c-started").length === 1 && statusOf(resultFor(rt, "c-started")[0]) === "outcomeUnknown", String(JSON.stringify(recordedResults(rt))).slice(0, 240));
@@ -1130,6 +1129,7 @@ async function runtimeChecks(part) {
 			check("durable-runtime: resume runs the call that never started", rt.toolCalls.some((c) => c.id === "c-not-started"), JSON.stringify(rt.toolCalls));
 			check("durable-runtime: resume runs again a started call that is safe to repeat", rt.toolCalls.some((c) => c.id === "c-safe") && statusOf(resultFor(rt, "c-safe")[0]) === "completed", JSON.stringify(rt.toolCalls));
 			check("durable-runtime: resume carries the turn on to completion", o.outcome?.kind === "completed" && o.result?.text === "carried on", JSON.stringify(o.outcome));
+			await lateSettlement({ start, initParams, part, runScenario, say, turn, check, before, entry, notStarted, startedCall, safeCall });
 		} else {
 			check("runtime: resume ends the turn as failed", o.outcome?.kind === "failed", JSON.stringify(o.outcome));
 			check("runtime: transient resume dispatches no calls and leaves notStarted or outcomeUnknown", rt.toolCalls.length === 0 && statusOf(resultFor(rt, notStarted.id)[0]) === "notStarted" && statusOf(resultFor(rt, safeCall.id)[0]) === "outcomeUnknown");

@@ -300,8 +300,11 @@ impl Endpoint for Conformance {
                 .await?;
             }
             h.load(Arc::new(Sink(peer.clone()))).await?;
+            let mut registration = self.registration();
+            if p["historySelect"] == 1 {
+                registration["historySelect"] = json!(1);
+            }
             *self.state.lock().unwrap() = Some((h, p));
-            let registration = self.registration();
             peer.configure_trace(registration["name"].as_str().unwrap_or("conformance"), true);
             return Ok(registration);
         }
@@ -336,7 +339,13 @@ impl Endpoint for Conformance {
                 if !self.has("runtime") && !self.has("durable-runtime") {
                     return missing("runtime");
                 }
-                let host = crate::runtime_server::Host::new(peer, id, cancel);
+                let history_select = self
+                    .state
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|(_, init)| init["historySelect"] == 1);
+                let host = crate::runtime_server::Host::new(peer, id, cancel, history_select);
                 Ok(
                     runtime_engine::binding::run(&host, method, p, self.has("durable-runtime"))
                         .await

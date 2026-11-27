@@ -58,7 +58,7 @@ test("this agent passes the ACP kit with its history in a history service", asyn
 const servePlugin = fileURLToPath(import.meta.resolve("@modular-agent/plugin-wire").replace(/index\.js$/, "serve-cli.js"));
 
 test("this build's conformance plugin passes the plugin binding's kit", t => {
-	const run = spawnSync(process.execPath, [`${repo}conformance/plugin/run.mjs`, "--", process.execPath, servePlugin], { encoding: "utf8", timeout: 120_000 });
+	const run = spawnSync(process.execPath, [`${repo}conformance/plugin/run.mjs`, "--", process.execPath, servePlugin], { encoding: "utf8", timeout: 120_000, env: { ...process.env, MODULAR_AGENT_PLUGIN_REQUIRE_HISTORY_SELECT: "1" } });
 	t.diagnostic(run.stdout.trim().split("\n").at(-1) ?? "No kit summary");
 	assert.equal(run.status, 0, run.stdout.split("\n").filter((l) => l.startsWith("FAIL")).join("\n"));
 });

@@ -19,6 +19,7 @@ import {
 	isPending,
 	isToolCall,
 	pendingToolCalls,
+	readRecoveryHistory,
 	text,
 	textOf,
 	zeroUsage,
@@ -79,8 +80,7 @@ export class TransientRuntime implements Runtime {
 	/** A transient Runtime ends a turn whose process stopped. The host settles abandoned calls. */
 	resumeTurn(input: TurnInput, host: RuntimeHost, signal: AbortSignal, interrupted: InterruptedTurn): Promise<TurnOutcome> {
 		return this.withHooks(input, host, signal, async (progress) => {
-			const history = await host.history();
-			const kept = await host.history({ all: true });
+			const { branch: history, kept } = await readRecoveryHistory(host, interrupted.turnId);
 			const pending = new Set(pendingToolCalls(history, interrupted.turnId, kept));
 			const retrying = new Set(interrupted.calls.map((c) => c.id));
 			for (const e of history) {

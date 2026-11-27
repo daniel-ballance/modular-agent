@@ -532,7 +532,7 @@ async fn initialize(peer: &Peer, project: &Path, home: &Path, config: Value) -> 
     let params = json!({
         "binding":"modular-agent-plugin/1",
         "host":{"name":"modular-agent-rs","version":env!("CARGO_PKG_VERSION")},
-        "project":project,"home":home,"config":config
+        "project":project,"home":home,"config":config,"historySelect":1
     });
     let registration = control(peer, "plugin/initialize", params).await?;
     if let Some(name) = registration["name"].as_str() {
@@ -1945,7 +1945,7 @@ impl Callbacks {
             if method.starts_with("host/jobs/") {
                 return crate::jobs::RemoteJobs { peer: peer.clone(), shared: self.0.clone() }.request(method, &p).await;
             }
-            let (api,scope,work)=self.scope(&peer,&p)?;
+            let (api,scope,work)=if method=="host/history" {self.capture_scope(&peer,&p)?} else {self.scope(&peer,&p)?};
             let runtime = work.as_ref().and_then(|w|w.runtime.clone());
             if method.starts_with("host/runtime/") { ensure!(runtime.is_some(),"Runtime callback requires a turn parent"); }
             if let Some(rt) = &runtime {
@@ -2134,36 +2134,8 @@ impl Callbacks {
                         Ok(reply)
                     }
                     "host/history"=>{
-                        require(api.as_ref(),&scope,"watch")?;
-                        let data=api.snapshot(&scope.session)?;
-                        let mut entries=if p["all"]==true {data.entries.clone()}else{data.branch()};
-                        entries.retain(|e|e.writer!="rust.derived");
-                        let start=if wire::optional(&p,"after").is_some() {
-                            let after = wire::string(&p, "after")?;
-                            entries.iter().position(|e|e.id==after).ok_or_else(||anyhow!("unknown history cursor"))?+1
-                        } else {0};
-                        let limit=match wire::optional(&p,"limit") {
-                            None => 500,
-                            Some(v) => v.as_u64().filter(|n| (1..=500).contains(n)).ok_or_else(||anyhow!("limit must be an integer from 1 to 500"))? as usize,
-                        };
-                        ensure!(wire::optional(&p,"all").is_none_or(Value::is_boolean), "all must be a boolean");
-                        let mut page=vec![];
-                        let mut size=b"{\"entries\":[]}".len();
-                        for (i,e) in entries.iter().enumerate().skip(start).take(limit) {
-                            let mut v=wire::entry(e,&data)?;
-                            portable::omit_trace_metadata(&mut v);
-                            let n=serde_json::to_vec(&v)?.len();
-                            let cursor_size=if i+1<entries.len() {b",\"next\":".len()+serde_json::to_vec(&e.id)?.len()}else{0};
-                            let total=size+n+usize::from(!page.is_empty());
-                            if total+cursor_size>4*1024*1024 {
-                                if !page.is_empty() { break; }
-                                if total>4*1024*1024 { return Err(Fault::new("result_too_large","history entry exceeds 4 MiB").into()); }
-                            }
-                            size=total;
-                            page.push(v);
-                        }
-                        let next=if start+page.len()<entries.len(){page.last().map(|v|v["id"].clone())}else{None};
-                        let mut result=json!({"entries":page});if let Some(next)=next {result["next"]=next;}Ok(result)
+                        let agreed = self.0.registration.lock().unwrap()["historySelect"] == 1;
+                        crate::history::page(api.as_ref(), &scope, &p, agreed)
                     }
                     "host/session"=>{require(api.as_ref(),&scope,"watch")?;let d=api.snapshot(&scope.session)?;Ok(json!({"id":d.id,"project":d.project,"settings":d.settings,"busy":api.is_running(&d.id),"actors":d.entries.iter().filter(|e|e.kind=="actor.grant").filter_map(|e|e.content.as_ref()).filter_map(|v|v["actor"].as_str()).chain(std::iter::once("user")).collect::<BTreeSet<_>>().into_iter().map(|actor|json!({"id":actor,"rights":api.authority(&d.id,actor).ok()})).collect::<Vec<_>>()}))}
                     "host/declaration"=>{require(api.as_ref(),&scope,"watch")?;interface_acp::declaration(api.as_ref(),Some(&scope.session))}

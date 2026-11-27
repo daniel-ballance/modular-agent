@@ -10,7 +10,6 @@ use std::{
 use support::Events;
 use tokio::sync::Notify;
 
-// Run the supplied kits one at a time without serializing the other tests.
 static KIT_RUN: Mutex<()> = Mutex::new(());
 
 fn executable() -> &'static str {
@@ -185,6 +184,7 @@ fn supplied_plugin_kit_is_mandatory() {
         .env("HOME", home.path())
         .env_remove("MODULAR_AGENT_PLUGINS")
         .env_remove("MODULAR_AGENT_PLUGIN_PARTS")
+        .env("MODULAR_AGENT_PLUGIN_REQUIRE_HISTORY_SELECT", "1")
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -193,9 +193,7 @@ fn supplied_plugin_kit_is_mandatory() {
         "{stdout}\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // Strong containment is checked with a setsid escapee, process-group containment
-    // (macOS) with an in-group child: the same number of checks either way.
-    assert!(stdout.contains("150/150 checks passed"), "{stdout}");
+    assert!(stdout.contains("151/151 checks passed"), "{stdout}");
 }
 #[test]
 fn supplied_acp_kit_with_two_external_plugins_is_mandatory() {
@@ -983,6 +981,7 @@ async fn history_sends_an_entry_that_fits_alone_with_its_cursor() {
     let size = serde_json::to_vec(&json!({"entries":[wire::entry(&sample,&before).unwrap()]}))
         .unwrap()
         .len();
+    let cursor_size = b",\"next\":".len() + serde_json::to_vec(&sample.id).unwrap().len();
     let blob = rig
         .h
         .append(
@@ -991,7 +990,7 @@ async fn history_sends_an_entry_that_fits_alone_with_its_cursor() {
             Draft::new(
                 "test.padding",
                 false,
-                json!({"data":"x".repeat(4*1024*1024 - size)}),
+                json!({"data":"x".repeat(4*1024*1024 - size - cursor_size)}),
             ),
         )
         .unwrap();

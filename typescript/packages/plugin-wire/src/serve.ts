@@ -5,7 +5,7 @@ import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promi
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type WebSocket from "ws";
 import { listenWebSocket, PLUGIN_PROTOCOL, receiveMessages, type ListenOptions } from "./websocket.js";
-import { interruptedCalls, lowerReasoning, pendingToolCalls, providerAvailability, restoreAnsweredStep, zeroUsage } from "@modular-agent/harness";
+import { interruptedCalls, lowerReasoning, pendingToolCalls, providerAvailability, readRecoveryHistory, restoreAnsweredStep, zeroUsage } from "@modular-agent/harness";
 import type {
 	Answer,
 	AssistantMessage,
@@ -105,8 +105,7 @@ export async function servePluginService(makePlugins: (() => ServeOptions) | ((c
 async function validateResume(input: TurnInput, host: RuntimeHost, interrupted: InterruptedTurn, runtime: Runtime) {
 	const invalid = () => new WireError("invalid_request", "Interrupted turn does not match its checkpoint");
 	if (interrupted?.turnId !== input.turnId || !Array.isArray(interrupted.calls)) throw invalid();
-	const branch = await host.history();
-	const kept = await host.history({ all: true });
+	const { branch, kept } = await readRecoveryHistory(host, input.turnId);
 	let lastStep;
 	try { lastStep = restoreAnsweredStep(branch, input.turnId, kept)?.lastStep; }
 	catch { throw invalid(); }
@@ -185,6 +184,7 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 	});
 	let nextHandler = 1;
 	let initialized = false;
+	let historySelect: 1 | undefined;
 
 	/** The host's working environment, reached through host/env/*, for a request the host sent. */
 	const hostEnvironment = (parentRequestId: number | string, cwd: string, sessionId: string): WorkingEnvironment => ({
@@ -290,6 +290,7 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 		if (p.binding !== PLUGIN_BINDING) throw new WireError("not_supported", `This plugin speaks ${PLUGIN_BINDING}, not ${p.binding}`);
 		if (initialized) throw new WireError("invalid_request", "Already initialized");
 		initialized = true;
+		historySelect = p.historySelect === 1 ? 1 : undefined;
 		const init = { project: String(p.project), home: String(p.home), config: (p.config ?? {}) as Record<string, unknown> };
 		hostProject = init.project;
 		if (shuttingDown) throw new WireError("lost", "The plugin instance is stopping");
@@ -322,6 +323,7 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 		return {
 			binding: PLUGIN_BINDING,
 			name: options.name,
+			...(historySelect ? { historySelect } : {}),
 			...(providers.length ? { providers: providers.map((x) => ({ id: x.id, supports: x.supports, models: toWire(x.models()) })) } : {}),
 			...(toolSources.length ? { toolSources: toolSources.map((t) => ({ id: t.id, tools: toWire(t.tools()) })) } : {}),
 			...(environment ? { workingEnvironment: { containment: environment.containment ?? options.containment ?? "none", platforms: [process.platform], ...(environment.points && environment.save && environment.hasPoint && environment.restore ? { points: true } : {}), ...(environment.confinesFiles === true ? { confinesFiles: true } : {}) } } : {}),
@@ -585,6 +587,7 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 		};
 		const host: RuntimeHost = {
 			hostSettlesTools: true,
+			historySelect,
 			newId: async () => (await call<{ id: string }>("host/runtime/newId")).id,
 			prepareStep: async (info) => {
 				currentStep = info.stepId;
@@ -601,7 +604,8 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 				const entries: HistoryEntry[] = [];
 				let after: string | undefined;
 				do {
-					const page: { entries: HistoryEntry[]; next?: string } = await call("host/history", { sessionId: input.sessionId, after, all: options?.all });
+					const page: { entries: HistoryEntry[]; next?: string } = await call("host/history", { sessionId: input.sessionId, after, all: options?.all,
+						...(historySelect && options?.select ? { select: options.select } : {}) });
 					entries.push(...fromWire(page.entries));
 					after = page.next ?? undefined;
 				} while (after);

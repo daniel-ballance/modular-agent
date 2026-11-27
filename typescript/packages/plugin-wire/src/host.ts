@@ -1,3 +1,4 @@
+import { historyPage } from "./history.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
@@ -54,11 +55,12 @@ export interface ServicePluginSpec {
 export type PluginSpec = ExternalPluginSpec | ServicePluginSpec;
 
 /** What a plugin registered at its handshake. */
-import { historyForPeer, TURN_TRACE } from "@modular-agent/harness/telemetry";
+import { TURN_TRACE } from "@modular-agent/harness/telemetry";
 
 export interface Registration {
 	binding: string;
 	name: string;
+	historySelect?: 1;
 	providers?: { id: string; supports?: Record<string, boolean | string>; models: unknown[] }[];
 	toolSources?: { id: string; tools: unknown[]; perSession?: boolean }[];
 	workingEnvironment?: { containment: "strong" | "processGroup" | "none"; platforms?: string[]; points?: boolean; confinesFiles?: boolean };
@@ -171,6 +173,7 @@ export async function registerExternalPlugin(peer: WirePeer, info: { project: st
 		project: info.project,
 		home: info.home,
 		config,
+		historySelect: 1,
 	}), controlMs, "initialization").catch(async (error) => { await stop("refused", "Initialization failed"); throw error; });
 	try {
 		const reg = registration;
@@ -367,29 +370,18 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				return { credential: credential ?? null };
 			});
 			peer.handle("host/history", async (p) => {
-				const all = await api.readHistory(sessionOf(p), { all: p.all === true });
-				let from = 0;
-				if (p.after != null) {
-					from = all.findIndex((e) => e.id === p.after) + 1;
-					if (from === 0) throw new WireError("invalid_request", `Unknown entry ${p.after}`);
+				const sessionId = sessionOf(p);
+				if (p.parentRequestId != null) {
+					const parent = parentOf(p);
+					if (!api.workMay(sessionId, "watch", parent.actors ?? [], parent.jobs)) throw new WireError("invalid_request", "Parent cannot read history");
 				}
-				const limit = p.limit ?? 500;
-				if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new WireError("invalid_request", "limit must be an integer from 1 to 500");
-				const max = 4 * 1024 * 1024;
-				const entries: unknown[] = [];
-				let bytes = Buffer.byteLength('{"entries":[]}');
-				for (let i = from; i < all.length && entries.length < limit; i++) {
-					const entry = toWire(historyForPeer(all[i]));
-					const size = Buffer.byteLength(JSON.stringify(entry));
-					const nextBytes = i + 1 < all.length ? Buffer.byteLength(JSON.stringify(all[i].id)) + 8 : 0;
-					if (bytes + size + Number(entries.length > 0) + nextBytes > max) {
-						if (!entries.length) throw new WireError("result_too_large", "One entry and its cursor do not fit in a page");
-						break;
-					}
-					bytes += size + Number(entries.length > 0);
-					entries.push(entry);
+				try {
+					const view = await api.readHistory(sessionId, { all: p.all === true });
+					return historyPage(view, p, reg.historySelect === 1);
+				} catch (error) {
+					if (["forbidden", "not_open"].includes((error as { code?: string }).code ?? "")) throw new WireError("invalid_request", "History read is forbidden");
+					throw error;
 				}
-				return { entries, ...(from + entries.length < all.length ? { next: all[from + entries.length - 1].id } : {}) };
 			});
 			peer.handle("host/session", async (p) => {
 				const s = api.session(sessionOf(p));

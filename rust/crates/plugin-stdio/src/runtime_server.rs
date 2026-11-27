@@ -223,14 +223,21 @@ pub struct Host {
     parent: Value,
     cancel: CancellationToken,
     records: Mutex<Vec<Value>>,
+    history_select: bool,
 }
 impl Host {
-    pub fn new(peer: Arc<Peer>, parent: Value, cancel: CancellationToken) -> Self {
+    pub fn new(
+        peer: Arc<Peer>,
+        parent: Value,
+        cancel: CancellationToken,
+        history_select: bool,
+    ) -> Self {
         Self {
             peer,
             parent,
             cancel,
             records: Mutex::default(),
+            history_select,
         }
     }
 }
@@ -265,10 +272,22 @@ impl runtime_engine::binding::Host for Host {
         Ok(reply)
     }
     async fn history(&self, session: &Value, after: Option<&Value>) -> Result<Value> {
-        self.read_history(session, after, false).await
+        self.read_history(session, after, false, None).await
     }
     async fn history_all(&self, session: &Value, after: Option<&Value>) -> Result<Value> {
-        self.read_history(session, after, true).await
+        self.read_history(session, after, true, None).await
+    }
+    fn history_select(&self) -> bool {
+        self.history_select
+    }
+    async fn selected_history(
+        &self,
+        session: &Value,
+        after: Option<&Value>,
+        all: bool,
+        select: &Value,
+    ) -> Result<Value> {
+        self.read_history(session, after, all, Some(select)).await
     }
     fn cancelled(&self) -> bool {
         self.cancel.is_cancelled()
@@ -283,10 +302,14 @@ impl Host {
         session: &Value,
         after: Option<&Value>,
         all: bool,
+        select: Option<&Value>,
     ) -> Result<Value> {
         let mut params = json!({"parentRequestId":self.parent,"sessionId":session,"all":all});
         if let Some(after) = after {
             params["after"] = after.clone();
+        }
+        if let Some(select) = select {
+            params["select"] = select.clone();
         }
         Ok(self
             .peer

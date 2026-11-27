@@ -465,7 +465,11 @@ export interface StepPreparation { stepId: string; usage: Usage }
  * What the Harness offers a Runtime during a turn. Everything that asks the Harness
  * is asynchronous, so a Runtime can run in another process.
  */
+export interface HistorySelector { turnId?: string; toolCallIds?: string[] }
+
 export interface RuntimeHost {
+	/** The served host negotiated selectors for its history port. */
+	readonly historySelect?: 1;
 	/** The plugin wire host commits terminal tool results before replying. */
 	readonly hostSettlesTools?: boolean;
 	/** Authenticated attribution for model work, not supplied by a Runtime. */
@@ -480,7 +484,7 @@ export interface RuntimeHost {
 	definition(toolName: string): Promise<ToolDefinition | undefined>;
 	/** Record entries in the session's history. */
 	record(entry: EntryDraft): Promise<HistoryEntry>;
-	history(options?: { all?: boolean }): Promise<HistoryEntry[]>;
+	history(options?: { all?: boolean; select?: HistorySelector }): Promise<HistoryEntry[]>;
 	/** Take input given for the running turn, and record it. */
 	takeSteering(final?: boolean): Promise<HistoryEntry[]>;
 	registration?(name: string): { source: { plugin: string; toolSource: string }; definition: ToolDefinition } | undefined;
