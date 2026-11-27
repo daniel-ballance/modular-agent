@@ -7,6 +7,7 @@ A scenario that turns out to be wrong is fixed here first, then in the SDKs.
 | Scenario | Checks |
 |---|---|
 | [`first-turn`](scenarios/first-turn.json) | One prompt, one turn, the standard records in order |
+| [`turn-before-sources`](scenarios/turn-before-sources.json) | Omitted, empty, named and invalid sources on turn additions |
 | [`tool-call`](scenarios/tool-call.json) | A tool call and its result |
 | [`tool-content`](scenarios/tool-content.json) | An exact ordered image and text result in every placement |
 | [`gate-refusal`](scenarios/gate-refusal.json) | A `tool.before` refusal settles the call without running it |

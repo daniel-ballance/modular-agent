@@ -1,7 +1,7 @@
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { AgentError, definePlugin, tool, type Plugin, type ToolOutput } from "@modular-agent/core";
+import { AgentError, definePlugin, tool, type Content, type Plugin, type ToolOutput } from "@modular-agent/core";
 import { textOf } from "@modular-agent/harness";
 import { z } from "zod";
 
@@ -24,6 +24,20 @@ export function count(path: string): number {
 export function fixture(name: string, config?: Record<string, unknown>, yes = "yes"): Plugin {
   switch (name) {
     case "tide": return definePlugin({ name, config, tools: [tide] });
+    case "turn-sources": return definePlugin({ name, config, hooks: {
+      "turn.before": async ({ input }, context) => {
+        switch (textOf(input)) {
+          case "Omit sources": return { add: { system: "Omitted addition." } };
+          case "No sources": return { add: { system: "Static addition.", sources: [] } };
+          case "Name a source": {
+            const entry = (await context.history()).entries.find(e => e.kind === "response");
+            if (!entry?.message) throw new AgentError("not_found", "No seed response");
+            return { add: { context: entry.message.content as Content, sources: [entry.id, entry.id] } };
+          }
+          case "Unknown source": return { add: { system: "Invalid addition.", sources: ["unknown-entry"] } };
+        }
+      },
+    } });
     case "chart": return definePlugin({ name, config, tools: [tool({
       name: "chart", description: "Return a sample chart.", input: z.object({}), readOnly: true,
       run(): ToolOutput {

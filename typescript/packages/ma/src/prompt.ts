@@ -43,7 +43,7 @@ export function standardPrompt(paths: Paths) {
       const skills = skillPrompt((await skillsFor(paths, project)).skills);
       if (skills) parts.push(`<skills>\n${skills}\n</skills>`);
       parts.push(catalog(tools).prompt(), `<cwd>\n${project}\n</cwd>`, `<date>\n${localDate(new Date())}\n</date>`);
-      return { add: { system: parts.join("\n\n") } };
+      return { add: { system: parts.join("\n\n"), sources: [] } };
     }, "first", { inProcessOnly: true });
   } });
 }

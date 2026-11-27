@@ -9,7 +9,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual, promisify } from "node:util";
-import { AgentError, createAgent, fileHistory, httpHistory, serveHistory, type Actor, type AgentOptions, type Answer, type Content, type InputTiming, type PromptResult, type ServicePlugin, type Session } from "@modular-agent/core";
+import { AgentError, createAgent, fileHistory, httpHistory, serveHistory, type Actor, type AgentOptions, type Answer, type Content, type HistoryEntry, type InputTiming, type PromptResult, type ServicePlugin, type Session } from "@modular-agent/core";
 import { answers, memoryEnvironment, scriptedProvider, testAgent, type ScriptStep } from "@modular-agent/core/testing";
 import { count, fixture } from "./index.js";
 import { ScenarioEvidence, type TelemetryRun } from "./telemetry-scenario.js";
@@ -51,7 +51,7 @@ export function placements(require = process.env.MODULAR_AGENT_SDK_REQUIRE): Pla
   return [...out, ...services];
 }
 
-type Expect = { outcome?: string; text?: string; toolResults?: { name: string; status: string; text?: string; contains?: string; content?: Content }[]; records?: string[]; count?: number; error?: string };
+type Expect = { outcome?: string; text?: string; toolResults?: { name: string; status: string; text?: string; contains?: string; content?: Content }[]; records?: string[]; count?: number; error?: string; turnSources?: "branch" | { kind: string; index: number }[]; systemIncludes?: string; context?: Content };
 type Crash = { record: string } | { count: number };
 type Step = ({ prompt: string; as?: string; crashWhen?: Crash } | { reopen: true } |
   { send: string; timing?: InputTiming } | { answer: Answer } | { wait: true }) & { expect?: Expect };
@@ -232,6 +232,25 @@ async function crashRun(path: string, dir: string, p: Placement, i: number, when
   }
 }
 
+function checkTurnSources(want: Expect, entries: HistoryEntry[], turnId: string | undefined,
+  fail: (field: string, expected: unknown, actual: unknown) => void) {
+  const start = entries.find(e => e.kind === "turnStart" && turnId && e.turnId === turnId);
+  if (!start) { fail("turnSources", want.turnSources, "missing turnStart"); return; }
+  const byId = new Map(entries.map(e => [e.id, e]));
+  const branch: HistoryEntry[] = [];
+  for (let entry = byId.get(start.parentId ?? ""); entry; entry = byId.get(entry.parentId ?? "")) {
+    if (!entry.erased) branch.push(entry);
+  }
+  branch.reverse();
+  const expected = want.turnSources === "branch" ? branch.map(e => e.id) :
+    want.turnSources!.map(({ kind, index }) => branch.filter(e => e.kind === kind)[index]?.id);
+  const actual = start.sources ?? [];
+  if (!isDeepStrictEqual([...actual].sort(), expected.sort())) fail("turnSources", expected, actual);
+  const data = start.data as { system?: string; context?: Content };
+  if (want.systemIncludes && !data.system?.includes(want.systemIncludes)) fail("systemIncludes", want.systemIncludes, data.system);
+  if (want.context && !isDeepStrictEqual(data.context, want.context)) fail("context", want.context, data.context);
+}
+
 export async function runScenario(path: string, p: Placement, run?: TelemetryRun): Promise<string[]> {
   const s = loadScenario(path);
   if (s.scenario.startsWith("waiting-approval")) {
@@ -339,6 +358,7 @@ export async function runScenario(path: string, p: Placement, run?: TelemetryRun
           at = found + 1;
         }
       }
+      if (want.turnSources) checkTurnSources(want, await session!.history(), result?.turnId, fail);
       compare("count", want.count, count(countFile(dir)));
     }
     if (failures.length === 0) {

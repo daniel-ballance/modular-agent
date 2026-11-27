@@ -24,12 +24,9 @@
 - Choice: the Runtime reports completion with the open calls in call order. The Rust Harness records the pending call before acknowledging it and checks the reported ids and outcome against committed work. It rejects an invented limit or a mismatched list as a Runtime failure rather than converting it to completion. Winning cancellation and a real host limit that was latched but not signalled still follow the Plugin binding.
 - Swap test: yes. The TypeScript host recorded the old Rust limit and failed the kit's late-question check. A host that rewrote the reply would conceal the Runtime defect. See [PROGRESS.md](PROGRESS.md#edition-3-late-question-outcomes) for the rerun.
 
-### PE3-01: Before-turn contributions do not specify how to report lineage
+### PE3-01: Before-turn contribution lineage
 
-- Where: Plugin, From core hooks to wire hooks, `turn.before`; Shared data, Recording order and ownership.
-- Missing: `turnStart.sources` needs the history copied into system or context. A hook can read history and produce a contribution, but the standard reply has no field for its source ids.
-- Choice: the built-in prompt identifies its contribution as carrying no history. The Harness accepts explicit source ids from trusted contributions and checks them against the live branch. For an unlabelled, nonempty contribution, it conservatively names real live branch entries. It never records virtual calls as sources.
-- Swap test: yes. Equivalent contributors can produce a different erasure copy set unless the binding provides a way to name sources.
+- Resolution: [`turn.before` sources](../../../docs/sdk/api.md#hooks) specify how omission, an empty list and named history entries affect `turnStart.sources` in process and over the binding.
 
 ### PE3-02: The Rust value answer used the wrong union form
 

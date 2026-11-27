@@ -184,7 +184,7 @@ Actor is `{ id: Id, kind: "user" | "host" | "agent" | "program", rights: Rights 
 | `delegate` | Start subagents. |
 | `administer` | Set the session limit. |
 
-The Harness MUST apply [Authority](../contracts.md#authority) to the current rights of all contributors and ancestors as well as the recorded maximum for the work. It MUST refuse an effect if it cannot resolve required provenance. Authorizer is either `{ sessionId: Id, actorId: Id }` or `{ sessionId: Id, jobId: Id }`, exclusively. Provenance recorded in history references these trusted principals or jobs; it is never accepted from free-form content.
+The Harness MUST apply [Authority](../contracts.md#authority) to the current rights of all contributors and ancestors as well as the recorded maximum for the work. It MUST refuse an effect if it cannot resolve required provenance. Authorizer is either `{ sessionId: Id, actorId: Id }` or `{ sessionId: Id, jobId: Id }`, exclusively. Authority provenance recorded in history references these trusted principals or jobs; it is never accepted from free-form content. Copy provenance is separate. `turnStart.sources` includes the history entry IDs attributed to the collected system and context additions by [the plugin binding](plugin.md#from-core-hooks-to-wire-hooks).
 
 ## Limits and tenants
 

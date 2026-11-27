@@ -145,8 +145,8 @@ pub struct TurnAddition {
     pub system: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<Value>,
-    /// History entries used by this contribution. An empty list asserts that
-    /// it does not depend on any session history.
+    /// History entries used by this contribution. `None` attributes it to
+    /// the current branch; `Some(vec![])` declares no history dependency.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sources: Option<Vec<String>>,
 }

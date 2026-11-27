@@ -25,7 +25,7 @@ type Hooks = {
   "session.leave": [{ sessionId: string; actorId: string; requestedBy?: string }, void];
   output: [Omit<OutputPayload, "events"> & { events: OutputEvent[] }, "block" | { redact: OutputEvent[] }];
   input: [{ sessionId: string; actorId: string; content: Content; when: string }, { change: Content } | { handle: true | { command: string } }];
-  "turn.before": [Observe & { input: Content; project?: string; tools?: ToolDefinition[] }, { add: { system?: string; context?: Content } }];
+  "turn.before": [Observe & { input: Content; project?: string; tools?: ToolDefinition[] }, { add: { system?: string; context?: Content; sources?: string[] } }];
   "turn.start": [Observe, void];
   "step.before": [Observe & { stepId: string; request: ModelRequest; model?: ModelInfo; history?: HistoryEntry[]; usage?: Usage }, { change: ModelRequest }];
   "step.after": [Observe & { stepId: string; response: AssistantMessage }, "continue" | { end: string }];

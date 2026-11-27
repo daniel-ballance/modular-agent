@@ -393,7 +393,7 @@ pub async fn restart(agent: Agent) -> Result<Agent> {
 pub mod fixtures {
     use super::*;
     use crate::{
-        Gate, Plugin,
+        Gate, Plugin, TurnAddition,
         error::Error,
         tool::{Ask, ToolContext},
     };
@@ -406,6 +406,43 @@ pub mod fixtures {
         Some(match name {
             "tide" => Plugin::new("tide").tool(tide()),
             "chart" => Plugin::new("chart").tool(chart()),
+            "turn-sources" => Plugin::new(name).on_turn_before(|before| async move {
+                Ok(
+                    match before.input.first().and_then(|part| part["text"].as_str()) {
+                        Some("Omit sources") => TurnAddition {
+                            system: Some("Omitted addition.".into()),
+                            ..Default::default()
+                        },
+                        Some("No sources") => TurnAddition {
+                            system: Some("Static addition.".into()),
+                            sources: Some(vec![]),
+                            ..Default::default()
+                        },
+                        Some("Name a source") => {
+                            let page = before.context.history(None).await?;
+                            let entry = page
+                                .entries
+                                .iter()
+                                .find(|e| e["kind"] == "response")
+                                .ok_or_else(|| {
+                                    Error::new(crate::Code::NotFound, "No seed response")
+                                })?;
+                            let id = entry["id"].as_str().unwrap().to_owned();
+                            TurnAddition {
+                                context: Some(entry["message"]["content"].clone()),
+                                sources: Some(vec![id.clone(), id]),
+                                ..Default::default()
+                            }
+                        }
+                        Some("Unknown source") => TurnAddition {
+                            system: Some("Invalid addition.".into()),
+                            sources: Some(vec!["unknown-entry".into()]),
+                            ..Default::default()
+                        },
+                        _ => TurnAddition::default(),
+                    },
+                )
+            }),
             "quay" => Plugin::new("quay").tool(Tool::new("moor", "Moor at a harbour.").run(
                 |_: TideInput, cx: ToolContext| async move {
                     Err::<String, _>(cx.refuse("the quay is closed"))

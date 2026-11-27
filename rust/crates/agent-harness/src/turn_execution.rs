@@ -441,6 +441,7 @@ impl Harness {
             .into_iter()
             .flatten()
             .filter_map(|v| v.as_str().or_else(|| v["system"].as_str()))
+            .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n");
         let context: Vec<_> = contributions
@@ -543,7 +544,14 @@ impl Harness {
         // Only system and context additions can carry history into turnStart.
         // A contribution can declare its sources, including an empty list for
         // static content. Without lineage, conservatively keep real records.
-        let history = data.branch();
+        let history: Vec<_> = data
+            .branch()
+            .into_iter()
+            .filter(|e| e.writer != "rust.derived" && e.content.is_some())
+            .map(|e| e.id)
+            .collect();
+        let live: std::collections::HashSet<_> = history.iter().map(String::as_str).collect();
+        let mut uses_branch = false;
         let mut sources = Vec::new();
         for addition in contributions.as_array().into_iter().flatten().filter(|v| {
             v.as_str()
@@ -553,24 +561,23 @@ impl Harness {
                     .as_array()
                     .is_some_and(|parts| !parts.is_empty())
         }) {
-            if let Some(ids) = addition["sources"].as_array() {
-                for id in ids {
-                    ensure!(
-                        id.as_str().is_some_and(|s| history
-                            .iter()
-                            .any(|e| e.id == s && e.content.is_some())),
-                        "unknown before-turn source"
-                    );
-                    sources.push(id.as_str().unwrap().to_owned());
-                }
+            if addition["sources"].is_null() {
+                uses_branch = true;
             } else {
-                sources.extend(
-                    history
-                        .iter()
-                        .filter(|e| e.writer != "rust.derived" && e.content.is_some())
-                        .map(|e| e.id.clone()),
-                );
+                let ids = addition["sources"]
+                    .as_array()
+                    .ok_or_else(|| anyhow!("before-turn sources must be an array"))?;
+                for id in ids {
+                    let id = id.as_str().filter(|id| live.contains(id));
+                    sources.push(
+                        id.ok_or_else(|| anyhow!("unknown before-turn source"))?
+                            .to_owned(),
+                    );
+                }
             }
+        }
+        if uses_branch {
+            sources = history;
         }
         let links = start["continuesTurnId"]
             .as_str()
@@ -588,11 +595,11 @@ impl Harness {
         }
         let continuation_origin = start["continuesTurnId"].as_str().map(str::to_owned);
         entries.push(Draft::new("turn.start", false, start).copying(sources));
-        let mut taken = json!({"text":input.text,"inputId":input_id,"key":input.key,"authority":cap,"context":context});
+        let mut taken =
+            json!({"text":input.text,"inputId":input_id,"key":input.key,"authority":cap});
         if let Some(value) = source.and_then(|s| s.content.as_ref()) {
             if let Some(content) = value["content"].as_array() {
-                let parts: Vec<_> = context.iter().chain(content).collect();
-                taken["message"] = json!({"role":"user","content":parts});
+                taken["message"] = json!({"role":"user","content":content});
             }
             for key in ["sponsor", "releasedBy"] {
                 if let Some(actor) = wire::optional(value, key) {

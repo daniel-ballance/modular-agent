@@ -279,7 +279,7 @@ impl Engine {
         let branch = api.snapshot(&scope.session)?.branch();
         let sources = branch
             .iter()
-            .filter(|e| e.visible && e.kind != "resultFeedback")
+            .filter(|e| step_history_source(e, scope.turn.as_deref()))
             .chain(pending_result_feedback(&branch, scope.turn.as_deref()))
             .map(|e| e.id.clone())
             .collect();

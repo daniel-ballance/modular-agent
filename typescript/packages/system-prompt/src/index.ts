@@ -43,7 +43,7 @@ export function systemPrompt(options: { base?: string; contextFileNames?: string
 						.map((f) => `<context-file path="${f.path}">\n${f.text.trim()}\n</context-file>`)
 						.join("\n\n");
 					const parts = [base, tools && `Available tools:\n${tools}`, `Working directory: ${project}`, files && `Project context:\n\n${files}`];
-					return { system: parts.filter(Boolean).join("\n\n") };
+					return { system: parts.filter(Boolean).join("\n\n"), sources: [] };
 				},
 				"first",
 			);
