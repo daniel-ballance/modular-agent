@@ -161,7 +161,8 @@ async function scopedAttachments(kit, { scopes, nested, alias, nestedAlias, unse
 			check(`isolation: ${m} rejects a supplied canonical project mismatch`, refusal(mismatch, "wrong_project") || refusal(mismatch, "forbidden"));
 		});
 		await kit.stop(restricted);
-		const { a: watcher } = await h.peer(1);
+		const { a: watcher, hello: narrowHello } = await h.peer(1);
+		check("isolation: initialize advertises the narrow connection ceiling, not recorded grants", equal(meta(narrowHello)?.actor?.rights, ["watch"]));
 		await within(await reopenWatchdog(), load(watcher, plain.sid, project), "attach with narrow rights");
 		const beforeNarrow = await history(watcher, plain.sid, { all: true });
 		const target = beforeNarrow.entries.findLast((e) => e.kind !== "position").id;
