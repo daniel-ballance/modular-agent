@@ -1,0 +1,14 @@
+[package]
+name = "modular-agent-openai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OpenAI Responses Provider for Modular Agent"
+
+[dependencies]
+modular-agent = { path = "../sdk" }
+agent-api.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+sdk-api-key = { path = "../sdk-api-key" }
+provider-openai = { path = "../provider-openai" }

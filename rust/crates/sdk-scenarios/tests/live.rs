@@ -1,9 +1,11 @@
 //! Manual release checks; never provide credentials through a test file.
 use futures_util::StreamExt;
-use modular_agent::{Agent, ApiKeyProvider, Outcome, Result, ToolStatus, anthropic, openai};
+use modular_agent::{Agent, Outcome, Result, ToolStatus};
+use modular_agent_anthropic::anthropic;
+use modular_agent_openai::{ApiKeyProvider, openai};
 use serde_json::json;
 
-#[path = "fixtures/git_project.rs"]
+#[path = "../../sdk/tests/fixtures/git_project.rs"]
 mod git_project;
 use git_project::git_project;
 

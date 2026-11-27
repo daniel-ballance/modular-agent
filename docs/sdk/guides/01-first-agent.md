@@ -8,6 +8,8 @@ Set `OPENAI_API_KEY` in the environment first. The agent's default credential st
 
 **Rust**
 
+Use the `modular-agent` and `modular-agent-openai` crates.
+
 ```rust
 use modular_agent::{Agent, Result};
 use modular_agent_openai::openai;
@@ -44,6 +46,8 @@ What happened:
 - The agent started with its [defaults](../concepts.md#defaults): history in memory, the transient Runtime, a local working environment rooted at the current directory and no approval plugin.
 - `session` created a session. `prompt` admitted the input as the local actor, `user`, ran one turn and returned its outcome. `turn.outcome` says how it ended; `turn.text` is the answer.
 - No session history was written to disk. When the process ends, the session is gone. [Sessions that survive a crash](05-sessions-that-survive-a-crash.md) shows how to keep it.
+
+To use Anthropic instead, set `ANTHROPIC_API_KEY`, call `anthropic()` and choose `anthropic/claude-sonnet-4-6`. In Rust, depend on `modular-agent-anthropic` and import `modular_agent_anthropic::anthropic`. In TypeScript, import `anthropic` from `@modular-agent/anthropic`.
 
 ## Stream the answer
 

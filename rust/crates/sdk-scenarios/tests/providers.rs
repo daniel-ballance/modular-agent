@@ -1,13 +1,17 @@
-use modular_agent::{Agent, Result, anthropic, openai};
+use modular_agent::{Agent, Result};
+use modular_agent_anthropic::anthropic;
+use modular_agent_openai::openai;
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::TcpListener,
 };
 
-#[path = "fixtures/git_project.rs"]
+#[path = "../../sdk/tests/fixtures/git_project.rs"]
 mod git_project;
 use git_project::git_project;
+
+const MODEL_TABLE: &[u8] = include_bytes!("../../sdk-api-key/api-key-models.json");
 
 async fn fake(
     status: &str,
@@ -52,7 +56,7 @@ async fn fake(
 #[test]
 fn vendored_model_table_is_byte_identical() {
     assert_eq!(
-        include_bytes!("../api-key-models.json").as_slice(),
+        MODEL_TABLE,
         include_bytes!("../../../../docs/sdk/api-key-models.json").as_slice(),
     );
 }
@@ -120,7 +124,7 @@ fn controls(body: &Value) -> Value {
 #[tokio::test]
 async fn sends_every_verified_mapping_to_the_vendor() -> Result<()> {
     use modular_agent::Provider;
-    let table: Value = serde_json::from_slice(include_bytes!("../api-key-models.json")).unwrap();
+    let table: Value = serde_json::from_slice(MODEL_TABLE).unwrap();
     for row in table["models"].as_array().unwrap() {
         let vendor = row["provider"].as_str().unwrap();
         let id = row["id"].as_str().unwrap();

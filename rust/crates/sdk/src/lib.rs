@@ -20,7 +20,6 @@ mod agui;
 #[cfg(feature = "agui")]
 pub use agui::{AguiActor, AguiOptions, AguiServer, AguiState};
 mod agent;
-mod api_key;
 mod chatgpt;
 mod claude;
 mod client_identity;
@@ -57,7 +56,6 @@ pub use agent::{
     Agent, AgentBuilder, Approval, ByteCapacity, ByteLimits, Capacity, Durability, ProcessPlugin,
     ResourceLimits, ServicePlugin, SessionOptions,
 };
-pub use api_key::{ApiKeyProvider, anthropic, openai};
 pub use async_trait::async_trait;
 pub use chatgpt::{ChatGptOptions, ChatGptProvider, chatgpt};
 pub use claude::{ClaudeOptions, ClaudeProvider, claude};
