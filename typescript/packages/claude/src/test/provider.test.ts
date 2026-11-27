@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import type { ModelRequest, StreamEvent } from "../data.js";
 import { Cancelled, ClaudeProvider, loginVisible } from "../provider.js";
-import { requestProblem } from "../serve.js";
+import { requestProblem, serve } from "../serve.js";
 import { createFake } from "../testing/fake-sdk.js";
 import { ToolBridge, wireNames } from "../tools.js";
+import { PLUGIN_BINDING, WirePeer } from "../wire.js";
 
 const TOOL = { name: "get_weather", description: "Weather for a city", parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] } };
 
@@ -17,6 +22,27 @@ function setup(account?: Record<string, unknown>, env: NodeJS.ProcessEnv = { HOM
 
 const request = (text: string, extra: Partial<ModelRequest> = {}): ModelRequest => ({
 	systemPrompt: "Be terse.", messages: [{ role: "user", content: [{ type: "text", text }] }], tools: [TOOL], settings: {}, ...extra,
+});
+
+test("the Claude server omits blank availability reasons", { timeout: 5_000 }, async t => {
+	const home = await mkdtemp(join(tmpdir(), "claude-availability-"));
+	t.after(() => rm(home, { recursive: true, force: true }));
+	const { provider } = setup();
+	let reason: string;
+	provider.availability = async () => ({ available: false, reason });
+	const input = new PassThrough();
+	const peer = new WirePeer(line => queueMicrotask(() => input.write(line)));
+	const done = serve({ provider, input, output: line => peer.feed(line) });
+	try {
+		await peer.request("plugin/initialize", { binding: PLUGIN_BINDING, project: home, home });
+		for (reason of ["", "   "]) {
+			assert.deepEqual(await peer.request("provider/available", { provider: "claude" }), { available: false });
+		}
+	} finally {
+		input.end();
+		await done;
+		peer.close();
+	}
 });
 
 test("the SDK is configured as a plain model endpoint", async () => {
@@ -119,13 +145,12 @@ test("model-service failures are failed messages with an error", async () => {
 
 test("a login that is not a subscription fails before any prompt is sent", async () => {
 	const { provider, model, log } = setup({ apiKeySource: "user" });
-	assert.equal(provider.available(), true);
 	const message = await provider.infer(model, request("hi"), new AbortController().signal, () => {});
 	assert.equal(message.stop, "failed");
 	assert.equal(message.error?.kind, "credentials");
 	assert.deepEqual(log.prompts, []);
 	assert.equal(log.closed, 1);
-	assert.equal(provider.available(), false);
+	assert.equal((await provider.availability()).available, false);
 });
 
 test("cancelling closes the query promptly and yields no message", async () => {
@@ -168,7 +193,7 @@ test("readiness and a request finish while the probe is still reading context wi
 	t.after(() => { provider.close(); release(); });
 
 	let available: boolean | undefined;
-	const ready = provider.ready().then((answer) => { available = answer; });
+	const ready = provider.availability().then((answer) => { available = answer.available; });
 	await started;
 	// Let readiness settle without releasing the window read.
 	await new Promise<void>((resolve) => setImmediate(resolve));
@@ -204,16 +229,16 @@ for (const end of ["close", "deadline"] as const) {
 		t.after(() => provider.close());
 
 		const refreshed = provider.refresh();
-		assert.equal(await provider.ready(), true);
+		assert.deepEqual(await provider.availability(), { available: true });
 		await started;
 		if (end === "close") {
 			provider.close();
 			await assert.rejects(refreshed, Cancelled);
-			assert.equal(await provider.ready(), false);
+			assert.deepEqual(await provider.availability(), { available: false });
 		} else {
 			t.mock.timers.tick(30_000);
 			await assert.rejects(refreshed, /did not answer in time/);
-			assert.equal(await provider.ready(), true);
+			assert.deepEqual(await provider.availability(), { available: true });
 		}
 		assert.equal(fake.log.closed, 1);
 		assert.equal(reads, 1);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createAgent, definePlugin, defineProvider, environmentCredentials, type Event, type ModelInfo } from "../src/index.js";
+import { createAgent, definePlugin, defineProvider, environmentCredentials, type Event, type ModelInfo, type ProviderAvailability } from "../src/index.js";
 import { overWire } from "../src/testing.js";
 import { gitProject } from "./fixtures/git-project.js";
 
@@ -37,11 +37,11 @@ for (const served of [false, true]) {
   test(`Provider readiness, catalog changes, hooks and credentials (${served ? "served" : "local"})`, async t => {
     const catalog: ModelInfo[] = [{ provider: "beacon", id: "demo", contextWindow: 4096, maxOutput: 256, input: ["text"], reasoning: false }];
     const calls: string[] = [];
-    let ready = false;
+    let status: ProviderAvailability = { available: false, reason: "Beacon is waiting for its operator" };
     let requestCount = 0;
     const provider = defineProvider({
       id: "beacon", models: () => catalog, supports: { keepsState: false, safeToRepeat: true },
-      async available() { calls.push("available"); return ready; },
+      async availability() { calls.push("availability"); return status; },
       async request(_model, request, cx) {
         requestCount++;
         assert.equal(request.systemPrompt, "Transformed");
@@ -68,11 +68,15 @@ for (const served of [false, true]) {
       assert.equal(changes, 1);
       unsubscribe();
       const session = await agent.session();
-      const failure = await session.prompt("Check the beacon.");
-      assert.equal(failure.outcome?.kind, "failed");
-      assert.equal(requestCount, 0);
-      assert.deepEqual(calls.splice(0), ["request", "available", "response:failed"]);
-      ready = true;
+      for (const reason of ["Beacon is waiting for its operator", undefined, "", "   "]) {
+        status = reason === undefined ? { available: false } : { available: false, reason };
+        const failure = await session.prompt("Check the beacon.");
+        assert.equal(failure.outcome?.kind, "failed");
+        assert.ok(failure.outcome.error.includes(reason?.trim() ? reason : "Provider is not available"), failure.outcome.error);
+        assert.equal(requestCount, 0);
+        assert.deepEqual(calls.splice(0), served ? ["availability"] : ["request", "availability", "response:failed"]);
+      }
+      status = { available: true };
       const pieces: string[] = [];
       const next = await agent.session({ settings: { model: "beacon/updated" } });
       for await (const event of next.promptStream("Check the beacon.")) {
@@ -80,7 +84,7 @@ for (const served of [false, true]) {
       }
       assert.deepEqual(pieces, ["Bea", "con"]);
       assert.equal((await next.lastTurn())?.text, "Beacon");
-      assert.deepEqual(calls, ["request", "available", "response:finished"]);
+      assert.deepEqual(calls, [...(served ? ["availability"] : []), "request", "availability", "response:finished"]);
       assert.equal(requestCount, 1);
     } finally { await agent.close(); }
   });

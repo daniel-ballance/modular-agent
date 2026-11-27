@@ -5,7 +5,7 @@ import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promi
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type WebSocket from "ws";
 import { listenWebSocket, PLUGIN_PROTOCOL, receiveMessages, type ListenOptions } from "./websocket.js";
-import { interruptedCalls, lowerReasoning, pendingToolCalls, restoreAnsweredStep, zeroUsage } from "@modular-agent/harness";
+import { interruptedCalls, lowerReasoning, pendingToolCalls, providerAvailability, restoreAnsweredStep, zeroUsage } from "@modular-agent/harness";
 import type {
 	Answer,
 	AssistantMessage,
@@ -338,7 +338,7 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 		return p;
 	};
 	peer.handle("provider/models", async (p) => ({ models: toWire(provider(p.provider).models()) }));
-	peer.handle("provider/available", async (p) => ({ available: (await provider(p.provider).available?.()) ?? true }));
+	peer.handle("provider/available", p => providerAvailability(provider(p.provider)));
 	peer.handle("provider/discard", async p => {
 		const part = provider(p.provider);
 		if (!part.discardState) {
@@ -364,14 +364,18 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 		request.settings = { ...request.settings, reasoning: lowerReasoning(request.settings?.reasoning, modelInfo) };
 		let message: unknown;
 		try {
-			message = toWire(await currentParent.run(ctx.id, async () => (await impl.available?.()) === false ?
-				{ role: "assistant", stop: "failed", content: [], error: { kind: "credentials", message: "Provider is not available" } }
-				: impl.request(p.model, request, {
-				signal: ctx.signal,
-				sessionId: p.sessionId,
-				requestPrepared: true,
-				onEvent: (event) => { if (!ctx.signal.aborted) peer.notify("provider/event", { parentRequestId: ctx.id, event }); },
-			})));
+			message = toWire(await currentParent.run(ctx.id, async () => {
+				const status = await providerAvailability(impl);
+				checkCancelled();
+				if (!status.available) return { role: "assistant", stop: "failed", content: [],
+					error: { kind: "credentials", message: status.reason ?? "Provider is not available" } };
+				return impl.request(p.model, request, {
+					signal: ctx.signal,
+					sessionId: p.sessionId,
+					requestPrepared: true,
+					onEvent: (event) => { if (!ctx.signal.aborted) peer.notify("provider/event", { parentRequestId: ctx.id, event }); },
+				});
+			}));
 		} catch (error) {
 			checkCancelled();
 			throw error;

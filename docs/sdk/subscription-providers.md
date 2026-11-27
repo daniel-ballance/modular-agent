@@ -25,7 +25,7 @@ These Providers are for a person using their own plan, on their own machine. Eac
 - The file is created with mode 0600 and refused if it is readable by anyone else. Every change replaces the file atomically.
 - Every change, and every token refresh, holds an exclusive kernel lock (`flock(2)`) from reading the file to replacing it, including while waiting for the token endpoint. The lock is on a sibling file with the same name and the extension `.lock` (`auth.json` is locked through `auth.lock`), created with mode 0600 and never removed, because replacing the login file gives it a new inode. Two processes refreshing at once therefore spend one refresh token: the second finds the new token when it gets the lock. Programs in different languages share the lock.
 - A Provider reads its login when it needs a token. If the stored token expires within the margin, it refreshes under the lock and writes the result. A refresh the service refuses (`invalid_grant`) leaves the login in place and fails the request with ModelError `credentials`, saying to sign in again.
-- `available()` is true when the file holds a login for the Provider. It does not call the service.
+- `availability()` reports available when the file holds a login for the Provider. It does not call the service.
 
 A login is never written to history, events, logs or errors, and never sent anywhere but the vendor's token and model endpoints.
 
@@ -71,7 +71,7 @@ The client is the one xAI registered for its own Grok Build CLI; xAI publishes n
 - `claude()` reaches Claude through the Claude Agent SDK, used as a plain model endpoint: the host's system prompt with no Claude Code preset; only the host's tools shown to the model; Claude Code's own tools, settings files, hooks, memory, MCP configuration, skills and session files off. When the model asks for a tool, the request ends with `toolCall` parts and stop `toolUse`; nothing runs inside the Agent SDK. Text and reasoning arrive as pieces.
 - TypeScript uses Anthropic's Agent SDK. Anthropic publishes none for Rust, so Rust's `claude()` runs the TypeScript SDK's Claude program as a [process plugin](placement.md#a-plugin-in-another-process) and needs Node.js 22 or newer. The `program` option, or `MODULAR_AGENT_CLAUDE_SIDECAR`, names it; otherwise the Rust SDK looks in its documented install location. A missing program is `invalid_composition` naming both.
 - The catalog starts from the `claude` entries in [subscription-models.json](subscription-models.json), then takes what Claude Code reports the account offers.
-- `available()` is true when Claude Code reports a Claude plan sign-in. If Claude Code is using an API key instead, `available()` is false and the reason names the key's source, so a plan is never silently replaced by metered use. Served, the Claude program sends that reason in `provider/available`.
+- `availability()` reports available when Claude Code reports a Claude plan sign-in. If Claude Code is using an API key instead, it reports unavailable and the reason names the key's source if known, so a plan is never silently replaced by metered use. Served, the Claude program sends that reason in `provider/available`.
 
 ## Checks
 

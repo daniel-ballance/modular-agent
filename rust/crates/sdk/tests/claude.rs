@@ -1,5 +1,7 @@
 use futures_util::StreamExt;
-use modular_agent::{Agent, ClaudeOptions, Code, Outcome, Plugin, claude};
+use modular_agent::{
+    Agent, ClaudeOptions, Code, Outcome, Plugin, ProcessPlugin, ProviderAvailability, claude,
+};
 use std::path::PathBuf;
 
 #[path = "fixtures/git_project.rs"]
@@ -14,7 +16,10 @@ async fn claude_runs_as_a_process_plugin_and_the_host_runs_its_tool() -> modular
     let provider = claude(ClaudeOptions {
         program: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude.cjs")),
     })?;
-    assert!(provider.available().await);
+    assert_eq!(
+        provider.availability().await,
+        ProviderAvailability::Available
+    );
     let project = git_project();
     let agent = Agent::builder()
         .project(project.path())
@@ -65,10 +70,11 @@ async fn a_claude_api_key_is_not_a_plan_sign_in() -> modular_agent::Result<()> {
     let provider = claude(ClaudeOptions {
         program: Some(program),
     })?;
-    assert!(!provider.available().await);
     assert_eq!(
-        provider.unavailable_reason().await.as_deref(),
-        Some(API_KEY_REASON)
+        provider.availability().await,
+        ProviderAvailability::Unavailable {
+            reason: Some(API_KEY_REASON.into()),
+        }
     );
     let project = git_project();
     let agent = Agent::builder()
@@ -83,6 +89,26 @@ async fn a_claude_api_key_is_not_a_plan_sign_in() -> modular_agent::Result<()> {
         matches!(result.outcome, Some(Outcome::Failed { error }) if error.contains(API_KEY_REASON))
     );
     agent.close().await
+}
+
+#[tokio::test]
+async fn a_blank_wire_reason_uses_the_generic_host_error() -> modular_agent::Result<()> {
+    let program = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/claude.cjs");
+    for reason in ["", "   "] {
+        let agent = modular_agent::testing::test_agent()
+            .model("claude/claude-haiku-5-5")
+            .process_plugin(ProcessPlugin::new(["node", program, "unavailable", reason]))
+            .build()
+            .await?;
+        let result = agent.session().await?.prompt("Do not send this").await?;
+        assert!(
+            matches!(&result.outcome, Some(Outcome::Failed { error }) if error.contains("external Provider is unavailable")),
+            "expected the generic host error for {reason:?}, got {:?}",
+            result.outcome
+        );
+        agent.close().await?;
+    }
+    Ok(())
 }
 
 #[test]

@@ -106,7 +106,8 @@ async function authCommand(argv: string[], auth: AuthFile, identity: ClientIdent
     }
     const p = claude();
     try {
-      const status = await p.available() ? "signed in through Claude Code" : p.unavailableReason();
+      const readiness = await p.availability();
+      const status = readiness.available ? "signed in through Claude Code" : readiness.reason ?? "not signed in";
       console.log(`${"claude".padEnd(13)} ${"Claude subscription".padEnd(22)} ${status}`);
     } finally { p.close(); }
     return 0;
@@ -223,7 +224,7 @@ async function main(argv: string[]) {
       saved ?? modelRef(settings.model) ?? defaultModel;
     const claudeProvider = !script && !conformance && (model?.startsWith("claude/") || !model && !inspecting || opts.command === "models")
       ? claude({ project: cwd }) : undefined;
-    const claudeReady = claudeProvider && await claudeProvider.available();
+    const claudeReady = claudeProvider && (await claudeProvider.availability()).available;
     if (!model && !inspecting && claudeReady) model = "claude/claude-sonnet-5-5";
     if (!model && !inspecting && !serving) throw new Error(noModel);
     if (conformance) settings.modelTools = null;

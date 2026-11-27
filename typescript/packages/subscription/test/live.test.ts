@@ -11,7 +11,7 @@ for (const [id, make, modelVariable, defaultModel] of [
 ] as const) {
   test(`live ${id} plan returns text`, { skip: process.env.MODULAR_AGENT_LIVE !== "1" || !path }, async t => {
     const p = make({ logins: subscriptionLogins(path!) });
-    if (!await p.available()) { t.skip(`No ${id} login`); return; }
+    if (!(await p.availability()).available) { t.skip(`No ${id} login`); return; }
     const model = process.env[modelVariable] || defaultModel;
     const agent = await createAgent({ providers: [p], model: `${id}/${model}`, environment: memoryEnvironment() });
     t.after(() => agent.close());

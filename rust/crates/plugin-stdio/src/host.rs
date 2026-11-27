@@ -160,7 +160,7 @@ impl ProviderReadiness {
     }
 
     /// Ask a fresh process for readiness without composing an agent or sending model work.
-    pub async fn probe(self, launch: &Launch, state: &Path) -> Result<Option<String>> {
+    pub async fn probe(self, launch: &Launch, state: &Path) -> Result<ProviderAvailability> {
         let state = state.canonicalize()?;
         let mut child = launch.spawn(&state)?;
         let peer = Peer::start(
@@ -1035,9 +1035,12 @@ impl RemoteModel {
         readiness: Option<ProviderReadiness>,
         cancel: CancellationToken,
     ) -> Result<()> {
-        if let Some(reason) = provider_availability(&self.peer, &self.id, readiness, cancel).await?
+        if let ProviderAvailability::Unavailable { reason } =
+            provider_availability(&self.peer, &self.id, readiness, cancel).await?
         {
-            bail!("{reason}");
+            let fallback =
+                readiness.map_or("external Provider is unavailable", |check| check.fallback);
+            bail!("{}", reason.as_deref().unwrap_or(fallback));
         }
         Ok(())
     }
@@ -1048,7 +1051,7 @@ async fn provider_availability(
     id: &str,
     readiness: Option<ProviderReadiness>,
     cancel: CancellationToken,
-) -> Result<Option<String>> {
+) -> Result<ProviderAvailability> {
     let call = peer.call("provider/available", json!({"provider":id}), None, cancel);
     let value = if let Some(readiness) = readiness {
         match tokio::time::timeout(readiness.guard, call).await {
@@ -1065,16 +1068,8 @@ async fn provider_availability(
         call.await?
     };
     match value["available"].as_bool() {
-        Some(true) => Ok(None),
-        Some(false) => Ok(Some(
-            value["reason"]
-                .as_str()
-                .filter(|reason| !reason.is_empty())
-                .unwrap_or_else(|| {
-                    readiness.map_or("external Provider is unavailable", |check| check.fallback)
-                })
-                .to_owned(),
-        )),
+        Some(true) => Ok(ProviderAvailability::Available),
+        Some(false) => Ok(ProviderAvailability::unavailable(value["reason"].as_str())),
         None => bail!("invalid provider/available reply: expected a boolean available field"),
     }
 }

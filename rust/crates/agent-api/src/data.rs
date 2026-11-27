@@ -616,6 +616,32 @@ impl std::fmt::Display for ModelFailure {
     }
 }
 impl std::error::Error for ModelFailure {}
+/// Whether a Provider can accept requests now.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum ProviderAvailability {
+    #[default]
+    Available,
+    Unavailable {
+        /// An optional explanation safe to show to a user. Never include a credential.
+        reason: Option<String>,
+    },
+}
+
+impl ProviderAvailability {
+    /// Construct an unavailable status, treating an empty or blank reason as absent.
+    pub fn unavailable(reason: Option<&str>) -> Self {
+        Self::Unavailable {
+            reason: reason
+                .filter(|reason| !reason.trim().is_empty())
+                .map(str::to_owned),
+        }
+    }
+
+    pub fn is_available(&self) -> bool {
+        matches!(self, Self::Available)
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub name: String,

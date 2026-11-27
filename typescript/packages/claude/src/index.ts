@@ -22,14 +22,13 @@ export function claude(options: ClaudeOptions = {}) {
   const provider = defineProvider({
     id: "claude", supports: { keepsState: false, safeToRepeat: false },
     models: () => impl.catalog(),
-    available: () => impl.ready(),
-    unavailableReason: () => impl.unavailableReason(),
+    availability: () => impl.availability(),
     close: () => impl.close(),
     async request(ref, request, cx) {
       const model = impl.model(ref.id);
       if (ref.provider !== "claude" || !model) throw new AgentError("invalid_request", "Claude does not offer that model");
       return impl.infer(model, request, cx.cancelled, e => cx.piece(e.type, e.delta, "toolCallId" in e ? e.toolCallId : undefined));
     },
-  } satisfies Provider & { unavailableReason(): string | undefined; close(): void });
+  } satisfies Provider & { close(): void });
   return provider;
 }

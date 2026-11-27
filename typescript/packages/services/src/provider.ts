@@ -1,5 +1,5 @@
 import type { MutableModels } from "@earendil-works/pi-ai";
-import type { AssistantMessage, ModelInfo, ModelRef, ModelRequest, Plugin, PluginApi, Provider, RequestOptions } from "@modular-agent/harness";
+import type { AssistantMessage, ModelInfo, ModelRef, ModelRequest, Plugin, PluginApi, Provider, ProviderAvailability, RequestOptions } from "@modular-agent/harness";
 import { PiAiProvider } from "@modular-agent/provider-pi-ai";
 import { call, type ClientOptions, ndjson, serve, stream } from "./http.js";
 import { checkSettings } from "./settings.js";
@@ -20,7 +20,7 @@ export async function providerService(options: { models: MutableModels; token: s
 	);
 	return serve(
 		[
-			["GET", /^\/providers$/, async () => Promise.all([...providers.values()].map(async (p) => ({ id: p.id, supports: p.supports, models: p.models(), available: await p.available() })))],
+			["GET", /^\/providers$/, async () => Promise.all([...providers.values()].map(async (p) => ({ id: p.id, supports: p.supports, models: p.models(), availability: await p.availability() })))],
 			["POST", /^\/providers\/([^/]+)\/request$/, async (req, res) => {
 				const provider = providers.get(req.params[0]);
 				if (!provider) throw new Error(`No provider ${req.params[0]}`);
@@ -38,7 +38,7 @@ export async function providerService(options: { models: MutableModels; token: s
 	);
 }
 
-interface Offered { id: string; supports: Provider["supports"]; models: ModelInfo[]; available: boolean }
+interface Offered { id: string; supports: Provider["supports"]; models: ModelInfo[]; availability: ProviderAvailability }
 
 /** One of the gateway's Providers, standing in for it in the agent. */
 export class HttpProvider implements Provider {
@@ -51,8 +51,8 @@ export class HttpProvider implements Provider {
 	models(): ModelInfo[] {
 		return this.offered.models;
 	}
-	async available(): Promise<boolean> {
-		return this.offered.available;
+	async availability(): Promise<ProviderAvailability> {
+		return this.offered.availability;
 	}
 	async request(ref: ModelRef, request: ModelRequest, options: RequestOptions): Promise<AssistantMessage> {
 		// "Before a model request" runs here: this plugin is the Provider, as far as the agent knows.

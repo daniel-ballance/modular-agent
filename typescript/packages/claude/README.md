@@ -52,9 +52,9 @@ The host starts a plugin with a minimal environment ([plugin binding, "Choosing 
 
 `PATH` is not needed by Claude Code itself: the SDK runs the binary from its own platform package. It is needed only if `command[0]` is a bare `node`.
 
-Without any of these the sidecar still starts and registers, and answers `provider/available` with `false`.
+Without any of these the sidecar still starts and registers, and answers `provider/available` with `available: false`.
 
-The Provider never opens a credential file. It checks whether a login may be present by checking for the credential file's existence or an OAuth token variable. Claude Code then reports whether the account has a plan. `claude().unavailableReason()` gives the reason after an availability check. Over the plugin binding, `provider/available` includes that reason when the Provider is unavailable. API routing variables and an API key source reported by Claude Code both make the Provider unavailable; no prompt is sent.
+The Provider never opens a credential file. It checks whether a login may be present by checking for the credential file's existence or an OAuth token variable. Claude Code then reports whether the account has a plan. `claude().availability()` reports readiness and includes a reason when unavailable, if one is known. Over the plugin binding, `provider/available` includes that reason when the Provider is unavailable. API routing variables and an API key source reported by Claude Code both make the Provider unavailable; no prompt is sent.
 
 Anthropic decides how Agent SDK usage is counted against a plan. This sidecar is for your own use with your own account.
 
@@ -136,7 +136,7 @@ Four real model requests in total, all on `claude-haiku-5-5`, Agent SDK 0.3.323,
 
 The former `npm run live` check started the sidecar with only `PATH` and `HOME` in its environment, as the host does. All 11 checks passed:
 
-- `provider/available` was `true`. The catalog narrowed from 18 built-in models to the 13 the account offers.
+- `provider/available` reported `available: true`. The catalog narrowed from 18 built-in models to the 13 the account offers.
 - Request 1 (one-line system prompt, one user message, one tool `get_weather`, `reasoning: "off"`, `maxOutput: 1024`): `stop: "toolUse"`, content `[{"type":"toolCall","id":"toolu_...","name":"get_weather","arguments":{"city":"Paris"}}]`, usage `input 2, output 56, cacheWrite 1089`, three `toolInput` events. Claude Code reported its tool list as exactly `[mcp__host__get_weather]`. Claude Code did try the call once in the moment before its process was closed; the sidecar has nothing that could run it, held the call unanswered and logged "none ran".
 - Request 2 (the same conversation plus the assistant message and a tool result): `stop: "finished"`, text "Paris is 18°C with light rain and wind at 7 km/h.", streamed as text events, no further tool call.
 - Hooks ran in order (`provider.request`, then `provider.response`) and the sidecar exited with 0.

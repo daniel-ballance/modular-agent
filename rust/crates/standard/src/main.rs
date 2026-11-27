@@ -293,10 +293,12 @@ async fn auth_status(standard: &Standard) -> Result<()> {
         println!("{id:<13} {label:<22} {state}");
     }
     let status = match sdk::claude(sdk::ClaudeOptions::default()) {
-        Ok(provider) => provider
-            .unavailable_reason()
-            .await
-            .unwrap_or_else(|| "signed in through Claude Code".into()),
+        Ok(provider) => match provider.availability().await {
+            sdk::ProviderAvailability::Available => "signed in through Claude Code".into(),
+            sdk::ProviderAvailability::Unavailable { reason } => {
+                reason.unwrap_or_else(|| "not signed in".into())
+            }
+        },
         Err(e) => e.message().to_owned(),
     };
     println!("{:<13} {:<22} {status}", "claude", "Claude subscription");

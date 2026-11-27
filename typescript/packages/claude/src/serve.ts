@@ -64,9 +64,9 @@ export function serve(options: ServeOptions): Promise<void> {
 	peer.handle("provider/models", async (p) => (ours(p.provider), { models: provider.catalog() }));
 	peer.handle("provider/available", async (p) => {
 		ours(p.provider);
-		const available = await provider.ready();
-		const reason = available ? undefined : provider.unavailableReason();
-		return reason ? { available, reason } : { available };
+		const status = await provider.availability();
+		if (status.available) return { available: true };
+		return status.reason?.trim() ? { available: false, reason: status.reason } : { available: false };
 	});
 	peer.handle("provider/discard", async (p) => {
 		ours(p.provider);

@@ -1,4 +1,4 @@
-import { AgentError, ModelFailure, type AssistantMessage, type ContentPart, type ModelError, type ModelRequest, type Provider, type ProviderContext, type Usage } from "@modular-agent/core";
+import { AgentError, ModelFailure, type AssistantMessage, type ContentPart, type ModelError, type ModelRequest, type Provider, type ProviderAvailability, type ProviderContext, type Usage } from "@modular-agent/core";
 import { chatgptAccount, chatgptOAuth, grokOAuth, loopback, type OAuthTestOptions, type SubscriptionProviderId } from "./oauth.js";
 import type { Login, SubscriptionLogins } from "./logins.js";
 import { resolveClientIdentity, type ClientIdentityOptions } from "./client-identity.js";
@@ -151,7 +151,7 @@ export interface ResponsesProviderOptions extends ClientIdentityOptions {
 
 export function responsesProvider(id: SubscriptionProviderId, url: string,
   { logins, models: enrolled, modelOverrides, clientIdentity, test }: ResponsesProviderOptions): Provider & {
-  available(): Promise<boolean>;
+  availability(): Promise<ProviderAvailability>;
 } {
   let identity: string;
   try { identity = resolveClientIdentity(clientIdentity); }
@@ -164,7 +164,7 @@ export function responsesProvider(id: SubscriptionProviderId, url: string,
   const endpoint = test ? loopback(test.endpoint) : url;
   return {
     id, supports: { keepsState: false, safeToRepeat: true },
-    async available() { return !!await logins.login(id); },
+    async availability() { return { available: !!await logins.login(id) }; },
     models: () => Array.from(models.values(), modelInfo),
     async request(ref, request, ctx) {
       const model = models.get(ref.id);

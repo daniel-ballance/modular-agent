@@ -19,6 +19,7 @@ async function answer(id, method, p) {
         case 'provider/available':
             if (p.provider !== 'claude') throw new Error('expected the Claude Provider id');
             if (process.argv[2] === 'hang') return new Promise(() => {});
+            if (process.argv[2] === 'unavailable') return { available: false, reason: process.argv[3] };
             if (process.argv[2] === 'api-key') {
                 return { available: false, reason: 'The fixture is using an API key from ANTHROPIC_API_KEY, not a Claude plan.' };
             }

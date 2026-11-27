@@ -14,7 +14,7 @@ export function openai({ baseUrl, models: enrolled }: OpenAIOptions = {}): Provi
   return {
     id: "openai", models: () => structuredClone(models),
     supports: { keepsState: false, safeToRepeat: true },
-    available: async cx => !!(await cx.credential()),
+    availability: async cx => ({ available: !!(await cx.credential()) }),
     async request(model, request, cx) {
       if (model.provider !== "openai" || !models.some(m => m.id === model.id)) throw new AgentError("invalid_request", "Model is not offered");
       const key = await cx.credential();

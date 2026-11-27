@@ -6,7 +6,7 @@ Build a Provider with one model, stream its reply, and test a rejected credentia
 
 A Provider has an id and returns its full current catalog from `models()`. Each model has its own id within that Provider, so the model below is `beacon/demo`. List the model's real input types and limits; the agent uses them to prepare the request. See [Models](../../bindings/data.md#models).
 
-The optional `available()` check reports whether the Provider can take requests now. It does not promise the next request will succeed. Handle unavailable or rejected credentials inside `request` in every language. After changing an in-process catalog, notify readers with `changed()`; see [Languages](../languages.md) for the helper each SDK exposes.
+The optional `availability()` check reports whether the Provider can take requests now and can explain why it cannot. Never include a credential in the reason. It does not promise the next request will succeed. Handle unavailable or rejected credentials inside `request` in every language. After changing an in-process catalog, notify readers with `changed()`; see [Languages](../languages.md) for the helper each SDK exposes.
 
 `request` receives the selected model, the prepared request (including messages, tools and settings) and a call-scoped context. A real Provider passes the context's cancellation signal to its client and sends the prepared request to the selected model. It gets the key through the context, not from plugin config or the prompt. The dummy below ignores the model and request and simulates a reply instead.
 
@@ -39,10 +39,6 @@ impl Provider for Beacon {
             extra: serde_json::from_value(serde_json::json!({"input":["text"],"reasoning":false}))
                 .unwrap(),
         }]
-    }
-
-    fn available(&self) -> bool {
-        true
     }
 
     fn supports(&self) -> ProviderSupport {
@@ -82,7 +78,6 @@ const beacon: Provider = {
     provider: "beacon", id: "demo", contextWindow: 4096, maxOutput: 256,
     input: ["text"], reasoning: false,
   }],
-  available: () => true,
   supports: { keepsState: false, safeToRepeat: true },
   async request(_model, _request, cx) {
     const key = await cx.credential();

@@ -5,7 +5,7 @@
   "rust/crates/agent-base/tests/plugin_binding.rs": 1998,
   "rust/crates/history-http/src/lib.rs": 1286,
   "rust/crates/history-http/src/server.rs": 1619,
-  "rust/crates/plugin-stdio/src/host.rs": 2394,
+  "rust/crates/plugin-stdio/src/host.rs": 2389,
   "rust/crates/plugin-stdio/src/runtime_host.rs": 1937,
   "rust/crates/runtime-engine/src/lib.rs": 1613,
   "rust/crates/sdk-scenarios/src/lib.rs": 1030,
@@ -14,5 +14,5 @@
   "rust/crates/sdk/src/plugin.rs": 1089,
   "rust/crates/sdk/src/session.rs": 1480,
   "typescript/packages/interface-acp/src/index.ts": 1194,
-  "typescript/packages/plugin-wire/src/host.ts": 1091
+  "typescript/packages/plugin-wire/src/host.ts": 1016
 }

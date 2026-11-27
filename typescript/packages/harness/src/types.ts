@@ -241,6 +241,9 @@ export interface RequestOptions {
 	onEffectiveRequest?(request: ModelRequest): void;
 }
 
+/** A reason, if supplied, is safe to show to a user and never contains a credential. */
+export type ProviderAvailability = { available: true; reason?: never } | { available: false; reason?: string };
+
 export interface Provider {
 	id: string;
 	readonly inProcessInference?: boolean;
@@ -250,11 +253,19 @@ export interface Provider {
 	onChange?(handler: () => void): () => void;
 	/** A served Provider may refresh its cached catalog using provider/models. */
 	refreshModels?(): Promise<void>;
-	/** Whether this Provider can be used now, for example because it has credentials. */
-	available?(): Promise<boolean>;
+	/** Readiness for catalog filtering, dispatch and the plugin binding. */
+	availability?(): Promise<ProviderAvailability>;
 	/** Make one model request. Never rejects for a model failure: the message says why. */
 	request(model: ModelRef, request: ModelRequest, options: RequestOptions): Promise<AssistantMessage>;
 	discardState?(sessionId: string, options?: { erase?: boolean; entryIds?: string[] }): Promise<void | { pending?: string[]; outOfReach?: string[] }>;
+}
+
+/** Query a Harness Provider's readiness and project only the public fields. */
+export async function providerAvailability(provider: Provider): Promise<ProviderAvailability> {
+	const status = await provider.availability?.();
+	if (!status || status.available) return { available: true };
+	return typeof status.reason === "string" && status.reason.trim()
+		? { available: false, reason: status.reason } : { available: false };
 }
 
 /** What the Runtime is given: the chosen model, without credentials. */

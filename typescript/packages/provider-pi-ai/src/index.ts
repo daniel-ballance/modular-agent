@@ -23,6 +23,7 @@ import type {
 	Plugin,
 	PluginApi,
 	Provider,
+	ProviderAvailability,
 	RequestOptions,
 	StopReason,
 } from "@modular-agent/harness";
@@ -37,11 +38,11 @@ export class PiAiProvider implements Provider {
 		return this.collection.getModels(this.id).map(toInfo);
 	}
 
-	async available(): Promise<boolean> {
+	async availability(): Promise<ProviderAvailability> {
 		try {
-			return (await this.collection.getAuth(this.id)) !== undefined;
+			return { available: (await this.collection.getAuth(this.id)) !== undefined };
 		} catch {
-			return false;
+			return { available: false };
 		}
 	}
 

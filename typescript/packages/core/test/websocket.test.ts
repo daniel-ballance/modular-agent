@@ -4,9 +4,9 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { definePlugin, memoryHistory, serve, tool, type AcpActorToken } from "@modular-agent/core";
+import { definePlugin, memoryHistory, serve, tool, type AcpActorToken, type Provider, type ProviderAvailability } from "@modular-agent/core";
 import { testAgent } from "@modular-agent/core/testing";
-import { ACP_PROTOCOL, connectWebSocket } from "@modular-agent/plugin-wire";
+import { ACP_PROTOCOL, PLUGIN_BINDING, PLUGIN_PROTOCOL, WirePeer, connectWebSocket, receiveMessages } from "@modular-agent/plugin-wire";
 import { interruptedHistory } from "./fixtures/interrupted-history.js";
 
 async function token(t: TestContext) {
@@ -16,6 +16,37 @@ async function token(t: TestContext) {
   await writeFile(tokenFile, randomBytes(32).toString("hex"), { mode: 0o600 });
   return { dir, tokenFile };
 }
+
+test("SDK server sends only the applicable Provider availability fields", { timeout: 10_000 }, async t => {
+  const { dir, tokenFile } = await token(t);
+  let status: ProviderAvailability;
+  const provider: Provider = {
+    id: "beacon", models: () => [], supports: { keepsState: false, safeToRepeat: false },
+    availability: () => status,
+    request() { throw new Error("Unexpected model request"); },
+  };
+  const server = await serve(definePlugin({ name: "beacon", setup: r => r.provider(provider) }), { listen: "127.0.0.1:0", tokenFile });
+  try {
+    const ws = await connectWebSocket(server.url, tokenFile, PLUGIN_PROTOCOL, 2_000);
+    const peer = new WirePeer(line => ws.send(line.slice(0, -1)), () => ws.close());
+    receiveMessages(ws, bytes => peer.message(bytes));
+    ws.on("close", () => peer.close());
+    try {
+      await peer.request("plugin/initialize", { binding: PLUGIN_BINDING, host: { name: "test", version: "1" }, project: dir, home: dir, config: {} });
+      const cases: [ProviderAvailability, ProviderAvailability][] = [
+        [{ available: true }, { available: true }],
+        [{ available: false }, { available: false }],
+        [{ available: false, reason: "" }, { available: false }],
+        [{ available: false, reason: "   " }, { available: false }],
+        [{ available: false, reason: "Beacon is offline" }, { available: false, reason: "Beacon is offline" }],
+      ];
+      for (const [offered, expected] of cases) {
+        status = offered;
+        assert.deepEqual(await peer.request("provider/available", { provider: provider.id }), expected);
+      }
+    } finally { peer.close(); }
+  } finally { await server.close(); }
+});
 
 test("SDK loads in-process, stdio, explicit service and environment services in order", async t => {
   const { tokenFile } = await token(t);
