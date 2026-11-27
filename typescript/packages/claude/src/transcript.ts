@@ -11,7 +11,17 @@ type ImageType = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
 const IMAGE_TYPES: readonly string[] = ["image/jpeg", "image/png", "image/gif", "image/webp"];
 
 function digest(value: unknown): string {
-	return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 24);
+	return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 8);
+}
+
+function historyMark(past: readonly Message[]): string {
+	const first = past[0];
+	const serialized = JSON.stringify(past);
+	let mark = digest(first);
+	for (let attempt = 1; serialized.includes(`:${mark}`); attempt++) {
+		mark = digest([first, attempt]);
+	}
+	return mark;
 }
 
 const isText = (part: Content[number]): part is { type: "text"; text: string } => part.type === "text" && typeof (part as { text?: unknown }).text === "string";
@@ -61,9 +71,10 @@ export function replayable(messages: readonly Message[]): Message[] {
  * and tool results cannot be handed over as native history. Earlier messages go in as a
  * marked record, then the trailing user messages as written. Images keep their place.
  *
- * Every marker of the record ends in a mark derived from the record's own content. Text
- * inside it, such as a tool result that quotes these markers, cannot know the mark in
- * advance, so it cannot close the record or pose as another turn. Reasoning is left out.
+ * Every marker uses a mark derived from the first replayed entry. The mark stays stable
+ * as history grows unless an entry contains it after a colon. Checking the whole record
+ * keeps even a quoted marker from closing the record or posing as another turn.
+ * Reasoning is left out.
  */
 export function promptBlocks(request: Pick<ModelRequest, "messages">): UserBlock[] {
 	const entries = replayable(request.messages);
@@ -72,7 +83,7 @@ export function promptBlocks(request: Pick<ModelRequest, "messages">): UserBlock
 	const past = entries.slice(0, live);
 	const blocks: UserBlock[] = [];
 	if (past.length) {
-		const mark = digest(past).slice(0, 8);
+		const mark = historyMark(past);
 		const open = (tag: string, attributes = ""): string => `<${tag}:${mark}${attributes}>\n`;
 		const close = (tag: string): string => `</${tag}:${mark}>\n`;
 		let text = [
