@@ -30,7 +30,8 @@ Name the program in the agent's process plugins. The command is an argument vect
 **Rust**
 
 ```rust
-use modular_agent::ProcessPlugin;
+use modular_agent::{Agent, ProcessPlugin};
+use modular_agent_openai::openai;
 
 let agent = Agent::builder()
     .provider(openai())

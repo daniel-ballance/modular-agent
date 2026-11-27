@@ -2674,7 +2674,6 @@ dependencies = [
  "opentelemetry_sdk",
  "plugin-stdio",
  "provider-fake",
- "provider-openai",
  "reqwest",
  "runtime-durable",
  "runtime-transient",
@@ -2687,6 +2686,17 @@ dependencies = [
  "tokio-util",
  "tools-builtin",
  "transport-websocket",
+]
+
+[[package]]
+name = "modular-agent-anthropic"
+version = "0.4.0"
+dependencies = [
+ "agent-api",
+ "modular-agent",
+ "reqwest",
+ "sdk-api-key",
+ "serde_json",
 ]
 
 [[package]]
@@ -2709,6 +2719,18 @@ dependencies = [
  "futures-util",
  "mcp-client",
  "modular-agent",
+ "serde_json",
+]
+
+[[package]]
+name = "modular-agent-openai"
+version = "0.4.0"
+dependencies = [
+ "agent-api",
+ "modular-agent",
+ "provider-openai",
+ "reqwest",
+ "sdk-api-key",
  "serde_json",
 ]
 
@@ -4518,6 +4540,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "sdk-api-key"
+version = "0.4.0"
+dependencies = [
+ "agent-api",
+ "async-trait",
+ "futures-util",
+ "modular-agent",
+ "reqwest",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "sdk-scenarios"
 version = "0.4.0"
 dependencies = [
@@ -4529,9 +4564,12 @@ dependencies = [
  "libc",
  "log",
  "modular-agent",
+ "modular-agent-anthropic",
+ "modular-agent-openai",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",

@@ -52,6 +52,9 @@ The function returns text, so the result is `completed` with that text as its co
 **Rust**
 
 ```rust
+use modular_agent::Agent;
+use modular_agent_openai::openai;
+
 let agent = Agent::builder()
     .provider(openai())
     .model("openai/gpt-6-luna")
