@@ -91,7 +91,7 @@ ACP uses the official Rust SDK and declares its standard session lifecycle, conf
 
 MCP uses official rmcp over stdio and Streamable HTTP. Settings servers serve every session; servers passed by an ACP client serve only that session and close with it. Tool annotations become hints and raw definitions/results are retained. Names are mcp_SERVER__TOOL, with documented naming restrictions.
 
-Settings can name the prelinked plugins guardrail.literal, feature.subagents and tools.mcp in an ordered plugins array, with options. Project plugin declarations and plugin_settings apply only after explicit trust. Ordinary project defaults, such as model/thinking, still apply before trust. The canonical-path trust ledger is trusted-projects.json beside the global settings file. An ACP host can explicitly trust the attached session’s project through `_modular-agent/trust-project`. Trust affects new/reopened compositions, not running ones. MILESTONE-4.md has complete examples.
+Settings can name the prelinked plugins guardrail.literal, feature.subagents and tools.mcp in an ordered plugins array, with options. Project plugin declarations and plugin_settings apply only after explicit trust. Ordinary project defaults, such as model/thinking, still apply before trust. The canonical-path trust ledger is trusted-projects.json beside the global settings file. The operator grants trust with `--trust-project` outside ACP. Trust affects new/reopened compositions, not running ones. MILESTONE-4.md has complete examples.
 
 ## Settings and data
 

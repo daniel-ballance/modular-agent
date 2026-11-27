@@ -167,7 +167,6 @@ pub trait Factory: Send + Sync {
     ) -> Result<Option<Value>> {
         Ok(Some(json!({"sessionId": data.id, "cwd": data.project})))
     }
-    fn trust(&self, project: &Path) -> Result<()>;
     fn serves_project(&self, _project: &Path) -> bool {
         true
     }

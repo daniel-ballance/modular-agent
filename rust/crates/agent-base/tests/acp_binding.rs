@@ -145,7 +145,6 @@ async fn conformance_read_zero_usage_and_authoritative_data_directory() {
         for e in entries.iter().filter(|e|e["kind"] == "response") {
             assert_eq!(e["message"]["usage"],json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"cost":0.0}));
         }
-        rpc(&cx,"_modular-agent/trust-project",json!({"sessionId":id,"cwd":cwd,"confirm":true})).await?;
         rpc(&cx,"session/close",json!({"sessionId":id})).await?;
         let resumed = rpc(&cx,"session/resume",json!({"sessionId":id,"cwd":cwd,"mcpServers":[]})).await?;
         assert_eq!(resumed["configOptions"][0]["currentValue"],"conformance/echo");
@@ -154,7 +153,6 @@ async fn conformance_read_zero_usage_and_authoritative_data_directory() {
     }).await;
     assert!(data.join("sessions").is_dir());
     assert!(data.join("commands").is_dir());
-    assert!(data.join("trusted-projects.json").is_file());
     for path in ["sessions", "commands", "trusted-projects.json", "openai"] {
         assert!(
             !r.root.path().join(path).exists(),

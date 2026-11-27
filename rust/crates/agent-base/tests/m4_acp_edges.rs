@@ -118,6 +118,7 @@ async fn project_mcp_never_starts_before_explicit_external_trust() {
     ]));
     let cwd = r.project.path().to_path_buf();
     let pid = r.root.path().join("project.pid");
+    let config = r.root.path().join("settings.json");
     std::fs::write(cwd.join(".modular-agent.json"),serde_json::to_vec(&json!({"thinking":"high","_parent":{"session":"forged"},"plugins":[{"name":"tools.mcp","options":{"servers":[{"transport":"stdio","name":"project","command":"/usr/bin/python3","args":[format!("{}/../../scripts/mcp-fixture.py",env!("CARGO_MANIFEST_DIR")),pid]}]}}]})).unwrap()).unwrap();
     r.client(Some(true), true, async move |cx| {
         let before = cx
@@ -136,21 +137,19 @@ async fn project_mcp_never_starts_before_explicit_external_trust() {
         )
         .await?;
         assert!(settings.get("_parent").is_none());
-        assert!(
-            rpc(
-                &cx,
-                "_modular-agent/trust-project",
-                json!({"sessionId":before.session_id,"cwd":cwd,"confirm":false})
-            )
-            .await
-            .is_err()
-        );
-        rpc(
+        let error = rpc(
             &cx,
             "_modular-agent/trust-project",
             json!({"sessionId":before.session_id,"cwd":cwd,"confirm":true}),
         )
-        .await?;
+        .await
+        .unwrap_err();
+        assert_eq!(i32::from(error.code), -32601);
+        assert!(!config.with_file_name("trusted-projects.json").exists());
+
+        config_files::FilesConfiguration::new(config)
+            .trust(&cwd)
+            .unwrap();
         assert!(!pid.exists());
         cx.send_request(CloseSessionRequest::new(before.session_id))
             .block_task()

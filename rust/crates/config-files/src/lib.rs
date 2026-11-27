@@ -51,7 +51,7 @@ impl FilesConfiguration {
         let path = project.canonicalize()?;
         Ok(read(&self.trust_path())?[path.to_string_lossy().as_ref()] == true)
     }
-    /// Called only by an explicit outside user/host action, never by project settings.
+    /// Called only by an explicit operator action, never by project settings.
     pub fn trust(&self, project: &Path) -> Result<()> {
         let path = project.canonicalize()?;
         let mut ledger = read(&self.trust_path())?;
