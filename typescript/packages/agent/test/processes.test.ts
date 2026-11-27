@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
-import { testTempDir } from "./fixtures/temp-dir.js";
+import { test, type TestContext } from "node:test";
+import { beforeTempDirCleanup, testTempDir } from "./fixtures/temp-dir.js";
 
 const envLocal = import.meta.resolve("@modular-agent/env-local");
 const alive = (pid: number) => {
@@ -19,6 +19,14 @@ const until = async (check: () => boolean, ms = 5000) => {
 	for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 50))) if (check()) return true;
 	return false;
 };
+
+function stopAgentAfterTest(t: TestContext, agent: ReturnType<typeof spawn>): void {
+	const closed = new Promise<void>(resolve => agent.once("close", () => resolve()));
+	beforeTempDirCleanup(t, async () => {
+		agent.kill("SIGKILL");
+		await closed;
+	});
+}
 
 /** An agent process that starts commands, then is killed with SIGKILL. */
 function agentScript(dir: string, home: string, platform = process.platform): string {
@@ -40,7 +48,7 @@ for (const platform of new Set<NodeJS.Platform>([process.platform, "darwin"])) t
 	const dir = testTempDir(t, "ma-proc-");
 	const home = testTempDir(t, "ma-h-");
 	const agent = spawn(process.execPath, [agentScript(dir, home, platform)], { stdio: ["ignore", "pipe", "inherit"] });
-	t.after(() => { agent.kill("SIGKILL"); });
+	stopAgentAfterTest(t, agent);
 	await new Promise<void>((r, reject) => {
 		agent.once("exit", code => reject(new Error(`agent exited before ready: ${code}`)));
 		agent.stdout.on("data", (d) => String(d).includes("ready") && r());
@@ -78,7 +86,7 @@ test("Darwin groups stop on timeout, cancellation and session close", async t =>
 	const dir = testTempDir(t, "ma-proc-");
 	const { LocalEnvironment, ProcessTracker } = await import(envLocal);
 	const tracker = new ProcessTracker(undefined, "darwin");
-	t.after(async () => { await tracker.stopAll(); });
+	beforeTempDirCleanup(t, async () => { await tracker.stopAll(); });
 	const local = new LocalEnvironment(dir, tracker);
 	assert.equal(local.containment, "processGroup");
 	assert.deepEqual(local.platforms, ["darwin"]);
@@ -114,6 +122,7 @@ test("if the watcher dies too, the next agent to start cleans up", { skip: proce
 	const dir = testTempDir(t, "ma-proc-");
 	const home = testTempDir(t, "ma-h-");
 	const agent = spawn(process.execPath, [agentScript(dir, home)], { stdio: ["ignore", "pipe", "inherit"] });
+	stopAgentAfterTest(t, agent);
 	await new Promise<void>((r) => agent.stdout.on("data", (d) => String(d).includes("ready") && r()));
 	const bg = Number(readFileSync(join(dir, "bg.pid"), "utf8"));
 	// Find the watcher: the process whose command line names this home's run directory.

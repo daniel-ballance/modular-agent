@@ -8,7 +8,7 @@ import type { AgentEvent } from "@modular-agent/harness";
 import { Peer, remotePlugin } from "@modular-agent/plugin-rpc";
 import { createAgent } from "../src/index.js";
 import type { Scripted } from "./fixtures/faux-provider.js";
-import { testDirs } from "./fixtures/temp-dir.js";
+import { beforeTempDirCleanup, testDirs, testTempDir } from "./fixtures/temp-dir.js";
 
 const fixture = new URL("./fixtures/faux-provider.js", import.meta.url).href;
 const remoteProvider = (responses: Scripted[]) => remotePlugin({ name: "provider-faux", spawn: { module: fixture, export: "fauxProviders", options: { responses } } });
@@ -71,10 +71,10 @@ test("RPC: cancelling reaches a tool in another process", async (t) => {
 test("RPC: a plugin in another process that dies takes its calls with it, and the turn says so", async t => {
 	const d = testDirs(t);
 	const environment = remotePlugin({ name: "env-crashing", replaces: "env-local",
-		spawn: { module: new URL("./fixtures/crashing-environment.js", import.meta.url).href, export: "crashingEnvironment" } });
+		spawn: { module: new URL("./fixtures/crashing-environment.js", import.meta.url).href, export: "crashingEnvironment", options: { tmp: testTempDir(t, "ma-rpc-crash-tmp-") } } });
 	const h = await createAgent({ ...d, model: "faux/faux-1", remote: [],
 		plugins: [environment, remoteProvider([{ tool: "bash", args: { command: "unused" } }, { text: "after" }])] });
-	t.after(() => h.stop());
+	beforeTempDirCleanup(t, () => h.stop());
 	const api = h.api("t");
 	const s = await api.startSession();
 	await api.input(s, { content: "go", actorId: "user" });

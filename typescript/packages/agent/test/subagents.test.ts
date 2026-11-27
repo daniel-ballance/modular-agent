@@ -9,7 +9,7 @@ import type { Harness, InputRequest, Plugin, PluginApi } from "@modular-agent/ha
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { subagents } from "@modular-agent/subagents";
 import { createAgent } from "../src/index.js";
-import { testDirs } from "./fixtures/temp-dir.js";
+import { beforeTempDirCleanup, testDirs } from "./fixtures/temp-dir.js";
 
 type Context = Parameters<FauxResponseFactory>[0];
 const textOfMessage = (m: { content: unknown }) => (typeof m.content === "string" ? m.content : (m.content as { type: string; text?: string }[]).filter((p) => p.type === "text").map((p) => p.text).join(""));
@@ -47,7 +47,7 @@ async function settle(h: Harness, s: string) {
 
 test("a background subagent: its result arrives as a job report and wakes the parent", { timeout: 30_000 }, async t => {
 	const h = await agent(testDirs(t), router(() => fauxAssistantMessage([fauxText("one two three")]), { task: "count to three", label: "counter" }), [subagents()]);
-	t.after(() => h.stop());
+	beforeTempDirCleanup(t, () => h.stop());
 	const api = h.api("t");
 	const s = await api.startSession();
 	// Becoming idle after delegation says nothing about when the job will report.
@@ -56,7 +56,7 @@ test("a background subagent: its result arrives as a job report and wakes the pa
 	const stop = api.follow(s, { recipient: "t", raw: true }, e => {
 		if (e.type === "turn.ended" && ++turns === 2) events.emit("reportTurnEnded");
 	});
-	t.after(stop);
+	beforeTempDirCleanup(t, stop);
 	await Promise.all([
 		once(events, "reportTurnEnded", { signal: t.signal }),
 		api.input(s, { content: "please delegate", actorId: "user" }),

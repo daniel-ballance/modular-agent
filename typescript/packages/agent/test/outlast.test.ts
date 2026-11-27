@@ -5,7 +5,7 @@ import { type Harness, type InputRequest, type Plugin, type PluginApi, type Runt
 import { TransientRuntime } from "@modular-agent/runtime-transient";
 import { questionTool } from "@modular-agent/tools-question";
 import { createAgent } from "../src/index.js";
-import { testDirs } from "./fixtures/temp-dir.js";
+import { beforeTempDirCleanup, testDirs } from "./fixtures/temp-dir.js";
 
 function fakeUi() {
 	const requests: InputRequest[] = [];
@@ -87,7 +87,7 @@ test("the Harness preserves a committed pending call when the Runtime reply is l
 	const ui = fakeUi();
 	const call = pay();
 	const h = await agent(testDirs(t), [fauxAssistantMessage([call], { stopReason: "toolUse" }), fauxAssistantMessage([fauxText("Continued.")])], ui.plugin, runtime);
-	t.after(() => h.stop());
+	beforeTempDirCleanup(t, () => h.stop());
 	const api = h.api("t");
 	const s = await api.startSession();
 	await api.input(s, { content: "pay", actorId: "user" });

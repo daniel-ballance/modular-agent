@@ -1,22 +1,21 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 import { ALL_AUTHORITY, text, type EntryDraft, type HistoryStore, type ModelRequest, type Plugin, type Provider } from "@modular-agent/harness";
 import { durableRuntime } from "@modular-agent/runtime-durable";
 import { createAgent, conformanceProvider } from "../src/index.js";
+import { beforeTempDirCleanup, testTempDir } from "./fixtures/temp-dir.js";
 
 function folders(t: TestContext) {
-	const root = mkdtempSync(join(tmpdir(), "ma-r5-"));
-	t.after(() => rmSync(root, { force: true, recursive: true }));
+	const root = testTempDir(t, "ma-r5-");
 	return { project: root, home: join(root, "agent-state") };
 }
 
 async function open(t: TestContext, dirs = folders(t), plugins: Plugin[] = []) {
 	const harness = await createAgent({ ...dirs, model: "conformance/echo", plugins: [conformanceProvider(), ...plugins] });
-	t.after(() => harness.stop());
+	beforeTempDirCleanup(t, () => harness.stop());
 	return { api: harness.api("test"), store: harness.use<HistoryStore>("history-store")!, harness, dirs };
 }
 
@@ -212,7 +211,7 @@ test("plugin binding: refreshes before completing the parent, gates split output
 	await api.input(sid, { actorId: "user", when: "propose", content: "Keep this session" });
 	const seen: unknown[] = [];
 	const stop = api.follow(sid, { recipient: "wire-test" }, (event) => { if (event.type === "model.output") seen.push(event.data.delta); });
-	t.after(stop);
+	beforeTempDirCleanup(t, stop);
 	assert.equal((await api.callTool(sid, { name: "grow", input: {}, startedBy: "ui", actorId: "user" })).status, "completed");
 	assert.ok(api.tools(sid).some((tool) => tool.name === "grown"));
 	await api.input(sid, { actorId: "user", content: "stream" });
@@ -251,6 +250,6 @@ async function wireHarness(t: TestContext) {
 		{ command: [process.execPath, module] },
 		{ command: [process.execPath, served], env: { MODULAR_AGENT_PLUGIN_PARTS: "hooks" } },
 	] });
-	t.after(() => harness.stop());
+	beforeTempDirCleanup(t, () => harness.stop());
 	return harness;
 }

@@ -8,7 +8,7 @@ import { approval } from "@modular-agent/approval";
 import type { Harness, HistoryEntry, Plugin } from "@modular-agent/harness";
 import { acpInterface } from "@modular-agent/interface-acp";
 import { createAgent } from "../src/index.js";
-import { testDirs, testTempDir } from "./fixtures/temp-dir.js";
+import { beforeTempDirCleanup, testDirs, testTempDir } from "./fixtures/temp-dir.js";
 
 
 /** Our agent, with an ACP Interface, and an ACP client from the official SDK connected to it in process. */
@@ -43,7 +43,7 @@ test("ACP: initialize negotiates the wire version independently of the binding",
 	for (const [version, binding] of [[2, "modular-agent-acp/1"], [2, "modular-agent-acp/2"], [65535, undefined]] as const) {
 		await t.test(`version ${version} with ${binding ?? "the default binding"}`, async (t) => {
 			const { ctx, connection, harness } = await setup(t, []);
-			t.after(async () => { connection.close(); await harness.stop(); });
+			beforeTempDirCleanup(t, async () => { connection.close(); await harness.stop(); });
 			const hello = await ctx.request(methods.agent.initialize, { protocolVersion: version, _meta: binding ? { [ns]: { binding } } : {} });
 			assert.equal(hello.protocolVersion, 1);
 			assert.deepEqual((hello._meta?.[ns] as { binding: string }).binding, binding ?? "modular-agent-acp/1");
@@ -53,7 +53,7 @@ test("ACP: initialize negotiates the wire version independently of the binding",
 
 test("ACP: failed initialize requests leave the connection uninitialized", async (t) => {
 	const { ctx, connection, harness } = await setup(t, []);
-	t.after(async () => { connection.close(); await harness.stop(); });
+	beforeTempDirCleanup(t, async () => { connection.close(); await harness.stop(); });
 	const init = (params: unknown) => ctx.request(methods.agent.initialize, params as InitializeRequest);
 	const ns = "modular-agent";
 	const invalid = [
@@ -85,7 +85,7 @@ test("ACP: withheld history entries are omitted before the page reply gate", asy
 		});
 	} };
 	const { d, harness, ctx, connection } = await setup(t, [fauxAssistantMessage([fauxText("Ready")])], { plugins: [gate] });
-	t.after(async () => { connection.close(); await harness.stop(); });
+	beforeTempDirCleanup(t, async () => { connection.close(); await harness.stop(); });
 	await ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
 	const { sessionId } = await ctx.request(methods.agent.session.new, { cwd: d.project, mcpServers: [] });
 	await ctx.request(methods.agent.session.prompt, { sessionId, prompt: [{ type: "text", text: "Start" }] });
