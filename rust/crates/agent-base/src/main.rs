@@ -34,25 +34,7 @@ async fn start() -> Result<()> {
                 server.close().await;
                 stopped?;
             }
-            [flag, address, policy_flag, path]
-                if flag == "--listen" && policy_flag == "--host-policy" =>
-            {
-                let hosts = policy::plugin_hosts(&PathBuf::from(path))?;
-                let server = plugin_stdio::server::serve_websocket_hosts(
-                    address,
-                    None,
-                    hosts,
-                    move |(project, state)| Arc::new(plugin.for_host(project, state)),
-                )
-                .await?;
-                println!("{}", server.url);
-                let stopped = tokio::signal::ctrl_c().await;
-                server.close().await;
-                stopped?;
-            }
-            _ => bail!(
-                "usage: --serve-plugin [--listen ADDR --token-file FILE | --listen ADDR --host-policy FILE]"
-            ),
+            _ => bail!("usage: --serve-plugin [--listen ADDR --token-file FILE]"),
         }
         return Ok(());
     }

@@ -45,48 +45,6 @@ pub fn load() -> Result<Option<(Identity, ResourceLimits)>> {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PluginHost {
-    token_file: PathBuf,
-    project: PathBuf,
-    state: PathBuf,
-}
-
-type PluginHosts = Vec<(PathBuf, (PathBuf, PathBuf))>;
-
-pub fn plugin_hosts(path: &std::path::Path) -> Result<PluginHosts> {
-    let read = || -> Result<_> {
-        let hosts: Vec<PluginHost> = serde_json::from_slice(&std::fs::read(path)?)?;
-        ensure!(!hosts.is_empty(), "at least one host is required");
-        let relative = |p: PathBuf| path.parent().unwrap_or(std::path::Path::new(".")).join(p);
-        let overlap =
-            |a: &std::path::Path, b: &std::path::Path| a.starts_with(b) || b.starts_with(a);
-        let mut entries: PluginHosts = Vec::new();
-        for host in hosts {
-            let project = relative(host.project).canonicalize()?;
-            let state = relative(host.state).canonicalize()?;
-            ensure!(
-                project.is_dir() && state.is_dir(),
-                "host project and state must be directories"
-            );
-            ensure!(
-                !overlap(&project, &state)
-                    && !entries.iter().any(|(_, (p, s))| {
-                        overlap(p, &project)
-                            || overlap(p, &state)
-                            || overlap(s, &project)
-                            || overlap(s, &state)
-                    }),
-                "host projects and state must not overlap"
-            );
-            entries.push((relative(host.token_file), (project, state)));
-        }
-        Ok(entries)
-    };
-    read().with_context(|| format!("host policy {}", path.display()))
-}
-
-#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AcpHost {
     token_file: PathBuf,
