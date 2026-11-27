@@ -113,4 +113,4 @@ git diff --check
 ## Platform and Provider limits
 
 - macOS local commands use process-group containment. A process that leaves its group is not stopped. Stronger containment is tracked in [#255](https://github.com/daniel-ballance/modular-agent/issues/255).
-- `ma` selects the Claude Provider at composition time. To run a Claude model when the current launch did not load it, start with `--model claude/ID` or reopen a saved Claude session. Switching without a restart is tracked in [#37](https://github.com/daniel-ballance/modular-agent/issues/37).
+- `ma` selects the Claude Provider at composition time. To run a Claude model when the current launch did not load it, start with `--model claude/ID` or reopen a saved Claude session. Switching without a restart is tracked in [#272](https://github.com/daniel-ballance/modular-agent/issues/272).

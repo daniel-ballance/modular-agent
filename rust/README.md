@@ -178,14 +178,17 @@ MODULAR_AGENT_DATA_DIR="$scratch" MODULAR_AGENT_SCRIPT="$scratch/script.json" \
   MODULAR_AGENT_SCRIPT_LOG="$scratch/requests.jsonl" target/debug/ma -p "Say hello."
 ```
 
+## Behavior and limits
+
+- **Claude:** Rust `ma` uses a separate Node.js sidecar. `scripts/install.sh` installs it alongside `ma` when Node.js is available. For a session, `ma` loads the Provider at composition time if the selected model is Claude, including when ACP reopens a saved Claude session. Claude Code starts per request and adds some of its own prompt text. The [Rust-host smoke run on 2026-11-19](../typescript/packages/claude/README.md#rust-host-smoke-run-2026-11-19) used Haiku 5.5, completed two host tool rounds, and returned the correct answer. See the [Provider's remaining work](../typescript/packages/claude/README.md#remaining-work) for the live probes.
+- **Images:** `read` attaches supported images unchanged up to 4.5 MiB. It reports larger images without attaching them; it does not resize them.
+- **MCP:** `ma` connects to MCP servers over stdio or Streamable HTTP and imports tools only, not prompts or resources. HTTP connections can send configured headers. The SDK's MCP plugin keeps each session's tool catalog in process; it is not served over the plugin binding on stdio.
+- **Terminal:** The terminal reads one line at a time and prints text without rendering Markdown. On an embedded reopen it waits for recovery before reading the next line. ACP installs recovery before returning the reopened session, without waiting for the recovered turn to finish.
+
 ## Known gaps
 
-Tracked in #37.
-
-- **Claude:** The sidecar must be installed separately. `ma --acp` loads it when the launch settings or the reopened session choose a Claude model, not when a client later switches a session that was composed without Claude. Claude Code starts per request and adds some text of its own; see the [sidecar's gaps](../typescript/packages/claude/README.md#known-gaps-and-open-problems). This migration did not exercise the sidecar with a real model.
-- **Images:** They are attached as read, up to 4.5 MiB. They are not resized.
-- **MCP:** tools only, no OAuth negotiation. The official MCP plugin's changing catalog is local to this agent; the SDK does not yet serve that plugin over stdio. It can still connect to remote MCP servers.
-- **Terminal:** line-based, with no markdown rendering. Embedded reopening waits for recovery before reading another terminal line. ACP installs recovery before returning the session and does not wait for the recovered turn to finish.
+- Neither build can switch to Claude in place in a session composed without the Provider ([#272](https://github.com/daniel-ballance/modular-agent/issues/272), 0.6.0).
+- The MCP clients do not negotiate OAuth for remote servers ([#273](https://github.com/daniel-ballance/modular-agent/issues/273), 0.6.0).
 
 <a id="where-the-specification-was-silent"></a>
 
