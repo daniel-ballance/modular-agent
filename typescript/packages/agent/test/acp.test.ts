@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { client, methods, type SessionNotification } from "@agentclientprotocol/sdk";
+import { client, methods, type InitializeRequest, type SessionNotification } from "@agentclientprotocol/sdk";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { approval } from "@modular-agent/approval";
 import type { Harness, HistoryEntry, Plugin } from "@modular-agent/harness";
@@ -38,6 +38,41 @@ async function setup(responses: FauxResponseStep[], options: { permission?: "all
 }
 
 const kinds = (updates: SessionNotification[]) => updates.map((u) => u.update.sessionUpdate);
+
+test("ACP: initialize negotiates the wire version independently of the binding", async (t) => {
+	const ns = "modular-agent";
+	for (const [version, binding] of [[2, "modular-agent-acp/1"], [2, "modular-agent-acp/2"], [65535, undefined]] as const) {
+		await t.test(`version ${version} with ${binding ?? "the default binding"}`, async (t) => {
+			const { ctx, connection, harness } = await setup([]);
+			t.after(async () => { connection.close(); await harness.stop(); });
+			const hello = await ctx.request(methods.agent.initialize, { protocolVersion: version, _meta: binding ? { [ns]: { binding } } : {} });
+			assert.equal(hello.protocolVersion, 1);
+			assert.deepEqual((hello._meta?.[ns] as { binding: string }).binding, binding ?? "modular-agent-acp/1");
+		});
+	}
+});
+
+test("ACP: failed initialize requests leave the connection uninitialized", async (t) => {
+	const { ctx, connection, harness } = await setup([]);
+	t.after(async () => { connection.close(); await harness.stop(); });
+	const init = (params: unknown) => ctx.request(methods.agent.initialize, params as InitializeRequest);
+	const ns = "modular-agent";
+	const invalid = [
+		[{}, { code: -32602 }],
+		...["1", 1.5, -1, 65536, true, null, {}, []].map((version) => [{ protocolVersion: version }, { code: -32602 }]),
+		[{ protocolVersion: 0 }, { code: -32602, data: { code: "unsupported_version" } }],
+		[{ protocolVersion: 2, _meta: { [ns]: { binding: "modular-agent-acp/3" } } }, { code: -32602, data: { code: "unsupported_version" } }],
+		...[null, [], { binding: 2 }].map((namespace) =>
+			[{ protocolVersion: 2, _meta: { [ns]: namespace } }, { code: -32602, data: { code: "invalid_params" } }]),
+	] as const;
+	for (const [params, error] of invalid) {
+		await assert.rejects(init(params), error, JSON.stringify(params));
+		await assert.rejects(ctx.request(methods.agent.session.list, {}), { code: -32600 });
+	}
+	assert.equal((await init({ protocolVersion: 2 })).protocolVersion, 1);
+	const list = await ctx.request(methods.agent.session.list, {});
+	assert.deepEqual(list.sessions, []);
+});
 
 test("ACP: withheld history entries are omitted before the page reply gate", async (t) => {
 	const seen: string[][] = [];

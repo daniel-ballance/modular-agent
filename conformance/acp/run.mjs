@@ -16,6 +16,7 @@ import { coveredApproval } from "./covered.mjs";
 import { waitingChecks } from "./waiting.mjs";
 import { stdioRights } from "./stdio-rights.mjs";
 import { retryAsDifferentPrincipal, websocketRetries } from "./retries.mjs";
+import { checkInitialize } from "./initialize.mjs";
 import { ACP_PROTOCOL, checkUpgrades, CONTROL_MS, readToken, socketPeer, websocketOptions } from "../tools/websocket.mjs";
 
 const args = process.argv.slice(2);
@@ -400,10 +401,9 @@ if (group !== "core") {
 	await finish();
 }
 let agent = connect();
-
 await attempt("initialize", async () => {
-	const init = await within(15000, agent.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} }), "initialize");
-	check("initialize: protocol version 1", init.protocolVersion === 1, `got ${init.protocolVersion}`);
+	const init = await checkInitialize(agent.ctx, check, within);
+	check("initialize: ACP version 2 negotiates to 1", init.protocolVersion === 1, `got ${init.protocolVersion}`);
 	const m = meta(init);
 	writerActor = m?.actor?.id;
 	tokenActor = m?.actor;
@@ -577,8 +577,8 @@ await attempt("failed turn", async () => {
 	check("failed turn: /1 _meta outcome failed, with the reason", meta(r)?.outcome?.kind === "failed" && String(meta(r)?.outcome?.error ?? "").includes("the kit asked for it"), JSON.stringify(meta(r)?.outcome));
 	const two = connect();
 	try {
-		const init = await within(15000, two.ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {}, _meta: { [NS]: { binding: "modular-agent-acp/2" } } }), "initialize /2");
-		check("/2: the agent speaks modular-agent-acp/2 when asked", meta(init)?.binding === "modular-agent-acp/2", JSON.stringify(meta(init)?.binding));
+		const init = await within(15000, two.ctx.request(methods.agent.initialize, { protocolVersion: 2, clientCapabilities: {}, _meta: { [NS]: { binding: "modular-agent-acp/2" } } }), "initialize /2");
+		check("/2: ACP version 2 negotiates to 1 and selects modular-agent-acp/2", init.protocolVersion === 1 && meta(init)?.binding === "modular-agent-acp/2", JSON.stringify({ protocolVersion: init.protocolVersion, binding: meta(init)?.binding }));
 		const s2 = await openFixture(two);
 		validateDeclaration("/2 session/new", meta(s2)?.declaration);
 		await setOption(two, s2.sessionId, "model", "conformance/echo");

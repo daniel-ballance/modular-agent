@@ -10,7 +10,9 @@ Binding metadata MUST be an object under `_meta["modular-agent"]`. Each extensio
 
 ## Versions
 
-The agent MUST speak both binding versions over ACP `protocolVersion: 1`. The agent MUST select `/1` if `initialize` omits `binding`, and the exact requested version otherwise. The agent MUST reject an unsupported ACP protocol or binding version with `unsupported_version`, without falling back. The agent MUST reject malformed metadata, including a present non-object namespace or non-string `binding`, with `invalid_params`. A second `initialize` after success MUST fail with `already_initialized`. A withheld initialization reply MUST leave the connection uninitialized. The agent MUST refuse all other requests before successful initialization with `not_initialized`.
+The agent MUST speak both binding versions over ACP `protocolVersion: 1`. The agent MUST reply with `protocolVersion: 1` when `initialize` offers an integer from 1 through 65535. It MUST reject version 0 with `unsupported_version`. It MUST reject a missing, non-integer or out-of-range version with JSON-RPC Invalid params (`-32602`). The error data for this protocol validation error MAY come from the ACP SDK.
+
+The agent MUST select `/1` if `initialize` omits `binding`, and the exact requested version otherwise. The agent MUST reject an unknown binding with `unsupported_version` without falling back. The agent MUST reject malformed metadata, including a present non-object namespace or non-string `binding`, with `invalid_params`. A second `initialize` after success MUST fail with `already_initialized`. A failed or withheld initialization reply MUST leave the connection uninitialized. The agent MUST refuse all other requests before successful initialization with `not_initialized`.
 
 ## Starting
 
@@ -165,7 +167,7 @@ For a request with valid syntax but no required right, the agent MUST return `-3
 
 ### Errors
 
-Unless another number is specified, the agent MUST return the following errors as JSON-RPC `-32602` with `data: { code }`. The JSON-RPC message is human-readable, not a machine discriminator. Validation and authorization errors contain no session content and take no effect.
+Unless otherwise specified, the agent MUST return the following errors as JSON-RPC `-32602` with `data: { code }`. The JSON-RPC message is human-readable, not a machine discriminator. Validation and authorization errors contain no session content and take no effect.
 
 | `data.code` | Condition |
 |---|---|
@@ -441,6 +443,8 @@ The shared-erasure fixture MUST use the history service’s [pending-erasure reg
 The [conformance kit](../../conformance/acp/README.md) exercises this mode. See [Conformance and versioning](../conformance.md) for what passing the kit establishes.
 
 ## Changes
+
+- **2026-11-26.** Negotiate ACP protocol version 1 when a client offers a newer valid major version. Binding selection still requires an exact match when the client names a binding.
 
 - **Accepted 2026-11-23, implemented in 0.3.0 ([ADR 0034](../adr/0034-approvals-that-wait.md)).** Add `approvalsOutlastTurns`, its `approvalWait` session option and expiry in the waiting request projection. Late decisions use `requests` and `answer`, not a permission RPC. No new method in either version.
 

@@ -137,6 +137,8 @@ A check started inside a run that holds a slot (`MA_CHECK_SLOT_HELD` is set) use
 
 A suite run on its own in a fresh worktree first needs the setup steps that `scripts/check.sh` runs: `npm ci` in `conformance/acp`, `conformance/tools` and `conformance/telemetry`, and the language's build step. Without them some tests fail on a missing package, which is not a failure of the change.
 
+When adding checks to a conformance kit, find the tests that assert its summary count with `git grep -n 'checks passed'`. Update their expected totals and run the affected tests.
+
 Before you blame a change for a failure, rule out the machine. `Disk quota exceeded`, `No space left on device`, a missing saved point or a missing build output can come from a full `/tmp`; check `quota -s` and `df -h /tmp` against the time of the failing step, and rerun once there is space. The rewind failures in #110 came from a full `/tmp`, not from the pull request they blocked, and #113's likely did too.
 
 Heavy writes to the same disk can stall file system calls for seconds, so a step can miss deadlines that another step's writes caused. In #154, three Rust workspace test builds with full debug info each wrote 54 GB at once, `mkdtemp` and `fsync` took up to 8 s, and the TypeScript suite beside them timed out across seven files. `rust/Cargo.toml` therefore limits debug builds to line tables. Before you add debug info back, run `scripts/stress.sh 3` with it.

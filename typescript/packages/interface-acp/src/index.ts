@@ -254,7 +254,7 @@ export class AcpInterface implements InterfaceCapability {
 			const ns = params._meta?.[NS];
 			if (ns !== undefined && (!ns || typeof ns !== "object" || Array.isArray(ns) || ("binding" in ns && typeof ns.binding !== "string"))) throw bindingError("invalid_params");
 			const binding = (ns as { binding?: string } | undefined)?.binding ?? BINDING;
-			if (params.protocolVersion !== PROTOCOL_VERSION || (binding !== BINDING && binding !== BINDING_V2)) throw bindingError("unsupported_version");
+			if (params.protocolVersion < PROTOCOL_VERSION || (binding !== BINDING && binding !== BINDING_V2)) throw bindingError("unsupported_version");
 			this.clientCaps = params.clientCapabilities ?? {};
 			this.binding = binding;
 			const result = {
