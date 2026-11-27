@@ -155,7 +155,9 @@ A step is one of:
 | `{ "prompt": text, "crashWhen": { "record": kind } }` | sends the prompt and kills the agent's process once a record of that kind is committed |
 | `{ "prompt": text, "crashWhen": { "count": n } }` | sends the prompt and kills the agent's process once the `counter` fixture's count reaches `n`, so the crash lands after the effect |
 | `{ "prompt": text, "as": actorId }` | `session.as(actorId).prompt(text)` |
-| `{ "send": text, "timing": timing }` | `session.send(text, timing)`, without waiting for a turn; `timing` is `now` if absent |
+| `{ "send": text, "timing": timing, "key": key }` | `session.send(text, timing, { key })`, without waiting for a turn; `timing` is `now` if absent and `key` is optional |
+| `{ "waitForCount": n }` | waits up to 10 seconds for the `counter` fixture's file to reach `n`, without waiting for its call to return |
+| `{ "cancel": true }` | calls `session.cancel()` and captures its hand-back list |
 | `{ "answer": answer }` | waits up to 10 seconds until exactly one question is open in `session.questions()`, then answers it with `session.answer`; `answer` takes the forms the `answers` list does |
 | `{ "wait": true }` | `session.waitIdle()`; expectations then apply to the session's last turn |
 | `{ "reopen": true }` | starts the agent again over the same data and reopens the session; waits until it is idle |
@@ -168,10 +170,15 @@ and can have `expect`:
 | `text` | the last turn's result text is exactly this |
 | `toolResults` | the last turn's tool results, in order, have these `name` and `status`, `text` if given (exact), `contains` if given (a substring, for diagnostics an SDK may word in its own way), and `content` if given (the exact ordered array of shared parts) |
 | `records` | these record kinds appear in the session's history in this order, not necessarily adjacent |
+| `recordCounts` | every named record kind appears exactly this many times in the session's history |
+| `receipt` | `send` returns exactly this admission ID, `taken` and `duplicate` for non-erased input; a returned receipt without `duplicate` counts as false; the expectation names `duplicate` |
+| `handedBack` | `cancel` returns exactly this ordered array of `{ inputId, content }` |
 | `turnSources` | the result's `turnStart` has exactly these sources: `"branch"` for all intact ancestors, or an array selecting records by `kind` and zero-based `index` among intact ancestors of that kind, in oldest-first order. Compare IDs without regard to order; duplicates fail. A missing record source list counts as empty. |
 | `systemIncludes`, `context` | the same snapshot contains the given system text substring and, if supplied, the exact ordered context parts |
 | `count` | the `counter` fixture's count is this number |
 | `error` | the step itself raised this error code |
+
+An `inputId` beginning with `$` in an expected non-duplicate receipt binds that name to the actual nonempty admission ID for this scenario run. A later receipt or hand-back expectation using the name compares to the bound ID; it cannot bind a new one.
 
 The runner MUST report each failed expectation with the scenario, placement, step and both values. It MUST NOT retry a failed scenario.
 

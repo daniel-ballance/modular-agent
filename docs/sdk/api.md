@@ -151,6 +151,10 @@ The [shared scenarios](testing.md#the-shared-scenarios) and the ACP kit check th
 
 `input` is a string or Content. `options` carries `key`, for safe retries ([input admission](../contracts.md#input)), and `actor`, to act as an actor other than the local one.
 
+For a successful admission to the turn queue or proposal list, **InputReceipt** gives the admission's `inputId` and its initial `taken` disposition: `now`, `inTurn` (steering), `after` (queued for a later turn), or `proposed`. On an authorized `send` with a key already admitted to that queue or list and not erased, the receipt has the original `inputId` and `taken`, with `duplicate` true, regardless of the retry's content or requested timing. It does not admit input or start work.
+
+`cancel()` returns the ID and content of each input handed back to the caller. Hand-back does not change the original admission receipt. If a keyed `send` returned `taken: "after"` and cancellation handed that input back, a retry with the same key still returns the original ID and `taken: "after"`, with `duplicate` true, even when the session is idle. It does not return `taken: "handedBack"` or start another turn. Use a fresh key to submit the content for work again. A declined `release` reports `taken: "handedBack"` for the release, not for a retry of the original `send`. See [language field names](languages.md#input-receipts) and [Input](../contracts.md#input) for key scope and erased keys.
+
 `prompt` admits its input with timing `now`, as ACP's `session/prompt` does ([Input admission](../bindings/acp.md#input-admission)). When the session is idle, the input starts a turn. When a turn is running, the input queues a new turn and `prompt` waits for that one, not the running one. Only `send(input, "steer")`, where the agent declares `inputDuringTurn`, puts input into a running turn.
 
 A **PromptResult** has:

@@ -8,7 +8,6 @@
   "rust/crates/plugin-stdio/src/host.rs": 2361,
   "rust/crates/plugin-stdio/src/runtime_host.rs": 1937,
   "rust/crates/runtime-engine/src/lib.rs": 1613,
-  "rust/crates/sdk-scenarios/src/lib.rs": 1030,
   "rust/crates/sdk/src/agent.rs": 1068,
   "rust/crates/sdk/src/agui/run.rs": 1055,
   "rust/crates/sdk/src/plugin.rs": 1089,

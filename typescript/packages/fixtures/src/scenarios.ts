@@ -9,7 +9,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual, promisify } from "node:util";
-import { AgentError, createAgent, fileHistory, httpHistory, serveHistory, type Actor, type AgentOptions, type Answer, type Content, type HistoryEntry, type InputTiming, type PromptResult, type ServicePlugin, type Session } from "@modular-agent/core";
+import { AgentError, createAgent, fileHistory, httpHistory, serveHistory, type Actor, type AgentOptions, type Answer, type Content, type HistoryEntry, type InputReceipt, type InputTiming, type PromptResult, type ServicePlugin, type Session } from "@modular-agent/core";
 import { answers, memoryEnvironment, scriptedProvider, testAgent, type ScriptStep } from "@modular-agent/core/testing";
 import { count, fixture } from "./index.js";
 import { ScenarioEvidence, type TelemetryRun } from "./telemetry-scenario.js";
@@ -51,10 +51,14 @@ export function placements(require = process.env.MODULAR_AGENT_SDK_REQUIRE): Pla
   return [...out, ...services];
 }
 
-type Expect = { outcome?: string; text?: string; toolResults?: { name: string; status: string; text?: string; contains?: string; content?: Content }[]; records?: string[]; count?: number; error?: string; turnSources?: "branch" | { kind: string; index: number }[]; systemIncludes?: string; context?: Content };
+type Receipt = { inputId: string; taken: InputReceipt["taken"]; duplicate: boolean };
+type HandedBack = { inputId: string; content: Content };
+type Expect = {
+  receipt?: Receipt; handedBack?: HandedBack[]; recordCounts?: Record<string, number>;
+  outcome?: string; text?: string; toolResults?: { name: string; status: string; text?: string; contains?: string; content?: Content }[]; records?: string[]; count?: number; error?: string; turnSources?: "branch" | { kind: string; index: number }[]; systemIncludes?: string; context?: Content };
 type Crash = { record: string } | { count: number };
 type Step = ({ prompt: string; as?: string; crashWhen?: Crash } | { reopen: true } |
-  { send: string; timing?: InputTiming } | { answer: Answer } | { wait: true }) & { expect?: Expect };
+  { send: string; timing?: InputTiming; key?: string } | { waitForCount: number } | { cancel: true } | { answer: Answer } | { wait: true }) & { expect?: Expect };
 export interface Scenario {
   scenario: string;
   agent: Pick<AgentOptions, "durability" | "approval" | "settings" | "severalActors"> & {
@@ -261,6 +265,7 @@ export async function runScenario(path: string, p: Placement, run?: TelemetryRun
   const evidence = run && new ScenarioEvidence(run, s.steps.some(step => "prompt" in step && !!step.crashWhen));
   let report: unknown;
   const failures: string[] = [];
+  const inputIds = new Map<string, string>();
   const handler = s.agent.answers && answers(s.agent.answers);
   let id: string | undefined;
   let a: Awaited<ReturnType<typeof scenarioAgent>> | undefined;
@@ -297,6 +302,13 @@ export async function runScenario(path: string, p: Placement, run?: TelemetryRun
       const compare = (field: string, expected: unknown, actual: unknown) => {
         if (expected !== undefined && expected !== actual) fail(field, expected, actual);
       };
+      const resolveInputId = (id: string, bind?: string) => {
+        if (!id.startsWith("$")) return id;
+        if (!inputIds.has(id) && bind) inputIds.set(id, bind);
+        const original = inputIds.get(id);
+        if (!original) fail("inputId", `an original admission for ${id}`, undefined);
+        return original;
+      };
       let result: PromptResult | undefined;
       try {
         if ("prompt" in step && step.crashWhen) {
@@ -313,8 +325,27 @@ export async function runScenario(path: string, p: Placement, run?: TelemetryRun
           session ??= await a.session({ actors: s.agent.actors });
           id = session.id;
           if ("prompt" in step) result = await (step.as === undefined ? session : session.as(step.as)).prompt(step.prompt);
-          else if ("send" in step) await session.send(step.send, step.timing ?? "now");
-          else if ("answer" in step) {
+          else if ("send" in step) {
+            const receipt = await session.send(step.send, step.timing ?? "now", { key: step.key });
+            if (want.receipt) {
+              const { inputId, taken, duplicate = false, erased } = receipt;
+              const bind = !want.receipt.duplicate && !duplicate && !erased ? inputId : undefined;
+              const expected = { ...want.receipt, inputId: resolveInputId(want.receipt.inputId, bind) };
+              if (erased || !isDeepStrictEqual({ inputId, taken, duplicate }, expected)) fail("receipt", expected, receipt);
+            }
+          } else if ("cancel" in step) {
+            const got = await session.cancel();
+            if (want.handedBack) {
+              const expected = want.handedBack.map(item => ({ ...item, inputId: resolveInputId(item.inputId) }));
+              if (!isDeepStrictEqual(got, expected)) fail("handedBack", expected, got);
+            }
+          } else if ("waitForCount" in step) {
+            const deadline = Date.now() + 10_000;
+            for (let got; (got = count(countFile(dir))) < step.waitForCount;) {
+              if (Date.now() >= deadline) throw new Error(`Counter: want ${step.waitForCount}, got ${got}`);
+              await delay(10);
+            }
+          } else if ("answer" in step) {
             const deadline = Date.now() + 10_000;
             let open;
             while ((open = await session.questions()).length !== 1) {
@@ -356,6 +387,12 @@ export async function runScenario(path: string, p: Placement, run?: TelemetryRun
           const found = kinds.indexOf(kind, at);
           if (found < 0) { fail("records", want.records, kinds); break; }
           at = found + 1;
+        }
+      }
+      if (want.recordCounts) {
+        const entries = await session!.history();
+        for (const [kind, n] of Object.entries(want.recordCounts)) {
+          compare(`recordCounts.${kind}`, n, entries.filter(entry => entry.kind === kind).length);
         }
       }
       if (want.turnSources) checkTurnSources(want, await session!.history(), result?.turnId, fail);

@@ -1,11 +1,12 @@
 //! A runner for the shared SDK scenarios (docs/sdk/testing.md#the-shared-scenarios).
 mod assertions;
+mod steps;
 pub mod telemetry;
 pub mod waiting;
 use modular_agent::{
     Agent, Answer, Approval, Code, Durability, Error, HistoryServer, ProcessPlugin,
-    ServeHistoryOptions, ServicePlugin, Session, SessionOptions, Timing, file_history,
-    http_history, listen_history,
+    ServeHistoryOptions, ServicePlugin, Session, SessionOptions, file_history, http_history,
+    listen_history,
     testing::{Answers, answers, fixtures, test_agent},
 };
 use serde_json::Value;
@@ -370,53 +371,6 @@ pub async fn new_session(agent: &Agent, scenario: &Value) -> modular_agent::Resu
         .await
 }
 
-async fn perform(
-    session: &Session,
-    step: &Value,
-) -> modular_agent::Result<Option<modular_agent::PromptResult>> {
-    let session = match step["as"].as_str() {
-        Some(actor) => session.r#as(actor)?,
-        None => session.clone(),
-    };
-    if let Some(prompt) = step["prompt"].as_str() {
-        return session.prompt(prompt).await.map(Some);
-    }
-    if let Some(input) = step["send"].as_str() {
-        let timing = step
-            .get("timing")
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()?
-            .unwrap_or(Timing::Now);
-        session.send(input, timing).await?;
-    } else if let Some(answer) = step.get("answer") {
-        let answer = scenario_answer(answer)?;
-        let question = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let mut open = session.questions()?;
-                if open.len() == 1 {
-                    return Ok::<_, Error>(open.remove(0));
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .map_err(|_| {
-            Error::new(
-                Code::Busy,
-                "expected exactly one open question within 10 seconds",
-            )
-        })??;
-        session.answer(&question.id, answer).await?;
-    } else if step["wait"] == true {
-        session.wait_idle().await?;
-        return session.last_turn().await;
-    } else {
-        return Err(Error::new(Code::InvalidParams, "unknown scenario step"));
-    }
-    Ok(None)
-}
-
 /// Whether a scenario applies to a placement.
 pub fn applies(scenario: &Value, placement: &Placement) -> bool {
     match scenario["placements"].as_array() {
@@ -526,6 +480,7 @@ async fn run_at(
     let mut current: Option<(Agent, modular_agent::Session, Option<Answers>)> = None;
     let mut session_id = None;
     let mut before_crash = None;
+    let mut bindings = steps::Bindings::default();
     let mut services = Vec::new();
     for (index, step) in scenario["steps"].as_array().unwrap().iter().enumerate() {
         let expect = &step["expect"];
@@ -575,7 +530,11 @@ async fn run_at(
                 }
             }
             let (_, session, _) = current.as_ref().unwrap();
-            match perform(session, step).await {
+            match steps::perform(session, step, &run.counter(), &mut bindings, &mut |w| {
+                fail(index, w)
+            })
+            .await
+            {
                 Ok(r) => result = r,
                 Err(e) => {
                     check_error(expect, &e, &mut |w| fail(index, w));
@@ -643,8 +602,26 @@ async fn run_at(
                 format!("expected error {code}, but the step succeeded"),
             );
         }
+        if let Some(want) = expect["count"].as_u64() {
+            let got = fixtures::count(&run.counter());
+            if got != want {
+                fail(index, format!("count: want {want}, got {got}"));
+            }
+        }
+        if let Some(want) = expect["recordCounts"].as_object() {
+            let (_, session, _) = current.as_ref().unwrap();
+            match session.history().await {
+                Ok(entries) => assertions::record_counts(want, &entries, |w| fail(index, w)),
+                Err(e) => fail(index, format!("read record counts: {e}")),
+            }
+        }
         let Some(r) = result else {
-            fail(index, "no turn to check".into());
+            if ["outcome", "text", "toolResults", "records", "turnSources"]
+                .iter()
+                .any(|field| expect.get(field).is_some())
+            {
+                fail(index, "no turn to check".into());
+            }
             continue;
         };
         if let Some(want) = expect["outcome"].as_str() {
@@ -723,12 +700,6 @@ async fn run_at(
                     })
                 }
                 Err(e) => fail(index, format!("read turn sources: {e}")),
-            }
-        }
-        if let Some(want) = expect["count"].as_u64() {
-            let got = fixtures::count(&run.counter());
-            if got != want {
-                fail(index, format!("count: want {want}, got {got}"));
             }
         }
     }
