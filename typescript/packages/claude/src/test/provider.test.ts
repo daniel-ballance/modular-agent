@@ -44,6 +44,7 @@ test("the SDK is configured as a plain model endpoint", async () => {
 	assert.equal(options.env!.HOME, "/nowhere");
 	assert.equal(options.env!.CLAUDE_CODE_MAX_OUTPUT_TOKENS, "128000");
 	assert.equal(options.env!.CLAUDE_AGENT_SDK_CLIENT_APP, "modular-agent-claude-sidecar/9.9.9");
+	assert.equal(options.env!.DISABLE_PROMPT_CACHING, undefined);
 	assert.equal(log.closed, 1);
 });
 
@@ -99,6 +100,7 @@ test("the conversation with its tool result is what the next request shows Claud
 	] }), new AbortController().signal, () => {});
 	assert.match(log.prompts[0], /Weather in Paris\?/);
 	assert.match(log.prompts[0], /id="c1" name="get_weather" status="ok">\n18C\n/);
+	assert.equal(log.started[0].env!.DISABLE_PROMPT_CACHING, "1");
 });
 
 test("model-service failures are failed messages with an error", async () => {

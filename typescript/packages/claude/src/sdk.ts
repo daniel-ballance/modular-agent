@@ -60,6 +60,13 @@ export function apiRoutingReason(env: NodeJS.ProcessEnv): string | undefined {
 	return source && `Claude Code is configured for API use by ${source}, not a Claude plan.`;
 }
 
+/** Defer to the CLI's caching policy when the operator opts out globally or for this family. */
+export function replayCacheEnabled(env: NodeJS.ProcessEnv, modelId: string): boolean {
+	const family = /^claude-(fable|haiku|mythos|opus|sonnet)-/.exec(modelId)?.[1]?.toUpperCase();
+	return ![env.DISABLE_PROMPT_CACHING, family && env[`DISABLE_PROMPT_CACHING_${family}`]]
+		.some(value => value === "1" || value?.toLowerCase() === "true");
+}
+
 const PARENT_SESSION = [
 	"CLAUDECODE",
 	"CLAUDE_CODE_ENTRYPOINT",
