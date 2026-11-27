@@ -1,7 +1,7 @@
 use super::*;
 
 impl Session {
-    fn check_actor_option(&self) -> Result<()> {
+    pub(super) fn check_actor_option(&self) -> Result<()> {
         if !self.inner.several_actors {
             return Err(Error::new(
                 Code::NotSupported,
