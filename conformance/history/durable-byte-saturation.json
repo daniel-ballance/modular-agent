@@ -1,0 +1,6 @@
+{
+  "input": "erase this retained input",
+  "response": "bounded store fixture",
+  "ordinaryWriteBytes": 8192,
+  "controlHeadroomBytes": 4096
+}

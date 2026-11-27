@@ -52,6 +52,10 @@ export function resourceBytes(value: unknown): number {
 	return Buffer.byteLength(JSON.stringify(value) ?? "");
 }
 
+export function retainedHistoryBytes({ meta, entries }: { meta: unknown; entries: readonly unknown[] }): number {
+	return entries.reduce<number>((total, entry) => total + resourceBytes(entry), resourceBytes(meta));
+}
+
 export interface ReservationOwner { id: string; tenant?: string }
 type Charge = Partial<Usage>;
 interface Account { tenant: string | null; usage: Usage; work: Map<string, Charge>; retained: number }

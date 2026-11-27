@@ -3,6 +3,7 @@ import { memoryPendingErasure, type ErasureIntent, type ErasurePlan, type Histor
 import { failure } from "./failure.js";
 import type { ErasureReport } from "./plugin-api.js";
 import { handoffRecords } from "./interface-tools.js";
+import { retainedHistoryBytes, type Reservations } from "./reservations.js";
 import type { RunReceipts } from "./run-receipts.js";
 import { inputIdOf, type Session } from "./session.js";
 import { isToolCall, type AgentEvent, type Authority, type EntryDraft, type HistoryStore, type Provider } from "./types.js";
@@ -10,6 +11,7 @@ import { isToolCall, type AgentEvent, type Authority, type EntryDraft, type Hist
 interface ErasureOperations {
 	sessions: ReadonlyMap<string, Session>;
 	receipts: RunReceipts;
+	reservations(): Reservations;
 	store(): HistoryStore | undefined;
 	providers(): Provider[];
 	checkWriter(s: Session): void;
@@ -165,8 +167,9 @@ export class SessionErasure {
 				const recorded = new Set((book?.data as { entryIds?: string[] } | undefined)?.entryIds);
 				this.operations.receipts.erase(s.id, recorded, [...s.entries.values()]);
 				if (!s.ephemeral) await this.operations.write(s, () => store!.erase!(s.id, [...recorded]));
-				const kept = s.ephemeral ? [...s.entries.values()] : (await store!.load(s.id)).entries;
-				const tombstones = new Set(kept.filter(e => e.erased).map(e => e.id));
+				const kept = s.ephemeral ? { meta: s.meta, entries: [...s.entries.values()] } : await store!.load(s.id);
+				this.operations.reservations().retain(s, retainedHistoryBytes(kept), true);
+				const tombstones = new Set(kept.entries.filter(e => e.erased).map(e => e.id));
 				let confirmed = 0;
 				for (const copy of unresolved) if (recorded.has(copy.id) && tombstones.has(copy.id)) { copy.erased = true; confirmed++; }
 				registry.keep(intent);
@@ -206,7 +209,9 @@ export class SessionErasure {
 			if (!book || book.erased || book.kind !== "erasure" || pending.some(id => !recorded.has(id))) throw failure("unavailable", "Erasure bookkeeping does not match the plan");
 			this.operations.receipts.erase(s.id, recorded, [...s.entries.values()]);
 			await this.operations.write(s, () => store.erase!(s.id, pending));
-			const tombstones = new Set((await store.load(s.id)).entries.filter(e => e.erased === true).map(e => e.id));
+			const kept = await store.load(s.id);
+			this.operations.reservations().retain(s, retainedHistoryBytes(kept), true);
+			const tombstones = new Set(kept.entries.filter(e => e.erased === true).map(e => e.id));
 			this.storedTombstones.set(s, tombstones);
 			if (pending.some(id => !tombstones.has(id))) throw failure("unavailable", "Erasure has no matching tombstones");
 			this.erasureEpoch.set(s, this.epoch(s) + 1);

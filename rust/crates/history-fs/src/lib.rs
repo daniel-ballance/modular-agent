@@ -183,8 +183,12 @@ impl HistoryStore for FileHistory {
     ) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
         self.mark(source, targets)
     }
-    fn reconcile_erasure(&self, session: &str) -> Result<Option<(SessionData, Vec<String>)>> {
-        self.reconcile(session)
+    fn reconcile_erasure(
+        &self,
+        session: &str,
+        write: &mut ErasureWrite<'_>,
+    ) -> Result<Option<(SessionData, Vec<String>)>> {
+        self.reconcile(session, write)
     }
     fn check_erasure(&self, data: &SessionData) -> Result<()> {
         let _lock = self

@@ -202,7 +202,6 @@ impl Harness {
             .get_mut(&scope.session)
             .ok_or_else(|| anyhow!("session not open"))?;
         self.check_open_writer(open)?;
-        let check_lease = || open.lease.as_ref().map_or(Ok(()), |lease| lease.check());
         let mut content = json!({"to":to});
         if let Some((point, undo)) = restore {
             content["restore"] = json!({"point":point,"undo":undo});
@@ -216,7 +215,13 @@ impl Harness {
         let mut next = open.data.clone();
         next.entries.push(entry.clone());
         next.position = to;
-        if let Err(error) = self.save(&next) {
+        let pool = self.reservations();
+        let before = open.data.clone();
+        pool.commit(&before, &next, None, || {
+            let Err(error) = self.save(&next) else {
+                return Ok(());
+            };
+            let check_lease = || open.lease.as_ref().map_or(Ok(()), |lease| lease.check());
             let observed = (|| {
                 check_lease()?;
                 let observed = self
@@ -248,7 +253,8 @@ impl Harness {
                     return Err(LostPart("could not reconcile the rewind journal".into()).into());
                 }
             }
-        }
+            Ok(())
+        })?;
         open.data = next;
         self.pending_events
             .lock()

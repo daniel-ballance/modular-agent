@@ -1,5 +1,25 @@
-use super::{Harness, OpenSession};
+use super::{Harness, OpenSession, ReservationPool};
 use agent_api::*;
+use std::{ops::Deref, sync::Arc};
+
+/// The same accounting applies on writer acquisition, active-session refresh,
+/// and explicit erasure, including destinations not open in this Harness.
+pub(super) struct AccountedHistory {
+    pub(super) store: Arc<dyn HistoryStore>,
+    pub(super) pool: Arc<ReservationPool>,
+}
+impl Deref for AccountedHistory {
+    type Target = dyn HistoryStore;
+
+    fn deref(&self) -> &Self::Target {
+        self.store.as_ref()
+    }
+}
+impl AccountedHistory {
+    pub(super) fn reconcile_erasure(&self, id: &str) -> Result<Option<(SessionData, Vec<String>)>> {
+        self.pool.reconcile_erasure(self.store.as_ref(), id)
+    }
+}
 
 impl Harness {
     pub fn on_reconciled_erasure(

@@ -154,8 +154,11 @@ impl Harness {
     fn api(&self) -> Api {
         self.me.upgrade().expect("Harness is alive")
     }
-    fn store(&self) -> Option<Arc<dyn HistoryStore>> {
-        capability(self, "history").ok()
+    fn store(&self) -> Option<session_erasure::AccountedHistory> {
+        Some(session_erasure::AccountedHistory {
+            store: capability(self, "history").ok()?,
+            pool: self.reservations(),
+        })
     }
     pub async fn load(&self, plugin: Arc<dyn Plugin>) -> Result<()> {
         self.load_replacing(plugin, &[]).await

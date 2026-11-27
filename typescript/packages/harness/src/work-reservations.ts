@@ -1,7 +1,7 @@
 import { SessionLifecycle } from "./session-lifecycle.js";
 import { Jobs } from "./jobs.js";
 import { failure } from "./failure.js";
-import { Reservations, resourceBytes } from "./reservations.js";
+import { Reservations, resourceBytes, retainedHistoryBytes } from "./reservations.js";
 import { type QueuedInput, Session } from "./session.js";
 import { type HistoryStore, isToolCall } from "./types.js";
 
@@ -24,7 +24,9 @@ export class WorkReservations {
 				const s = await this.operations.lifecycle().loadInto(meta.id);
 				if (!s) continue;
 				const entries = s.order.map(id => s.entries.get(id)!);
-				this.operations.reservations().retain(s, entries.reduce((n, entry) => n + resourceBytes(entry), 0), true);
+				// A pending tombstone can hide content from the in-memory view before
+				// the backend has actually reclaimed the encoded bytes.
+				this.operations.reservations().retain(s, retainedHistoryBytes(await store!.load(s.id)), true);
 				for (const q of s.admissions.values()) this.reserveInput(s, q, true);
 				for (const { job } of this.operations.jobWork().runningJobs(s)) this.reserveJob(s, job.id, true);
 				const own = entries.filter(e => !s.copied.has(e.id));

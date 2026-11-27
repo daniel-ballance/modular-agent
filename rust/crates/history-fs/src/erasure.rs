@@ -151,7 +151,11 @@ impl FileHistory {
         Ok(copies)
     }
 
-    pub(super) fn reconcile(&self, session: &str) -> Result<Option<(SessionData, Vec<String>)>> {
+    pub(super) fn reconcile(
+        &self,
+        session: &str,
+        write: &mut ErasureWrite<'_>,
+    ) -> Result<Option<(SessionData, Vec<String>)>> {
         let _lock = self.lock().map_err(unavailable)?;
         let mut registry = self.read_registry()?;
         if !registry
@@ -181,23 +185,24 @@ impl FileHistory {
                 .map(|e| e.id.clone())
                 .collect();
             if !kept.is_empty() {
+                let mut staged = data.clone();
                 if !has_bookkeeping {
                     let keys = erased_input_keys(&data, &kept);
-                    record_erasure(&mut data, kept.clone(), keys);
-                    data.entries.last_mut().unwrap().id = record.clone();
-                    data.position = Some(record.clone());
-                    self.save_unlocked(&data).map_err(unavailable)?;
+                    record_erasure(&mut staged, kept.clone(), keys);
+                    staged.entries.last_mut().unwrap().id = record.clone();
+                    staged.position = Some(record);
                 }
-                let settings = data
+                let mut next = staged.clone();
+                let settings = next
                     .entries
                     .iter()
                     .any(|e| kept.contains(&e.id) && e.kind == "settings");
-                for e in data.entries.iter_mut().filter(|e| kept.contains(&e.id)) {
+                for e in next.entries.iter_mut().filter(|e| kept.contains(&e.id)) {
                     e.content = None;
                     e.visible = false;
                 }
                 if settings {
-                    data.settings = data
+                    next.settings = next
                         .entries
                         .iter()
                         .rev()
@@ -205,7 +210,19 @@ impl FileHistory {
                         .and_then(|e| e.content.clone())
                         .unwrap_or_else(|| json!({}));
                 }
-                self.save_unlocked(&data).map_err(unavailable)?;
+                // Bookkeeping and tombstones share the atomic replacement.
+                // Restoring older settings can make the final snapshot larger.
+                let peak = if settings
+                    && serde_json::to_vec(&next)?.len() > serde_json::to_vec(&staged)?.len()
+                {
+                    &next
+                } else {
+                    &staged
+                };
+                data = write(&data, peak, &mut || {
+                    self.save_unlocked(&next).map_err(unavailable)?;
+                    Ok(next.clone())
+                })?;
             }
             let done: Vec<String> = targets
                 .iter()

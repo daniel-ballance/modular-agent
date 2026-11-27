@@ -6,6 +6,7 @@ import { Commands } from "./commands.js";
 import { SessionAuthority, readTenants, intersectRights } from "./authority.js";
 import { WorkReservations } from "./work-reservations.js";
 import { HistoryCommit } from "./history-commit.js";
+import { lifecycleHistory } from "./fork-history.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
 import { InputAdmission } from "./input-admission.js";
 import { TurnExecution } from "./turn-execution.js";
@@ -142,7 +143,7 @@ export class Harness {
 		session: id => this.session(id),
 		startSession: options => this.startSession(options),
 		canDiscoverSession: (...args) => this.canDiscoverSession(...args),
-		use: (...args) => this.use(...args),
+		use: lifecycleHistory(capability => this.use(capability), () => this.historyCommit, id => this.session(id)),
 		erasure: () => this.erasure,
 		tenants: () => this.tenants,
 		newId: (...args) => this.newId(...args),
@@ -152,7 +153,7 @@ export class Harness {
 		turnAuthority: () => this.authority.turnAuthority,
 		workRights: (...args) => this.authority.workRights(...args),
 		activePlugins: (...args) => this.activePlugins(...args),
-		observeCommit: (...args) => this.historyCommit.observeCommit(...args),
+		observeCommit: (...args) => this.historyCommit.observeFork(...args),
 		commit: (...args) => this.commit(...args),
 		hooks: () => this.hooks,
 		emit: (...args) => this.emit(...args),
@@ -406,6 +407,7 @@ export class Harness {
 		this.erasure = new SessionErasure({
 			sessions: this.sessions,
 			receipts: this.receipts,
+			reservations: () => this.reservations,
 			store: () => this.use<HistoryStore>("history-store"),
 			providers: () => this.useAll<Provider>("provider"),
 			checkWriter: s => this.lifecycle.checkWriter(s),
