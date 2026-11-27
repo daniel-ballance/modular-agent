@@ -24,7 +24,7 @@ async function crashedSession(t: TestContext) {
 	const api = h.api("test");
 	const s = await api.startSession();
 	await api.append(s, { kind: "inputAccepted", writer: "harness", modelVisible: false, actorId: "user", inputId: "foreign-input",
-		data: { content: [{ type: "text", text: "do three things" }], when: "now", taken: "now" } });
+		data: { content: [{ type: "text", text: "do three things" }], when: "now", taken: "now", rights: ALL_AUTHORITY, authorizers: [{ sessionId: s, actorId: "user" }] } });
 	await api.append(s, { kind: "turnStart", writer: "test", modelVisible: false, turnId: "t1", actorId: "user", data: { startedBy: { kind: "actor", id: "user" }, model: { provider: "faux", id: "faux-1" }, system: "", tools: api.tools(s), settings: {}, rights: ALL_AUTHORITY, authorizers: [{ sessionId: s, actorId: "user" }] } });
 	await api.append(s, { kind: "input", writer: "test", modelVisible: true, turnId: "t1", actorId: "user", message: { role: "user", content: [{ type: "text", text: "do three things" }] }, inputId: "foreign-input" });
 	const calls = [fauxToolCall("read", { path: "notes.txt" }), fauxToolCall("bash", { command: "echo charged >> payments.log" }), fauxToolCall("write", { path: "done.txt", content: "ok" })];

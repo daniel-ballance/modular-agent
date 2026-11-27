@@ -22,6 +22,7 @@ import { isDeepStrictEqual } from "node:util";
 import { interruptedCalls } from "./view.js";
 import { HookRegistry } from "./hooks.js";
 import { INTERFACE_HANDOFF } from "./interface-tools.js";
+import { validateRetainedWork } from "./history-intake.js";
 import { type QueuedInput, Session } from "./session.js";
 import { type Actor, type AgentEvent, type Authority, type Configuration, type EntryDraft, type HistoryEntry, type HistoryStore, type InterruptedTurn, type Provider, type SessionInterruptionReason, type StoredSession, type ToolCall, type ToolDefinition, type ToolSource, type TurnOutcome, type TurnSnapshot, type WorkingEnvironment, isToolCall } from "./types.js";
 
@@ -54,7 +55,7 @@ interface SessionLifecycleOperations {
 	turns(): Pick<TurnExecution, "startQueued" | "maybeContinueOpenCalls" | "openCalls" | "launch" | "resumeTurn">;
 	actorRights(s: Session, actorId: string): Authority[];
 	withinLimits(s: Session, right: Authority): boolean;
-	jobWork(): Pick<Jobs, "readJob" | "reportJob" | "runningJobs" | "endJobObservation" | "cancelJob">;
+	jobWork(): Pick<Jobs, "readJob" | "runningJobs" | "endJobObservation" | "cancelJob">;
 	problem(plugin: string, where: string, error: unknown): void;
 	rightsOf(s: Session, actorId: string): Authority[];
 	requireAuthority(s: Session, actorId: string, authority: Authority): void;
@@ -191,6 +192,7 @@ export class SessionLifecycle {
 			validateRecordedApproval(e);
 			s.apply(e);
 		}
+		validateRetainedWork(s);
 		const interrupted = this.unfinishedTurn(s, s.branch());
 		if (interrupted) recordedSnapshot(interrupted);
 		return s;
@@ -290,7 +292,6 @@ export class SessionLifecycle {
 		await this.operations.interfaceTools().recoverInterfaceCalls(s);
 		await this.operations.approvals().reconcileApprovals(s, true);
 		await this.recoverInterruptedTurn(s);
-		await this.recoverReports(s);
 		s.reopening = false;
 		this.operations.turns().startQueued(s);
 		this.operations.emit(s, "session.started", { meta: s.meta, resumed: true }, "harness");
@@ -397,19 +398,6 @@ export class SessionLifecycle {
 		const active = this.operations.activePlugins();
 		const last = s.order.map((id) => s.entries.get(id)!).findLast((e) => e.kind === "plugins" && !e.erased);
 		if (!isDeepStrictEqual(last?.data, { active })) await this.operations.commit(s, [{ kind: "plugins", writer: "harness", modelVisible: false, data: { active } }]);
-	}
-
-	private async recoverReports(s: Session): Promise<void> {
-		const entries = s.order.map((id) => s.entries.get(id)!);
-		const jobs = new Map(entries.flatMap((e) => {
-			const job = this.operations.jobWork().readJob(s, e);
-			return job ? [[job.job.id, job] as const] : [];
-		}));
-		for (const end of entries) {
-			if (!end.jobId || end.kind !== "jobEnded" || end.erased || !(end.data as { report?: boolean })?.report) continue;
-			const job = jobs.get(end.jobId);
-			if (job) await this.operations.jobWork().reportJob(s, job, end);
-		}
 	}
 
 	private unfinishedTurn(s: Session, branch: HistoryEntry[]) {

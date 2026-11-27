@@ -1491,7 +1491,7 @@ impl TurnWork {
         );
         let start = Draft::new("tool.started", false, json!({"call":call,"source":registration,
                 "definition":wire::registered_definition(&definition),"openWorld":definition.open_world(),
-                "safeToRepeat":definition.safe_to_repeat && capability::<dyn WorkingEnvironment>(api.as_ref(),"environment")?.declaration()["stops_commands_after_sigkill"]==true})).copying(vec![entry.id.clone()]);
+                "rights":work_authority(api.as_ref(), &scope)?,"authorizers":work_authorizers(&api.snapshot(&scope.session)?, &scope),"safeToRepeat":definition.safe_to_repeat && capability::<dyn WorkingEnvironment>(api.as_ref(),"environment")?.declaration()["stops_commands_after_sigkill"]==true})).copying(vec![entry.id.clone()]);
         if let Some(result) = api.handoff_interface_tool(&scope, &call, start.clone()).await? {
             self.running_tools.lock().unwrap().remove(&call.id);
             if result.status == ToolStatus::Waiting {

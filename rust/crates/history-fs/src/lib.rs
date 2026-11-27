@@ -356,8 +356,7 @@ impl FileHistory {
             let input_keys = erased_input_keys(session, &entry_ids);
             for entry in &mut session.entries {
                 if erased.contains(&entry.id) && !authority_record(entry) {
-                    entry.content = None;
-                    entry.visible = false;
+                    entry.erase_payload();
                 }
             }
             // Avoid retaining an erased setting in the materialized session header.

@@ -97,11 +97,11 @@ async fn a_handed_back_key_keeps_its_first_receipt_after_restart() {
     assert_eq!(receipt["inputId"], first.input);
     assert_eq!(
         receipt["data"],
-        json!({"inputId":first.input,"when":"after","content":[{"type":"text","text":"queued"}],"key":"same","taken":"after","rust.taken":"after","rust.authority":Authority::full()})
+        json!({"inputId":first.input,"when":"after","content":[{"type":"text","text":"queued"}],"key":"same","taken":"after","rights":Authority::full(),"authorizers":[{"sessionId":rig.id,"actorId":"user"}]})
     );
     assert_eq!(
-        portable::entry(returned, &data).unwrap()["data"]["inputIds"],
-        json!([first.input])
+        portable::entry(returned, &data).unwrap()["inputId"],
+        json!(first.input)
     );
     let retry = rig
         .h

@@ -103,7 +103,7 @@ async fn reopen(served: bool) {
             "receipt",
             Some("join"),
             "inputAccepted",
-            json!({"inputId":"receipt","data":{"when":"now","key":"keep-once","content":[{"type":"text","text":"Foreign user text"}]}}),
+            json!({"inputId":"receipt","data":{"when":"now","taken":"now","rights":["watch","input","tools"],"authorizers":[{"sessionId":"foreign","actorId":"user"}],"key":"keep-once","content":[{"type":"text","text":"Foreign user text"}]}}),
         ),
         row(
             "start",
@@ -115,7 +115,7 @@ async fn reopen(served: bool) {
             "input",
             Some("start"),
             "input",
-            json!({"turnId":"interrupted","sources":null,"data":{"inputId":"receipt","key":"keep-once"},"message":{"role":"user","content":[{"type":"text","text":"Foreign user text","newField":true}]}}),
+            json!({"turnId":"interrupted","sources":["receipt"],"inputId":"receipt","data":{"key":"keep-once"},"message":{"role":"user","content":[{"type":"text","text":"Foreign user text","newField":true}]}}),
         ),
         row(
             "intent",

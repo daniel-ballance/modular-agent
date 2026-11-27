@@ -27,7 +27,6 @@ use std::{
     time::{Duration, Instant},
 };
 use subtle::ConstantTimeEq;
-
 mod leases;
 #[cfg(test)]
 mod tests;
@@ -1067,6 +1066,7 @@ fn snapshot_data(id: String, settings: Value, entries: Vec<Value>) -> SessionDat
         .map(|(i, content)| Entry {
             id: format!("record-{i}"),
             parent: i.checked_sub(1).map(|n| format!("record-{n}")),
+            input_id: None,
             scope: Scope::session(&id),
             writer: "history-http".into(),
             at: 0,

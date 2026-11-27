@@ -353,7 +353,6 @@ export class Harness {
 		admit: (...args) => this.admission.admit(...args),
 		jobReportsStartTurns: () => this.jobReportsStartTurns,
 		startQueued: (...args) => this.turns.startQueued(...args),
-		acceptInput: (...args) => this.admission.acceptInput(...args),
 	});
 
 	readonly receipts: RunReceipts;

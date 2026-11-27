@@ -5,7 +5,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { conversation, startOperation, type Operation } from "./telemetry.js";
 import { Reservations, resourceBytes } from "./reservations.js";
 import { type QueuedInput, Session } from "./session.js";
-import { type AgentEvent, type Authority, type ContentPart, type EntryDraft, type HistoryEntry, type Job, type JobState, type ToolCall, text, zeroUsage } from "./types.js";
+import { type AgentEvent, type Authority, type EntryDraft, type HistoryEntry, type Job, type JobState, type ToolCall, text, zeroUsage } from "./types.js";
 
 export interface JobStart { kind: string; key?: string; actorId?: string; actors?: string[]; jobs?: string[]; toolCallId?: string; detail?: unknown }
 export interface KeptJob { job: Job; key?: string; detail?: unknown; actors?: string[]; rights?: Authority[] }
@@ -25,7 +25,6 @@ interface JobsOperations {
 	admit<T>(s: Session, work: () => Promise<T>): Promise<T>;
 	jobReportsStartTurns(): boolean;
 	startQueued(s: Session): void;
-	acceptInput(s: Session, q: QueuedInput): Promise<unknown>;
 }
 
 export class Jobs {
@@ -128,12 +127,12 @@ export class Jobs {
 						const end: EntryDraft = { id: this.operations.newId(), kind: "jobEnded", writer: plugin, modelVisible: false, jobId: job.id, sources: options?.sources, data: { outcome, result: content, report } };
 						let queued: QueuedInput | undefined;
 						const drafts = [end];
-						if (report && !s.keys.has(`job:${job.id}`)) {
+						if (report) {
 							if (!this.operations.workRights(s, [], [job.id]).includes("input")) throw failure("invalid_request", 'Job report requires the "input" right');
 							queued = { id: this.operations.newId(), actorId: job.actorId ?? "harness", when: this.operations.jobReportsStartTurns() ? "after" : "propose", key: `job:${job.id}`, kind: "input",
 								startedBy: { kind: "job", id: job.id }, startingRights: rights, sources: [end.id!], content: content ?? [] };
 							drafts.push({ kind: "inputAccepted", writer: "harness", modelVisible: false, inputId: queued.id, actorId: queued.actorId, jobId: job.id,
-								sources: queued.sources, data: { key: queued.key, content: queued.content, when: queued.when, taken: queued.when === "propose" ? "proposed" : "after", parked: queued.when === "propose", rights, authorizers: (kept.actors ?? []).map(actorId => ({ sessionId: s.id, actorId })) } });
+								sources: queued.sources, data: { key: queued.key, content: queued.content, when: "after", taken: queued.when === "propose" ? "proposed" : "after", parked: queued.when === "propose", rights, authorizers: [{ sessionId: s.id, jobId: job.id }] } });
 						}
 						await this.operations.commit(s, drafts);
 						if (queued) this.operations.reservations().transfer(s, `job:${job.id}`, `input:${queued.id}`, {
@@ -165,19 +164,6 @@ export class Jobs {
 		const record: import("./session.js").JobRecord = { ...kept, handle };
 		s.jobs.set(job.id, record);
 		return handle;
-	}
-
-	async reportJob(s: Session, { job }: KeptJob, end: HistoryEntry): Promise<void> {
-		const data = end.data as { result?: ContentPart[]; outcome: { kind: JobState } };
-		const key = `job:${job.id}`;
-		await this.operations.admit(s, async () => {
-			if (s.keys.has(key) || s.closed || s.closing || s.suspended || !this.operations.workRights(s, [], [job.id]).includes("input")) return;
-			await this.operations.acceptInput(s, {
-				id: this.operations.newId(), actorId: job.actorId ?? "harness", when: this.operations.jobReportsStartTurns() ? "after" : "propose", key, kind: "input",
-				startedBy: { kind: "job", id: job.id }, sources: [end.id],
-				content: data.result ?? [],
-			});
-		});
 	}
 
 	async cancelJob(s: Session, jobId: string): Promise<void> {

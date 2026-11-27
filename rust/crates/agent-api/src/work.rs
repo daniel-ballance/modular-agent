@@ -151,6 +151,64 @@ pub fn work_authority(api: &dyn AgentApi, scope: &Scope) -> Result<Authority> {
     }
     Ok(cap)
 }
+/// Principals of a native admission, including a delegated submitter or releaser.
+pub fn admission_authorizers(scope: &Scope, data: &Value) -> Value {
+    if let Some(saved) = data.get("authorizers").filter(|a| a.is_array()) {
+        return saved.clone();
+    }
+    let primary = match scope
+        .actor
+        .strip_prefix("job:")
+        .filter(|id| Some(*id) == scope.job.as_deref())
+    {
+        Some(job) => json!({"sessionId":scope.session,"jobId":job}),
+        None => json!({"sessionId":scope.session,"actorId":scope.actor}),
+    };
+    let mut result = vec![primary];
+    for key in ["sponsor", "releasedBy"] {
+        if let Some(actor) = data[key].as_str() {
+            let principal = json!({"sessionId":scope.session,"actorId":actor});
+            if !result.contains(&principal) {
+                result.push(principal);
+            }
+        }
+    }
+    json!(result)
+}
+
+/// The principals whose authority contributed to a tool dispatch.
+pub fn work_authorizers(data: &SessionData, scope: &Scope) -> Value {
+    let mut principals = admission_authorizers(scope, &Value::Null)
+        .as_array()
+        .unwrap()
+        .clone();
+    let branch = data.branch();
+    let mut turns = BTreeSet::new();
+    let mut cursor = scope.turn.as_deref();
+    while let Some(turn) = cursor.filter(|id| turns.insert(*id)) {
+        cursor = branch
+            .iter()
+            .find(|e| e.kind == "turn.start" && e.scope.turn.as_deref() == Some(turn))
+            .and_then(|e| e.content.as_ref()?.get("continuesTurnId")?.as_str());
+        for entry in branch.iter().filter(|e| {
+            matches!(e.kind.as_str(), "input" | "turn.start")
+                && e.scope.turn.as_deref() == Some(turn)
+        }) {
+            if let Some(content) = &entry.content {
+                for principal in admission_authorizers(&entry.scope, content)
+                    .as_array()
+                    .unwrap()
+                {
+                    if !principals.contains(principal) {
+                        principals.push(principal.clone());
+                    }
+                }
+            }
+        }
+    }
+    json!(principals)
+}
+
 pub fn job_usage(data: &SessionData, job: &str) -> Result<Usage> {
     let turns: BTreeSet<_> = data
         .entries

@@ -317,7 +317,13 @@ pub(crate) async fn replay(api: Api, id: &str, cx: &ConnectionTo<acp::Client>) -
     let scope = crate::actor_scope(id);
     require(api.as_ref(), &scope, "watch")?;
     let data = api.snapshot(id)?;
-    for original in data.branch().into_iter().filter(|e| e.content.is_some()) {
+    for original in data.branch().into_iter().filter(|e| {
+        e.content.is_some()
+            && matches!(
+                e.kind.as_str(),
+                "input" | "model.response" | "tool.started" | "tool.result"
+            )
+    }) {
         let Some(e) =
             crate::binding::gate_entry(api.as_ref(), &scope, wire::public_entry(&original, &data)?)
                 .await?
