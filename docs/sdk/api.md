@@ -33,6 +33,8 @@ The shape of the API, in language-neutral terms. [Languages](languages.md) says 
 | `maxApprovalWaitMs` | positive [Duration](../bindings/data.md#general-rules), set by the operator | absent: no `approvalsOutlastTurns` support. An explicit maximum bounds every waiting approval. It does not opt a session in. |
 | `approvalCoversNested` | boolean, set by the operator | false. With the approval plugin, an allow for a top-level call also answers approval for its nested calls ([covered approvals](../contracts.md#approvals-that-cover-nested-calls)). |
 | `onQuestion` | a question handler | none; see [Questions](#questions) |
+| `questionsOutlastTurns` | boolean (TypeScript only) | false. Set to true to declare both `questionsOutlastTurns` and `lateAnswersStartTurns`, allowing eligible tool questions to stay open after their turn and late answers to start a continuation turn. |
+| `settingsDuringTurn` | `nextTurn` or `refused` (TypeScript only) | `nextTurn`: record a change during a running turn for the next turn. With `refused`, changing settings during a running turn raises `busy`. |
 | `servicePlugins` | ordered list of `{ url, tokenFile, config? }` | none; see [Placement](placement.md#services) |
 | `pluginHost` | boolean | true if either plugin list is nonempty; otherwise false. A plugin host reads `MODULAR_AGENT_PLUGINS` after both lists. See [Placement](placement.md#a-plugin-in-another-process). |
 | `severalActors` | boolean | false. When true, the agent declares `severalActors`, and `session.join`, `leave`, `as` and proposed input work. When false they raise `not_supported` for any actor but the local one, as the [ACP binding](../bindings/acp.md#several-actors) requires. |
@@ -40,6 +42,8 @@ The shape of the API, in language-neutral terms. [Languages](languages.md) says 
 | `tenants` | operator-supplied map of tenant name to `{ rights, tokens? }` | none. Supplying the map enables the `tenants` declaration and lets `session({ tenant })` select a configured tenant. It sets tenant rights ceilings and optional token limits, not an Interface connection’s tenant access ([Limits and tenants](../contracts.md#limits-and-tenants)). |
 | `jobReportsStartTurns` | boolean | false: a job's report is parked until released ([Jobs](../contracts.md#jobs)) |
 | `agentName` | string | absent. A stable name for `gen_ai.agent.name`; omit the attribute and span name suffix when unset. |
+
+See [Declaration choices](languages.md#declaration-choices) for the Rust SDK behavior, which has no builder options for these two choices.
 
 Each SDK provides constructors for the parts it ships: `transientRuntime()`, `durableRuntime()`, `memoryHistory()`, `fileHistory(dir)`, `httpHistory(url, tokenFile)`, `localEnvironment(root?)`, `environmentCredentials()` and `fileCredentials(path)`. `serve(plugin)` and `serveHistory(store, options)` are covered in [Placement](placement.md).
 
@@ -127,7 +131,7 @@ An Agent is safe to use from several tasks at once. Sessions have separate work 
 | `telemetry` | `1` for a Harness that supports the [profile](../telemetry.md), including in its session declaration. Omitted without support. Independent of the app's tracer provider, sampler and exporter. |
 | `erasure` | true only if the history store and the agent implement erasure and can enforce [pending erasure](../contracts.md#cross-session-coordination) across the declared scope. An HTTP history client uses the [pending-erasure registry profile](../bindings/history-http.md#pending-erasure-registry-profile-pendingerasure-1) when the service declares a supported version. Without one, the HTTP composition declares false, even if the service can erase. |
 | `inputKeys` | true |
-| `questionsOutlastTurns`, `lateAnswersStartTurns` | false unless the app enables both |
+| `questionsOutlastTurns`, `lateAnswersStartTurns` | Both follow the `questionsOutlastTurns` option in TypeScript. Both are true with the Rust SDK’s built-in questions plugin. |
 | `approvalCoversNested` | true only with the approval plugin and the `approvalCoversNested` option |
 | `approvalsOutlastTurns` | true only with `maxApprovalWaitMs`, the approval plugin, `portableSessions`, `questionsOutlastTurns`, `lateAnswersStartTurns` and a path that enforces the [waiting approval rules](../contracts.md#approvals-that-wait). Omit otherwise. |
 | `startsTurnsUnasked` | `jobReports` if `jobReportsStartTurns`; otherwise `never` |

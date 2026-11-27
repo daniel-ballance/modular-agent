@@ -82,6 +82,13 @@ Rust takes `status` from the working environment in process. For a served call t
 
 Omit the timeout (`None` in Rust) to request no deadline. For served calls, the binding uses positive whole milliseconds. Rust converts a supplied duration to whole milliseconds, with a minimum of one; TypeScript callers must pass a positive safe integer if supplying a timeout over the binding.
 
+## Declaration choices
+
+| Capability | Rust | TypeScript |
+|---|---|---|
+| Questions that outlast their turns | No builder switch. The SDK installs its questions plugin by default; it declares `questionsOutlastTurns` and `lateAnswersStartTurns` as true. | `createAgent({ questionsOutlastTurns: true })` enables both declarations. They default to false. |
+| Changing settings during a turn | No builder switch. The SDK declares `settingsDuringTurn: "refused"`; a `Session::set_setting` change during a running turn returns `Code::Busy`. | `createAgent` defaults to `settingsDuringTurn: "nextTurn"`. Set `settingsDuringTurn: "refused"` for `session.setSetting` to raise `busy` during a running turn. |
+
 ## Rust
 
 - Use `agent.session_summary(id, &viewer)?` to read kept work without opening the session. An inaccessible or missing session returns `None`.
