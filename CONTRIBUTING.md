@@ -223,7 +223,7 @@ To look at traces while working on [telemetry](docs/telemetry.md), run `scripts/
 
 Install or rebuild the local `ma` from the permanent `main` checkout. Run `rust/scripts/install.sh` there for Rust, or build in its `typescript/` folder and run `npm link --workspace @modular-agent/ma` for TypeScript. The Rust installer links the Claude sidecar into the checkout. npm links the TypeScript bin to the workspace build. Deleting a temporary worktree breaks either link if it points there. Use the worktree's built binary or direct Node entry point to test a branch.
 
-For the real-work evaluation in [#20](https://github.com/daniel-ballance/modular-agent/issues/20), start Phoenix and set the trace-specific variables in the environment that launches `ma`:
+When evaluating `ma` on real work (see [#20](https://github.com/daniel-ballance/modular-agent/issues/20)), start Phoenix and set the trace-specific variables in the environment that launches `ma`:
 
 ```sh
 scripts/phoenix.sh start
@@ -231,7 +231,7 @@ export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:6006/v1/traces
 export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
 ```
 
-For `ma` launched by a host, set both variables in the host's launch configuration for `ma`. Query `http://127.0.0.1:6006/v1/projects/default/spans` for the same time window as the session history. Periodically audit the session histories (Rust JSON files under `~/.local/state/modular-agent/rust/sessions/<id>.json` and TypeScript JSONL files under `~/.local/state/modular-agent/typescript/history/<project-folder>/<id>.jsonl`) and compare them with the spans. Read history in place without reopening or changing sessions. Follow the [ma-meta-analysis skill](.agents/skills/ma-meta-analysis/SKILL.md) for measurements and issue filing.
+For `ma` launched by a host, set both variables in the host's launch configuration for `ma`. Query `http://127.0.0.1:6006/v1/projects/default/spans` for the same time window as the session history. After each wave of real `ma` runs (or roughly every 5–10 sessions outside waves), audit the session histories (Rust JSON files under `~/.local/state/modular-agent/rust/sessions/<id>.json` and TypeScript JSONL files under `~/.local/state/modular-agent/typescript/history/<project-folder>/<id>.jsonl`) and compare them with the spans. Keep this cadence until the operator turns it off. Use another harness or model and read history in place without reopening or changing sessions. Follow the [ma-meta-analysis skill](.agents/skills/ma-meta-analysis/SKILL.md) for measurements and issue filing.
 
 ## Commits
 
