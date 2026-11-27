@@ -10,11 +10,11 @@ export async function erasureTriggers(kit, peer, approvalOff) {
 		const path = store.path(sessionId);
 		const ext = (name, params = {}) => rpc(`_modular-agent/${name}`, { sessionId, ...params });
 		const key = randomUUID(), secret = `trigger-private-${key}`;
-		await prompt(peer, sessionId, trigger === "answer" ? "Seed the recorded questions." : secret, key);
+		await prompt(peer, sessionId, ["answer", "fork"].includes(trigger) ? "Seed the retained history." : secret, key);
 		await prompt(peer, sessionId, "Keep this independent position.");
 		const before = await store.pages(sessionId);
 		const end = before.findLast(e => e.kind === "turnEnd");
-		const entryId = end.id;
+		let entryId = end.id;
 		let target = before.find(e => e.kind === "inputAccepted" && e.data?.key === key).id;
 		let affected, unaffected;
 		if (trigger === "answer") {
@@ -34,7 +34,19 @@ export async function erasureTriggers(kit, peer, approvalOff) {
 			const { requests } = await ext("requests");
 			assert.ok([affected, unaffected].every(id => requests.some(q => q.id === id && q.answerable)));
 		}
-		const entryIds = trigger === "answer" ? [target] : [...new Set([target, ...before.filter(e => JSON.stringify(e).includes(secret)).map(e => e.id)])];
+		if (trigger === "fork") {
+			// Seed a private, non-model record so the single-copy plan is
+			// complete without depending on either Runtime's turn graph.
+			await kit.closeSession(peer, sessionId);
+			const { lease } = await store.json(`${path}/lease`, "POST", { owner: "fork-fixture" });
+			entryId = target = randomUUID();
+			try {
+				await store.json(`${path}/entries`, "POST", { lease, entries: [{ id: target, parentId: before.at(-1).id,
+					sessionId, kind: "fixture.note", time: Date.now(), writer: "fixture", modelVisible: false, data: { secret } }] });
+			} finally { await store.json(`${path}/lease/${lease}`, "DELETE"); }
+			await rpc("session/resume", { sessionId, cwd: project, mcpServers: [] });
+		}
+		const entryIds = ["answer", "fork"].includes(trigger) ? [target] : [...new Set([target, ...before.filter(e => JSON.stringify(e).includes(secret)).map(e => e.id)])];
 		const { revision } = await store.json(`${path}/pending-erasure`);
 		const intentId = randomUUID(), recordId = randomUUID();
 		const lease = leases.get(`${path}/lease`);
@@ -75,7 +87,7 @@ export async function erasureTriggers(kit, peer, approvalOff) {
 			![after, reply].some(value => JSON.stringify(value).includes(secret)));
 		if (trigger === "fork") {
 			const copied = await store.pages(reply.sessionId);
-			check("erasure triggers: fork copies tombstones without source links", copied.some(e => e.kind === "inputAccepted" && e.erased && !e.sources?.length) && !JSON.stringify(copied).includes(secret));
+			check("erasure triggers: fork copies tombstones without source links", copied.some(e => e.erased && !e.sources?.length) && !JSON.stringify(copied).includes(secret), JSON.stringify(copied.map(e => [e.kind, !!e.erased, e.sources?.length ?? 0])));
 		}
 	});
 	leases.clear();
