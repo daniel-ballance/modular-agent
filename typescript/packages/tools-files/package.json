@@ -18,7 +18,6 @@
   "dependencies": {
     "@modular-agent/harness": "0.4.0",
     "@modular-agent/core": "0.4.0",
-    "ignore": "7.0.16",
     "minimatch": "11.0.9"
   }
 }

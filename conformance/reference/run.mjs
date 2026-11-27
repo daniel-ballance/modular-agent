@@ -47,6 +47,16 @@ const printQuestionScript = [
   { text: "Done." },
 ];
 
+const findScript = path => [codemode([
+  `print(tools.find('*.txt', path=${JSON.stringify(path)}))`,
+  "print('---')",
+  `print(tools.find('./*.txt', path=${JSON.stringify(path)}))`,
+  "print('---')",
+  `print(tools.find('**/keep.*', path=${JSON.stringify(path)}))`,
+  "print('---')",
+  `print(tools.find('cache', path=${JSON.stringify(path)}))`,
+].join("\n")), { text: "Done." }];
+
 const checks = [
   {
     name: "help-options",
@@ -232,6 +242,46 @@ const checks = [
       const results = (log[1]?.messages ?? []).filter((m) => m.role === "toolResult");
       ok(results.length === 1 && results[0].name === "codemode", "the model sees one result, codemode's", results.map((r) => r.name));
       ok(results[0]?.text?.includes("same"), "the alias and the direct call read the same text", results[0]?.text);
+    },
+  },
+  {
+    name: "find-ignore-and-globs",
+    about: "Find uses parent and local ignore rules, repository and global excludes, and name or path globs.",
+    git: true,
+    files: {
+      "project/.gitignore": "/sub/anchored.txt\n*.log\n!keep.log\ncache/\nsub/**/scratch-*.txt\nsub/suppressed.txt\n",
+      "project/.ignore": "sub/quiet.txt\n!sub/suppressed.txt\n",
+      "project/.git/info/exclude": "/sub/private.txt\nkeep.log\n",
+      "project/sub/.gitignore": "suppressed.txt\n",
+      "home/.gitconfig": "[core]\nexcludesFile = ~/custom-ignore\n",
+      "home/custom-ignore": "/sub/global.txt\n",
+      "home/xdg/git/ignore": "/sub/xdg.txt\n",
+      ...Object.fromEntries([
+        "anchored.txt", "deep/anchored.txt", "deep/keep.log", "drop.log", "deep/cache/drop.txt", "cache",
+        "scratch-a.txt", "deep/scratch-b.txt", "quiet.txt", "suppressed.txt", "private.txt", "global.txt", "xdg.txt", "deep/keep.txt",
+      ].map(name => [`project/sub/${name}`, ""])),
+    },
+    script: findScript("sub"),
+    async run(command, invoke, _skip, t) {
+      for (const xdg of [false, true]) {
+        if (xdg) {
+          rmSync(join(t.home, ".gitconfig"));
+          writeFileSync(join(t.dir, "find-from-project.json"), JSON.stringify(findScript(join(t.project, "sub"))));
+        }
+        const result = await invoke(command, {
+          args: [...(xdg ? ["--project", join(t.project, "sub")] : []), "-p", "Find files."],
+          env: {
+            XDG_CONFIG_HOME: join(t.home, "xdg"), GIT_CONFIG_SYSTEM: "/dev/null",
+            ...(xdg ? { MODULAR_AGENT_SCRIPT: join(t.dir, "find-from-project.json") } : {}),
+          },
+        });
+        assert.equal(result.exit, 0, result.stderr);
+        const requests = readFileSync(t.logFile, "utf8").trim().split("\n").map(line => JSON.parse(line));
+        const visible = xdg ? "global.txt" : "xdg.txt";
+        const top = xdg ? [visible, "suppressed.txt"] : ["suppressed.txt", visible];
+        assert.equal(last(requests.at(-1), "toolResult")?.text,
+          ["deep/anchored.txt", "deep/keep.txt", ...top, "---", ...top, "---", "deep/keep.log", "deep/keep.txt", "---", "cache\n"].join("\n"));
+      }
     },
   },
   {

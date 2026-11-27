@@ -103,23 +103,17 @@ typescript/scripts/check-agui.sh
 git diff --check
 ```
 
-- Reference checks: **28/28**, including `approval-covers-script`, `trace-trust`, `resume-open`, `telemetry-export`, `client-identity`, all four codemode profile checks, `sandbox-memory` and both crash-recovery modes.
-- Stdio ACP: **190/190** core checks. The covered group runs both bindings against `ma`. The waiting group uses the disposable SDK fixture instead of enabling test controls in `ma`. Over WebSocket, ACP passed **195/195**, the plugin kit **157/157**, listener isolation **14/14**, and named callers **29/29**.
+- Earlier reference run: **28/28**, including `approval-covers-script`, `trace-trust`, `resume-open`, `telemetry-export`, `client-identity`, all four codemode profile checks, `sandbox-memory` and both crash-recovery modes.
+- Stdio ACP: **190/190** core checks. The covered group runs both bindings against `ma`. The waiting group passes **50/50** using the disposable SDK fixture instead of enabling test controls in `ma`. Over WebSocket, ACP passed **195/195**, the plugin kit **157/157**, listener isolation **14/14**, and named callers **29/29**.
 - At the four-language checkpoint the workspace passed **918 offline tests** both with in-process and remote base parts, with all four fixture programs built. Five live tests are opt-in. The TypeScript runner passed **405/405** shared scenarios across all four SDKs. See the [SDK README](../core/README.md#what-is-checked) for fixture build commands.
 - AG-UI passed **49/49** adapter cases, including the structured approval call, wait closures and run receipts.
 - Claude workspace package: **51 offline tests passed** and one live check skipped. No real sign-ins or model requests ran, and no real credentials were read.
 - `tsc -b` and `git diff --check` pass. The workspace has no separate lint or formatting command.
 
-## Known gaps
+## Platform and Provider limits
 
-Tracked in #41.
-
-- The waiting ACP fixture passed 44/50 checks at kit revision `2dc41493`. In each binding, two checks require erasure during a running turn; the SDK refuses it. The capacity check compares `resourceReservations` to `true` rather than inspecting its session, tenant and agent limits.
-
-- macOS local commands use process-group containment, not strong containment. A process that leaves its group is outside that guarantee.
-- HTTP history on macOS needs no clock setting: the writer derives a sleep-aware clock ([SDK history configuration](../core/README.md#registering-or-serving-a-custom-history-store)).
-- `ma` selects the Claude Provider at composition time. To switch to Claude from a launch that did not load it, start with `--model claude/ID` or reopen a saved Claude session. See the [Claude package gaps](../claude/README.md#known-gaps-and-open-problems).
-- `find` honors `.gitignore` files at or below its search root, but not parent or global Git rules, `.ignore` or `.git/info/exclude`. Its glob parser, filesystem diagnostics and Monty's tracebacks can differ from Rust.
+- macOS local commands use process-group containment. A process that leaves its group is not stopped. Stronger containment is tracked in [#255](https://github.com/daniel-ballance/modular-agent/issues/255).
+- `ma` selects the Claude Provider at composition time. To run a Claude model when the current launch did not load it, start with `--model claude/ID` or reopen a saved Claude session. Switching without a restart is tracked in [#37](https://github.com/daniel-ballance/modular-agent/issues/37).
 
 ## Findings for docs/reference and docs/sdk
 
