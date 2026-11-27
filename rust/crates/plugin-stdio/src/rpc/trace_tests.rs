@@ -1,9 +1,11 @@
 use super::*;
 
 fn peer(serves: bool) -> Arc<Peer> {
-    let (tx, _) = mpsc::unbounded_channel();
+    let (tx, _) = mpsc::channel(OUTBOUND_FRAMES);
     let peer = Arc::new(Peer {
         tx,
+        outbound_bytes: Arc::new(Semaphore::new(OUTBOUND_BYTES)),
+        overflowed: CancellationToken::new(),
         plugin: OnceLock::new(),
         serves_plugin: false.into(),
         jobs: Mutex::default(),

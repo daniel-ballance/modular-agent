@@ -4,17 +4,17 @@ mod outbound;
 use futures_util::{FutureExt, Sink, SinkExt, Stream, StreamExt, future::BoxFuture, sink, stream};
 pub use outbound::Gate;
 pub(crate) use outbound::scoped;
-use outbound::{Frame, Prepared};
+use outbound::{Prepared, Queued};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
-    sync::{mpsc, oneshot},
+    sync::{Semaphore, mpsc, oneshot},
     task::JoinSet,
     time::{Duration, Instant, timeout_at},
 };
@@ -25,6 +25,10 @@ mod handoff_tests;
 mod trace_tests;
 
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
+// Match the TypeScript plugin peer: ordinary bursts fit, but a stalled peer
+// cannot retain an unlimited number of small frames or many maximum-size frames.
+const OUTBOUND_FRAMES: usize = 4096;
+const OUTBOUND_BYTES: usize = 2 * MAX_FRAME;
 const CANCEL_DEADLINE: Duration = Duration::from_secs(5);
 
 fn scope_from_params(params: &Value) -> Option<Scope> {
@@ -292,7 +296,9 @@ impl Drop for Outgoing<'_> {
     }
 }
 pub struct Peer {
-    tx: mpsc::UnboundedSender<Frame>,
+    tx: mpsc::Sender<Queued>,
+    outbound_bytes: Arc<Semaphore>,
+    overflowed: CancellationToken,
     plugin: OnceLock<String>,
     serves_plugin: AtomicBool,
     jobs: Mutex<BTreeMap<String, (Scope, telemetry::Operation)>>,
@@ -352,9 +358,11 @@ impl Peer {
         endpoint: Arc<dyn Endpoint>,
         shutdown_closes: bool,
     ) -> Arc<Self> {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
+        let (tx, mut rx) = mpsc::channel::<Queued>(OUTBOUND_FRAMES);
         let peer = Arc::new(Self {
             tx,
+            outbound_bytes: Arc::new(Semaphore::new(OUTBOUND_BYTES)),
+            overflowed: CancellationToken::new(),
             plugin: OnceLock::new(),
             serves_plugin: false.into(),
             jobs: Mutex::default(),
@@ -368,11 +376,10 @@ impl Peer {
         let p = peer.clone();
         let writer = tokio::spawn(async move {
             let mut outgoing = Box::pin(outgoing);
-            while let Some(frame) = p.closed.run_until_cancelled(rx.recv()).await.flatten() {
+            while let Some(queued) = p.closed.run_until_cancelled(rx.recv()).await.flatten() {
+                let mut frame = queued.into_frame();
                 let end = frame.end;
-                let Some(frame) = Prepared::new(frame, &p) else {
-                    break;
-                };
+                frame.bind(&p);
                 if !matches!(
                     p.closed.run_until_cancelled(outgoing.send(frame)).await,
                     Some(Ok(()))
@@ -820,12 +827,11 @@ impl Peer {
             (Some(parent), Some(scoped)) => Some(Box::new(move || parent() && scoped()) as Gate),
             (parent, scoped) => parent.or(scoped),
         };
-        let _ = self.tx.send(Frame {
-            message: json!({"jsonrpc":"2.0","method":method,"params":params}),
-            end: false,
+        self.send_frame(
+            json!({"jsonrpc":"2.0","method":method,"params":params}),
+            false,
             gate,
-            cancelled: None,
-        });
+        );
     }
     fn respond(&self, id: Value, reply: Reply) {
         self.respond_frame(id, reply, false, None);
@@ -841,12 +847,7 @@ impl Peer {
                 json!({"jsonrpc":"2.0","id":id,"error":{"code":e.number,"message":e.message,"data":data}})
             }
         };
-        let _ = self.tx.send(Frame {
-            message,
-            end,
-            gate,
-            cancelled: None,
-        });
+        self.send_frame(message, end, gate);
     }
     pub fn parent(&self, id: &Value) -> Option<Arc<Work>> {
         self.pending

@@ -5,7 +5,8 @@ export type WriteLine = (line: string) => void | boolean | Promise<void>;
 export type Delivery = (send: () => void) => Promise<void>;
 
 // Do not pass another RPC frame to Node's internal write queue while the
-// previous frame is still being written. The next frame retains its fence.
+// previous frame is still being written. The rest stay in WirePeer's bounded
+// queue and retain their delivery fences.
 export const streamWriter = (stream: Writable): WriteLine => line => new Promise((resolve, reject) => {
 	stream.write(line, error => error ? reject(error) : resolve());
 });

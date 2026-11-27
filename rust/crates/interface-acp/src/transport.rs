@@ -1,6 +1,6 @@
 //! Enforce the Modular Agent framing rules before passing lines to the ACP SDK.
-use agent_api::{Value, json, wire};
-use futures::{AsyncBufReadExt, AsyncWriteExt, io::BufReader, sink, stream};
+use agent_api::{CancellationToken, Value, json, wire};
+use futures::{AsyncBufReadExt, AsyncWriteExt, Sink, Stream, io::BufReader, sink, stream};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
@@ -9,6 +9,7 @@ use std::{
 use tokio::sync::{Mutex, mpsc};
 
 const LIMIT: usize = 64 * 1024 * 1024;
+const LOCAL_REFUSALS: usize = 64;
 
 type Reader = BufReader<blocking::Unblock<io::Stdin>>;
 type Writer = Arc<Mutex<blocking::Unblock<io::Stdout>>>;
@@ -48,14 +49,14 @@ impl Delivery {
         requests.insert(id.to_string(), (session.into(), stamp));
         true
     }
-    fn send(&self, line: String, refuse: &mpsc::UnboundedSender<String>) -> Option<String> {
+    fn send(&self, line: String, refuse: &Refusals) -> Option<String> {
         let frame: Value = serde_json::from_str(&line).ok()?;
         if frame["method"].is_string() {
             if let Some(session) = frame["params"]["sessionId"].as_str()
                 && self.stamp(session).is_none()
             {
                 if let Some(id) = frame.get("id") {
-                    let _ = refuse.send(error(
+                    refuse.send(error(
                         id,
                         -32000,
                         "withheld",
@@ -142,10 +143,24 @@ impl WireReader {
         }
     }
 }
+struct Refusals {
+    tx: mpsc::Sender<String>,
+    disconnected: CancellationToken,
+}
+impl Refusals {
+    fn send(&self, line: String) {
+        // A local reply settles the SDK's question. End the stream rather than
+        // block or silently drop a reply when the SDK stops draining them.
+        if !self.disconnected.is_cancelled() && self.tx.try_send(line).is_err() {
+            self.disconnected.cancel();
+        }
+    }
+}
+
 struct Input {
     reader: WireReader,
     write: SendLine,
-    refusals: mpsc::UnboundedReceiver<String>,
+    refusals: mpsc::Receiver<String>,
     seen: BTreeSet<String>,
     delivery: Arc<Delivery>,
 }
@@ -261,29 +276,46 @@ fn lines(
     delivery: Arc<Delivery>,
     write: SendLine,
 ) -> impl agent_client_protocol::ConnectTo<agent_client_protocol::Agent> {
+    let (outgoing, incoming) = split_lines(reader, delivery, write);
+    agent_client_protocol::Lines::new(Box::pin(outgoing), Box::pin(incoming))
+}
+
+fn split_lines(
+    reader: WireReader,
+    delivery: Arc<Delivery>,
+    write: SendLine,
+) -> (
+    impl Sink<String, Error = io::Error>,
+    impl Stream<Item = io::Result<String>>,
+) {
     // The peer can close its read pipe before EOF on its write pipe. Treat a
     // failed write to that pipe as disconnect, not a failed agent shutdown.
-    let disconnected = agent_api::CancellationToken::new();
+    let disconnected = CancellationToken::new();
     let write: SendLine = Arc::new({
         let disconnected = disconnected.clone();
         move |line| {
             let disconnected = disconnected.clone();
             let write = write.clone();
             Box::pin(async move {
-                if disconnected.is_cancelled() {
-                    return Ok(());
-                }
-                match write(line).await {
-                    Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+                match disconnected
+                    .run_until_cancelled(async { write(line).await })
+                    .await
+                {
+                    None => Ok(()),
+                    Some(Err(e)) if e.kind() == io::ErrorKind::BrokenPipe => {
                         disconnected.cancel();
                         Ok(())
                     }
-                    result => result,
+                    Some(result) => result,
                 }
             })
         }
     });
-    let (refuse, refusals) = mpsc::unbounded_channel();
+    let (tx, refusals) = mpsc::channel(LOCAL_REFUSALS);
+    let refuse = Refusals {
+        tx,
+        disconnected: disconnected.clone(),
+    };
     let input = Input {
         reader,
         write: write.clone(),
@@ -314,7 +346,7 @@ fn lines(
                 if let Some(id) = frame.get("id") {
                     if frame["method"].is_string() {
                         // Withhold an oversized question and settle its SDK waiter locally.
-                        let _ = refuse.send(error(
+                        refuse.send(error(
                             id,
                             -32000,
                             "withheld",
@@ -340,5 +372,59 @@ fn lines(
             Ok((write, refuse, delivery))
         },
     );
-    agent_client_protocol::Lines::new(Box::pin(outgoing), Box::pin(incoming))
+    (outgoing, incoming)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::{SinkExt, StreamExt, poll};
+    use std::task::Poll;
+
+    #[tokio::test]
+    async fn a_stalled_acp_reader_cannot_accumulate_local_refusals() {
+        let (tx, reader) = mpsc::channel(1);
+        let write_started = CancellationToken::new();
+        let write: SendLine = Arc::new({
+            let write_started = write_started.clone();
+            move |_| {
+                write_started.cancel();
+                Box::pin(std::future::pending())
+            }
+        });
+        let (outgoing, incoming) =
+            split_lines(WireReader::WebSocket(reader), Arc::default(), write);
+        let mut outgoing = Box::pin(outgoing);
+        let mut incoming = Box::pin(incoming);
+        // A local validation error is trying to write to the stalled peer, so
+        // the SDK's incoming stream is no longer draining local refusals.
+        tx.try_send(format!(
+            r#"{{"jsonrpc":"2.0","id":0,"method":"test","params":{}0{}}}"#,
+            "[".repeat(70),
+            "]".repeat(70)
+        ))
+        .unwrap();
+        let next = incoming.next();
+        tokio::pin!(next);
+        assert!(poll!(&mut next).is_pending());
+        assert!(write_started.is_cancelled());
+
+        for id in 1..=LOCAL_REFUSALS + 1 {
+            outgoing
+                .send(
+                    json!({"jsonrpc":"2.0","id":id,"method":"session/request_permission",
+                "params":{"sessionId":"withheld"}})
+                    .to_string(),
+                )
+                .await
+                .unwrap();
+            if id <= LOCAL_REFUSALS {
+                assert!(
+                    poll!(&mut next).is_pending(),
+                    "closed before filling the queue"
+                );
+            }
+        }
+        assert!(matches!(poll!(&mut next), Poll::Ready(None)));
+    }
 }

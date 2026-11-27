@@ -129,10 +129,10 @@ async function validateResume(input: TurnInput, host: RuntimeHost, interrupted: 
  */
 export function servePlugins(options: ServeOptions, service?: ServiceConnection): Promise<void> {
 	const write = service ? socketWriter(service.ws) : options.output ?? streamWriter(process.stdout);
-	let closed = () => {};
+	let closed: (abortTransport: boolean) => void = () => {};
 	let registered = false;
 	const startup = new Set(["plugin/initialize", "plugin/shutdown", "$/ping"]);
-	const peer = new WirePeer(write, () => closed(), method => {
+	const peer = new WirePeer(write, abortTransport => closed(abortTransport), method => {
 		if (method === "plugin/initialize") registered = true;
 		if (method === "plugin/shutdown") service?.ws.close(1000);
 	}, service ? method => registered || startup.has(method) : undefined);
@@ -655,8 +655,9 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 	peer.handle("plugin/shutdown", async (_, { id }) => (await shutdown(id), {}));
 
 	if (service) return new Promise(resolve => {
-		closed = () => {
-			if (service.ws.readyState === service.ws.OPEN) service.ws.close(1002);
+		closed = abortTransport => {
+			if (abortTransport) service.ws.terminate();
+			else if (service.ws.readyState === service.ws.OPEN) service.ws.close(1002);
 			void shutdown().then(resolve);
 		};
 		receiveMessages(service.ws, bytes => { if (!shuttingDown) peer.message(bytes); });
@@ -665,7 +666,11 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 	});
 	const input = options.input ?? process.stdin;
 	return new Promise((resolve) => {
-		closed = () => { input.pause?.(); void shutdown().then(() => resolve()); };
+		closed = abortTransport => {
+			input.pause?.();
+			if (abortTransport && !options.output) process.stdout.destroy();
+			void shutdown().then(resolve);
+		};
 		input.on("data", (chunk: Buffer | string) => peer.feed(chunk));
 		const end = () => peer.close("the host closed the connection");
 		input.on("end", end);

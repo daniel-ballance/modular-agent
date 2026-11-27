@@ -154,7 +154,11 @@ impl Endpoint for Host {
     }
 }
 
-async fn connect(websocket: bool, host: Arc<Host>, pause: Arc<Pause>) -> (Arc<Peer>, Either) {
+async fn connect(
+    websocket: bool,
+    host: Arc<dyn Endpoint>,
+    pause: Arc<Pause>,
+) -> (Arc<Peer>, Either) {
     let (server, client) = duplex(4096);
     let (reader, writer) = tokio::io::split(server);
     let server = Socket(writer, reader, pause);
@@ -346,6 +350,79 @@ impl Either {
         };
         serde_json::from_str(&line).unwrap()
     }
+}
+
+struct NoWork;
+#[async_trait]
+impl Endpoint for NoWork {
+    async fn request(
+        &self,
+        _: Arc<Peer>,
+        _: Value,
+        method: &str,
+        _: Value,
+        _: CancellationToken,
+    ) -> Reply {
+        Err(Fault::unknown(method))
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stalled_stdio_and_websocket_close_when_the_outbound_queue_fills() {
+    for websocket in [false, true] {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let pause = Arc::new(Pause::default());
+            let (peer, _client) = connect(websocket, Arc::new(NoWork), pause.clone()).await;
+            let request = peer.call("test/held", json!({}), None, CancellationToken::new());
+            tokio::pin!(request);
+            assert!(futures_util::poll!(&mut request).is_pending());
+            pause.entered.notified().await;
+            assert_eq!(peer.tx.capacity(), OUTBOUND_FRAMES);
+
+            let cancel = CancellationToken::new();
+            let queued = peer.call("test/queued", json!({}), None, cancel.clone());
+            tokio::pin!(queued);
+            assert!(futures_util::poll!(&mut queued).is_pending());
+            for _ in 1..OUTBOUND_FRAMES {
+                peer.notify("test/output", json!({}));
+            }
+            assert_eq!(peer.tx.capacity(), 0);
+            assert!(!peer.closed.is_cancelled());
+
+            // Even cancellation must not wait for an outbound slot.
+            cancel.cancel();
+            assert_eq!(queued.await.unwrap_err().code, "lost");
+            assert_eq!(request.await.unwrap_err().code, "lost");
+            assert!(peer.overflowed.is_cancelled());
+            peer.finished.cancelled().await;
+            assert!(peer.pending.lock().unwrap().is_empty());
+            assert_eq!(peer.outbound_bytes.available_permits(), OUTBOUND_BYTES);
+        })
+        .await
+        .unwrap_or_else(|_| panic!("overflow did not disconnect: websocket={websocket}"));
+    }
+}
+
+#[tokio::test]
+async fn outbound_bytes_can_fill_before_message_slots() {
+    let (peer, _client) = connect(false, Arc::new(NoWork), Arc::default()).await;
+    let params = json!({"output":"é"});
+    let size = json!({"jsonrpc":"2.0","method":"test/output","params":params})
+        .to_string()
+        .len()
+        + 1;
+    // Leave exactly one frame's worth of bytes without a large allocation.
+    let _held = peer
+        .outbound_bytes
+        .clone()
+        .try_acquire_many_owned((OUTBOUND_BYTES - size) as u32)
+        .unwrap();
+    peer.notify("test/output", params.clone());
+    assert_eq!(peer.outbound_bytes.available_permits(), 0);
+    assert_eq!(peer.tx.capacity(), OUTBOUND_FRAMES - 1);
+    assert!(!peer.closed.is_cancelled());
+    peer.notify("test/output", params);
+    assert!(peer.overflowed.is_cancelled());
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -102,7 +102,10 @@ export function pluginSpecsFromEnv(env: NodeJS.ProcessEnv = process.env): Plugin
  */
 export async function startExternalPlugin(spec: ExternalPluginSpec, info: { project: string; home: string }): Promise<ExternalPlugin> {
 	const child = spawn(spec.command[0], spec.command.slice(1), { stdio: ["pipe", "pipe", "inherit"], env: { PATH: process.env.PATH, ...(spec.env ?? {}) } });
-	const peer = new WirePeer(streamWriter(child.stdin), () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
+	const peer = new WirePeer(streamWriter(child.stdin), () => {
+		child.stdin.destroy();
+		if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+	});
 	child.stdout.on("data", (chunk: Buffer) => peer.feed(chunk));
 	child.stdout.on("end", () => peer.close("The plugin closed its output"));
 	const exited = new Promise<void>((resolve) => child.on("close", () => resolve()));
@@ -141,9 +144,10 @@ export async function startPluginService(spec: ServicePluginSpec, info: { projec
 		}, interval);
 	};
 	const write = socketWriter(ws);
-	const peer = new WirePeer(line => { const sent = write(line); arm(); return sent; }, () => {
+	const peer = new WirePeer(line => { const sent = write(line); arm(); return sent; }, abortTransport => {
 		clearTimeout(silence);
-		if (ws.readyState === ws.OPEN) ws.close();
+		if (abortTransport) ws.terminate();
+		else if (ws.readyState === ws.OPEN) ws.close();
 	});
 	const ended = new Promise<void>(resolve => ws.once("close", () => { peer.close(); resolve(); }));
 	ws.on("error", () => peer.close("Plugin service WebSocket failed"));
