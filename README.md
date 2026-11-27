@@ -69,19 +69,16 @@ ma login chatgpt             # or grok, or claude (uses your Claude Code sign-in
 ma                           # in a project folder
 ```
 
-The TypeScript build is in [`typescript/packages/ma`](typescript/packages/ma/README.md).
-For local development, install or rebuild `ma` from the permanent `main` checkout so its links survive worktree cleanup. See [Evaluating ma on real work](CONTRIBUTING.md#evaluating-ma-on-real-work).
+Both `ma` builds support Linux and macOS, not Windows. The TypeScript build is in [`typescript/packages/ma`](typescript/packages/ma/README.md).
+For local development, install or rebuild `ma` from the permanent `main` checkout so its links survive worktree cleanup. The ongoing [week of real use (#20)](https://github.com/daniel-ballance/modular-agent/issues/20) has exercised live Providers on real work. See [Evaluating ma on real work](CONTRIBUTING.md#evaluating-ma-on-real-work). The SDKs also have [opt-in live checks](docs/sdk/testing.md#live-checks).
+
+Both SDKs offer several actors and session limits as options; `ma` leaves them off.
 
 ## Known gaps
 
-Tracked in #30. Real Provider use is tracked in #20.
-
-- **Command containment varies by OS.** Linux uses namespaces, ptrace and cgroups. macOS (Apple silicon; checked with `scripts/macos-check.sh`, which runs both language suites, reference checks and the ACP kit) uses process-group containment, not strong containment: a process that leaves its command's group is not stopped, so a command interrupted by a crash is never repeated there. Windows is unsupported.
-- **Few real requests.** The test suites use scripted models and local fakes. The ChatGPT, Grok and Claude subscription Providers have answered real requests through both `ma` builds, each reading a file through `codemode`, and the `openai` and `anthropic` API-key Providers pass the [live checks](docs/sdk/testing.md#live-checks) in both SDKs.
-- **`ma` turns off several actors, session limits and tenants.** The SDKs offer them as options.
-- **Parts as network services are new.** Both SDKs serve plugins and agents over the [WebSocket transport](docs/bindings/websocket.md), and the kits check each one, but only on loopback in tests; nothing has run across machines yet.
-
-Each SDK's README lists its own gaps.
+- **macOS command containment ([#255](https://github.com/daniel-ballance/modular-agent/issues/255)).** `ma` declares strong containment on Linux and process-group containment on macOS. On macOS, a process that leaves its command group is not stopped, so this guarantee cannot be used to replay a command after a crash.
+- **TypeScript `ma` tenant configuration ([#257](https://github.com/daniel-ballance/modular-agent/issues/257)).** Rust `ma` enables tenants when the operator names them in connection policy and supplies their deployment configuration. TypeScript `ma` does not pass that deployment configuration to its SDK.
+- **WebSocket deployment verification ([#269](https://github.com/daniel-ballance/modular-agent/issues/269)).** Both SDKs serve plugins and ACP agents over [WebSocket](docs/bindings/websocket.md). The WebSocket kits run on loopback rather than between separate machines.
 
 ## The specification
 
