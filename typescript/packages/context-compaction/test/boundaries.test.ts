@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isToolCall, modelView, text, type HistoryEntry, type ModelMessage } from "@modular-agent/harness";
+import { isToolCall, modelView, text, type AssistantMessage, type HistoryEntry, type ModelMessage } from "@modular-agent/harness";
 import { compact } from "../src/index.js";
 
-function fixture() {
+function fixture(summary: AssistantMessage = { role: "assistant", stop: "finished", content: [text("Goal and settled outcomes")] }) {
 	const history: HistoryEntry[] = [];
 	const add = (id: string, kind: string, message?: ModelMessage, data?: unknown) => history.push({
 		id, kind, message, data, modelVisible: !!message, parentId: history.at(-1)?.id ?? null,
@@ -23,7 +23,10 @@ function fixture() {
 		modelAccess: () => ({
 			model: { id: "fake", provider: "fake", contextWindow: 1000, maxOutput: 100, input: ["text"], reasoning: false },
 			supports: {},
-			request: async () => ({ role: "assistant", stop: "finished", content: [text("Goal and settled outcomes")] }),
+			request: async (request) => {
+				assert.deepEqual(request.settings, {});
+				return summary;
+			},
 		}),
 		append: async (_session, draft) => {
 			const entry = { ...draft, id: `summary-${history.length}`, parentId: history.at(-1)!.id, sessionId: "session", time: history.length };
@@ -34,6 +37,39 @@ function fixture() {
 	} satisfies Parameters<typeof compact>[0];
 	return { history, add, response, result, compact: () => compact(api, "session", 0) };
 }
+
+test("an output-limited summary is recorded with its sources", async () => {
+	const content = [text("Goal and settled outcomes")];
+	const f = fixture({ role: "assistant", stop: "length", content });
+	for (const step of ["a", "b"]) { f.response(step, step); f.result(step); }
+	assert.equal(await f.compact(), true);
+	const summaries = f.history.filter((entry) => entry.kind === "summary");
+	assert.equal(summaries.length, 1);
+	assert.deepEqual(summaries[0].sources, ["prompt", "a", "result-a"]);
+	assert.deepEqual(modelView(f.history)[0], { role: "user", content });
+});
+
+test("invalid summary responses leave history intact", async () => {
+	const prose = text("Goal and settled outcomes");
+	const call = { type: "toolCall", id: "unexpected", name: "read", arguments: {} } as const;
+	const cases: Pick<AssistantMessage, "stop" | "content">[] = [
+		{ stop: "length", content: [] },
+		{ stop: "length", content: [text(" \n\t")] },
+		{ stop: "length", content: [prose, call] },
+		{ stop: "finished", content: [prose, call] },
+		{ stop: "toolUse", content: [prose] },
+		{ stop: "failed", content: [prose] },
+		{ stop: "refused", content: [prose] },
+		{ stop: "aborted", content: [prose] },
+	];
+	for (const response of cases) {
+		const f = fixture({ role: "assistant", ...response });
+		for (const step of ["a", "b"]) { f.response(step, step); f.result(step); }
+		const before = structuredClone(f.history);
+		await assert.rejects(f.compact(), /Summary request did not produce a summary/, JSON.stringify(response));
+		assert.deepEqual(f.history, before);
+	}
+});
 
 test("settled calls with late results cannot be split, and an Interface handoff stays pending", async () => {
 	const f = fixture();

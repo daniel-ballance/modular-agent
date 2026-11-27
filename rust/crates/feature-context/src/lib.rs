@@ -156,7 +156,7 @@ async fn compact(api: Api, scope: &Scope, system: &str, force: bool, budget: u64
         Draft::new("model.response", false, json!(response)).copying(vec![intent.id]),
     )?;
     ensure!(
-        response.stop == "finished"
+        matches!(response.stop.as_str(), "finished" | "length")
             && response.tool_calls().is_empty()
             && !response.text_content().trim().is_empty(),
         "invalid summary response"

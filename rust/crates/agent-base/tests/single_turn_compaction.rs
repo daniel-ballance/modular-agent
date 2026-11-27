@@ -10,6 +10,21 @@ enum Trigger {
     Command,
 }
 
+async fn rig_with_files(script: Vec<provider_fake::Script>, settings: Value) -> Rig {
+    let rig = Rig::with(script, vec![], vec![], settings).await;
+    std::fs::write(
+        rig.project.path().join("old.txt"),
+        "OLD-RESULT ".repeat(500),
+    )
+    .unwrap();
+    std::fs::write(
+        rig.project.path().join("recent.txt"),
+        "verbatim recent result",
+    )
+    .unwrap();
+    rig
+}
+
 async fn compact_one_turn(trigger: Trigger) {
     let old = ToolCall::new("read", json!({"path":"old.txt"}));
     let recent = ToolCall::new("read", json!({"path":"recent.txt"}));
@@ -22,24 +37,21 @@ async fn compact_one_turn(trigger: Trigger) {
         if matches!(trigger, Trigger::Overflow) {
             script.push(provider_fake::Script::failure(FailureKind::ContextTooLarge));
         }
-        script.extend([text(summary_text), text("comparison complete")]);
+        let mut summary = ModelResponse::text(summary_text);
+        if matches!(trigger, Trigger::Threshold) {
+            summary.stop = "length".into();
+        }
+        script.extend([
+            provider_fake::Script::response(summary),
+            text("comparison complete"),
+        ]);
     }
     let settings = if matches!(trigger, Trigger::Threshold) {
         json!({"context_tokens": 1100, "keep_recent_tokens": 500})
     } else {
         json!({})
     };
-    let rig = Rig::with(script, vec![], vec![], settings).await;
-    std::fs::write(
-        rig.project.path().join("old.txt"),
-        "OLD-RESULT ".repeat(500),
-    )
-    .unwrap();
-    std::fs::write(
-        rig.project.path().join("recent.txt"),
-        "verbatim recent result",
-    )
-    .unwrap();
+    let rig = rig_with_files(script, settings).await;
     assert_eq!(rig.run(goal).await.outcome, Outcome::Completed);
     if matches!(trigger, Trigger::Command) {
         let reply = rig
@@ -114,8 +126,59 @@ async fn compact_one_turn(trigger: Trigger) {
 }
 
 #[tokio::test]
-async fn automatic_compaction_can_shorten_one_long_turn() {
+async fn automatic_compaction_accepts_a_summary_at_the_output_limit() {
     compact_one_turn(Trigger::Threshold).await;
+}
+
+#[tokio::test]
+async fn invalid_summary_responses_fail_without_recording_a_summary() {
+    for (stop, content, has_call) in [
+        ("length", "", false),
+        ("length", " \n\t", false),
+        ("length", "summary", true),
+        ("finished", "summary", true),
+        ("tools", "summary", false),
+        ("failed", "summary", false),
+        ("refused", "summary", false),
+        ("aborted", "summary", false),
+    ] {
+        let mut summary = ModelResponse::text(content);
+        summary.stop = stop.into();
+        if has_call {
+            summary.parts.push(Part::ToolCall {
+                call: ToolCall::new("read", json!({"path":"unexpected.txt"})),
+            });
+        }
+        let rig = rig_with_files(
+            vec![
+                calls(vec![ToolCall::new("read", json!({"path":"old.txt"}))]),
+                calls(vec![ToolCall::new("read", json!({"path":"recent.txt"}))]),
+                provider_fake::Script::response(summary),
+                text("comparison complete"),
+            ],
+            json!({"context_tokens": 1100, "keep_recent_tokens": 500}),
+        )
+        .await;
+        assert_eq!(
+            rig.run("Compare the two files").await.outcome,
+            Outcome::Failed,
+            "{stop}, text {content:?}, tool call {has_call}"
+        );
+        let branch = rig.data().branch();
+        assert!(!branch.iter().any(|e| e.kind == "summary"));
+        let view = messages(&branch).unwrap();
+        assert_eq!(
+            view.iter().filter(|message| message.role == "tool").count(),
+            2
+        );
+        assert_eq!(
+            branch.iter().filter(|e| e.kind == "tool.started").count(),
+            2
+        );
+        let requests = rig.probe.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].system.contains("Summarize"));
+    }
 }
 
 #[tokio::test]

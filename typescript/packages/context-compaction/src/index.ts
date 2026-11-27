@@ -117,12 +117,12 @@ export async function compact(
 			messages: [{ role: "user", content: [text(`Summarize this conversation:\n\n${transcript(older.map(({ message }) => message))}`)] }],
 			tools: [],
 			providerTools: "none",
-			settings: { maxOutput: 1024 },
+			settings: {},
 		},
 		{ signal: new AbortController().signal, sessionId },
 	);
 	const summary = textOf(response.content);
-	if (response.stop !== "finished" || !summary.trim() || response.content.some(isToolCall)) {
+	if ((response.stop !== "finished" && response.stop !== "length") || !summary.trim() || response.content.some(isToolCall)) {
 		throw new Error("Summary request did not produce a summary");
 	}
 	// The summary copies what it summarizes, including any earlier summary: erasing any of them erases it.

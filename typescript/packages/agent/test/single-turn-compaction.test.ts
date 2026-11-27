@@ -28,7 +28,9 @@ for (const trigger of ["threshold", "overflow", "command"] as const) {
 			const request = JSON.stringify(ctx.messages);
 			assert.ok(request.includes(goal) && request.includes("OLD-RESULT"));
 			assert.ok(!request.includes("verbatim recent result"));
-			return fauxAssistantMessage("Goal: compare the files. The old file was inspected.");
+			return fauxAssistantMessage("Goal: compare the files. The old file was inspected.", {
+				stopReason: trigger === "threshold" ? "length" : "stop",
+			});
 		};
 		const answer: FauxResponseStep = (ctx) => {
 			const request = JSON.stringify(ctx.messages);
