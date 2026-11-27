@@ -16,7 +16,7 @@ import { InterfaceToolRoutes } from "./interface-tool-routes.js";
 import { connectionRights } from "./connection-authority.js";
 import { InputRequests } from "./input-requests.js";
 import { Jobs } from "./jobs.js";
-import { SessionErasure } from "./session-erasure.js";
+import { SessionErasure, type ReconcileErasureOptions } from "./session-erasure.js";
 import { ApprovalReconciliation } from "./approval-reconciliation.js";
 import { failure } from "./failure.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -378,6 +378,8 @@ export class Harness {
 		findTool: (s, name) => this.findTool(s, name),
 		actorRights: (s, actor) => this.authority.actorRights(s, actor),
 		originalWorkAllows: (s, approval) => this.authority.originalWorkAllows(s, approval),
+		retryErasure: s => this.erasure.reconcilePending(s),
+		checkErasure: s => this.erasure.admitHistory(s),
 		exitTurn: work => this.authority.turnAuthority.exit(work),
 		exitConnection: work => connectionRights.exit(work),
 		commit: (...args) => this.commit(...args),
@@ -411,6 +413,9 @@ export class Harness {
 			providers: () => this.useAll<Provider>("provider"),
 			checkWriter: s => this.lifecycle.checkWriter(s),
 			settleJobs: s => this.jobWork.settleForErasure(s),
+			jobsRunning: s => this.jobWork.runningJobs(s).some(({job}) => ![...s.entries.values()].some(e => e.kind === "jobCleanupUnconfirmed" && e.jobId === job.id)),
+			inScope: (project, tenant) => (!this.project || project === this.project) && (tenant === undefined || this.tenants.has(tenant)),
+			withQuietWriter: (id, work) => this.lifecycle.withQuietWriter(id, work),
 			invalidateErasedHandoffs: (...args) => this.interfaceTools.invalidateErasedHandoffs(...args),
 			commitNow: (...args) => this.historyCommit.commitNow(...args),
 			write: (s, write) => this.lifecycle.write(s, write),
@@ -845,16 +850,11 @@ export class Harness {
 		return this.lifecycle.hostView(id, actor, scope);
 	}
 
+	reconcileErasure(options: ReconcileErasureOptions) { return this.erasure.retrySessions(options); }
 	private activePlugins() { return this.loaded.map(({ plugin: { name, origin } }) => ({ name, ...(origin ? { origin } : {}) })); }
 
-	forkSession(sessionId: string, entryId: string): Promise<string> {
-		return this.lifecycle.forkSession(sessionId, entryId);
-	}
-
-	closeSession(id: string, actorId?: string, delegatedBy?: string, authority?: readonly Authority[]): Promise<void> {
-		return this.lifecycle.closeSession(id, actorId, delegatedBy, authority);
-	}
-
+	forkSession(sessionId: string, entryId: string) { return this.lifecycle.forkSession(sessionId, entryId); }
+	closeSession(id: string, actorId?: string, delegatedBy?: string, authority?: readonly Authority[]) { return this.lifecycle.closeSession(id, actorId, delegatedBy, authority); }
 	/** Commit drafts to the session. All are kept, or none are. */
 	commit(s: Session, drafts: EntryDraft[], pluginRecord = false, guard?: () => boolean | Promise<boolean>): Promise<HistoryEntry[]> {
 		return this.historyCommit.commit(s, drafts, pluginRecord, guard);
@@ -862,6 +862,7 @@ export class Harness {
 
 	private async setSetting(s: Session, key: string, value: unknown, writer: string, actorId?: string): Promise<void> {
 		if (actorId) this.authority.requireAuthority(s, actorId, "settings");
+		await this.erasure.reconcilePending(s);
 		if (this.settingsDuringTurn === "refused" && s.isBusy()) throw Object.assign(new Error("Cannot change settings during a turn"), { code: "busy" });
 		await this.commit(s, [{ kind: "setting", writer, actorId, modelVisible: false, data: { key, value } }]);
 		if (s.hasWaitingApprovals) await this.approvals.reconcileApprovals(s);

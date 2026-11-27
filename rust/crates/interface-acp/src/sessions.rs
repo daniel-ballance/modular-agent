@@ -110,7 +110,7 @@ impl Session {
             !self.stop.is_cancelled() && !self.drive_stop.is_cancelled(),
             request_error("not_open", "session is detached")
         );
-        let data = self.api.snapshot(&self.id)?;
+        let data = self.api.authority_snapshot(&self.id)?;
         let allowed = PRINCIPAL
             .try_with(|identity| {
                 self.factory.serves_project(&data.project) && in_scope(identity, &data)

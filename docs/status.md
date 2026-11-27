@@ -4,9 +4,9 @@
 
 Rust and TypeScript are the two maintained SDKs and `ma` builds ([ADR 0037](adr/0037-two-languages.md)). Go and Python were removed from `main` after the [`four-languages`](https://github.com/daniel-ballance/modular-agent/tree/four-languages) tag. Their code and results stand as evidence at that tag.
 
-## Production gaps
+## Production rules
 
-Remaining ADR 0030 work is tracked in #19. [Cross-session erasure](contracts.md#cross-session-coordination) leaves copies pending when affected job cleanup cannot be confirmed.
+[Cross-session erasure](contracts.md#cross-session-coordination) retries at authorized entry points and through operator reconciliation. A copy stays pending when affected job cleanup cannot be confirmed.
 
 [ADR 0021](adr/0021-production-edition.md) listed four gaps. [Secret staging and recovery](contracts.md#secrets) shipped first. [ADR 0029](adr/0029-sdk-decisions-after-four-builds.md) settled ACP service token scope and rights ceilings, and [ADR 0030](adr/0030-production-gaps.md) set the rules for the other three. All four SDKs and `ma` passed checks for them on 2026-11-21, using the opt-in kits run through `scripts/production-kits.sh` and `scripts/erasure-matrix.sh`:
 
@@ -16,7 +16,7 @@ Remaining ADR 0030 work is tracked in #19. [Cross-session erasure](contracts.md#
 | Resource reservations | [Resource reservations](contracts.md#resource-reservations), [Security](security.md#resource-limits-and-denial-of-service) | ACP `--capacity-checks`: races for the last slot, `busy` with no admission, settlement of questions and jobs while full, `capacity` inside a turn |
 | Cross-session erasure coordination | [Cross-session coordination](contracts.md#cross-session-coordination), [pending-erasure registry profile](bindings/history-http.md#pending-erasure-registry-profile-pendingerasure-1) | ACP `--erasure-checks`, including crash cutoffs and the next writer completing; the history kit's registry checks across a restart in all four services; each language's agents on every language's history service, 16 pairings |
 
-**What the checks do not establish.** Byte limits are counted logically: they do not reserve physical disk, and the operator provides the extra space a backend needs for framing, journals and atomic replacement. Scope is rechecked when a queued reply leaves its queue, but not every transport proves it at the last socket handoff. A deletion is not held until every external effect already in flight has finished, and restoring a backup still needs separate proof that it is current. Each SDK's README lists its own remaining items. Full production readiness is not claimed.
+**What the checks do not establish.** Byte limits are counted logically: they do not reserve physical disk, and the operator provides the extra space a backend needs for framing, journals and atomic replacement. These checks do not attest deletion by external recipients or changes to independently managed authority. Restoring a backup still needs separate proof that it is current. Full production readiness is not claimed.
 
 ## 0.4.0
 

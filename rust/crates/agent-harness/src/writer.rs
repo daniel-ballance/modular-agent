@@ -74,7 +74,7 @@ impl Harness {
         open.check_rewind()?;
         self.check_open_writer(open)?;
         if retry_erasure {
-            self.refresh_open_erasure(open)?;
+            self.check_open_erasure(open)?;
         }
         open.environment_work += 1;
         Ok(Box::new(EnvironmentWork {

@@ -114,7 +114,7 @@ export interface LeasedHistoryStore {
 }
 
 type Grant = { lease: string; ttlMs: number };
-type Caps = { ttlMs: number; retention?: number | null; pendingErasure?: unknown };
+type Caps = { ttlMs: number; retention?: number | null; pendingErasure?: unknown; pendingErasureIndex?: unknown };
 interface HistoryPort {
 	readonly remote?: boolean;
 	initialize(signal: AbortSignal): Promise<Caps>;
@@ -123,6 +123,7 @@ interface HistoryPort {
 	renew(id: string, lease: string, signal: AbortSignal): Promise<{ ttlMs: number }>;
 	release(id: string, lease: string, signal: AbortSignal): Promise<unknown>;
 	append(id: string, lease: string, entries: HistoryEntry[], signal: AbortSignal, revision?: string): Promise<unknown>;
+	index?(after: string | undefined, signal: AbortSignal): Promise<unknown>;
 	plans?(id: string, after: string | undefined, signal: AbortSignal): Promise<unknown>;
 	publish?(id: string, lease: string, intent: ErasurePublication, signal: AbortSignal): Promise<unknown>;
 	complete?(id: string, lease: string, intentId: string, entryIds: string[], signal: AbortSignal): Promise<unknown>;
@@ -156,6 +157,7 @@ class HistoryWriter implements HistoryStore {
 		if (caps.pendingErasure === 1 && this.port.plans && this.port.publish && this.port.complete) {
 			this.historyErasure = {
 				read: id => this.plans(id),
+				...(caps.pendingErasureIndex === 1 && this.port.index && { discover: () => this.pendingIndex() }),
 				publish: async (id, intent) => {
 					const lease = this.leases.get(id);
 					if (!lease) throw new ServiceError(409, "Erasure requires a source lease", "lost");
@@ -300,6 +302,28 @@ class HistoryWriter implements HistoryStore {
 		this.checkWriter(id);
 		if (this.historyErasure) await this.guardedAppend(id, lease!, batch, pending?.meta.forkedFrom?.sessionId, options?.forkErasureView);
 		else await this.mutate(id, signal => this.port.append(id, lease!.value, batch, signal), lease);
+	}
+	private async pendingIndex(): Promise<string[]> {
+		let revision: string | undefined, after: string | undefined;
+		const sessions = new Set<string>();
+		try {
+			do {
+				const page = await this.port.index!(after, timeout(10_000));
+				if (!shape(page, ["revision", "sessions"], ["next"]) || !validLease(page.revision) ||
+					(revision !== undefined && revision !== page.revision) || !Array.isArray(page.sessions) || page.sessions.length > 500 ||
+					(after !== undefined && !page.sessions.length)) throw unavailable("Invalid erasure index page");
+				revision = page.revision;
+				for (const row of page.sessions) {
+					if (!shape(row, ["sessionId", "intentIds"]) || !pathName(row.sessionId) || sessions.has(row.sessionId) ||
+						!Array.isArray(row.intentIds) || !row.intentIds.length || !row.intentIds.every(pathName) ||
+						new Set(row.intentIds).size !== row.intentIds.length) throw unavailable("Invalid erasure index row");
+					sessions.add(row.sessionId);
+				}
+				if (Object.hasOwn(page, "next") && (!pathName(page.next) || page.next === after || page.next !== page.sessions.at(-1)?.sessionId)) throw unavailable("Invalid erasure index cursor");
+				after = page.next as string | undefined;
+			} while (after !== undefined);
+			return [...sessions];
+		} catch (cause) { throw Object.assign(new Error("Pending erasure index is unavailable", { cause }), { code: "unavailable" }); }
 	}
 	private async plans(id: string) {
 		try {
@@ -490,6 +514,7 @@ export class HttpHistoryStore extends HistoryWriter {
 			renew: (id, lease, signal) => call(client, "POST", path(id, `/lease/${pathId(lease)}/renew`), { signal }),
 			release: (id, lease, signal) => call(client, "DELETE", path(id, `/lease/${pathId(lease)}`), { signal }),
 			append: (id, lease, entries, signal, historyRevision) => call(client, "POST", path(id, "/entries"), { body: { lease, entries }, signal, historyRevision }),
+			index: (after, signal) => call(client, "GET", "/v1/pending-erasure" + query({ after, limit: 500 }), { signal, noStore: true }),
 			plans: (id, after, signal) => call(client, "GET", path(id, "/pending-erasure") + query({ after, limit: 500 }), { signal, noStore: true }),
 			publish: (id, lease, intent, signal) => call(client, "POST", path(id, "/pending-erasure"), { body: { ...intent, lease }, signal }),
 			complete: (id, lease, intentId, entryIds, signal) => call(client, "POST", path(id, `/pending-erasure/${pathId(intentId)}/complete`), { body: { lease, entryIds }, signal }),

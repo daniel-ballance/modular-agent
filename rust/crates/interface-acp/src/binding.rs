@@ -456,7 +456,7 @@ pub(crate) async fn extension(
         let represented = represented_actors();
         if actor != connection_actor.as_str()
             && (!represented.iter().any(|id| id == actor)
-                || !actors(&session.api.snapshot(&session.id)?).contains_key(actor))
+                || !actors(&session.api.authority_snapshot(&session.id)?).contains_key(actor))
         {
             return Err(
                 request_error("forbidden", "connection does not represent this actor").into(),
@@ -620,6 +620,7 @@ pub(crate) async fn extension(
         }
         "history" => {
             require(api, &scope, "watch")?;
+            api.retry_open_erasure(&session.id).await?;
             history(&session, p).await
         }
         "input" => {
@@ -743,6 +744,7 @@ pub(crate) async fn extension(
                 .gate
                 .try_lock()
                 .map_err(|_| request_error("busy", "session busy"))?;
+            api.retry_open_erasure(&session.id).await?;
             let data = session.api.snapshot(&session.id)?;
             let branch = data.branch();
             ensure!(

@@ -392,7 +392,9 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				}
 			});
 			peer.handle("host/session", async (p) => {
-				const s = api.session(sessionOf(p));
+				const id = sessionOf(p);
+				await api.checkPending(id);
+				const s = api.session(id);
 				return { id: s.id, project: api.projectOf(s.id), settings: s.settings, busy: s.busy, actors: s.actors.map(({ authority, ...a }) => ({ ...a, rights: authority })) };
 			});
 			peer.handle("host/declaration", async (p) => {

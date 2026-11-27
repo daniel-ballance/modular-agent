@@ -174,6 +174,10 @@ pub trait AgentApi: Send + Sync {
     async fn cancel(&self, session: &str) -> Result<Vec<Input>>;
     async fn withdraw(&self, session: &str, input: &str) -> Result<Input>;
     async fn history_view(&self, session: &str) -> Result<Value>;
+    /// Call only after authorizing an operation that triggers erasure reconciliation.
+    async fn retry_open_erasure(&self, _session: &str) -> Result<()> {
+        Ok(())
+    }
     fn declaration(&self) -> Result<Value>;
     /// Signals that the open session's writer can no longer commit.
     fn writer_interruption(&self, _session: &str) -> Result<CancellationToken> {
@@ -209,6 +213,10 @@ pub trait AgentApi: Send + Sync {
         json!({"plugin":capability,"toolSource":capability.strip_prefix("tools.").unwrap_or(capability)})
     }
     fn snapshot(&self, session: &str) -> Result<SessionData>;
+    /// Internal authority and scope metadata. Not a delivery view.
+    fn authority_snapshot(&self, session: &str) -> Result<SessionData> {
+        self.snapshot(session)
+    }
     /// Internal job settlement view; not a history read or a grant to run work.
     fn job_records(&self, session: &str) -> Result<Vec<Job>> {
         jobs(&self.snapshot(session)?)
@@ -376,6 +384,10 @@ pub trait HistoryStore: Send + Sync {
         false
     }
     fn acquire(&self, session: &str) -> Result<Box<dyn Lease>>;
+    /// Acquire only if free, without waiting for a hold or lease to expire.
+    fn acquire_for_erasure(&self, session: &str) -> Result<Box<dyn Lease>> {
+        self.acquire(session)
+    }
     fn load(&self, session: &str) -> Result<SessionData>;
     /// Read a committed snapshot for discovery, without acquiring a writer.
     fn inspect(&self, session: &str) -> Result<SessionData> {
@@ -400,6 +412,13 @@ pub trait HistoryStore: Send + Sync {
     /// Check a retained view against the authoritative registry.
     fn check_erasure(&self, _data: &SessionData) -> Result<()> {
         Ok(())
+    }
+    /// Registry discovery; `None` means this backend does not expose an index.
+    fn pending_erasure_sessions(&self) -> Result<Option<Vec<String>>> {
+        Ok(None)
+    }
+    fn pending_erasure_ids(&self, _session: &str) -> Result<Vec<String>> {
+        Ok(vec![])
     }
     /// Previously verified tombstones, without attempting another writer acquisition.
     fn confirmed_erasure(&self, _session: &str) -> Result<Vec<String>> {

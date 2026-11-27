@@ -196,6 +196,12 @@ impl HistoryStore for FileHistory {
     ) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
         self.mark(source, targets)
     }
+    fn pending_erasure_sessions(&self) -> Result<Option<Vec<String>>> {
+        Ok(Some(self.pending_copies()?.into_keys().collect()))
+    }
+    fn pending_erasure_ids(&self, session: &str) -> Result<Vec<String>> {
+        Ok(self.pending_copies()?.remove(session).unwrap_or_default())
+    }
     fn confirmed_erasure(&self, session: &str) -> Result<Vec<String>> {
         self.confirmed(session)
     }

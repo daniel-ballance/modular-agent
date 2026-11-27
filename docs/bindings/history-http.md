@@ -147,6 +147,12 @@ The base authentication, paths, error order, media type and body limit apply. Th
 - All request arrays MUST be nonempty. Entry IDs in an array and session IDs in `copies` MUST be distinct. The source session MUST appear in `copies`, covering all requested source targets. A violation, unknown field or malformed revision is `400 invalid_request`.
 - Registry GET MUST read authoritative state without a lease, include pending and completed plans, and send `Cache-Control: no-store`. It MUST also return plans for reserved IDs whose records expired; a never-created ID gives `404 unknown_session`. Plans are in intent publication order; copy order is the published order. Paging follows the [4 MiB prefix rule](#sessions), with the last plan's `intentId` as `next`. An unknown `after` gives `404 unknown_intent`. Publication MUST refuse a plan that would not fit by itself with the largest allowed revision and its intent ID as `next` (`413 request_too_large`).
 
+### Discovery index (`pendingErasureIndex: 1`)
+
+A service with the registry profile MAY declare `pendingErasureIndex: 1` in `GET /v1`. It MUST omit the field and route if it does not implement discovery. `GET /v1/pending-erasure?after&limit` requires no lease and returns `{ revision: Revision, sessions: { sessionId: Id, intentIds: Id[] }[], next?: Id }` with `Cache-Control: no-store`. Each session appears once, with the distinct intent IDs that have at least one incomplete copy there. The reply contains no payload, entry IDs or input keys.
+
+Use the registry GET paging rules, with sessions ordered by ID and the last row's `sessionId` as `next`. An unknown `after` gives `404 unknown_session`. A client MUST read all pages at the same revision or return `unavailable`. Without the index a Harness uses explicit IDs or the IDs returned by publication; it MUST NOT discover by scanning session histories.
+
 ### Publication and completion
 
 - The revision is shared by all sessions in one service. The service MUST change it atomically with any committed change to session metadata, entries or registry state, and MUST NOT reuse a revision for a different state, including across restart or failover. No-op requests need not change it. Revisions do not prove restore freshness.
@@ -166,6 +172,8 @@ The base authentication, paths, error order, media type and body limit apply. Th
 The client MUST check `GET /v1` before use and refuse a binding it does not speak. The service MUST use the declared `ttlMs` for grants and renewals. Absent or null `retention` disables expiry. Otherwise the service MUST treat the session as expired at operation lookup when it has no current lease and the declared interval since its last metadata or entry change has elapsed. An expired session and its cursors are unknown; its ID stays reserved. Sweeps reclaim storage, not authority. Expiry does not confirm erasure or reset usage.
 
 ## Changes
+
+- **2026-11-27.** Add the optional `pendingErasureIndex: 1` discovery route without changing the binding version or the registry profile.
 
 - **2026-11-25.** In a service whose backing store holds no writer leases, a renewal of a current lease must not wait for storage work on another session. In such a service, a write under a lease checks that lease immediately before it commits. The Go, Rust, TypeScript and Python services over their built-in stores met both rules at the four-language checkpoint.
 

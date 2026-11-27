@@ -304,6 +304,19 @@ export class Records {
 		this.revision();
 		this.db.prepare("UPDATE registry_revision SET revision=?").run(randomBytes(32).toString("hex"));
 	}
+	pendingIndex(after: string | undefined, limit: number) {
+		const revision = this.revision();
+		const rows = this.db.prepare(`WITH pending AS (
+			SELECT session, intent FROM registry_plans WHERE EXISTS (
+				SELECT 1 FROM json_each(json, '$.copies') WHERE json_extract(value, '$.complete') = 0
+			)
+		) SELECT session AS id, json_object('sessionId', session, 'intentIds', json_group_array(registry_intents.id)) AS json
+			FROM pending JOIN registry_intents ON seq=intent WHERE session>? GROUP BY session ORDER BY session LIMIT ?`);
+		if (after !== undefined && !this.db.prepare(`SELECT 1 FROM registry_plans WHERE session=? AND EXISTS (
+			SELECT 1 FROM json_each(json, '$.copies') WHERE json_extract(value, '$.complete') = 0
+		)`).get(after)) throw unknownSession();
+		return page(`{"revision":${JSON.stringify(revision)},"sessions":[`, rows.iterate(after ?? "", limit + 1) as Iterable<Row>, limit);
+	}
 	plans(sid: string, after: string | undefined, limit: number) {
 		const revision = this.revision();
 		if (!this.db.prepare("SELECT 1 FROM sessions WHERE id=?").get(sid)) throw unknownSession();

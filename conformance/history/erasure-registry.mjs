@@ -87,7 +87,10 @@ export async function runErasureRegistry(options) {
 
 async function verifyRegistry({ url, tokenFile, project, req, check, ttl, restart, trace }, c) {
 	const declare = (r) => r.status === 200 && r.body?.pendingErasure === 1;
-	const supported = declare(await req("GET", "/v1"));
+	const declaration = await req("GET", "/v1");
+	const indexed = declaration.body?.pendingErasureIndex === 1;
+	const index = (query = "") => req("GET", `/v1/pending-erasure${query}`);
+	const supported = declare(declaration);
 	check("registry: GET /v1 declares pendingErasure: 1", supported);
 	if (!supported) return;
 
@@ -142,6 +145,19 @@ async function verifyRegistry({ url, tokenFile, project, req, check, ttl, restar
 		const marked = await c.plans(dest);
 		check("registry: pending plan has the stable record and copy IDs; raw reads are unchanged",
 			hasPlan(marked, [plan(false)]) && marked.body.revision !== snapshot.body.revision && (await c.read(dest)).body?.entries?.some(e => equal(e, copy)));
+		if (indexed) {
+			const first = await index("?limit=1");
+			const second = await index(`?limit=1&after=${encodeURIComponent(first.body?.next)}`);
+			const ordered = [source, dest].sort().map(sessionId => ({ sessionId, intentIds: [intentId] }));
+			check("index: lease-free pages share the registry revision and list only incomplete sessions",
+				first.headers.get("cache-control") === "no-store" &&
+				ok(first, {revision: marked.body.revision, sessions: ordered.slice(0, 1), next: ordered[0].sessionId}) &&
+				ok(second, {revision: marked.body.revision, sessions: ordered.slice(1)}));
+			check("index: authentication, query bounds and cursor are enforced",
+				err(await req("GET", "/v1/pending-erasure", undefined, {auth: null}), 401, "unauthorized") &&
+				err(await index("?limit=501"), 400, "invalid_request") &&
+				err(await index(`?after=${id()}`), 404, "unknown_session"));
+		}
 		check("registry: independent reader refuses its cached copy after publication", await reader("cached-refused", { dest }));
 		check("registry: stale guarded append is fenced even with the current destination lease",
 			err(await c.append(dest, destLease, [{ id: id(), parentId: null, sources: [copy.id] }], snapshot.body.revision), 409, "stale_revision"));
@@ -161,6 +177,13 @@ async function verifyRegistry({ url, tokenFile, project, req, check, ttl, restar
 			check("registry: a matching erasure record alone does not confirm deletion", result.bookOnlyRefused);
 			check("registry: writer B completes with a tombstone; repeat completion is harmless", result.completed);
 		});
+		if (indexed) {
+			const found = await index();
+			check("index: verified completion removes only the completed session and changes the revision",
+				found.body?.revision !== marked.body.revision && ok(found, {
+					revision: found.body.revision, sessions: [{sessionId: source, intentIds: [intentId]}],
+				}));
+		}
 		check("registry: completed plan still refuses a stale view; fresh view has no copy payload",
 			hasPlan(await c.plans(dest), [plan(true)]) && await reader("cached-refused", { dest }) && await reader("fresh-tombstone", { dest, copy }));
 		check("registry: completion and the tombstone also survive restart",

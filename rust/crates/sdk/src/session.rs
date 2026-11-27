@@ -345,7 +345,6 @@ impl Session {
     }
 
     fn require(&self, right: &str) -> Result<()> {
-        self.snapshot()?;
         base::require(
             self.inner.harness.as_ref(),
             &base::Scope::session(&self.id),
@@ -428,7 +427,7 @@ impl Session {
 
     pub async fn leave(&self, actor_id: &str) -> Result<()> {
         self.check_actor_option()?;
-        let data = self.snapshot()?;
+        let data = self.inner.harness.authority_snapshot(&self.id)?;
         if actor_id != self.actor {
             self.require("grant")?;
         }
@@ -578,7 +577,6 @@ impl Session {
 
     /// Answer an open question by id.
     pub async fn answer(&self, id: &str, answer: crate::Answer) -> Result<()> {
-        self.snapshot()?;
         let api: base::Api = self.inner.harness.clone();
         let mut q = None;
         for data in api.list(None)? {
@@ -611,6 +609,17 @@ impl Session {
                 ));
             }
         } else {
+            self.inner
+                .harness
+                .retry_open_erasure(&q.scope.session)
+                .await?;
+            let current = self.inner.harness.snapshot(&q.scope.session)?;
+            if !base::questions(&current)?
+                .iter()
+                .any(|question| question.id == q.id && question.answerable)
+            {
+                return Err(Error::new(Code::Conflict, "no current question view"));
+            }
             crate::events::answer(api, &self.id, &self.actor, &q, answer).await?;
         }
         if q.scope.session == self.id && q.scope.call.is_some() {
@@ -1085,10 +1094,6 @@ impl Session {
     pub fn fork_with(&self, entry_id: Option<&str>) -> Result<Session> {
         self.require("watch")?;
         self.require("settings")?;
-        let data = self.snapshot()?;
-        if entry_id.is_some_and(|id| !data.entries.iter().any(|e| e.id == id)) {
-            return Err(Error::new(Code::NotFound, "unknown fork point"));
-        }
         let id = self
             .inner
             .harness
@@ -1218,14 +1223,6 @@ impl Session {
     pub async fn move_to_with(&self, entry_id: &str, options: MoveOptions) -> Result<Vec<String>> {
         self.require("settings")?;
         let h = self.inner.harness.as_ref();
-        if !self
-            .snapshot()?
-            .entries
-            .iter()
-            .any(|entry| entry.id == entry_id)
-        {
-            return Err(Error::new(Code::NotFound, "unknown position"));
-        }
         if options.rewind {
             if h.declaration()?["rewinding"] != true {
                 return Err(Error::new(

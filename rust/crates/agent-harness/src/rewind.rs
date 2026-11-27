@@ -102,6 +102,7 @@ impl Harness {
         position: String,
     ) -> Result<Vec<String>> {
         require(self, scope, "settings")?;
+        self.retry_open_erasure(&scope.session).await?;
         let env: Arc<dyn WorkingEnvironment> =
             capability(self, "environment").map_err(|_| RewindError::NotSupported)?;
         let (_reservation, data) = self.reserve_rewind(&scope.session)?;

@@ -6,7 +6,7 @@ impl Session {
         let harness = self.inner.harness.as_ref();
         base::require(harness, &base::Scope::session(&self.id), "watch")?;
         base::require(harness, &self.scope(), "watch")?;
-        harness.reconcile_pending_erasure(&self.id).await?;
+        harness.retry_open_erasure(&self.id).await?;
         self.require("watch")?;
         let data = self.snapshot()?;
         let mut rows = Vec::new();

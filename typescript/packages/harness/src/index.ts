@@ -7,6 +7,7 @@ export { reservationLimits, type ReservationOptions, type ReservationLimits, typ
 export * from "./hooks.js";
 export * from "./session.js";
 export * from "./harness.js";
+export type { ReconcileErasureOptions, ErasureRetryReport } from "./session-erasure.js";
 export type { ApprovalRoute, ApprovalDelivery } from "./waiting-approval.js";
 export * from "./view.js";
 export type { InterfaceToolSource, InterfaceToolConnection, InterfaceToolConnectionOptions, InterfaceToolHandoff, InterfaceToolReceipt, InterfaceToolReport } from "./interface-tools.js";

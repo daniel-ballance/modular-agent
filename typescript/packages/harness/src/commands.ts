@@ -40,8 +40,8 @@ export class Commands {
 		const match = /^\/(\S+)\s?([\s\S]*)$/.exec(line.trimStart());
 		if (!match) throw failure("invalid_params", "Not a command");
 		const session = this.operations.session(sessionId);
-		await this.operations.erasure().reconcilePending(session);
 		this.operations.authority().requireAuthority(session, actorId, "input");
+		await this.operations.erasure().reconcilePending(session);
 		this.operations.lifecycle().checkWriter(session);
 		const command = this.operations.commandTable().get(match[1]);
 		if (!command) throw failure("not_found", `Unknown command /${match[1]}`);

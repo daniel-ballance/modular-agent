@@ -126,6 +126,9 @@ impl AgentApi for Harness {
     async fn withdraw(&self, session: &str, input: &str) -> Result<Input> {
         Harness::withdraw(self, session, input).await
     }
+    async fn retry_open_erasure(&self, session: &str) -> Result<()> {
+        Harness::retry_open_erasure(self, session).await
+    }
     async fn history_view(&self, session: &str) -> Result<Value> {
         Harness::history_view(self, session).await
     }
@@ -216,6 +219,19 @@ impl AgentApi for Harness {
             .get(question)
             .cloned()
     }
+    fn authority_snapshot(&self, session: &str) -> Result<SessionData> {
+        let sessions = self.sessions.lock().unwrap();
+        let open = sessions.get(session).ok_or(SessionNotOpen)?;
+        let mut data = open.data.clone();
+        data.entries.retain(|e| {
+            matches!(
+                e.kind.as_str(),
+                "tenant" | "actor.grant" | "actor.left" | "limit"
+            )
+        });
+        data.settings = Value::Null;
+        Ok(data)
+    }
     fn snapshot(&self, session: &str) -> Result<SessionData> {
         self.session_snapshot(session)
     }
@@ -300,8 +316,9 @@ impl AgentApi for Harness {
         self.deliver_event(event).await
     }
     async fn command(&self, scope: &Scope, name: &str, args: &str) -> Result<Value> {
-        let _workspace = self.begin_environment_work(&scope.session)?;
         require(self, scope, "input")?;
+        self.retry_open_erasure(&scope.session).await?;
+        let _workspace = self.begin_environment_work(&scope.session)?;
         let _reservation = self
             .reservations()
             .command(&self.snapshot(&scope.session)?)?;

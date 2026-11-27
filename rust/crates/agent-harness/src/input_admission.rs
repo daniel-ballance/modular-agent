@@ -130,7 +130,7 @@ impl Harness {
             }),
             OperationError::Forbidden("actor lacks input authority".into())
         );
-        self.reconcile_pending_erasure(session).await?;
+        self.retry_open_erasure(session).await?;
         let admission = self
             .admissions
             .lock()
@@ -389,6 +389,7 @@ impl Harness {
             timing != Timing::Propose && !input.is_empty(),
             OperationError::InvalidParams("invalid proposal id or release timing".into())
         );
+        self.retry_open_erasure(&scope.session).await?;
         let data = self.snapshot(&scope.session)?;
         let source = proposal_source(&data, input)?;
         let releaser = self.authority(&scope.session, &scope.actor)?;

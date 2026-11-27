@@ -4,6 +4,7 @@ mod pending;
 mod portable_store;
 mod reconcile;
 mod server;
+mod store;
 pub use portable_store::{
     EntryPage, HistoryFault, HistoryResult, LeaseGrant, PortableHistoryStore, SessionPage,
 };
@@ -596,6 +597,7 @@ pub struct HttpHistory {
     service: Service,
     ttl: u64,
     coordinated: bool,
+    indexed: bool,
     held: Mutex<BTreeMap<String, Weak<State>>>,
 }
 impl HttpHistory {
@@ -654,6 +656,7 @@ impl HttpHistory {
             service,
             ttl,
             coordinated: wire::json_eq(&version["pendingErasure"], &json!(1)),
+            indexed: wire::json_eq(&version["pendingErasureIndex"], &json!(1)),
             held: Mutex::default(),
         })
     }
@@ -681,6 +684,56 @@ impl HttpHistory {
             .service
             .pages(&["v1", "sessions", id], None, "entries")?;
         Ok((portable::session(&meta, &entries)?, entries))
+    }
+    fn pending_index(&self) -> Result<Vec<String>> {
+        let mut ids = BTreeSet::new();
+        let mut revision = None;
+        let mut after: Option<String> = None;
+        loop {
+            let value = checked(self.service.request_with(
+                Method::GET,
+                &["v1", "pending-erasure"],
+                None,
+                None,
+                after.as_deref(),
+                None,
+            )?)?;
+            ensure!(
+                value.get("next").is_none_or(Value::is_string),
+                "invalid index cursor"
+            );
+            let page: pending::IndexPage = serde_json::from_value(value)?;
+            lease_value(&json!({"lease":page.revision}))?;
+            ensure!(
+                revision.as_ref().is_none_or(|r| *r == page.revision),
+                "index changed during paging"
+            );
+            ensure!(
+                page.sessions.len() <= 500 && (after.is_none() || !page.sessions.is_empty()),
+                "invalid index page"
+            );
+            revision = Some(page.revision);
+            let last = page.sessions.last().map(|row| row.session_id.clone());
+            for row in page.sessions {
+                ensure!(
+                    pending::path_id(&row.session_id)
+                        && ids.insert(row.session_id)
+                        && !row.intent_ids.is_empty()
+                        && row.intent_ids.iter().all(|id| pending::path_id(id))
+                        && row.intent_ids.iter().collect::<BTreeSet<_>>().len()
+                            == row.intent_ids.len(),
+                    "invalid index row"
+                );
+            }
+            let Some(next) = page.next else {
+                return Ok(ids.into_iter().collect());
+            };
+            ensure!(
+                Some(&next) == last.as_ref() && Some(&next) != after.as_ref(),
+                "invalid index cursor"
+            );
+            after = Some(next);
+        }
     }
     fn erasure_plans(&self, session: &str) -> Result<(String, Vec<pending::Plan>)> {
         let read = || -> Result<_> {
@@ -893,287 +946,6 @@ fn check_plans(data: &SessionData, plans: &[pending::Plan]) -> Result<()> {
     Ok(())
 }
 
-impl HistoryStore for HttpHistory {
-    fn coordinates_erasure(&self) -> bool {
-        self.coordinated
-    }
-    fn mark_erasure(
-        &self,
-        session: &str,
-        entry_ids: &[String],
-    ) -> Result<BTreeMap<String, Vec<String>>> {
-        ensure!(
-            self.coordinated,
-            "history service does not coordinate erasure"
-        );
-        if entry_ids.is_empty() {
-            return Ok(BTreeMap::new());
-        }
-        let state = self
-            .lease(session)
-            .unwrap_or_else(|| self.temporary_lease(session));
-        let lease = state.acquire_with_wait(self.ttl, false)?;
-        let (revision, _) = self.erasure_plans(session)?;
-        let sessions = self.erasure_lineage()?;
-        let source = sessions
-            .iter()
-            .find(|s| s.id == session)
-            .ok_or_else(|| OperationError::NotFound("unknown erasure source".into()))?;
-        let entries: BTreeSet<_> = entry_ids.iter().cloned().collect();
-        for target in &entries {
-            let e = source
-                .entries
-                .iter()
-                .find(|e| &e.id == target)
-                .ok_or_else(|| OperationError::NotFound("unknown erasure target".into()))?;
-            ensure!(
-                erasable(e),
-                OperationError::Forbidden("protected erasure target".into())
-            );
-        }
-        let affected = discover_copies(&sessions, entries.clone());
-        let intent = pending::Publication {
-            lease,
-            revision,
-            intent_id: id(),
-            entry_ids: entries.into_iter().collect(),
-            copies: affected
-                .iter()
-                .map(|(sid, ids)| pending::CopySet {
-                    session_id: sid.clone(),
-                    record_id: id(),
-                    entry_ids: ids.clone(),
-                })
-                .collect(),
-        };
-        state.acquire(self.ttl)?;
-        let response = self.writer_post(
-            &state,
-            &["v1", "sessions", session, "pending-erasure"],
-            json!(intent),
-        )?;
-        let published: pending::Published = serde_json::from_value(response)
-            .map_err(|_| registry_unavailable("invalid erasure publication response"))?;
-        ensure!(
-            pending::path_id(&published.intent_id)
-                && (published.session_ids.is_empty()
-                    || pending::distinct_ids(&published.session_ids))
-                && published
-                    .session_ids
-                    .iter()
-                    .all(|sid| pending::path_id(sid)),
-            registry_unavailable("invalid erasure publication response")
-        );
-        if published.intent_id == intent.intent_id {
-            ensure!(
-                published.session_ids.iter().eq(affected.keys()),
-                registry_unavailable(
-                    "erasure publication did not return the submitted destinations"
-                )
-            );
-            return Ok(affected);
-        }
-        // Recover the source plan and every published destination, even if unlisted.
-        let mut original = BTreeMap::new();
-        // sessionIds lists every copy set's session, the source's included (history-http.md).
-        for sid in published.session_ids.iter().map(String::as_str) {
-            let plan = self
-                .erasure_plans(sid)?
-                .1
-                .into_iter()
-                .find(|p| p.intent_id == published.intent_id && p.source_session_id == session)
-                .ok_or_else(|| registry_unavailable("missing published erasure plan"))?;
-            original.insert(
-                sid.into(),
-                plan.copies.into_iter().map(|c| c.entry_id).collect(),
-            );
-        }
-        Ok(original)
-    }
-    fn check_erasure(&self, data: &SessionData) -> Result<()> {
-        if !self.coordinated {
-            return Ok(());
-        }
-        if self.lease(&data.id).is_some_and(|state| {
-            state.lease.lock().unwrap().is_none() && !state.lost.is_cancelled()
-        }) {
-            // This writer is still assembling a local, unpublished session.
-            return Ok(());
-        }
-        check_plans(data, &self.erasure_plans(&data.id)?.1)
-    }
-    fn confirmed_erasure(&self, session: &str) -> Result<Vec<String>> {
-        if !self.coordinated {
-            return Ok(Vec::new());
-        }
-        Ok(self
-            .erasure_plans(session)?
-            .1
-            .into_iter()
-            .flat_map(|plan| {
-                plan.copies
-                    .into_iter()
-                    .filter(|c| c.complete)
-                    .map(|c| c.entry_id)
-            })
-            .collect())
-    }
-    fn reconcile_erasure(
-        &self,
-        session: &str,
-        write: &mut ErasureWrite<'_>,
-    ) -> Result<Option<(SessionData, Vec<String>)>> {
-        self.reconcile(session, write)
-    }
-    fn supports_erasure(&self) -> bool {
-        self.coordinated
-    }
-    fn acquire(&self, session: &str) -> Result<Box<dyn Lease>> {
-        let mut held = self.held.lock().unwrap();
-        ensure!(
-            held.get(session).and_then(Weak::upgrade).is_none(),
-            "history session is already open here"
-        );
-        let state = self.temporary_lease(session);
-        held.insert(session.into(), Arc::downgrade(&state));
-        Ok(Box::new(Held(state)))
-    }
-    fn inspect(&self, session: &str) -> Result<SessionData> {
-        self.fetch(session).map(|(data, _)| data)
-    }
-    fn load(&self, session: &str) -> Result<SessionData> {
-        let state = self.lease(session);
-        if let Some(state) = &state {
-            state.acquire(self.ttl)?;
-        }
-        let (data, entries) = self.fetch(session)?;
-        if let Some(state) = state {
-            *state.kept.lock().unwrap() = entries
-                .iter()
-                .filter_map(|v| v["id"].as_str().map(str::to_owned))
-                .collect();
-        }
-        Ok(data)
-    }
-    fn save(&self, data: &SessionData) -> Result<()> {
-        let state = self
-            .lease(&data.id)
-            .ok_or_else(|| anyhow!("no history writer lease"))?;
-        let mut kept = state.kept.lock().unwrap();
-        let mut entries = data
-            .entries
-            .iter()
-            .filter(|e| !kept.contains(&e.id) && e.writer != "rust.derived")
-            .map(|e| portable::entry(e, data))
-            .collect::<Result<Vec<_>>>()?;
-        // A session used only for setup should not leave a row or take a lease.
-        if entries.is_empty()
-            || (kept.is_empty()
-                && data.origin.is_none()
-                && data.entries.iter().all(|e| {
-                    matches!(
-                        e.kind.as_str(),
-                        "settings"
-                            | "actor.grant"
-                            | "actor.identity"
-                            | "plugins.changed"
-                            | "tenant"
-                    )
-                }))
-        {
-            return Ok(());
-        }
-        if state.lease.lock().unwrap().is_none() {
-            // The allowed lease alphabet needs no JSON escaping. Use the actual
-            // sender encoding and the longest admissible lease before creating a row.
-            let envelope = json!({"lease":"A".repeat(LEASE_BYTES), "entries":[]});
-            ensure!(
-                serde_json::to_vec(&envelope)?.len() - 2 + serde_json::to_vec(&entries)?.len()
-                    <= BODY_LIMIT,
-                OperationError::ResultTooLarge("initial history append is too large".into())
-            );
-            let mut meta = json!({"project":data.project,"created":data.entries.first().map(|e|e.at).unwrap_or(0)});
-            if let Some((parent, entry)) = &data.origin {
-                meta["parentSessionId"] = json!(parent);
-                if let Some(entry) = entry {
-                    meta["forkedFrom"] = json!({"sessionId":parent,"entryId":entry});
-                }
-            }
-            checked(self.service.request(
-                Method::PUT,
-                &["v1", "sessions", &data.id],
-                None,
-                Some(meta),
-            )?)?;
-        }
-        let lease = state.acquire(self.ttl)?;
-        let revision = self
-            .coordinated
-            .then(|| self.check_append(data, &entries))
-            .transpose()?;
-        state.acquire(self.ttl)?;
-        let appended = self.guarded_append(&data.id, &lease, &entries, revision.as_deref());
-        let guard = state.lease.lock().unwrap();
-        let remote = guard.as_ref().expect("acquired lease");
-        if appended.as_ref().map_or(true, |(status, body)| {
-            body["code"] == "lost" || (status.is_success() && !body["kept"].is_u64())
-        }) {
-            state.lost.cancel();
-        }
-        remote.check(&state.lost)?;
-        checked(appended?)?;
-        kept.extend(
-            entries
-                .drain(..)
-                .filter_map(|v| v["id"].as_str().map(str::to_owned)),
-        );
-        Ok(())
-    }
-    fn list(&self, project: Option<&Path>) -> Result<Vec<SessionData>> {
-        let (_, listed) = self
-            .service
-            .pages(&["v1", "sessions"], project, "sessions")?;
-        listed
-            .iter()
-            .map(|meta| self.fetch(wire::string(meta, "id")?).map(|(s, _)| s))
-            .collect()
-    }
-    fn erase(&self, ids: Vec<String>, held: &[String]) -> Result<Vec<SessionData>> {
-        ensure!(
-            self.coordinated,
-            registry_unavailable("history service does not coordinate erasure")
-        );
-        let erased: BTreeSet<_> = ids.into_iter().collect();
-        let sessions = self.list(None)?;
-        let mut affected = BTreeSet::new();
-        for source in sessions {
-            let targets: Vec<_> = source
-                .entries
-                .iter()
-                .filter(|e| erasable(e) && erased.contains(&e.id))
-                .map(|e| e.id.clone())
-                .collect();
-            if !targets.is_empty() {
-                affected.extend(self.mark_erasure(&source.id, &targets)?.into_keys());
-            }
-        }
-        let mut result = Vec::new();
-        for sid in affected {
-            let _lease = if held.contains(&sid) {
-                None
-            } else {
-                Some(self.acquire(&sid)?)
-            };
-            self.lease(&sid)
-                .ok_or_else(|| anyhow!("missing history lease"))?
-                .acquire(self.ttl)?;
-            if let Some((data, _)) = self.reconcile_erasure(&sid, &mut |_, _, write| write())? {
-                result.push(data);
-            }
-        }
-        Ok(result)
-    }
-}
 pub struct HttpPlugin(pub HttpHistory);
 impl Plugin for HttpPlugin {
     fn name(&self) -> &str {
@@ -1186,6 +958,7 @@ impl Plugin for HttpPlugin {
                 service: self.0.service.clone(),
                 ttl: self.0.ttl,
                 coordinated: self.0.coordinated,
+                indexed: self.0.indexed,
                 held: Mutex::default(),
             }),
         )

@@ -42,16 +42,17 @@ impl Harness {
             })
     }
 
-    pub(super) fn refresh_open_erasure(&self, open: &mut OpenSession) -> Result<()> {
+    pub(super) fn retry_locked_erasure(&self, open: &mut OpenSession) -> Result<()> {
         if !open.provisional
             && let Some(store) = self.store()
             && let Err(error) = store.check_erasure(&open.data)
         {
-            if open.active.is_some() {
-                open.cancel.cancel();
-                return Err(error);
-            }
-            if self.needs_local_provider_discard()?
+            if !error.is::<PendingErasure>()
+                || open.active.is_some()
+                || jobs(&open.data)?
+                    .iter()
+                    .any(|job| job.state.is_unfinished())
+                || self.needs_local_provider_discard()?
                 || open.environment_work > 0
                 || open.rewinding
                 || open.lease.is_none()
@@ -67,7 +68,26 @@ impl Harness {
         }
         Ok(())
     }
-    fn install_erased_data(&self, open: &mut OpenSession, data: SessionData) -> Result<()> {
+    pub(super) fn retry_open_erasure_now(&self, session: &str) -> Result<()> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let open = sessions.get_mut(session).ok_or(super::SessionNotOpen)?;
+        self.retry_locked_erasure(open)
+    }
+
+    pub(super) fn check_open_erasure(&self, open: &OpenSession) -> Result<()> {
+        if !open.provisional
+            && let Some(store) = self.store()
+        {
+            store.check_erasure(&open.data)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn install_erased_data(
+        &self,
+        open: &mut OpenSession,
+        data: SessionData,
+    ) -> Result<()> {
         if let Some(remove) = self.private_erasure.get() {
             remove(&data)?;
         }
@@ -79,7 +99,19 @@ impl Harness {
         });
         self.reservations().rebuild(&data);
         open.data = data;
-        open.approval_views.clear();
+        open.approval_views.retain(|_, (id, _)| {
+            open.data.entries.iter().any(|entry| {
+                &entry.id == id
+                    && entry.content.is_some()
+                    && entry.copies.iter().all(|id| {
+                        !open
+                            .data
+                            .entries
+                            .iter()
+                            .any(|source| &source.id == id && source.content.is_none())
+                    })
+            })
+        });
         if let Some(commits) = &open.commits {
             let _ = commits.send(());
         }
@@ -218,6 +250,7 @@ impl Harness {
         &self,
         store: &AccountedHistory,
         session: &str,
+        cancel_running: bool,
     ) -> Result<Vec<String>> {
         loop {
             let settled = self.turn_settled.notified();
@@ -236,6 +269,14 @@ impl Harness {
                     Ok(()) => return store.confirmed_erasure(session),
                     Err(error) if error.is::<PendingErasure>() => {}
                     Err(error) => return Err(error),
+                }
+                if !cancel_running
+                    && (open.active.is_some()
+                        || jobs(&open.data)?
+                            .iter()
+                            .any(|job| job.state == JobState::Running))
+                {
+                    return Err(OperationError::Busy("Session work is active".into()).into());
                 }
                 if open.active.is_none() {
                     ensure!(
@@ -267,7 +308,7 @@ impl Harness {
         }
     }
 
-    pub async fn reconcile_pending_erasure(&self, session: &str) -> Result<()> {
+    pub async fn retry_open_erasure(&self, session: &str) -> Result<()> {
         let Some(store) = self.store() else {
             return Ok(());
         };
@@ -284,7 +325,20 @@ impl Harness {
             .erasure_requests
             .try_lock()
             .map_err(|_| OperationError::Unavailable("Erasure is being reconciled".into()))?;
-        self.reconcile_live_erasure(&store, session).await?;
+        match self.retry_open_erasure_now(session) {
+            Err(error) if error.is::<PendingErasure>() => {
+                self.reconcile_idle_erasure(&store, session).await
+            }
+            result => result,
+        }
+    }
+
+    pub(super) async fn reconcile_idle_erasure(
+        &self,
+        store: &AccountedHistory,
+        session: &str,
+    ) -> Result<()> {
+        self.reconcile_live_erasure(store, session, false).await?;
         Ok(())
     }
 
@@ -331,7 +385,7 @@ impl Harness {
             let live = self.sessions.lock().unwrap().contains_key(session);
             let result: Result<Vec<String>> = async {
                 if live {
-                    return self.reconcile_live_erasure(&store, session).await;
+                    return self.reconcile_live_erasure(&store, session, true).await;
                 }
                 let lease = store.acquire(session)?;
                 let mut data = store.load(session)?;

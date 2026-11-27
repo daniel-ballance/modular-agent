@@ -13,6 +13,7 @@ impl Harness {
         position: Option<String>,
     ) -> Result<()> {
         require(self, scope, "settings")?;
+        self.retry_open_erasure_now(&scope.session)?;
         ensure!(
             !jobs(&self.snapshot(&scope.session)?)?
                 .iter()
@@ -120,6 +121,7 @@ impl Harness {
     pub(super) fn fork_session(&self, scope: &Scope, position: Option<String>) -> Result<String> {
         require(self, scope, "watch")?;
         require(self, scope, "settings")?;
+        self.retry_open_erasure_now(&scope.session)?;
         let _workspace = self.begin_environment_work(&scope.session)?;
         ensure!(
             !self.is_running(&scope.session),

@@ -9,6 +9,7 @@ import { RestoreWitness } from "./restore-witness.js";
 /** Writes that can settle existing work without retaining its payload. */
 export function erasureSettlement(entry: import("./types.js").EntryDraft): boolean {
 	if (entry.sources?.length || entry.modelVisible || entry.message) return false;
+	if (["actorJoined", "actorLeft", "limit", "inputHandedBack"].includes(entry.kind)) return true;
 	const data = entry.data as { report?: boolean; result?: unknown; outcome?: { kind?: string; error?: unknown } } | undefined;
 	if (entry.jobId && (entry.kind === "jobCleanupUnconfirmed" || entry.kind === "jobEnded" &&
 		data?.report === false && data.result == null && data.outcome?.error == null)) return true;
@@ -26,6 +27,7 @@ export interface ErasurePublication {
 	copies: { sessionId: string; recordId: string; entryIds: string[] }[];
 }
 export interface HistoryErasureRegistry {
+	discover?(): Promise<string[]>;
 	read(id: string): Promise<{ revision: string; plans: ErasurePlan[] }>;
 	publish(id: string, intent: ErasurePublication): Promise<{ intentId: string; sessionIds: string[] }>;
 	complete(id: string, intentId: string, entryIds: string[]): Promise<void>;

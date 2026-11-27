@@ -557,14 +557,25 @@ export class Agent {
     await checked(() => this.#api.waitForIdle(id));
     return session;
   }
+  /** Retry erasure without opening sessions for ordinary work. */
+  async reconcileErasure(options: import("@modular-agent/harness").ReconcileErasureOptions = {}) {
+    this.#check();
+    return checked(() => this.#h.reconcileErasure(options));
+  }
   async sessions(filter?: { project?: string }): Promise<SessionListEntry[]> {
     this.#check();
     return checked(async () => {
       const stored = await this.#api.listSessions(filter?.project ? await realpath(filter.project) : null);
-      return Promise.all(stored.map(async ({ id }) => {
-        const { project, settings, updated } = await this.#savedSession(id);
+      const rows = await Promise.all(stored.map(async ({ id }) => {
+        const saved = await this.#savedSession(id).catch(error => {
+          if (error?.pendingErasure) return undefined;
+          throw error;
+        });
+        if (!saved) return undefined;
+        const { project, settings, updated } = saved;
         return { id, project, updated, model: parseModel(settings.model), title: typeof settings.title === "string" ? settings.title : undefined };
       }));
+      return rows.filter(row => row !== undefined);
     });
   }
   /** Inspect committed waits without opening a session, joining an actor or supplying presence. */
@@ -583,6 +594,12 @@ export class Agent {
   async #savedSession(id: string): Promise<SessionInfo> {
     const store = this.#h.use<HistoryStore>("history-store")!;
     const { meta, entries } = await store.load(id);
+    const erased = new Set(entries.filter(e => e.erased).map(e => e.id));
+    const plans = store.historyErasure && (await store.historyErasure.read(id)).plans;
+    if (plans?.some(p => p.copies.some(c => !c.complete || !erased.has(c.entryId))) || store.pendingErasure?.intents().some(i =>
+      i.copies.some(c => c.sessionId === id && (!c.erased || !erased.has(c.id))))) {
+      throw Object.assign(new AgentError("unavailable", "Session has unresolved pending erasure"), { pendingErasure: true });
+    }
     const settings: Settings = {};
     for (const entry of entries) if (!entry.erased && entry.kind === "setting") {
       const change = entry.data as { key: string; value: unknown };

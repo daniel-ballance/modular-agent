@@ -181,6 +181,16 @@ export class SessionLifecycle {
 		return s.id;
 	}
 
+	async withQuietWriter<T>(id: string, work: () => Promise<T>): Promise<T> {
+		if (this.opening.has(id) || this.operations.sessions().has(id)) throw failure("busy", "Session is busy");
+		this.opening.add(id);
+		try {
+			const store = this.operations.use<HistoryStore>("history-store")!;
+			await store.openForWriting(id, {wait: false});
+			try { return await work(); } finally { await store.close(id); }
+		} finally { this.opening.delete(id); }
+	}
+
 	async loadInto(id: string): Promise<Session | undefined> {
 		const store = this.operations.use<HistoryStore>("history-store");
 		if (!store) return undefined;
@@ -432,7 +442,7 @@ export class SessionLifecycle {
 
 	async forkSession(sessionId: string, entryId: string): Promise<string> {
 		const s = this.operations.session(sessionId);
-		await this.operations.erasure().admitHistory(s);
+		await this.operations.erasure().reconcilePending(s);
 		if (s.erasing) throw failure("busy", "Erasure is in progress");
 		// Forking at unfinished work would copy work that is still running: refused.
 		if (s.running || this.operations.jobWork().runningJobs(s).length || this.operations.questions().waitingRequests(s).length || this.operations.turns().openCalls(s).length || this.operations.interfaceTools().unsettledHandoffs(s).length) throw failure("busy", "Can't fork while the session has unfinished work: a running turn, a job, or a call waiting for an answer");
@@ -555,6 +565,7 @@ export class SessionLifecycle {
 		const s = this.operations.session(sessionId);
 		return this.operations.admission().admit(s, async () => {
 			if (options.actorId) this.operations.requireAuthority(s, options.actorId, "settings");
+			await this.operations.erasure().reconcilePending(s);
 			if (s.provisional) throw failure("invalid_request", "Session has not admitted its first input");
 			if (s.isBusy() || s.outsideTools || s.erasing || s.settling || s.requests.size || this.operations.questions().waitingRequests(s).length || this.operations.turns().openCalls(s).length || this.operations.interfaceTools().unsettledHandoffs(s).length || this.operations.jobWork().runningJobs(s).length) {
 				throw failure("busy", "Can't move while work is unfinished");

@@ -10,6 +10,7 @@ Usage:
   ma skills                    list the skills found for this folder
   ma mcp                       list the configured MCP servers
   ma sessions [--all]          list saved sessions
+  ma erasure retry [--session ID]... [--discover]  retry pending erasure
 
 Options:
   --model PROVIDER/ID   for example chatgpt/gpt-6.1-sol, grok/grok-4.7, claude/claude-sonnet-5-5

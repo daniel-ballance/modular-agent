@@ -38,7 +38,7 @@ interface ToolDispatchOperations {
 	projectOf(s: Session): string;
 	checkWriter(s: Session): void;
 	commit(s: Session, drafts: EntryDraft[], pluginRecord?: boolean, guard?: () => boolean | Promise<boolean>): Promise<HistoryEntry[]>;
-	erasure(): Pick<SessionErasure, "admitHistory" | "checkPending" | "reconcilePending">;
+	erasure(): Pick<SessionErasure, "admitHistory" | "checkPending">;
 	agentName(): string | undefined;
 	emit(session: string | Session, type: string, data: any, source: string, ids?: Partial<AgentEvent>): void;
 	jobWork(): Pick<Jobs, "startJob">;
@@ -405,7 +405,6 @@ export class ToolDispatch {
 
 	/** A tool call an Interface or plugin starts. The same checks apply. */
 	async callTool(s: Session, call: ToolCall): Promise<ToolResult> {
-		await this.operations.erasure().reconcilePending(s);
 		if (s.provisional) throw failure("invalid_request", "Session has not admitted its first input");
 		if (s.closed) throw failure("not_open", "Session is closed");
 		if (s.suspended) throw failure("lost", "Session has lost its writer");

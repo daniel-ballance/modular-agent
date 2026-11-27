@@ -26,6 +26,7 @@ Usage:
   ma skills                    list the skills found for this folder
   ma mcp                       list the configured MCP servers
   ma sessions [--all]          list saved sessions
+  ma erasure retry [--session ID]... [--discover]  retry pending erasure
 
 Options:
   --model PROVIDER/ID   for example chatgpt/gpt-6.1-sol, grok/grok-4.7, claude/claude-sonnet-5-5
@@ -362,6 +363,39 @@ async fn start(client_identity: ClientIdentity) -> Result<()> {
             return Ok(());
         }
         Some("auth") => return auth_status(&standard).await,
+        Some("erasure") => {
+            args.next();
+            ensure!(
+                args.next().as_deref() == Some("retry"),
+                "expected ma erasure retry"
+            );
+            let mut options = sdk::ReconcileErasureOptions::default();
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--session" => options.sessions.push(take(&mut args, &arg)?),
+                    "--discover" => options.discover = true,
+                    _ => bail!("unknown erasure retry argument {arg}"),
+                }
+            }
+            ensure!(
+                options.discover || !options.sessions.is_empty(),
+                "supply --session or --discover"
+            );
+            let agent = builder(&standard, &project, &Mcp::default(), vec![])?
+                .build()
+                .await?;
+            let reports = agent.reconcile_erasure(options).await?;
+            for report in &reports {
+                println!("{}", serde_json::to_string(report)?);
+            }
+            ensure!(
+                reports
+                    .iter()
+                    .all(|r| r.state == sdk::ErasureRetryState::Complete),
+                "Erasure is not complete for every session"
+            );
+            return Ok(());
+        }
         Some("models") => {
             standard.claude = !standard.conformance
                 && standard.scripted.is_none()

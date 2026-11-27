@@ -95,7 +95,7 @@ The operator MUST NOT enable or keep enabled a production path that cannot enfor
 - [Authentication, tokens and TLS](#authentication-on-each-wire).
 - [Resource limits and cancellation](#resource-limits-and-denial-of-service).
 - [History writer clock](bindings/history-http.md#writing-one-writer-at-a-time). If the platform has no monotonic clock that advances during suspension, the operator MUST configure the deadline margin.
-- [Pending erasure](contracts.md#cross-session-coordination). If deletion must finish in quiet sessions, the operator MUST arrange retries. Have the current writer perform an authorized history read, or reopen the session under authorized writer access when its lease is free. The Harness does not sweep all sessions on startup or in the background.
+- [Pending erasure](contracts.md#cross-session-coordination). To finish deletion in quiet sessions, the operator MUST arrange retries with `reconcileErasure` (`ma erasure retry`) or enable a sweep where supported. Use the HTTP pending-erasure discovery index or supply explicit session IDs. An authorized history read by the current writer or a reopen under authorized writer access also retries. No sweep runs by default.
 - [Retention, audit access and backup restore](#data-the-record-views-the-output-gate-and-erasure). The operator MUST set a retention policy for history and backups, including whether either is kept indefinitely.
 
 ## Deliberate limits

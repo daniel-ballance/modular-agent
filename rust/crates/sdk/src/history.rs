@@ -264,16 +264,35 @@ impl History {
 
     pub fn sessions(&self, project: Option<&Path>) -> Result<Vec<SessionInfo>> {
         let project = project.map(Path::canonicalize).transpose()?;
-        Ok(self
-            .0
+        self.0
             .list(project.as_deref())?
             .into_iter()
-            .map(SessionInfo::from)
-            .collect())
+            .filter_map(|data| match self.0.check_erasure(&data) {
+                Ok(()) => Some(Ok(SessionInfo::from(data))),
+                Err(error) if error.is::<base::PendingErasure>() => None,
+                Err(error) => Some(Err(error.into())),
+            })
+            .collect()
     }
 
     pub fn session_info(&self, id: &str) -> Result<SessionInfo> {
-        Ok(self.0.load(id)?.into())
+        let data = self.0.inspect(id)?;
+        self.0.check_erasure(&data)?;
+        Ok(data.into())
+    }
+}
+
+impl crate::Agent {
+    /// Retry durable erasure work without opening sessions for ordinary work.
+    pub async fn reconcile_erasure(
+        &self,
+        options: crate::ReconcileErasureOptions,
+    ) -> Result<Vec<crate::ErasureRetryReport>> {
+        Ok(self
+            .inner
+            .harness
+            .reconcile_erasure_sessions(options)
+            .await?)
     }
 }
 

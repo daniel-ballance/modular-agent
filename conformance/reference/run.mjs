@@ -79,6 +79,19 @@ const checks = [
     },
   },
   {
+    name: "erasure-retry",
+    about: "Quiet erasure retry uses discovery or explicit session IDs and reports incomplete work.",
+    script: [],
+    async run(command, invoke) {
+      const empty = await invoke(command, { args: ["erasure", "retry", "--discover"] });
+      assert.equal(empty.exit, 0, empty.stderr);
+      assert.equal(empty.stdout, "");
+      const missing = await invoke(command, { args: ["erasure", "retry", "--session", "absent", "--session", "absent"] });
+      assert.equal(missing.exit, 1, missing.stderr);
+      assert.deepEqual(JSON.parse(missing.stdout), {sessionId: "absent", state: "unavailable", erased: [], pending: []});
+    },
+  },
+  {
     name: "interactive-commands",
     about: "/commands prints the exact terminal list; /tool is rejected and /questions and /quit work without asking the model.",
     script: [{ text: "Unexpected model request." }],

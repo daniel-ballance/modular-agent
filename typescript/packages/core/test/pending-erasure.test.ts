@@ -33,13 +33,20 @@ test("pending marks follow forks across held writers and survive restart", async
   const report = await origin.erase([original.id, original.id]);
   assert.ok(report.erased.some(copy => copy.sessionId === origin.id && copy.id === original.id));
   for (const sid of [firstId, secondId]) assert.ok(report.pending.some(copy => copy.sessionId === sid));
-  await assert.rejects(held.fork(), { code: "unavailable" });
+  assert.equal((await a.reconcileErasure({ sessions: [firstId] }))[0].state, "busy");
+  assert.ok(!(await a.sessions()).some(s => s.id === firstId));
+  await assert.rejects(a.sessionInfo(firstId), { code: "unavailable" });
+  await held.setSetting("title", "after retry");
+  const updated = await held.history();
+  assert.ok(updated.findIndex(e => e.kind === "erasure") < updated.findLastIndex(e => e.kind === "setting"));
   const originId = origin.id;
   await a.close();
   await b.close();
 
   const c = await testAgent(config);
   t.after(() => c.close());
+  assert.deepEqual((await c.reconcileErasure({ discover: true })).map(r => [r.sessionId, r.state]), [[secondId, "complete"]]);
+  assert.deepEqual(await c.reconcileErasure({ discover: true }), []);
   for (const sid of [held.id, heldAgain.id]) {
     const takenOver = await c.openSession(sid);
     const entries = await takenOver.history();

@@ -183,14 +183,19 @@ impl Harness {
             .try_with(|policy| policy.session == id)
             .unwrap_or(false)
         {
-            self.reconcile_pending_erasure(id).await?;
-            let snapshot = self.snapshot(id);
+            let snapshot = self
+                .sessions
+                .lock()
+                .unwrap()
+                .get(id)
+                .map(|open| open.data.clone())
+                .ok_or_else(|| anyhow!(SessionNotOpen));
             if let Ok(data) = snapshot {
                 let rights =
                     SESSION_OPEN_POLICY.with(|policy| self.check_session_open(&data, policy))?;
                 let mut sessions = self.sessions.lock().unwrap();
                 let open = sessions.get_mut(id).ok_or(SessionNotOpen)?;
-                self.refresh_open_erasure(open)?;
+                self.retry_locked_erasure(open)?;
                 open.check_rewind()?;
                 ensure!(
                     same_open_authority(&open.data, &data),
@@ -235,21 +240,24 @@ impl Harness {
             let Some((store, lease, mut loaded)) = loaded else {
                 return Ok(None);
             };
+            if let Some(tenant) = tenants::name(&loaded) {
+                self.check_tenant(tenant)?;
+            }
+            SESSION_OPEN_POLICY
+                .try_with(|policy| {
+                    if policy.session == id {
+                        self.check_session_open(&loaded, policy).map(|_| ())
+                    } else {
+                        Ok(())
+                    }
+                })
+                .unwrap_or(Ok(()))?;
             let pending = match store.check_erasure(&loaded) {
                 Ok(()) => false,
                 Err(error) if error.is::<PendingErasure>() => true,
                 Err(error) => return Err(error),
             };
             if pending {
-                SESSION_OPEN_POLICY
-                    .try_with(|policy| {
-                        if policy.session == id {
-                            self.check_session_open(&loaded, policy).map(|_| ())
-                        } else {
-                            Ok(())
-                        }
-                    })
-                    .unwrap_or(Ok(()))?;
                 self.settle_stored_erasure_jobs(&store, lease.as_ref(), &mut loaded)
                     .await?;
                 self.discard_local_provider_state(id).await?;
@@ -542,9 +550,9 @@ impl Harness {
     }
 
     pub(super) fn session_snapshot(&self, session: &str) -> Result<SessionData> {
-        let mut sessions = self.sessions.lock().unwrap();
-        let open = sessions.get_mut(session).ok_or(SessionNotOpen)?;
-        self.refresh_open_erasure(open)?;
+        let sessions = self.sessions.lock().unwrap();
+        let open = sessions.get(session).ok_or(SessionNotOpen)?;
+        self.check_open_erasure(open)?;
         Ok(open.data.clone())
     }
 

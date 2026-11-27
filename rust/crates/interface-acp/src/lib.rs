@@ -643,6 +643,8 @@ impl State {
                 );
                 // A driver flushing an already finished turn is not a running turn.
                 let _guard = session.gate.lock().await;
+                require(session.api.as_ref(), &actor_scope(&session.id), "settings")?;
+                session.api.retry_open_erasure(&session.id).await?;
                 let name = string(&p, "configId")?;
                 let value = string(&p, "value")?;
                 match name {

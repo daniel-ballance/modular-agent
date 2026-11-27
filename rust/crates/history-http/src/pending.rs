@@ -2,6 +2,21 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct IndexPage {
+    pub revision: String,
+    pub sessions: Vec<IndexRow>,
+    pub next: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct IndexRow {
+    pub session_id: String,
+    pub intent_ids: Vec<String>,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Registry {
@@ -141,6 +156,21 @@ impl Intent {
 }
 
 impl Registry {
+    pub fn index(&self) -> std::collections::BTreeMap<&str, Vec<&str>> {
+        let mut index = std::collections::BTreeMap::<_, Vec<_>>::new();
+        for intent in &self.intents {
+            for (session, plan) in &intent.plans {
+                if plan.copies.iter().any(|copy| !copy.complete) {
+                    index
+                        .entry(session.as_str())
+                        .or_default()
+                        .push(intent.id.as_str());
+                }
+            }
+        }
+        index
+    }
+
     pub fn plans(&self, session: &str) -> impl Iterator<Item = &Plan> {
         self.intents
             .iter()

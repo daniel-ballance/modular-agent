@@ -6,9 +6,19 @@ pub(super) fn check_append_plans(
     entries: &[Value],
 ) -> Result<()> {
     let settlement = |entry: &Value| {
+        if entry.get("sources").is_some()
+            || entry.get("message").is_some()
+            || entry["modelVisible"] != false
+        {
+            return false;
+        }
+        if matches!(
+            entry["kind"].as_str(),
+            Some("actorJoined" | "actorLeft" | "limit" | "inputHandedBack")
+        ) {
+            return true;
+        }
         entry["jobId"].is_string()
-            && entry.get("sources").is_none()
-            && entry["modelVisible"] == false
             && (entry["kind"] == "jobCleanupUnconfirmed"
                 || entry["kind"] == "jobEnded"
                     && entry["data"]["report"] == false

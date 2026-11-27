@@ -148,8 +148,9 @@ impl Harness {
             self.abandon_open_interface_calls(open, "Interface call cancelled")?;
             open.queue.drain(..).collect::<Vec<_>>()
         };
-        if !self.is_running(session) {
-            let data = self.snapshot(session)?;
+        if !self.is_running(session)
+            && let Ok(data) = self.snapshot(session)
+        {
             if let Ok(service) = requests(self) {
                 for q in questions(&data)?
                     .iter()
@@ -218,7 +219,7 @@ impl Harness {
     }
 
     pub async fn run_next(&self, session: &str) -> Result<Option<TurnResult>> {
-        self.reconcile_pending_erasure(session).await?;
+        self.retry_open_erasure(session).await?;
         let (input, cancel, parent, resume, turn_id, interface) = {
             let mut sessions = self.sessions.lock().unwrap();
             let open = sessions
@@ -230,7 +231,7 @@ impl Harness {
                 OperationError::Busy("a turn is already running".into())
             );
             self.check_open_writer(open)?;
-            self.refresh_open_erasure(open)?;
+            self.check_open_erasure(open)?;
             self.reconcile_open_approvals(open, false)?;
             let interface = if self.has_interface_tools()
                 || open.data.entries.iter().any(waiting_approvals::marked)
