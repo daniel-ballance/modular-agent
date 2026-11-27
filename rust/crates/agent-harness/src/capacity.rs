@@ -503,18 +503,24 @@ impl Pool {
                 .saturating_add(reserved)
                 .saturating_sub(before_bytes);
             if growth != 0 {
-                let added = after.entries.iter().skip(before.entries.len());
-                let control = added.clone().next().is_some()
-                    && added.clone().all(|e| {
-                        matches!(
-                            e.kind.as_str(),
-                            "actor.left"
-                                | "limit"
-                                | "erasure"
-                                | "cancel.requested"
-                                | "job.cleanup.unconfirmed"
-                        )
-                    });
+                let added = after
+                    .entries
+                    .get(before.entries.len()..)
+                    .unwrap_or_default();
+                // Only a position that settles an existing rewind can use headroom.
+                let control = matches!(added, [entry]
+                    if entry.kind == "position" && before.unresolved_rewind().is_some())
+                    || (!added.is_empty()
+                        && added.iter().all(|e| {
+                            matches!(
+                                e.kind.as_str(),
+                                "actor.left"
+                                    | "limit"
+                                    | "erasure"
+                                    | "cancel.requested"
+                                    | "job.cleanup.unconfirmed"
+                            )
+                        }));
                 let used = self.byte_scopes(&charges, after, accounted);
                 for (used, cap) in
                     used.into_iter()

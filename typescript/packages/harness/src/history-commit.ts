@@ -161,7 +161,9 @@ export class HistoryCommit {
 		}
 		const inputId = entries.find(e => e.kind === "input" && e.turnId)?.inputId;
 		const allocations = entries.map(entry => {
-			const control = !pluginRecord && ["actorLeft", "limit", "erasure", "jobCleanupUnconfirmed", "inputHandedBack"].includes(entry.kind);
+			// The initial rewind intent and moves without a restore are ordinary writes.
+			const control = !pluginRecord && (["actorLeft", "limit", "erasure", "jobCleanupUnconfirmed", "inputHandedBack"].includes(entry.kind) ||
+				entries.length === 1 && entry.kind === "position" && s.unresolvedRewind() !== undefined);
 			const keys: string[] = [];
 			const add = (kind: string, id: string | undefined) => { if (id) keys.push(`${kind}:${id}`); };
 			if (!pluginRecord) switch (entry.kind) {

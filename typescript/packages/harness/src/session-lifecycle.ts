@@ -265,17 +265,15 @@ export class SessionLifecycle {
 		}
 		catch (error) { this.operations.sessions().delete(id); await this.closeWriter(s); throw error; }
 		await this.prepareSession(s, true, prepare);
-		const latest = s.entries.get(s.order.at(-1) ?? "");
-		if (latest?.kind === "position") {
-			const data = latest.data as { to: string | null; restore?: { point: string; undo: string } };
-			if (data.restore) {
-				const before = s.entries.get(s.order.at(-2) ?? "");
-				const prior = before?.kind === "position" && (before.data as typeof data).restore;
-				const undoing = !!prior && prior.point === data.restore.undo && prior.undo === data.restore.point && before?.parentId === data.to;
-				try { await this.completeRewind(s, data.to, latest.parentId, data.restore, undoing); }
-				catch (error) {
-					if (s.suspended || (error as { code?: string }).code !== "conflict") { this.operations.sessions().delete(id); await this.closeWriter(s); throw error; }
-				}
+		const rewind = s.unresolvedRewind();
+		if (rewind) {
+			const { entry, to, restore } = rewind;
+			const before = s.entries.get(s.order.at(-2) ?? "");
+			const prior = before?.kind === "position" && (before.data as { restore?: typeof restore }).restore;
+			const undoing = !!prior && prior.point === restore.undo && prior.undo === restore.point && before?.parentId === to;
+			try { await this.completeRewind(s, to, entry.parentId, restore, undoing); }
+			catch (error) {
+				if (s.suspended || (error as { code?: string }).code !== "conflict") { this.operations.sessions().delete(id); await this.closeWriter(s); throw error; }
 			}
 		}
 
