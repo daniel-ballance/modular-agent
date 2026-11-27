@@ -55,6 +55,8 @@ mise exec -- cargo build --locked --release -p standard        # target/release/
 scripts/install.sh                                    # optional: ~/.local/bin/ma and the sidecar
 ```
 
+Run the installer from the permanent `main` checkout. Its Claude sidecar link points into that checkout.
+
 Sign in to at least one Provider:
 
 ```sh

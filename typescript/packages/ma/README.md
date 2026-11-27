@@ -14,7 +14,7 @@ node packages/ma/dist/src/main.js --help
 npm link --workspace @modular-agent/ma
 ```
 
-The link installs `ma` on npm's global bin path. Remove any other implementation's `ma` link first. The direct Node command above also works without a link. The TypeScript packages have not been published; keep the checkout and its built dependencies when using the link.
+Run the build and link commands from the permanent `main` checkout when installing or rebuilding the local `ma`. The link installs `ma` on npm's global bin path and points to the workspace build. Remove any other implementation's `ma` link first. Keep the checkout and its built dependencies while using the link. Use the direct Node command above to test a build in a temporary worktree.
 
 ```sh
 ma login chatgpt               # add --device to use a code
