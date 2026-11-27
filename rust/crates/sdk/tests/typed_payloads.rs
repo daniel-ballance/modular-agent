@@ -97,6 +97,16 @@ fn tool_result_uses_the_id_of_its_wire_shape() -> Result<()> {
 }
 
 #[test]
+fn bare_audio_is_not_a_standard_event() -> Result<()> {
+    let raw = json!({"type":"audio","time":0,"sessionId":"s","data":{"delta":"sample"}});
+    assert!(matches!(
+        serde_json::from_value::<Event>(raw)?,
+        Event::Custom(_)
+    ));
+    Ok(())
+}
+
+#[test]
 fn event_keeps_unknown_wire_data() -> Result<()> {
     let raw = json!({"type":"sessionInterrupted","time":10,"sessionId":"s","data":{"reason":"writerLost","future":17}});
     let event: Event = serde_json::from_value(raw.clone())?;

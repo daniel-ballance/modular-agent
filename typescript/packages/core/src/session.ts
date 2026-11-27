@@ -43,7 +43,6 @@ export interface EventData {
   text: { delta: string };
   reasoning: { delta: string };
   toolInput: { delta: string; toolCallId?: string };
-  audio: { data: string; mimeType: string };
   toolCall: { call: ToolCall };
   toolStarted: { call: ToolCall };
   toolOutput: { toolCallId: string; chunk: string; content?: Content };
