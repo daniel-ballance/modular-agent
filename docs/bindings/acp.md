@@ -31,7 +31,7 @@ Agent-managed state includes local history, settings, trust and local credential
 
 ## `initialize`
 
-The agent MUST advertise `loadSession: true` and `sessionCapabilities.list`, `.resume` and `.close` as `{}`. It MUST advertise only the ACP `promptCapabilities` and `mcpCapabilities` it supports. It MUST return `authMethods: []` and the initialization fields in the [metadata table](#metadata). The connection's `actor` is the configured [Actor](data.md#actors), not a grant in any session. In this binding the agent MUST NOT use the client's `fs/*` or `terminal/*` methods, even if offered. They are not the agent's working environment. A future profile could register wrappers as [Interface-run tools](../contracts.md#interface-run-tools); this binding defines no such mapping.
+The agent MUST advertise `loadSession: true` and `sessionCapabilities.list`, `.resume` and `.close` as `{}`. It MUST advertise only the ACP `promptCapabilities` and `mcpCapabilities` it supports. It MUST return `authMethods: []` and the initialization fields in the [metadata table](#metadata). The connection's `actor` identifies the configured [Actor](data.md#actors), not a grant in any session. In `_meta["modular-agent"].actor.rights`, the agent MUST report the configured actor's rights intersected with the connection's rights ceiling, or the configured rights when no ceiling is set. These are the connection's effective rights before any session or tenant ceiling. This metadata MUST NOT change recorded grants in any session. In this binding the agent MUST NOT use the client's `fs/*` or `terminal/*` methods, even if offered. They are not the agent's working environment. A future profile could register wrappers as [Interface-run tools](../contracts.md#interface-run-tools); this binding defines no such mapping.
 
 ### Metadata
 
@@ -44,7 +44,7 @@ Peers MUST use the following fields under `_meta["modular-agent"]` on the indica
 | `binding` | `initialize` request (optional) and result | `"modular-agent-acp/1"` or `"modular-agent-acp/2"` |
 | `declaration` | `initialize`, `session/new`, `session/load`, `session/resume` and `session/set_config_option` results; `config_option_update` when the declaration changes | Complete [declaration](#the-declaration) |
 | `extensions` | `initialize` result | Array of offered extension names without `_modular-agent/` |
-| `actor` | `initialize` result | [Actor](data.md#actors), with kind `user`, `host`, `agent` or `program` |
+| `actor` | `initialize` result | [Actor](data.md#actors), with kind `user`, `host`, `agent` or `program`; `rights` reports the [connection's effective rights](#initialize), not session grants |
 | `tenant` | `session/new` request (optional) | Tenant name (string); omitted for no tenant |
 | `key` | `session/prompt` request (optional) | [Input key](#input-admission) |
 | `inputId` | Admitted prompt result or post-admission error | Admission id; absent for an erased duplicate |
@@ -443,6 +443,8 @@ The shared-erasure fixture MUST use the history service’s [pending-erasure reg
 The [conformance kit](../../conformance/acp/README.md) exercises this mode. See [Conformance and versioning](../conformance.md) for what passing the kit establishes.
 
 ## Changes
+
+- **2026-11-26.** Specify that `initialize` advertises the configured actor's rights capped by the connection's rights ceiling, without changing recorded session grants.
 
 - **2026-11-26.** Negotiate ACP protocol version 1 when a client offers a newer valid major version. Binding selection still requires an exact match when the client names a binding.
 

@@ -23,6 +23,8 @@ export async function stdioRights({ project, connect, stop, check, within, histo
 			const hello = await rpc("initialize", { protocolVersion: 1, clientCapabilities: {} });
 			const principal = hello._meta?.[namespace]?.actor;
 			check(`${label}: initialize identifies the configured actor`, principal?.id === actor.id && principal.kind === actor.kind);
+			const expected = ceiling === undefined ? broad : broad.filter(right => ceiling.includes(right));
+			check(`${label}: initialize advertises the connection's effective rights`, sameRights(principal?.rights, expected));
 			await fn(peer, rpc);
 		} finally { await stop(peer); }
 	}
@@ -35,6 +37,9 @@ export async function stdioRights({ project, connect, stop, check, within, histo
 	}));
 	await attempt("stdio rights: disjoint lists", () => withPeer("disjoint", ["tools"], async (_peer, rpc) => {
 		check("disjoint: an empty intersection forbids creation", await forbidden(open(rpc)));
+	}));
+	await attempt("stdio rights: empty ceiling", () => withPeer("empty", [], async (_peer, rpc) => {
+		check("empty: an explicit empty ceiling forbids creation", await forbidden(open(rpc)));
 	}));
 	await attempt("stdio rights: recorded grant on reopen", async () => {
 		let id, before;
