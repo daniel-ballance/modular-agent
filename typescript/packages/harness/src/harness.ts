@@ -639,10 +639,11 @@ export class Harness {
 				}
 				return undefined;
 			},
-			onJobCancel: (handler) => this.jobWork.jobCancels.set(pluginName, handler),
-			unfinishedJobs: (id) => this.jobWork.runningJobs(this.session(id)).filter(({ job }) => job.plugin === pluginName),
+			onJobCancel: (handler, cleanup) => this.jobWork.registerCancel(pluginName, handler, cleanup),
+			unfinishedJobs: (id) => this.jobWork.unfinishedByOwner(this.session(id), pluginName),
 			resumeJob: (id, jobId) => {
 				const s = this.session(id);
+				this.erasure.checkPending(s);
 				const found = this.jobWork.runningJobs(s).find((j) => j.job.id === jobId && j.job.plugin === pluginName);
 				if (!found) throw new Error(`No unfinished job ${jobId} of ${pluginName}`);
 				return s.jobs.get(jobId)?.handle ?? this.jobWork.jobHandle(s, found);

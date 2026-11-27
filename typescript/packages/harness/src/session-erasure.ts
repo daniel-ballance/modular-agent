@@ -160,6 +160,7 @@ export class SessionErasure {
 				await s.running.done;
 			}
 			await s.committing;
+			this.operations.checkWriter(s);
 			if (!await this.operations.settleJobs(s)) return;
 			await this.reconcileProviderErasure(s, undefined, observe);
 			await registry.exclusive(async () => {
@@ -207,6 +208,7 @@ export class SessionErasure {
 		try {
 			if (s.running) { s.running.abort.abort(); await s.running.done; }
 			await s.committing;
+			this.operations.checkWriter(s);
 			if (!await this.operations.settleJobs(s)) return;
 			this.operations.checkWriter(s);
 			const pending = plan.copies.filter(copy => !copy.complete).map(copy => copy.entryId);

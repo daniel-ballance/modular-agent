@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { createAgent, definePlugin, defineProvider, fileHistory, httpHistory, serveHistory, tool } from "@modular-agent/core";
 import { JsonlHistoryStore } from "@modular-agent/history-jsonl";
 import { HttpHistoryStore } from "@modular-agent/services";
-import { testAgent } from "@modular-agent/core/testing";
+import { overWire, testAgent } from "@modular-agent/core/testing";
 
 for (const http of [false, true]) test(`copy discovery does not replay malformed intake (${http ? "HTTP" : "file"})`, async t => {
   const project = await mkdtemp(join(tmpdir(), "sdk-erasure-intake-"));
@@ -102,10 +102,63 @@ for (const pending of [false, true]) for (const confirm of [false, true]) {
         await assert.rejects(destination.history(), { code: "unavailable" });
         assert.ok((await new JsonlHistoryStore(join(project, "history")).load(destination.id)).entries.some(e => e.kind === "jobCleanupUnconfirmed"));
       }
-      assert.equal(cancels, 1);
+      assert.equal(cancels, !pending && !confirm ? 2 : 1);
     } finally { await Promise.allSettled([a.close(), ...(pending ? [b.close()] : [])]); }
   });
 }
+
+for (const [retryByErase, served] of [[false, false], [true, false], [false, true]]) test(`pending job cleanup retries after restart (${retryByErase ? "erase" : "open"}, ${served ? "wire" : "local"})`, async t => {
+  const project = await mkdtemp(join(tmpdir(), "sdk-erasure-job-retry-"));
+  t.after(() => rm(project, { recursive: true, force: true }));
+  let cancels = 0, resumes = 0;
+  const build = async (confirm: boolean) => {
+    const plugin = definePlugin({ name: "erasure-jobs", setup(r) {
+      r.jobs({ async cancel(job, cx) {
+        cancels++;
+        assert.equal(job.detail, null);
+        assert.equal(cx.job.started, false);
+        await cx.job.end({ kind: "cancelled" }, "must not enter history", true);
+        if (!confirm) throw new Error("could not stop");
+      }, resume() { resumes++; } });
+      r.tool(tool({ name: "lookup", description: "Start a job", input: { type: "object" }, async run(_, cx) {
+        return (await cx.jobs.start("lookup", { secret: "job detail" })).id;
+      } }));
+    } });
+    const agent = await testAgent({ project, dataDir: project, durability: "kept", plugins: [served ? overWire(plugin) : plugin], script: [{ text: "seed" }] });
+    t.after(() => agent.close());
+    return agent;
+  };
+  const a = await build(false), b = await build(false);
+  const source = await a.session();
+  await source.prompt("erase this");
+  const target = (await source.history()).find(e => e.kind === "input")!.id;
+  const fork = await source.fork();
+  await fork.close();
+  const destination = await b.openSession(fork.id);
+  await destination.callTool("lookup", {});
+  assert.ok((await source.erase([target])).pending.some(copy => copy.sessionId === fork.id));
+  await assert.rejects(destination.history(), { code: "unavailable" });
+  assert.equal(cancels, 1);
+  await b.close();
+  await a.close();
+
+  const c = await build(false);
+  await assert.rejects(c.openSession(fork.id), { code: "unavailable" });
+  assert.equal(cancels, 2);
+  await c.close();
+
+  const d = await build(true);
+  const reopenedSource = await d.openSession(source.id);
+  if (retryByErase) assert.deepEqual((await reopenedSource.erase([target])).pending, []);
+  const reopened = await d.openSession(fork.id);
+  const entries = await reopened.history();
+  assert.equal(cancels, 3);
+  assert.equal(resumes, 0);
+  assert.equal(entries.filter(e => e.kind === "jobCleanupUnconfirmed").length, 1);
+  assert.deepEqual(entries.filter(e => e.kind === "jobEnded").map(e => e.data), [{ outcome: { kind: "cancelled" }, report: false }]);
+  assert.doesNotMatch(JSON.stringify(entries), /must not enter history|erase this/);
+  assert.deepEqual((await reopenedSource.erase([target])).pending, []);
+});
 
 for (const pending of [false, true]) test(`erasure joins a live destination turn (${pending ? "reconciliation" : "direct"})`, { timeout: 5000 }, async t => {
   const project = await mkdtemp(join(tmpdir(), "sdk-erasure-live-"));

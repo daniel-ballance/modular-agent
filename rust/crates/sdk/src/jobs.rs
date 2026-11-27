@@ -34,6 +34,7 @@ impl JobOutcome {
 #[crate::async_trait]
 pub trait JobOwner: Send + Sync + 'static {
     /// Stop any running work. The SDK records cancellation if the handler did not end it.
+    /// An erasure retry supplies only the job, session and actor IDs, not job detail.
     async fn cancel(&self, job: Job, context: HookContext) -> Result<()>;
     /// Whether this owner takes up unfinished jobs on reopen.
     fn can_resume(&self) -> bool {
@@ -137,6 +138,7 @@ impl Owner {
             session_id: session.into(),
             actor_id: actor.into(),
             cleanup_unconfirmed: false,
+            cleanup_only: false,
             backend,
             active: Arc::downgrade(&self.active),
             records: self.records.clone(),
@@ -320,6 +322,26 @@ impl Owner {
         let _settled = context.settled.clone().drop_guard();
         self.handler.resume(job, context).await
     }
+    pub(crate) async fn cleanup_for_erasure(
+        &self,
+        backend: Backend,
+        session: &str,
+        actor: &str,
+        id: &str,
+    ) -> Result<()> {
+        let mut job = self.handle(id, "", Value::Null, None, session, actor, backend);
+        job.cleanup_only = true;
+        job.cancelled.cancel();
+        {
+            let _guard = self.records.lock().unwrap();
+            if let Some(old) = self.active.lock().unwrap().remove(id) {
+                old.cancelled.cancel();
+            }
+        }
+        let context = job.context();
+        let _settled = context.settled.clone().drop_guard();
+        self.handler.cancel(job, context).await
+    }
     pub(crate) async fn cancel_id(&self, id: &str) -> Result<()> {
         let job = self
             .active
@@ -358,6 +380,7 @@ pub struct Job {
     pub session_id: String,
     pub actor_id: String,
     pub cleanup_unconfirmed: bool,
+    cleanup_only: bool,
     backend: Backend,
     active: std::sync::Weak<Mutex<HashMap<String, Job>>>,
     records: Arc<Mutex<()>>,
@@ -412,6 +435,11 @@ impl Job {
         result: Option<Content>,
         report: bool,
     ) -> Result<()> {
+        // Erasure cleanup cannot publish through this handle. The host records
+        // a content-free end only if the cancellation handler returns success.
+        if self.cleanup_only {
+            return Ok(());
+        }
         self.check().await?;
         let mut ended = self.state.lock().await;
         if *ended {
@@ -420,6 +448,13 @@ impl Job {
         let event = match &self.backend {
             Backend::Local { api, scope } => {
                 let _guard = self.records.lock().unwrap();
+                if self
+                    .active
+                    .upgrade()
+                    .is_none_or(|a| !a.lock().unwrap().contains_key(&self.id))
+                {
+                    return Err(Error::new(Code::InvalidRequest, "job is not active"));
+                }
                 let mut job = api
                     .job_records(&scope.session)?
                     .into_iter()
@@ -494,6 +529,24 @@ impl LocalOwner {
 impl base::ExternalJobs for LocalOwner {
     fn owner(&self) -> String {
         self.0.clone()
+    }
+    async fn cleanup_for_erasure(
+        &self,
+        api: base::Api,
+        session: &str,
+        actor: &str,
+        id: &str,
+    ) -> base::Result<()> {
+        let scope = base::Scope {
+            actor: actor.into(),
+            job: Some(id.into()),
+            ..base::Scope::session(session)
+        };
+        // A cleanup-only handle needs no live session or plugin work context.
+        self.1
+            .cleanup_for_erasure(Backend::Local { api, scope }, session, actor, id)
+            .await?;
+        Ok(())
     }
     async fn cancel(&self, api: base::Api, job: base::Job) -> base::Result<base::Job> {
         let cancelled =

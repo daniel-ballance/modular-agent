@@ -552,6 +552,16 @@ pub fn jobs(data: &SessionData) -> Result<Vec<Job>> {
 pub trait ExternalJobs: Send + Sync {
     fn owner(&self) -> String;
     async fn cancel(&self, api: Api, job: Job) -> Result<Job>;
+    /// Confirm cleanup by identity alone, without resuming work or writing a result.
+    async fn cleanup_for_erasure(
+        &self,
+        _api: Api,
+        _session: &str,
+        _actor: &str,
+        _id: &str,
+    ) -> Result<()> {
+        Err(OperationError::Unavailable("Job owner cannot confirm erasure cleanup".into()).into())
+    }
 }
 #[async_trait]
 pub trait JobRunner: Send + Sync {

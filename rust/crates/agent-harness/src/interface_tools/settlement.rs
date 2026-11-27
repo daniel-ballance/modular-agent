@@ -267,9 +267,6 @@ impl Harness {
             return Ok(REFUSED);
         }
         let _serial = self.interface_tools.reports.lock().await;
-        let Ok(_erasure) = self.erasure.try_read() else {
-            return Ok(REFUSED);
-        };
         let inspect = |data: &SessionData| -> std::result::Result<_, InterfaceReportDisposition> {
             let branch = data.branch();
             let handoff = branch

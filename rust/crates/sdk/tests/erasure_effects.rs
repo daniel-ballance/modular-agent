@@ -1,5 +1,5 @@
 use modular_agent::{
-    AssistantMessage, Durability, Job, JobOwner, ModelInfo, ModelRef, ModelRequest, Plugin,
+    AssistantMessage, Code, Durability, Job, JobOwner, ModelInfo, ModelRef, ModelRequest, Plugin,
     Provider, ProviderContext, ProviderSupport, Result, Tool, ToolContext, async_trait,
     file_history, testing::test_agent,
 };
@@ -80,12 +80,134 @@ async fn job_cleanup_is_required_for_direct_and_pending_erasure() -> Result<()> 
             } else {
                 assert!(found.is_err());
             }
-            assert_eq!(cancels.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                cancels.load(Ordering::SeqCst),
+                if !pending && !confirm { 2 } else { 1 }
+            );
             let _ = a.close().await;
             if let Some(b) = b {
                 let _ = b.close().await;
             }
         }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_job_cleanup_retries_after_writer_handoff() -> Result<()> {
+    for (close_before_erase, served) in [(true, false), (false, false), (true, true)] {
+        let root = tempfile::tempdir()?;
+        let history = file_history(root.path().join("history"))?;
+        let cancels = Arc::new(AtomicUsize::new(0));
+        let build = |confirm| {
+            let cancels = cancels.clone();
+            let plugin = Plugin::new("erasure-job")
+                .setup(move |r| r.jobs(Owner(confirm, cancels.clone())))
+                .tool(
+                    Tool::new("job", "Start work").run(|_: Value, cx: ToolContext| async move {
+                        Ok(cx
+                            .start_job("work", json!("private job detail"), None)
+                            .await?
+                            .id)
+                    }),
+                );
+            let builder = test_agent()
+                .project(root.path())
+                .durability(Durability::Kept)
+                .history(history.clone())
+                .script(json!([{"text":"seed"}]));
+            if served {
+                builder.over_wire(plugin)
+            } else {
+                builder.plugin(plugin)
+            }
+            .build()
+        };
+        let first = build(false).await?;
+        let source = first.session().await?;
+        source.prompt("erase this").await?;
+        let target = source
+            .history()
+            .await?
+            .into_iter()
+            .find(|e| e["kind"] == "input")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let fork = source.fork()?;
+        let fork = if served {
+            fork.close().await?;
+            first.open_session(fork.id()).await?
+        } else {
+            fork
+        };
+        assert_eq!(
+            fork.call_tool("job", json!({})).await?.status,
+            modular_agent::ToolStatus::Completed
+        );
+        let source_id = source.id().to_owned();
+        let fork_id = fork.id().to_owned();
+        if close_before_erase {
+            first.close().await?;
+            assert_eq!(cancels.load(Ordering::SeqCst), 1);
+        }
+        let eraser = if close_before_erase {
+            build(false).await?
+        } else {
+            first
+        };
+        let source = if close_before_erase {
+            eraser.open_session(&source_id).await?
+        } else {
+            source
+        };
+        // The SDK redacts cross-session copy IDs from the source's report.
+        let report = source.erase(vec![target.clone()]).await?;
+        assert!(
+            report
+                .out_of_reach
+                .iter()
+                .any(|item| item == "copies in other sessions")
+        );
+        if close_before_erase {
+            assert_eq!(
+                eraser.open_session(&fork_id).await.err().unwrap().code(),
+                Code::Unavailable
+            );
+        }
+        eraser.close().await?;
+
+        let failing = build(false).await?;
+        let before = cancels.load(Ordering::SeqCst);
+        assert_eq!(
+            failing.open_session(&fork_id).await.err().unwrap().code(),
+            Code::Unavailable
+        );
+        assert_eq!(cancels.load(Ordering::SeqCst), before + 1);
+        failing.close().await?;
+
+        let recovering = build(true).await?;
+        let before = cancels.load(Ordering::SeqCst);
+        let fork = recovering.open_session(&fork_id).await?;
+        assert_eq!(cancels.load(Ordering::SeqCst), before + 1);
+        let entries = fork.history().await?;
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e["kind"] == "jobCleanupUnconfirmed")
+                .count(),
+            1
+        );
+        let ends: Vec<_> = entries.iter().filter(|e| e["kind"] == "jobEnded").collect();
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0]["data"]["outcome"], json!({"kind":"cancelled"}));
+        assert_eq!(ends[0]["data"]["report"], false);
+        assert!(ends[0]["data"]["result"].is_null());
+        assert!(!json!(entries).to_string().contains("erase this"));
+        let source = recovering.open_session(&source_id).await?;
+        assert!(source.erase(vec![target]).await?.pending.is_empty());
+        recovering.close().await?;
     }
     Ok(())
 }

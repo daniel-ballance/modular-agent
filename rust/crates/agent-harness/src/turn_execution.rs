@@ -129,6 +129,7 @@ impl Harness {
             let sessions = self.sessions.lock().unwrap();
             if sessions.get(session).is_some_and(|open| {
                 open.interruption.is_cancelled()
+                    || (preserve_waits && self.can_release_pending_writer(open))
                     || (!open.rewinding
                         && (open.journal_uncertain || open.data.unresolved_rewind().is_some()))
             }) {
@@ -218,7 +219,7 @@ impl Harness {
 
     pub async fn run_next(&self, session: &str) -> Result<Option<TurnResult>> {
         self.reconcile_pending_erasure(session).await?;
-        let (input, cancel, parent, resume, turn_id, erasure, interface) = {
+        let (input, cancel, parent, resume, turn_id, interface) = {
             let mut sessions = self.sessions.lock().unwrap();
             let open = sessions
                 .get_mut(session)
@@ -249,10 +250,6 @@ impl Harness {
             }
             // An idle driver wake-up must not take a reservation against
             // erasure or rewind. Decide and claim real work under one lock.
-            let erasure = self
-                .erasure
-                .try_read()
-                .map_err(|_| anyhow!("erasure in progress"))?;
             let (input, resume) = match (&interface, continuation) {
                 (Some(interface), _) => (interface.input.clone(), interface.calls.clone()),
                 (_, Some(continuation)) => continuation,
@@ -269,7 +266,6 @@ impl Harness {
                 parent,
                 resume,
                 turn_id,
-                erasure,
                 interface,
             )
         };
@@ -370,7 +366,6 @@ impl Harness {
             .await?;
         // The journal can already contain turn.end. Do not make completion
         // visible until all of the turn's idle-operation guards are gone.
-        drop(erasure);
         drop(activity);
         let mut event = json!(result);
         event["inputId"] = json!(admitted_input);
@@ -742,22 +737,5 @@ fn outcome_name(outcome: &Outcome) -> &'static str {
         Outcome::Cancelled => "cancelled",
         Outcome::Limit => "limit",
         Outcome::Failed => "failed",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::Path;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn an_idle_turn_probe_does_not_compete_with_erasure() -> Result<()> {
-        let harness = Harness::new();
-        let session = harness.create(Path::new("."), json!({})).await?;
-        let erasure = harness.erasure.try_write()?;
-        assert!(harness.run_next(&session).await?.is_none());
-        drop(erasure);
-        harness.close(&session).await
     }
 }

@@ -262,10 +262,6 @@ impl AgentApi for Harness {
         self.change_settings(scope, patch)
     }
     async fn rewind(&self, scope: &Scope, position: String) -> Result<Vec<String>> {
-        let _erasure = self
-            .erasure
-            .try_read()
-            .map_err(|_| anyhow!("erasure in progress"))?;
         self.rewind_project(scope, position).await
     }
     fn rewind_pending(&self, session: &str) -> Result<bool> {

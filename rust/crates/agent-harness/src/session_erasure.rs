@@ -1,4 +1,4 @@
-use super::{Harness, OpenSession, ReservationPool};
+use super::{Harness, OpenSession, ReservationPool, history_commit::make_entry};
 use agent_api::*;
 use std::{ops::Deref, sync::Arc};
 
@@ -27,6 +27,19 @@ impl Harness {
         remove: impl Fn(&SessionData) -> Result<()> + Send + Sync + 'static,
     ) {
         assert!(self.private_erasure.set(Box::new(remove)).is_ok());
+    }
+
+    /// A quiet, fenced session can release its writer without replay or new writes.
+    pub(super) fn can_release_pending_writer(&self, open: &OpenSession) -> bool {
+        !open.provisional
+            && !open.rewinding
+            && open.active.is_none()
+            && open.environment_work == 0
+            && self.store().is_some_and(|store| {
+                store
+                    .check_erasure(&open.data)
+                    .is_err_and(|e| e.is::<PendingErasure>())
+            })
     }
 
     pub(super) fn refresh_open_erasure(&self, open: &mut OpenSession) -> Result<()> {
@@ -100,21 +113,96 @@ impl Harness {
         Ok(false)
     }
 
-    async fn settle_erasure_jobs(&self, session: &str) -> Result<()> {
-        for job in self.job_records(session)? {
-            if job.state != JobState::Running {
+    async fn cleanup_erasure_job(&self, job: &Job) -> Option<bool> {
+        let owner = self
+            .capability_names("external.jobs.")
+            .iter()
+            .filter_map(|name| capability::<dyn ExternalJobs>(self, name).ok())
+            .find(|owner| owner.owner() == job.owner)?;
+        Some(matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                owner.cleanup_for_erasure(
+                    self.api(),
+                    &job.scope.session,
+                    &job.scope.actor,
+                    &job.id
+                ),
+            )
+            .await,
+            Ok(Ok(()))
+        ))
+    }
+
+    fn record_erasure_job_cleanup(
+        data: &SessionData,
+        mut job: Job,
+        confirmed: bool,
+    ) -> Option<SessionData> {
+        let draft = if confirmed {
+            job.state = JobState::Cancelled;
+            job.kind.clear();
+            job.detail = Value::Null;
+            job.result = None;
+            job.report = false;
+            Draft::new("job.end", false, json!(job))
+        } else if job.state == JobState::Running {
+            Draft::new("job.cleanup_unconfirmed", false, json!({}))
+        } else {
+            return None;
+        };
+        let mut next = data.clone();
+        let entry = make_entry(&next, &job.scope, &job.owner, draft);
+        next.position = Some(entry.id.clone());
+        next.entries.push(entry);
+        Some(next)
+    }
+
+    pub(super) async fn settle_stored_erasure_jobs(
+        &self,
+        store: &AccountedHistory,
+        lease: &dyn Lease,
+        data: &mut SessionData,
+    ) -> Result<()> {
+        for job in jobs(data)?
+            .into_iter()
+            .filter(|job| job.state.is_unfinished())
+        {
+            lease.check()?;
+            let Some(confirmed) = self.cleanup_erasure_job(&job).await else {
                 continue;
+            };
+            lease.check()?;
+            if let Some(next) = Self::record_erasure_job_cleanup(data, job, confirmed) {
+                store.pool.commit(data, &next, None, || store.save(&next))?;
+                *data = next;
             }
-            let owner = self
-                .capability_names("external.jobs.")
-                .iter()
-                .find_map(|name| {
-                    let owner = capability::<dyn ExternalJobs>(self, name).ok()?;
-                    (owner.owner() == job.owner).then_some(owner)
-                });
-            if let Some(owner) = owner {
-                let _ = owner.cancel(self.api(), job).await;
-            } else if let Ok(service) = job_service(self) {
+        }
+        check_erasure_jobs(data)
+    }
+
+    async fn settle_live_erasure_jobs(&self, session: &str) -> Result<()> {
+        for job in self
+            .job_records(session)?
+            .into_iter()
+            .filter(|job| job.state.is_unfinished())
+        {
+            if let Some(confirmed) = self.cleanup_erasure_job(&job).await {
+                let mut sessions = self.sessions.lock().unwrap();
+                let open = sessions.get_mut(session).ok_or(super::SessionNotOpen)?;
+                self.check_open_writer(open)?;
+                if let Some(current) = jobs(&open.data)?
+                    .into_iter()
+                    .find(|j| j.id == job.id && j.state.is_unfinished())
+                    && let Some(next) =
+                        Self::record_erasure_job_cleanup(&open.data, current, confirmed)
+                {
+                    self.commit(open, &next)?;
+                    open.data = next;
+                }
+            } else if job.state == JobState::Running
+                && let Ok(service) = job_service(self)
+            {
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(5),
                     service.cancel(self.api(), session, "user", &job.id),
@@ -122,14 +210,8 @@ impl Harness {
                 .await;
             }
         }
-        ensure!(
-            !self
-                .job_records(session)?
-                .iter()
-                .any(|job| job.state.is_unfinished()),
-            OperationError::Unavailable("Erasure is pending job settlement".into())
-        );
-        Ok(())
+        let sessions = self.sessions.lock().unwrap();
+        check_erasure_jobs(&sessions.get(session).ok_or(super::SessionNotOpen)?.data)
     }
 
     async fn reconcile_live_erasure(
@@ -166,7 +248,7 @@ impl Harness {
             }
             settled.await;
         }
-        self.settle_erasure_jobs(session).await?;
+        self.settle_live_erasure_jobs(session).await?;
         self.discard_local_provider_state(session).await?;
         let mut sessions = self.sessions.lock().unwrap();
         let open = sessions.get_mut(session).ok_or(super::SessionNotOpen)?;
@@ -252,13 +334,14 @@ impl Harness {
                     return self.reconcile_live_erasure(&store, session).await;
                 }
                 let lease = store.acquire(session)?;
-                let data = store.load(session)?;
+                let mut data = store.load(session)?;
                 match store.check_erasure(&data) {
                     Ok(()) => return store.confirmed_erasure(session),
                     Err(error) if error.is::<PendingErasure>() => {}
                     Err(error) => return Err(error),
                 }
-                check_erasure_jobs(&data)?;
+                self.settle_stored_erasure_jobs(&store, lease.as_ref(), &mut data)
+                    .await?;
                 self.discard_local_provider_state(session).await?;
                 lease.check()?;
                 if let Some((data, ids)) = store.reconcile_erasure(session)? {

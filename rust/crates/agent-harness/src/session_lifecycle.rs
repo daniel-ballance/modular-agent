@@ -220,10 +220,6 @@ impl Harness {
         let op = Operation::internal("modular_agent.session.open", &Scope::session(id));
         op.attr("modular_agent.session.operation", "load");
         op.run(async {
-            let _erasure = self
-                .erasure
-                .try_read()
-                .map_err(|_| anyhow!("erasure in progress"))?;
             ensure!(
                 !self.sessions.lock().unwrap().contains_key(id),
                 OperationError::Busy("session already open here".into())
@@ -236,7 +232,7 @@ impl Harness {
                 Ok(select(&loaded)?.then_some((store, lease, loaded)))
             })
             .await??;
-            let Some((store, lease, loaded)) = loaded else {
+            let Some((store, lease, mut loaded)) = loaded else {
                 return Ok(None);
             };
             let pending = match store.check_erasure(&loaded) {
@@ -245,7 +241,17 @@ impl Harness {
                 Err(error) => return Err(error),
             };
             if pending {
-                check_erasure_jobs(&loaded)?;
+                SESSION_OPEN_POLICY
+                    .try_with(|policy| {
+                        if policy.session == id {
+                            self.check_session_open(&loaded, policy).map(|_| ())
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .unwrap_or(Ok(()))?;
+                self.settle_stored_erasure_jobs(&store, lease.as_ref(), &mut loaded)
+                    .await?;
                 self.discard_local_provider_state(id).await?;
                 lease.check()?;
             }
@@ -470,6 +476,13 @@ impl Harness {
                             .unwrap()
                             .insert(open.data.project.clone(), id.into());
                     }
+                    sessions.remove(id);
+                    return Ok(());
+                }
+                if sessions
+                    .get(id)
+                    .is_some_and(|open| self.can_release_pending_writer(open))
+                {
                     sessions.remove(id);
                     return Ok(());
                 }

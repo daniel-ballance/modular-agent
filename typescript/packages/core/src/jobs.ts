@@ -5,6 +5,7 @@ import { AgentError, checked } from "./errors.js";
 export type JobOutcome = { kind: "completed" | "cancelled" } | { kind: "failed"; error: string };
 export interface UnfinishedJob { id: string; kind: string; detail: unknown; key?: string; actorId?: string }
 export interface JobOwner {
+  /** Erasure cleanup supplies identity only, with an inert handle. */
   cancel(job: UnfinishedJob, context: { job: Job }): void | Promise<void>;
   resume?(job: UnfinishedJob, context: { job: Job }): void | Promise<void>;
 }
