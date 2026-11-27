@@ -15,16 +15,11 @@ Build the agent as you would for [an embedded prompt](01-first-agent.md), with p
 
 Start with no serve options. The agent is then bound to its configured project. The client sends an absolute, existing directory as `cwd`; the server canonicalizes it, resolving symlinks, and refuses a different project. A project path is not a grant.
 
-For a multi-project host, use `compose` to supply an Agent for the canonical project. Check it against the operator's allowed projects before loading any project configuration or starting programs. Use a shared persistent history store for projects that need to reopen saved sessions: the serving agent needs to find the saved session before selecting its composition. When available, use the saved session metadata to select the parts needed for recovery. `projectSettings` supplies defaults for new sessions, not replacements for saved settings on reopen. `projectMcp` deals with session tools, not model settings. The callback that reads project MCP config must consult operator trust before returning any configured servers. Servers the client sends in `mcpServers` are a separate input, subject to the [host MCP policy](../../contracts.md#mcp-servers); don't treat them as trusted project config.
+For a multi-project host, configure the connection’s allowed projects and use `compose` to select an Agent for the canonical project. Point the serving side and the composed Agents at the same persistent history if sessions need to reopen. The serving side finds the saved session before selecting an Agent. Use its metadata to choose the parts that recovery needs; do not replace saved settings with new defaults. For example, both `ma` factories can use the saved model to decide whether to load the Claude Provider, even if the current default model is different.
 
-| Language | Project-aware options |
-|---|---|
-| Rust | Set `AcpOptions.compose` to an `Arc<dyn AcpComposition>`. Its `compose(project, reopening)` receives the optional saved session id. The trait also supplies `history()`, `configuration()`, `project_settings(project)` and `project_mcp(session, project, servers)`. Composed agents must enable plugin hosting. They need a `data_dir` only where [`createAgent`](../api.md#the-agent) needs one, such as for the default file history under `kept` or `durable`. |
-| TypeScript | Pass `{ compose, projectSettings, projectMcp }` to `serveAcp`. `compose(project, saved?)` is async and can receive a `SessionInfo`. `projectMcp(project)` returns a name-to-config map; it and `projectSettings` may be async. |
+Keep an operator-controlled trust decision outside the project. Before using a project’s config to launch code or add configured MCP servers, check that decision. An allowed path is not a trust grant, and the client cannot grant trust over ACP. Treat any `mcpServers` sent by the client as a separate input under the [host MCP policy](../../contracts.md#mcp-servers).
 
-Rust's `project_mcp` is an attachment callback for client-supplied servers, not a resolver that reads project config. For configured servers, install a trusted MCP source in `compose`, as the [Rust reference agent](../../reference/standard-configuration.md) does. The fixed-project Rust server refuses nonempty client MCP specs.
-
-See [The agent](../api.md#the-agent), [ACP Sessions](../../bindings/acp.md#sessions) and [Configuration and trust](../../contracts.md#configuration-and-trust).
+In Rust, use `AcpOptions.compose` and implement `AcpComposition`; `project_mcp` attaches client servers. In TypeScript, use `serveAcp({ compose, projectSettings, projectMcp })`; `projectMcp` resolves configured servers. For exact signatures and fixed-project support, see [ACP project options](../languages.md#acp-project-options). For the order of checks and recovery, see [ACP project composition](../api.md#acp-project-composition).
 
 ## Know who is acting
 
