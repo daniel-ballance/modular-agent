@@ -4,9 +4,9 @@
 
 The Agent SDK is used as a plain model endpoint. The Harness keeps the agent loop, the tools, the system prompt and the history:
 
-- The host's system prompt is passed as the system prompt, with no Claude Code preset.
+- The Provider passes the host's system prompt unchanged, without selecting a Claude Code preset. Claude Code can still add its own context.
 - The host's tool definitions are the only tools the model is shown. Claude Code's built-in tools are off (`tools: []`), and so are settings files, hooks, `CLAUDE.md` memory, MCP configuration, bundled skills and session files.
-- When the model asks for a tool, nothing runs. The sidecar ends the request as soon as the model's message is complete and returns an assistant message with `toolCall` parts and `stop: "toolUse"`. The host runs the tool and sends a new `provider/request` that includes the result.
+- When the model asks for a host tool, the sidecar does not run it. The sidecar ends the request as soon as the model's message is complete and returns an assistant message with `toolCall` parts and `stop: "toolUse"`. The host runs the tool and sends a new `provider/request` that includes the result.
 - Text and thinking are sent as `provider/event` notifications while the request runs. The final message carries usage.
 
 It is a port of the approach in the Pi extension `claude-subscription`, cut down to what a stateless Provider needs.
@@ -64,17 +64,17 @@ Only `catalog.json` in the `home` folder from `plugin/initialize`: the model lis
 
 ## Stateless, and why
 
-The Provider registers `keepsState: false`, `runsTools: false`. Every `provider/request` starts one Claude Code process, gives it the whole request, reads one model message and closes the process. `sessionId` is accepted and passed to the hooks but not otherwise used. `provider/discard` has nothing to discard and answers `{}`; with `erase: true` it answers `outOfReach`, since copies Anthropic holds cannot be named or deleted from here.
+The Provider registers `keepsState: false`, `runsTools: false`. Every `provider/request` starts one Claude Code process, gives it the whole request, returns one assistant message to the host and closes the process. Parallel requests use separate processes. `sessionId` is accepted and passed to the hooks but not otherwise used. `provider/discard` has nothing to discard and answers `{}`; with `erase: true` it answers `outOfReach`, since copies Anthropic holds cannot be named or deleted from here.
 
 The Agent SDK accepts only user input. Earlier messages go in as a marked text record in one user turn (`<history:MARK>` with `<user:MARK>`, `<assistant:MARK>`, `<tool-call:MARK>` and `<tool-result:MARK>` entries). Trailing user messages follow as written. Images keep their place. The reference uses this replay format after every restart, compaction or branch.
 
 The Provider hashes the first replayed entry to choose the mark. As messages are appended, the mark and existing record prefix stay the same for prompt caching unless a replayed entry contains the mark after a colon. When that happens, the Provider tries deterministic alternatives until it finds a mark that never follows a colon in the entries. This keeps quoted tags from acting as boundaries.
 
-The record header, each entry and the closing tag occupy separate content blocks. Images split an entry at their original positions. The Provider adds one five-minute cache breakpoint to the last entry, before the closing tag and any new user input. The pinned SDK forwards that breakpoint when the Provider turns off Claude Code's automatic breakpoints for replay. This avoids both the API's TTL ordering error and its limit of four breakpoints. [Anthropic's prompt caching rules](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) give the model-specific token minimums and the 20-block lookback window.
+The record header, each entry and the closing tag occupy separate content blocks. Images split an entry at their original positions. Unless the operator has disabled prompt caching, the Provider adds one five-minute cache breakpoint to the last entry, before the closing tag and any new user input. The pinned SDK forwards that breakpoint when the Provider turns off Claude Code's automatic breakpoints for replay. This avoids both the API's TTL ordering error and its limit of four breakpoints. [Anthropic's prompt caching rules](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) give the model-specific token minimums and the 20-block lookback window.
 
-The reference normally does something more involved: it keeps one Claude Code process alive per conversation and holds each tool call open until Pi supplies the result, which gives the model native history, its own thinking and a warm prompt cache. That is an optimisation there, not a necessity, and it would need the stateful Provider rules (`sessionId` on every request, exact-prefix proof, `provider/discard`, reset on move, fork, compaction and model change) plus a pool of long-lived processes. The stateless form is correct with none of that, so it was chosen. Its costs are listed under known gaps.
+The reference normally does something more involved: it keeps one Claude Code process alive per conversation and holds each tool call open until Pi supplies the result, which gives the model native history, its own thinking and a warm prompt cache. That is an optimisation there, not a necessity, and it would need the stateful Provider rules (`sessionId` on every request, exact-prefix proof, `provider/discard`, reset on move, fork, compaction and model change) plus a pool of long-lived processes. This Provider uses stateless replay instead. Earlier turns are not sent as native messages, and reasoning parts are not replayed.
 
-Failed and aborted assistant messages in the request are not replayed, and neither is a tool result whose call is not in a replayed assistant message. Reasoning parts are not replayed.
+Failed and aborted assistant messages in the request are not replayed, and neither is a tool result whose call is not in a replayed assistant message.
 
 ## Models
 
@@ -103,18 +103,20 @@ Which levels a model lists follows the reference: Fable 5.x cannot switch thinki
 - **Tool names.** Claude Code shows each host tool to the model as `mcp__host__<name>`. Names with characters outside `[A-Za-z0-9_-]`, or too long, get a stable replacement. The sidecar maps the name back, so the host sees its own names. Host tool names are also registered as aliases, so a model that uses the plain name still works.
 - **Tool call ids.** A `toolCall` part's `id` is Claude's `tool_use` id (`toolu_...`). `toolInput` stream events carry the same id.
 - **Stop.** `end_turn` and `stop_sequence` give `finished`; `tool_use` gives `toolUse`; `max_tokens` gives `length`; `refusal` gives `refused` with an error of kind `refused`. A tool call cut off by the output limit is dropped.
-- **Usage.** `input`, `output`, `cacheRead` and `cacheWrite` are Anthropic's token counts for the request. `cost` is always `0`: a subscription is not billed per token, and Claude Code's price estimate is not available when a request ends at a tool call.
+- **Temperature and stop sequences.** Claude Code owns these settings; the Provider does not set them.
+- **Unoffered tools.** Claude Code answers an attempt to call an unoffered tool with an error and can continue the turn within the same request. The Provider does not report the attempt as a host tool call.
+- **Usage.** `input`, `output`, `cacheRead` and `cacheWrite` are Anthropic's token counts for the request. A subscription is not billed per token. The Provider reports `cost: 0` under the [partial-meter rule](../../../docs/bindings/data.md#messages), not as a Claude Code price estimate.
 - **Errors.** A failure after the `provider.request` hook is an assistant message with `stop: "failed"` and an `error`. Kinds: a rejected or missing login is `credentials`; rate limits, overload and server errors are `temporary`; "prompt is too long" is `contextTooLarge`; the rest is `other`. Protocol errors are used only for an unknown Provider or model, a malformed request, a failed `provider.request` hook (the host's error is passed back) and cancellation.
 - **Cancel.** `$/cancel` closes the Claude Code process at once and the request answers `cancelled`. No `provider.response` hook is called for a cancelled request.
 
 ## Verification
 
-### Offline tests: 54 pass
+### Offline tests: 55 pass
 
 `npm test`, with a scripted fake in place of the SDK's `query()`:
 
 - `models.test.ts` (6): catalog shape, level mapping, nearest level, narrowing.
-- `transcript.test.ts` (9): ModelRequest to SDK input, replay prefix stability and boundary collisions.
+- `transcript.test.ts` (10): ModelRequest to SDK input, stable replay blocks, breakpoint placement and boundary collisions.
 - `response.test.ts` (11): SDK output to the assistant message (text, thinking, tool calls, usage, stop reasons), error kinds, token scrubbing.
 - `provider.test.ts` (15): requests against the fake SDK, cancellation, catalog changes after readiness, and closing the probe on shutdown or at the deadline.
 - `api.test.ts` (3 offline, one gated live): the public constructor in process and over the plugin binding, including an API key source refusal.
@@ -141,36 +143,32 @@ The former `npm run live` check started the sidecar with only `PATH` and `HOME` 
 - Request 2 (the same conversation plus the assistant message and a tool result): `stop: "finished"`, text "Paris is 18°C with light rain and wind at 7 km/h.", streamed as text events, no further tool call.
 - Hooks ran in order (`provider.request`, then `provider.response`) and the sidecar exited with 0.
 
-Two more single requests, made directly against the Provider class to look into what the first two showed:
+Two more requests went directly through the Provider. The no-tools request with `reasoning: "off"` returned only text (4 output tokens) and listed no tools. The tool-enabled replay of request 2, also with `reasoning: "off"`, returned an empty thinking block before the answer (110 output tokens total). The Provider does not stream empty thinking or include it in the final message.
 
-- No tools, `reasoning: "off"`: one text block, "ok", output 4 tokens, tool list `[]`.
-- The request 2 shape again with block logging: a thinking block with no text, then the text answer; output 110 tokens. See the first known gap.
+Claude Code added an Agent SDK identity line and `<system-reminder>` context. The no-tools request counted 858 input tokens with a seven-word host system prompt; that count is for the whole input, not a measurement of the added text alone. The init message named built-in agents, plugins and skills, but the Provider disables bundled skills and offers no Agent or Skill tool. An init listing does not establish what text the model received.
 
-## Known gaps and open problems
+### Rust-host smoke run (2026-11-19)
 
-Tracked in #39.
+`ma --model claude/claude-haiku-5-5 -p ...`, using the Rust standard configuration, launched the sidecar with `HOME`, `PATH` and `CLAUDE_CONFIG_DIR`. The host's code tool read a file and ran a command over two tool rounds. The model then answered correctly.
 
-- **`off` did not stop thinking in one real request.** With `reasoning: "off"` Claude Code is started with thinking disabled. With no tools offered, Haiku 5.5 sent only text. With a tool offered and a replayed record, it still sent a thinking block whose text was empty, at a cost of roughly 90 output tokens. The sidecar passes the setting correctly as far as the SDK's options go; why Claude Code or the model thought anyway was not investigated, to stay inside the request budget. Empty thinking is not streamed and leaves no reasoning part.
-- **Claude Code adds to the prompt.** The host's system prompt is passed unchanged as the system prompt, but Claude Code itself adds an identity line ("You are a Claude agent, built on Anthropic's Claude Agent SDK.") and `<system-reminder>` context such as the working directory, platform, date and account email. The no-tools request above, with a seven-word system prompt, counted 858 input tokens, so this overhead is real. The exact text was not captured. The Agent SDK offers no option to remove it.
-- **Built-in agents, plugin skills and plugins are still listed at start.** Claude Code's init message names its built-in agents (`Explore`, `Plan` and others), four built-in `cc-plugin-*` plugins and three skills those plugins supply. With `skills: []` and `disableBundledSkills` the bundled skills are gone and no skill is listed to the model, and since the tool list is only the host's tools there is no Agent or Skill tool to reach any of them. Whether any of their descriptions reach the prompt could not be checked.
-- **History is a text record.** The model sees earlier turns as a quoted record in one user message and receives no earlier thinking. Each request starts a fresh Claude Code process.
+### Replay prompt caching
 
-  The live run for [#227](https://github.com/daniel-ballance/modular-agent/issues/227) on 2026-11-26 used `claude()` directly with a Claude subscription, Haiku 5.5, Agent SDK 0.3.323 and Claude Code 2.1.323. One initial tool call supplied the first page of a synthetic inventory. Each of the next three requests replayed the record, called the same tool and added another 270-line page. Anthropic reported these token counts.
+[PR #225](https://github.com/daniel-ballance/modular-agent/pull/225) stabilized the replay mark, and [PR #231](https://github.com/daniel-ballance/modular-agent/pull/231) placed the cache breakpoint at a reusable block boundary. The live probe for [#227](https://github.com/daniel-ballance/modular-agent/issues/227) ran on 2026-11-26 with `claude()` directly, Haiku 5.5, Agent SDK 0.3.323 and Claude Code 2.1.323. An initial tool call supplied the first page of a synthetic inventory. Each of the next three requests replayed the record, called the same tool and added another 270-line page. Anthropic reported these token counts:
 
-  | Request | `cacheRead` | `cacheWrite` |
-  | --- | ---: | ---: |
-  | Initial, no replay | 0 | 1,383 |
-  | Replay 1 | 0 | 7,544 |
-  | Replay 2 | 7,544 | 6,636 |
-  | Replay 3 | 14,180 | 6,634 |
+| Request | `cacheRead` | `cacheWrite` |
+| --- | ---: | ---: |
+| Initial, no replay | 0 | 1,383 |
+| Replay 1 | 0 | 7,544 |
+| Replay 2 | 7,544 | 6,636 |
+| Replay 3 | 14,180 | 6,634 |
 
-- **Per-request process.** Requests are independent, so parallel requests work, each with its own process.
-- **`maxOutput` is not proven to bind.** It is passed as `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, and requests with it set succeeded, but no request was spent on hitting the cap.
-- **Temperature and stop sequences.** Claude Code sets them.
-- **A call to a tool the host did not offer** is answered by Claude Code itself with an error and the turn goes on inside the same request; the host sees none of it.
-- **`cost` is always 0.** See Usage above.
-- **An empty system prompt** is passed as an empty string. Whether Claude Code then falls back to its own prompt was not tested.
-- **Run through the Rust host once.** `ma --model claude/claude-haiku-5-5 -p ...` (the standard configuration in `rust/crates/standard`, which launches this sidecar with `HOME`, `PATH` and `CLAUDE_CONFIG_DIR`) read a file and ran a command through its code tool over two tool rounds and answered correctly, on 2026-11-19. Nothing beyond that one run has been exercised through the host.
+The live TypeScript `ma` Wave 2 run for #145 on Opus 5.5 reached a 91.84% cache hit rate (`cacheRead / (input + cacheRead + cacheWrite)`). The [#20 audit](https://github.com/daniel-ballance/modular-agent/issues/20#issuecomment-7209254792) records the run and its one full cache rewarm after an eight-minute wait.
+
+<a name="known-gaps-and-open-problems"></a>
+
+## Remaining work
+
+[#265](https://github.com/daniel-ballance/modular-agent/issues/265) tracks the 0.6.0 live probes: reproducing the `reasoning: "off"` result, measuring Claude Code's added prompt text, hitting the `maxOutput` cap and checking how Claude Code handles an empty system prompt. [#20](https://github.com/daniel-ballance/modular-agent/issues/20) tracks broader live `ma` use.
 
 ## Where the binding had to be read closely or guessed
 
@@ -179,6 +177,5 @@ Tracked in #39.
 - **Erasure by a stateless Provider.** `provider/discard` with `erase: true` answers `{ "outOfReach": [...] }` with one descriptive string, following the wording "report those copies out of reach". The binding does not define the strings.
 - **`sessionId` on a stateless Provider.** Accepted when present, never required, and copied into both hook payloads (`null` when absent, per [the hook table](../../../docs/bindings/plugin.md#from-core-hooks-to-wire-hooks)).
 - **A level the model does not list.** Settled by edition 4: lower it, never raise it. The sidecar now does.
-- **`cost` for a subscription.** [Messages](../../../docs/bindings/data.md#messages) says to use zero for fields missing from a partial meter. Zero is reported.
 - **Opaque reasoning data.** Thinking signatures are not returned as `providerData`, because history is never sent back as native turns and the data would only add bytes.
 - **The request after the hook.** If the hook answers with a request that is not a readable ModelRequest, inference has already been admitted, so the sidecar returns a `failed` message with kind `other` and still calls `provider.response`.
