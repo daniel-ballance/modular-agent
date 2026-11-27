@@ -200,6 +200,10 @@ export class Agent {
   #acp = false;
   #agui = false;
   #stopAcp?: () => Promise<void>;
+  /** Set once a plain ACP WebSocket listener serves; later listeners share its project MCP part. */
+  #acpService?: { projectMcp: ServeAcpOptions["projectMcp"]; mcp: ReturnType<typeof standardMcpTools> };
+  /** The ACP listener whose connections hold each open session of this Agent. */
+  #acpClaims = new Map<string, { listener: object; holders: Set<object> }>();
   #project: string;
   #conformance = false;
   #approval = false;
@@ -622,9 +626,15 @@ export class Agent {
   }
   async #serve(options: (ServeAcpOptions & { listen?: never }) | ServeAcpServiceOptions, agui?: ServeAguiOptions): Promise<void | ServiceServer> {
     this.#check();
-    if (this.#acp || this.#open.size || this.#opening.size) throw new AgentError("busy", "ACP must start before opening sessions");
+    // Another WebSocket ACP listener may join one that already serves this Agent.
+    const again = !!this.#acpService && options.listen !== undefined && !agui;
+    if (this.#acp && !again || this.#open.size || this.#opening.size) throw new AgentError("busy", "ACP must start before opening sessions");
+    if (again && options.projectMcp !== this.#acpService!.projectMcp) {
+      throw new AgentError("invalid_composition", "Every ACP listener on one Agent must share its projectMcp");
+    }
     this.#acp = true;
-    this.#agui = !!agui;
+    if (!again) this.#agui = !!agui;
+    const listener = {};
     const agents = new Map<string, Promise<Agent>>();
     const sessions = new Map<string, Agent>();
     const attachments = new Map<PluginApi, ReturnType<typeof standardMcpTools>>();
@@ -638,9 +648,11 @@ export class Agent {
           agent.#defaults.model = { id, provider };
         }
       }
+      if (agent === this && this.#acpService) { attachments.set(agent.#api, this.#acpService.mcp); return; }
       const mcp = standardMcpTools({ servers: async project => await options.projectMcp?.(project) ?? {} });
       await agent.#plugin(mcp);
       attachments.set(agent.#api, mcp);
+      if (agent === this && options.listen !== undefined && !agui) this.#acpService = { projectMcp: options.projectMcp, mcp };
     };
     const disposeProjects = async () => {
       await Promise.allSettled([...agents.values()].map(async pending => {
@@ -742,6 +754,17 @@ export class Agent {
     const prepareConnection = (scope: Awaited<ReturnType<typeof makeScope>>, network: boolean) => {
       const attached = new Map<PluginApi, { detach(): void; agent: Agent }>();
       let disconnected = false;
+      const holder = {}, claims = new Set<string>();
+      // A session open on this Agent belongs to one listener. Call only after the scope checks.
+      const claim = (id: string) => {
+        const held = this.#acpClaims.get(id);
+        if (held && held.listener !== listener && held.holders.size && this.#h.liveSessionInfo(id)) {
+          throw new AgentError("busy", "Session is open on another ACP listener");
+        }
+        if (held?.listener === listener) held.holders.add(holder);
+        else this.#acpClaims.set(id, { listener, holders: new Set([holder]) });
+        claims.add(id);
+      };
       const attach = (agent: Agent) => {
         if (disconnected) throw new AgentError("lost", "The ACP connection ended");
         if (attached.has(agent.#api)) return;
@@ -778,7 +801,11 @@ export class Agent {
         traceTrusted: scope.traceTrusted ?? !network,
         declaration: id => (id && sessions.get(id) || this).declaration(),
         projectSettings: options.projectSettings ? async project => await options.projectSettings!(project) : undefined,
-        associate: (id, api) => { sessions.set(id, attached.get(api)?.agent ?? this); },
+        associate: (id, api) => {
+          const agent = attached.get(api)?.agent ?? this;
+          sessions.set(id, agent);
+          if (agent === this) claim(id);
+        },
         project: async (cwd, id) => {
           const saved = id ? await authorize(id) : undefined;
           const project = await checked(() => realpath(cwd), "invalid_params");
@@ -786,6 +813,7 @@ export class Agent {
           if (!scope.allowProject(project)) throw inaccessible();
           if (saved && saved.project !== project) throw new AgentError("wrong_project", "Session belongs to a different project");
           const selected = await selectProject(project, id, saved);
+          if (id && selected === this) claim(id);
           attach(selected);
           if (id) sessions.set(id, selected);
           return { api: selected.#api, cwd: project };
@@ -802,6 +830,12 @@ export class Agent {
         disconnected = true;
         for (const part of attached.values()) part.detach();
         attached.clear();
+        for (const id of claims) {
+          const held = this.#acpClaims.get(id);
+          if (held?.listener !== listener) continue;
+          held.holders.delete(holder);
+          if (!held.holders.size) this.#acpClaims.delete(id);
+        }
       } };
     };
     const resumeOpen = async (scope?: Pick<Awaited<ReturnType<typeof makeScope>>, "allowProject" | "allowTenant">) => {
@@ -890,13 +924,15 @@ export class Agent {
         } finally { detach(); if (ws.readyState === ws.OPEN) ws.close(1000); }
       }, http, options.resumeOpen ? () => resumeOpen() : undefined);
       const stopListener = async () => { for (const off of cleanRoutes.splice(0)) off(); http?.close(); await server.close(); };
-      this.#stopAcp = async () => { await stopListener(); await disposeProjects(); };
+      const stopPrevious = this.#stopAcp;
+      this.#stopAcp = async () => { await stopListener(); await disposeProjects(); await stopPrevious?.(); };
       if (agui) { serving = true; return { url: new URL(server.url.replace(/^ws/, "http")).origin, close: stopListener }; }
       serving = true;
       return { url: server.url, close: () => this.close() };
     } catch (error) { throw new AgentError("invalid_composition", messageOf(error), undefined, error); }
     finally {
-      if (!serving) { await disposeProjects(); await this.close(); }
+      if (!serving && again) { for (const off of cleanRoutes.splice(0)) off(); await disposeProjects(); }
+      else if (!serving) { await disposeProjects(); await this.close(); }
     }
   }
   close(): Promise<void> {
