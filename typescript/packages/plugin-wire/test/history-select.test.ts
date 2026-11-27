@@ -18,6 +18,8 @@ test("history selectors page the fresh authorized view with trace projection and
 	const api = {
 		session(id: string) { if (id !== "session") throw Error("Session is closed"); },
 		onJobCancel() {},
+		workMay: () => true,
+		deliveryWitness: (id: string) => async () => id === "session" && fresh,
 		readHistory(_id: string, options: { all?: boolean }) {
 			if (!fresh) throw Error("Pending-erasure registry unavailable");
 			return options.all ? kept : branch;

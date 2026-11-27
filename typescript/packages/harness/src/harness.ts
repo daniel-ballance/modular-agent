@@ -599,6 +599,7 @@ export class Harness {
 			setLimit: (id, rights, actorId) => this.authority.setLimit(this.session(id), rights, actorId, pluginName),
 			tenant: (id) => this.authority.tenantInfo(this.session(id)),
 			checkPending: id => this.erasure.admitHistory(this.session(id)),
+			deliveryWitness: id => this.erasure.deliveryWitness(() => this.session(id)),
 			readHistory: (id, options) => this.inspectHistory(id, options ?? {}, entries => entries),
 			inspectHistory: (id, options, inspect) => this.inspectHistory(id, options, inspect),
 			history: (sessionId, options) => {

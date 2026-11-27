@@ -1,3 +1,4 @@
+import { socketWriter, streamWriter, type WriteLine } from "./outbound.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isDeepStrictEqual } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
@@ -45,7 +46,7 @@ export interface ServeOptions {
 	containment?: "strong" | "processGroup" | "none";
 	/** Where messages come from and go to. Defaults to this process's stdin and stdout. */
 	input?: NodeJS.ReadableStream;
-	output?: (line: string) => void;
+	output?: WriteLine;
 }
 
 interface PluginHostScope {
@@ -127,9 +128,7 @@ async function validateResume(input: TurnInput, host: RuntimeHost, interrupted: 
  * rest. Calls a plugin makes that this binding doesn't carry fail plainly.
  */
 export function servePlugins(options: ServeOptions, service?: ServiceConnection): Promise<void> {
-	const write = service ? (line: string) => {
-		if (service.ws.readyState === service.ws.OPEN) service.ws.send(line.slice(0, -1));
-	} : options.output ?? ((line: string) => process.stdout.write(line));
+	const write = service ? socketWriter(service.ws) : options.output ?? streamWriter(process.stdout);
 	let closed = () => {};
 	let registered = false;
 	const startup = new Set(["plugin/initialize", "plugin/shutdown", "$/ping"]);

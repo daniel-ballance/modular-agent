@@ -3356,6 +3356,7 @@ dependencies = [
  "base64 0.23.1",
  "environment-local",
  "futures-util",
+ "history-fs",
  "interface-acp",
  "runtime-engine",
  "serde",

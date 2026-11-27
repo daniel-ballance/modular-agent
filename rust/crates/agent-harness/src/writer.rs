@@ -93,6 +93,24 @@ impl Harness {
     }
 
     pub(super) fn check_session_writer(&self, session: &str) -> Result<()> {
+        self.check_delivery_view(session, |_| ())
+    }
+
+    pub(super) fn writer_delivery_epoch(&self, session: &str) -> Result<Option<String>> {
+        self.check_delivery_view(session, |data| {
+            data.entries
+                .iter()
+                .rev()
+                .find(|entry| entry.kind == "erasure")
+                .map(|entry| entry.id.clone())
+        })
+    }
+
+    fn check_delivery_view<T>(
+        &self,
+        session: &str,
+        view: impl FnOnce(&SessionData) -> T,
+    ) -> Result<T> {
         let mut sessions = self.sessions.lock().unwrap();
         let open = sessions
             .get_mut(session)
@@ -103,6 +121,6 @@ impl Harness {
         {
             store.check_erasure(&open.data)?;
         }
-        Ok(())
+        Ok(view(&open.data))
     }
 }

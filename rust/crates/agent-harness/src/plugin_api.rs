@@ -138,6 +138,17 @@ impl AgentApi for Harness {
     fn check_writer(&self, session: &str) -> Result<()> {
         self.check_session_writer(session)
     }
+    fn delivery_generation(&self, session: &str) -> Result<CancellationToken> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(session)
+            .map(|open| open.generation.clone())
+            .ok_or_else(|| anyhow!("session not open"))
+    }
+    fn delivery_epoch(&self, session: &str) -> Result<Option<String>> {
+        self.writer_delivery_epoch(session)
+    }
     fn cancellation(&self, session: &str) -> Result<CancellationToken> {
         self.turn_cancellation(session)
     }

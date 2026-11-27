@@ -67,6 +67,18 @@ export class SessionErasure {
 		return JSON.stringify(plans.map(plan => plan.intentId));
 	}
 
+	deliveryWitness(current: () => Session): () => Promise<boolean> {
+		let s: Session;
+		try { s = current(); } catch { return async () => false; }
+		const freshness = this.admitHistory(s).catch(() => undefined);
+		return async () => {
+			const expected = await freshness;
+			if (expected === undefined || current() !== s || await this.admitHistory(s) !== expected || current() !== s) return false;
+			this.operations.checkWriter(s);
+			return true;
+		};
+	}
+
 	async reconcilePending(s: Session): Promise<string> {
 		const remote = this.httpErasure();
 		if (remote && !s.provisional) {

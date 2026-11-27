@@ -31,8 +31,10 @@ use tokio_rustls::{
         pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
     },
 };
+// `run` accepts an already-upgraded stream; expose its type and framing
+// vocabulary so callers can supply one without pinning another dependency.
 use tokio_tungstenite::{
-    Connector, MaybeTlsStream, WebSocketStream,
+    Connector, MaybeTlsStream,
     tungstenite::{
         Error, Message,
         client::IntoClientRequest,
@@ -41,6 +43,7 @@ use tokio_tungstenite::{
         protocol::{CloseFrame, WebSocketConfig, frame::coding::CloseCode},
     },
 };
+pub use tokio_tungstenite::{WebSocketStream, tungstenite};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -80,7 +83,29 @@ impl Drop for Server {
 
 pub struct Connection {
     pub incoming: mpsc::Receiver<String>,
-    pub outgoing: mpsc::Sender<String>,
+    pub outgoing: Outgoing,
+}
+
+type Frame = Box<dyn FnOnce() -> Option<String> + Send>;
+
+#[derive(Clone)]
+pub struct Outgoing(mpsc::Sender<Frame>);
+
+impl Outgoing {
+    pub async fn send(&self, text: String) -> Result<(), mpsc::error::SendError<()>> {
+        self.send_at_handoff(move || Some(text)).await
+    }
+
+    /// Resolve the frame only after the socket writer has capacity. None drops it.
+    pub async fn send_at_handoff(
+        &self,
+        frame: impl FnOnce() -> Option<String> + Send + 'static,
+    ) -> Result<(), mpsc::error::SendError<()>> {
+        self.0
+            .send(Box::new(frame))
+            .await
+            .map_err(|_| mpsc::error::SendError(()))
+    }
 }
 
 pub async fn read_token_file(path: &Path) -> Result<String> {
@@ -411,6 +436,19 @@ async fn accept<T, F, Fut>(
     }
 }
 
+async fn write_frame(
+    sink: &mut (impl futures_util::Sink<Message, Error = Error> + Unpin),
+    frame: Frame,
+) -> Result<(), Error> {
+    use std::{future::poll_fn, pin::Pin};
+    poll_fn(|cx| Pin::new(&mut *sink).poll_ready(cx)).await?;
+    if let Some(text) = frame() {
+        Pin::new(&mut *sink).start_send(Message::Text(text.into()))?;
+        sink.flush().await?;
+    }
+    Ok(())
+}
+
 /// Run the wire in parallel with its binding, delivering EOF on loss or shutdown.
 pub async fn run<S, F, Fut>(socket: WebSocketStream<S>, stop: CancellationToken, handler: F)
 where
@@ -419,10 +457,13 @@ where
     Fut: Future<Output = ()>,
 {
     let (tx, incoming) = mpsc::channel(1);
-    let (outgoing, mut rx) = mpsc::channel::<String>(1);
+    let (outgoing, mut rx) = mpsc::channel::<Frame>(1);
     let (mut sink, mut source) = socket.split();
     let (pong, mut flush) = mpsc::channel(1);
-    let binding = handler(Connection { incoming, outgoing });
+    let binding = handler(Connection {
+        incoming,
+        outgoing: Outgoing(outgoing),
+    });
     tokio::pin!(binding);
     let (code, done) = {
         let read = async move {
@@ -450,7 +491,7 @@ where
             loop {
                 tokio::select! {
                     Some(()) = flush.recv() => sink.flush().await?,
-                    Some(text) = rx.recv() => sink.send(Message::Text(text.into())).await?,
+                    Some(frame) = rx.recv() => write_frame(&mut sink, frame).await?,
                     else => return Ok::<(), Error>(()),
                 }
             }
@@ -465,8 +506,8 @@ where
     };
     let close = async {
         if done {
-            while let Ok(text) = rx.try_recv() {
-                sink.send(Message::Text(text.into())).await?;
+            while let Ok(frame) = rx.try_recv() {
+                write_frame(&mut sink, frame).await?;
             }
         }
         drop(rx);

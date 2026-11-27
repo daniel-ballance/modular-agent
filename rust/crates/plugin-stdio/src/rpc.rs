@@ -1,6 +1,10 @@
 //! Symmetric, cancellable JSON-RPC over stdio or WebSocket. Each direction has its own id space.
 use agent_api::*;
+mod outbound;
 use futures_util::{FutureExt, Sink, SinkExt, Stream, StreamExt, future::BoxFuture, sink, stream};
+pub use outbound::Gate;
+pub(crate) use outbound::scoped;
+use outbound::{Frame, Prepared};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
@@ -16,6 +20,8 @@ use tokio::{
 };
 
 #[cfg(test)]
+mod handoff_tests;
+#[cfg(test)]
 mod trace_tests;
 
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
@@ -24,7 +30,8 @@ const CANCEL_DEADLINE: Duration = Duration::from_secs(5);
 fn scope_from_params(params: &Value) -> Option<Scope> {
     let session = params["sessionId"]
         .as_str()
-        .or_else(|| params["turn"]["sessionId"].as_str())?;
+        .or_else(|| params["turn"]["sessionId"].as_str())
+        .or_else(|| params["payload"]["sessionId"].as_str())?;
     let mut scope = Scope::session(session);
     scope.turn = params["turnId"]
         .as_str()
@@ -200,6 +207,9 @@ pub trait Endpoint: Send + Sync + 'static {
         params: Value,
         cancel: CancellationToken,
     ) -> Reply;
+    fn delivery(&self, _peer: &Peer, _method: &str, _params: &Value) -> Option<Gate> {
+        None
+    }
     // Admission runs on the reader: capture live scope and register changes here,
     // but leave any delivery or RPC work to the notification worker.
     fn admit_notification(
@@ -282,7 +292,7 @@ impl Drop for Outgoing<'_> {
     }
 }
 pub struct Peer {
-    tx: mpsc::UnboundedSender<(Value, bool)>,
+    tx: mpsc::UnboundedSender<Frame>,
     plugin: OnceLock<String>,
     serves_plugin: AtomicBool,
     jobs: Mutex<BTreeMap<String, (Scope, telemetry::Operation)>>,
@@ -314,10 +324,8 @@ impl Peer {
             }
             (bytes.len() <= MAX_FRAME).then_some((bytes, reader))
         });
-        let outgoing = sink::unfold(writer, |mut writer, mut bytes: Vec<u8>| async move {
-            bytes.push(b'\n');
-            writer.write_all(&bytes).await?;
-            writer.flush().await?;
+        let outgoing = sink::unfold(writer, |mut writer, frame: Prepared| async move {
+            frame.stdio(&mut writer).await?;
             Ok::<_, std::io::Error>(writer)
         });
         Self::start_frames(incoming, outgoing, endpoint, false)
@@ -331,21 +339,20 @@ impl Peer {
         let incoming = stream::unfold(conn.incoming, |mut rx| async move {
             Some((rx.recv().await?.into_bytes(), rx))
         });
-        let outgoing = sink::unfold(conn.outgoing, |tx, bytes| async move {
-            tx.send(String::from_utf8(bytes).expect("serialized JSON is UTF-8"))
-                .await?;
-            Ok::<_, mpsc::error::SendError<String>>(tx)
+        let outgoing = sink::unfold(conn.outgoing, |tx, frame: Prepared| async move {
+            tx.send_at_handoff(move || frame.websocket()).await?;
+            Ok::<_, mpsc::error::SendError<()>>(tx)
         });
         Self::start_frames(incoming, outgoing, endpoint, server)
     }
 
     fn start_frames(
         incoming: impl Stream<Item = Vec<u8>> + Send + 'static,
-        outgoing: impl Sink<Vec<u8>> + Send + 'static,
+        outgoing: impl Sink<Prepared> + Send + 'static,
         endpoint: Arc<dyn Endpoint>,
         shutdown_closes: bool,
     ) -> Arc<Self> {
-        let (tx, mut rx) = mpsc::unbounded_channel::<(Value, bool)>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
         let peer = Arc::new(Self {
             tx,
             plugin: OnceLock::new(),
@@ -361,24 +368,13 @@ impl Peer {
         let p = peer.clone();
         let writer = tokio::spawn(async move {
             let mut outgoing = Box::pin(outgoing);
-            while let Some((message, end)) = p.closed.run_until_cancelled(rx.recv()).await.flatten()
-            {
-                let mut bytes = match serde_json::to_vec(&message) {
-                    Ok(b) => b,
-                    Err(_) => break,
+            while let Some(frame) = p.closed.run_until_cancelled(rx.recv()).await.flatten() {
+                let end = frame.end;
+                let Some(frame) = Prepared::new(frame, &p) else {
+                    break;
                 };
-                if bytes.len() > MAX_FRAME {
-                    if let Some(id) = message
-                        .get("id")
-                        .filter(|_| message.get("method").is_none())
-                    {
-                        bytes = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":"result exceeds 64 MiB","data":{"code":"result_too_large"}}})).unwrap();
-                    } else {
-                        break;
-                    }
-                }
                 if !matches!(
-                    p.closed.run_until_cancelled(outgoing.send(bytes)).await,
+                    p.closed.run_until_cancelled(outgoing.send(frame)).await,
                     Some(Ok(()))
                 ) || end
                 {
@@ -512,6 +508,7 @@ impl Peer {
                             if let Some(after) = after {
                                 cancel.run_until_cancelled(after.cancelled()).await;
                             }
+                            let gate = endpoint.delivery(&p, &method, &params);
                             let reply = if cancel.is_cancelled() {
                                 Err(Fault::new(
                                     "cancelled",
@@ -533,13 +530,14 @@ impl Peer {
                                     Err(Fault::new("internal", "plugin callback panicked"))
                                 })
                             };
+                            // The handler has settled. A late cancel cannot change its reply.
                             p.incoming.lock().unwrap().remove(&key);
                             // An endpoint can stop polling a callback on cancel.
                             // Its parent answer must still follow the callback's reply.
                             settled.recv().await;
                             if !p.closed.is_cancelled() {
                                 let end = shutdown_closes && method == "plugin/shutdown";
-                                p.respond_frame(id, reply, end);
+                                p.respond_frame(id, reply, end, gate);
                             }
                         });
                     } else {
@@ -808,17 +806,31 @@ impl Peer {
                 .send((Err(Fault::new("lost", "plugin connection closed")), None));
         }
     }
-    pub fn notify(&self, method: &str, mut params: Value) {
+    pub fn notify(&self, method: &str, params: Value) {
+        self.notify_frame(method, params, None);
+    }
+    pub(crate) fn notify_scoped(&self, method: &str, params: Value, api: &Api, scope: &Scope) {
+        let gate = (!scope.session.is_empty()).then(|| scoped(api, scope, method));
+        self.notify_frame(method, params, gate);
+    }
+    fn notify_frame(&self, method: &str, mut params: Value, gate: Option<Gate>) {
         self.inject(method, &mut params, &telemetry::current());
-        let _ = self.tx.send((
-            json!({"jsonrpc":"2.0","method":method,"params":params}),
-            false,
-        ));
+        let parent = self.parent_delivery(method, &params);
+        let gate = match (parent, gate) {
+            (Some(parent), Some(scoped)) => Some(Box::new(move || parent() && scoped()) as Gate),
+            (parent, scoped) => parent.or(scoped),
+        };
+        let _ = self.tx.send(Frame {
+            message: json!({"jsonrpc":"2.0","method":method,"params":params}),
+            end: false,
+            gate,
+            cancelled: None,
+        });
     }
     fn respond(&self, id: Value, reply: Reply) {
-        self.respond_frame(id, reply, false);
+        self.respond_frame(id, reply, false, None);
     }
-    fn respond_frame(&self, id: Value, reply: Reply, end: bool) {
+    fn respond_frame(&self, id: Value, reply: Reply, end: bool, gate: Option<Gate>) {
         let message = match reply {
             Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
             Err(e) => {
@@ -829,7 +841,12 @@ impl Peer {
                 json!({"jsonrpc":"2.0","id":id,"error":{"code":e.number,"message":e.message,"data":data}})
             }
         };
-        let _ = self.tx.send((message, end));
+        let _ = self.tx.send(Frame {
+            message,
+            end,
+            gate,
+            cancelled: None,
+        });
     }
     pub fn parent(&self, id: &Value) -> Option<Arc<Work>> {
         self.pending
@@ -904,86 +921,6 @@ impl Peer {
                 .is_err_and(|e| !matches!(e.code.as_str(), "busy" | "cancelled" | "refused"))
         {
             span.error("plugin_request_failed");
-        }
-        reply
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn send_call(
-        &self,
-        method: &str,
-        params: Value,
-        work: Option<Arc<Work>>,
-        cancel: CancellationToken,
-        event: Option<OnEvent>,
-        context: telemetry::Context,
-    ) -> Reply {
-        let id = format!("r{}", self.next.fetch_add(1, Ordering::Relaxed));
-        let (tx, rx) = oneshot::channel();
-        let key = json!(id).to_string();
-        let parent = params.get("parentRequestId").and_then(|id| {
-            self.incoming
-                .lock()
-                .unwrap()
-                .get(&id.to_string())
-                .map(|request| request.callbacks.clone())
-        });
-        {
-            let mut pending = self.pending.lock().unwrap();
-            if pending.is_empty() {
-                self.activity.notify_one();
-            }
-            pending.insert(
-                key.clone(),
-                Pending {
-                    reply: tx,
-                    work,
-                    method: method.to_owned(),
-                    context,
-                    event,
-                    abandoned: false,
-                    _parent: parent,
-                },
-            );
-        }
-        if self.closed.is_cancelled() {
-            self.pending.lock().unwrap().remove(&key);
-            return Err(Fault::new("lost", "plugin connection closed"));
-        }
-        let frame = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
-        if serde_json::to_vec(&frame)
-            .map_err(|e| Fault::new("internal", e))?
-            .len()
-            > MAX_FRAME
-        {
-            self.pending.lock().unwrap().remove(&key);
-            return Err(Fault::new("result_too_large", "request exceeds 64 MiB"));
-        }
-        let _ = self.tx.send((frame, false));
-        let mut outgoing = Outgoing {
-            peer: self,
-            id: &id,
-            key: &key,
-            reply: Some(rx),
-            cancel_deadline: None,
-        };
-        let reply = tokio::select! {
-            result = outgoing.reply.as_mut().unwrap() => result,
-            _ = cancel.cancelled() => {
-                let deadline = outgoing.cancel();
-                match timeout_at(deadline, outgoing.reply.as_mut().unwrap()).await {
-                    Ok(r) => r,
-                    Err(_) => { self.close(); return Err(Fault::new("lost", "plugin did not settle cancellation within 5 seconds")) }
-                }
-            }
-        };
-        let (reply, after) = reply.map_err(|_| Fault::new("lost", "plugin reply lost"))?;
-        if let Some(after) = after {
-            tokio::select! {
-                biased;
-                _ = self.closed.cancelled() => return Err(Fault::new("lost", "plugin connection closed during stream delivery")),
-                _ = after.cancelled() => (),
-            }
         }
         reply
     }

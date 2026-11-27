@@ -65,6 +65,15 @@ impl AgentApi for Relay {
     fn declaration(&self) -> Result<Value> {
         self.inner.declaration()
     }
+    fn writer_interruption(&self, session: &str) -> Result<CancellationToken> {
+        self.inner.writer_interruption(session)
+    }
+    fn delivery_generation(&self, session: &str) -> Result<CancellationToken> {
+        self.inner.delivery_generation(session)
+    }
+    fn delivery_epoch(&self, session: &str) -> Result<Option<String>> {
+        self.inner.delivery_epoch(session)
+    }
     fn check_writer(&self, s: &str) -> Result<()> {
         self.inner.check_writer(s)
     }
@@ -165,9 +174,11 @@ impl AgentApi for Relay {
         match self.route {
             Route::Environment => {
                 if e.kind == "tool.progress" {
-                    self.peer.notify(
+                    self.peer.notify_scoped(
                         "host/env/output",
                         json!({"parentRequestId":self.id,"chunk":e.content.as_str().unwrap_or("")}),
+                        &self.inner,
+                        &e.scope,
                     );
                 }
                 return self.inner.emit(e).await;
@@ -180,9 +191,11 @@ impl AgentApi for Relay {
                     "model.end" => return self.inner.emit(e).await,
                     _ => return self.inner.emit(e).await,
                 };
-                self.peer.notify(
+                self.peer.notify_scoped(
                     "host/runtime/modelEvent",
                     json!({"parentRequestId":self.id,"event":{"type":kind,"delta":e.content}}),
+                    &self.inner,
+                    &e.scope,
                 );
                 return self.inner.emit(e).await;
             }
