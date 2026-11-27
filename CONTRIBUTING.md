@@ -12,13 +12,13 @@ Every change starts from a GitHub issue. An issue is a bug, a change, or a findi
 - **Lessons.** Learn a lesson once. When a rule was broken, a review finding repeated or a run went wrong, write it down before the session ends, where the next agent reads it: a line in `AGENTS.md` if every agent needs it, the detail in this file, or a check in `scripts/` when the rule is exact. Put it in the pull request that taught it, or open an issue and a follow-up pull request. An issue comment, a pull request comment or an agent's notes alone do not reach the next agent.
 - **Decisions.** A decision that outlives your session goes where the next reader looks: a comment on the issue, an ADR when it meets the test under [Writing](#writing), or the document it changes. Chat and an agent's own notes end with the session.
 - **One change, every place.** When you change a rule, a status word or a user-facing string, search for every other place that states it with `git grep -n`, which also reads `.github/`. Look in the documents, the READMEs, help text, tests and both languages. Change them in the same pull request. The languages you cannot change there get one issue with a `lang:` label for each ([ADR 0037](docs/adr/0037-two-languages.md)).
-- **Branch and pull request.** Work on one branch per issue. The pull request says `Closes #N` and lists the checks run, with their counts. Paste the final summary table of `scripts/check.sh` (its steps, wall time and failures) into the body: a delegate deletes its scratch folder, and the logs in it, before it reports, so the body is the only record a reviewer can read. Its sections are those in [the template](.github/pull_request_template.md). `Closes #N` goes only in the pull request body. A squash merge copies every commit message into `main`, and GitHub closes an issue that a keyword there names, which is how #44 closed #13.
+- **Branch and pull request.** Work on one branch per issue. The pull request says `Closes #N` and lists the checks run, with their counts. Paste the final summary table of `scripts/check.sh` into the body. If you ran the docs-only commands, give each command, its wall time and its failures in the table. A delegate deletes its scratch folder and logs before it reports. Use the sections in [the template](.github/pull_request_template.md). `Closes #N` goes only in the pull request body. A squash merge copies every commit message into `main`, and GitHub closes an issue that a keyword there names, which is how #44 closed #13.
 - **Review.** Every pull request gets a verdict from a reviewer who did not write it, from another model family when one is available. The reviewer posts the verdict on the pull request and names the head SHA it reviewed. Landing, below, says which heads a verdict covers. A reviewer that a provider's content filter refuses has given no verdict. Record the refusal on the pull request and start a replacement reviewer from another model family that did not write the pull request. The replacement reuses any check run already going at that head.
 - **Review findings.** The author fixes a reviewer's one-line finding in place. A larger finding goes to a fresh owner, a new agent or a new issue, together with the finding. Before you push a fix for a finding, give it the reviewer's probe and the harder cases next to it that a user, a real repository or a real run can produce, such as larger or malformed input. Measure any cost a comment or the pull request body claims, such as "linear", and for a check script measure it under a capped heap such as `node --max-old-space-size=128`. #114's rounds 4 to 9 each found a new size or memory failure at the next head. A probe that only contrived input reaches, such as nesting thousands of levels deep, is a note in the verdict and does not block. After two failed review rounds on the same premise, test the premise and record the decision on the issue instead of patching again. #27 needed eleven rounds and ended by replacing its line readers with parsers. The decision also fixes the scope later rounds block on: no regression against the baselines it names, such as `main`, on input that meets the bar under "What gets an issue", and the findings it keeps. An edge case that `main` gets wrong too becomes its own issue if it meets the bar under "What gets an issue", and otherwise a note in the verdict, never another round ([#59](https://github.com/daniel-ballance/modular-agent/issues/59)).
 - **Agent check.** Before the verdict, the reviewer runs `node scripts/docs-review.mjs` at the head; a stacked pull request adds `--base BRANCH`. It prints candidates: changed lines with a status word, with status wording beside a named or linked ADR, or naming open work that no issue in the section tracks, each with the ADRs its paragraph links and their status. It reads the committed head, so commit before running it. It picks lines by keyword. Candidates never fail the command; a usage or Git error exits 2. The reviewer judges each candidate for the two problems below and reports each problem as a blocking finding with its `file:line` and the fix. A candidate judged fine needs no comment. The verdict says that the agent check ran and how many candidates it judged.
   - **Stale status.** The line calls a decision proposed, draft or planned when its ADR is accepted, or calls something done or accepted that is not.
   - **Untracked open work.** The line names a gap, finding, TODO or follow-up that no issue tracks.
-- **Landing.** A pull request lands only with a passing verdict that covers the exact SHA given to `gh pr merge N --squash --match-head-commit SHA`. A verdict covers the head it names, with two exceptions: a push that only removes or rewords lines the verdict already reviewed, and a restack whose `git patch-id --stable` is unchanged ([Working in parallel](#working-in-parallel)). For either, the author posts both SHAs on the pull request, and the patch IDs for a restack. Any other push needs a new verdict. If `main` moved after the verdict and changed files the pull request also changes, merge `origin/main` into a scratch copy of the head and run the checks those files touch before landing. GitHub then deletes the remote branch. Remove your worktree and local branch with `git worktree remove PATH` and `git branch -D BRANCH`. A parent of a stacked pull request keeps its local branch until the child is restacked ([Working in parallel](#working-in-parallel)).
+- **Landing.** The operator lands a pull request only with a passing verdict that covers the exact SHA given to `gh pr merge N --squash --match-head-commit SHA` or to the [REST merge command](#working-in-parallel). A verdict covers the head it names, with two exceptions: a push that only removes or rewords lines the verdict already reviewed, and a restack whose `git patch-id --stable` is unchanged ([Working in parallel](#working-in-parallel)). For either, the author posts both SHAs on the pull request, and the patch IDs for a restack. Any other push needs a new verdict. If `main` moved after the verdict and changed files the pull request also changes, merge `origin/main` into a scratch copy of the head and run the checks those files touch before landing. GitHub then deletes the remote branch. Remove your worktree and local branch with `git worktree remove PATH` and `git branch -D BRANCH`. A parent of a stacked pull request keeps its local branch until the child is restacked ([Working in parallel](#working-in-parallel)).
 
 To move an issue on the Project, look up the IDs, then set the Status field:
 
@@ -37,8 +37,8 @@ gh project item-edit --project-id PROJECT_ID --id ITEM_ID \
 
 Several agents work at once, each on its own issue.
 
-- **One owner.** An issue has one owner, one branch in its own worktree and one pull request. Create the worktree with `git worktree add ../BRANCH -b BRANCH origin/main`.
-- **Disjoint files.** Work runs at once only when it changes different files. Before you start, compare your files with those of the open pull requests (`gh pr diff N --name-only`). If they overlap, wait for that pull request to land, or stack on it.
+- **One owner.** An issue has one owner, one branch in its own worktree and one pull request. Run `git fetch origin main` before branching. Create the worktree with `git worktree add ../BRANCH -b BRANCH origin/main` or check that a worktree supplied for the issue starts at the fetched commit.
+- **Disjoint files.** Work runs at once only when it changes different files. Before starting a wave, compare the full expected file lists of the candidate issues against each other and against every open pull request (`gh pr diff N --name-only`). Include shared specifications, fixtures and generated files. If they overlap, run one after the other or stack the dependent change.
 - **Stacking.** Branch from the parent's branch, open the pull request with `gh pr create --base PARENT_BRANCH` and write "Stacked on #N" in its body. The reviewer runs the agent check with `--base PARENT_BRANCH`.
 - **Restacking.** After the parent squash-merges, move the child onto `main`. OLD_PARENT_HEAD is the parent's head that the child is built on.
 
@@ -55,6 +55,25 @@ Several agents work at once, each on its own issue.
 - **Machine load.** `scripts/check.sh` and `scripts/stress.sh` wait for a free check slot on the machine by themselves. Start a long run as a systemd user unit and stop it with `systemctl --user stop UNIT`. [Checking a change](#checking-a-change) has both.
 - **Scratch.** A delegate puts its scratch files and worktrees in its own subfolder, `~/.cache/ma-std-tmp/UNIT/`, not in `/tmp`, and deletes only that subfolder before it reports. It never deletes `~/.cache/ma-std-tmp` itself, `check-slot.sh` or `slots/`, which other runs are using. `/tmp` is a shared tmpfs with a per-user quota; one reviewer's 41.7 GB left there made other agents' checks fail with `Disk quota exceeded`.
 - **No exported `GIT_DIR`.** Never run tests under `git rebase -x`, `git bisect run` or anything else that exports `GIT_DIR`. Test fixtures that run Git inherit it and act on the shared repository; for #59 one set `core.bare=true` on it and moved `origin/main`.
+
+Parallel agents can exhaust GitHub's GraphQL limit. Use `gh api` with the repository's REST endpoints for pull request reads, verdict comments and issue edits. Set `N` to the issue or pull request number for each command. `BODY_FILE` holds the comment text, and `MILESTONE_NUMBER` is the milestone's number in this repository.
+
+```sh
+repo=repos/daniel-ballance/modular-agent
+gh api --paginate "$repo/pulls?state=open"
+gh api "$repo/pulls/$N" --jq .head.sha
+gh api --paginate "$repo/pulls/$N/files" --jq '.[].filename'
+gh api -X POST "$repo/issues/$N/comments" -f body=@"$BODY_FILE"
+gh api -X PATCH "$repo/issues/$N" -F milestone="$MILESTONE_NUMBER"
+```
+
+The operator can use the REST merge endpoint with the same landing rules. Set `HEAD_SHA` to the exact head covered by the passing verdict.
+
+```sh
+gh api -X PUT "$repo/pulls/$N/merge" -f merge_method=squash -f sha="$HEAD_SHA"
+```
+
+If the head changed, check whether the verdict covers the new SHA before trying again.
 
 ### Releases
 
@@ -123,6 +142,16 @@ scripts/check.sh --serial     # one step at a time, in the original order
 scripts/stress.sh 3           # three independent full checks at once, on three check slots
 ```
 
+The syntax is `scripts/check.sh [--quick] [--serial] [rust|typescript ...]`. With no language argument, it runs both languages. The docs lane runs with either language and there is no `docs` argument. For a docs-only change, run these commands from the repository root:
+
+```sh
+npm ci --silent --prefix scripts
+node --test scripts/*.test.mjs
+node scripts/check-docs-state.mjs
+node scripts/check-maintainability.mjs
+node scripts/check-links.mjs
+```
+
 `--quick` runs a subset of each language's tests: Rust's `modular-agent` and `standard` crates, and the root TypeScript suite once without the separate `MA_REMOTE=...` rerun. It also skips the telemetry, AG-UI, WebSocket and ADR 0030 kits, the ACP kit's groups other than stdio rights, and the erasure matrix. A change to code outside that subset, such as the Harness, a base agent, an interface, a plugin host or a history service, runs the full lane for each language it touches (`scripts/check.sh rust` or `scripts/check.sh typescript`) before review. At the four-language checkpoint, #130 passed `--quick` while 21 Go tests outside `./modular/...` failed.
 
 Each selected language runs in its own lane. A failing step does not stop that lane or the others. The shared scenarios, reference checks, both demos, telemetry peer placements and erasure matrix run only when both language lanes are selected. In a parallel run, they wait for both lanes. The erasure pairings also run together unless you pass `--serial`.
@@ -187,6 +216,20 @@ What the full run covers:
 To run only the ADR 0030 kits for a built language, use `scripts/production-kits.sh rust` (or `typescript`). Use the builds from `scripts/check.sh`, including the Rust `history_service` example, and install the kit dependencies with `npm ci --prefix conformance/acp` and `npm ci --prefix conformance/tools`. The runner uses disposable loopback listeners, tokens and stores. It checks ACP on stdio and over direct WebSocket listeners. The full check runs this step for each selected language; `--quick` skips it.
 
 To look at traces while working on [telemetry](docs/telemetry.md), run `scripts/phoenix.sh start`. It starts [Arize Phoenix](https://arize.com/docs/phoenix) in podman or docker on loopback, with authentication off, from a pinned image. Point an exporter at it with `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:6006` and `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`; its HTTP endpoint does not take JSON. Phoenix shows `invoke_agent`, `chat` and `execute_tool` spans as agent, model and tool steps, and groups them by `gen_ai.conversation.id`. Its span API (`/v1/projects/default/spans`) does not return resource attributes such as `service.name`; check those at an OTLP receiver. It runs as the systemd user unit `ma-phoenix` where one is available, so it outlives the shell that started it. `scripts/phoenix.sh stop` stops it and keeps its traces in the `ma-phoenix-data` volume; `scripts/phoenix.sh reset` also deletes them. To open it from another device on your tailnet without MagicDNS, forward the port with `tailscale serve --bg --tcp=6006 tcp://127.0.0.1:6006` and browse to `http://TAILSCALE-IP:6006`; raw TCP forwarding does not depend on the hostname the browser sends. The checks do not need it.
+
+## Evaluating ma on real work
+
+Install or rebuild the local `ma` from the permanent `main` checkout. Run `rust/scripts/install.sh` there for Rust, or build in its `typescript/` folder and run `npm link --workspace @modular-agent/ma` for TypeScript. The Rust installer links the Claude sidecar into the checkout. npm links the TypeScript bin to the workspace build. Deleting a temporary worktree breaks either link if it points there. Use the worktree's built binary or direct Node entry point to test a branch.
+
+For the real-work evaluation in [#20](https://github.com/daniel-ballance/modular-agent/issues/20), start Phoenix and set the trace-specific variables in the environment that launches `ma`:
+
+```sh
+scripts/phoenix.sh start
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:6006/v1/traces
+export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
+```
+
+For `ma` launched by a host, set both variables in the host's launch configuration for `ma`. Query `http://127.0.0.1:6006/v1/projects/default/spans` for the same time window as the session history. Periodically audit the JSONL files under `~/.local/state/modular-agent/<lang>/history/` and compare them with the spans. Read history in place without reopening or changing sessions. Follow the [ma-meta-analysis skill](.agents/skills/ma-meta-analysis/SKILL.md) for measurements and issue filing.
 
 ## Commits
 

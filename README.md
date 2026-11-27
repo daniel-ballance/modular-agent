@@ -70,6 +70,7 @@ ma                           # in a project folder
 ```
 
 The TypeScript build is in [`typescript/packages/ma`](typescript/packages/ma/README.md).
+For local development, install or rebuild `ma` from the permanent `main` checkout so its links survive worktree cleanup. See [Evaluating ma on real work](CONTRIBUTING.md#evaluating-ma-on-real-work).
 
 ## Known gaps
 
