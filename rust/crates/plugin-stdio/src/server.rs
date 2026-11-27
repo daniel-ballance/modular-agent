@@ -50,7 +50,6 @@ pub struct Conformance {
     state: Mutex<Option<(Api, Value)>>,
     parts: BTreeSet<String>,
     service_scope: Option<(PathBuf, PathBuf)>,
-    host: Option<(PathBuf, PathBuf)>,
 }
 impl Conformance {
     /// The same served Runtime as the base agent's --serve-plugin fixture.
@@ -115,12 +114,6 @@ impl Conformance {
             parts: self.parts.clone(),
             service_scope: self.service_scope.clone(),
             ..Self::default()
-        }
-    }
-    pub fn for_host(&self, project: PathBuf, state: PathBuf) -> Self {
-        Self {
-            host: Some((project, state)),
-            ..self.new_instance()
         }
     }
     fn has(&self, part: &str) -> bool {
@@ -290,33 +283,19 @@ impl Endpoint for Conformance {
                 }
                 p["home"] = json!(state_dir);
             }
-            if self.has("environment") || self.host.is_some() {
-                let project = environment_cwd(&p, "project")?;
-                if self
-                    .host
-                    .as_ref()
-                    .is_some_and(|(allowed, _)| *allowed != project)
-                {
-                    return Err(Fault::new(
-                        "invalid_request",
-                        "project is outside the host scope",
-                    ));
-                }
-                p["project"] = json!(project);
+            if self.has("environment") {
+                p["project"] = json!(environment_cwd(&p, "project")?);
             }
             let h = agent_harness::Harness::new();
             // Reuse this build's environment, including its ptrace containment.
             if self.has("environment") {
                 h.load(Arc::new(environment_local::ServedEnvironment {
-                    state: match &self.host {
-                        Some((_, state)) => state.clone(),
-                        None => PathBuf::from(
-                            p["home"]
-                                .as_str()
-                                .ok_or_else(|| Fault::new("invalid_request", "home required"))?,
-                        )
-                        .join("commands"),
-                    },
+                    state: PathBuf::from(
+                        p["home"]
+                            .as_str()
+                            .ok_or_else(|| Fault::new("invalid_request", "home required"))?,
+                    )
+                    .join("commands"),
                 }))
                 .await?;
             }
@@ -385,14 +364,6 @@ impl Endpoint for Conformance {
                 }
                 if p["toolSource"] != "conformance-tools" {
                     return Err(Fault::new("invalid_request", "unknown tool source"));
-                }
-                if let Some((project, _)) = &self.host
-                    && environment_cwd(&p, "project")? != *project
-                {
-                    return Err(Fault::new(
-                        "invalid_request",
-                        "project is outside the host scope",
-                    ));
                 }
                 let call = &p["call"];
                 let name = call["name"].as_str().unwrap_or("");
