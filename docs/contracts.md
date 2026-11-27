@@ -369,7 +369,9 @@ The operation owner defines its hook points, including points owned by plugins. 
 ### Compaction
 
 - The Runtime MUST keep settled call/result pairs together, either in the view or summarized as a pair. It MUST keep an open call explicitly pending in the view or refuse compaction that would break that association.
+- Context management MAY shorten a long turn by summarizing its prompt and older settled steps. It MUST carry the user's goal into the summary, keep at least the latest step intact and place the summary before the retained steps. A late result can make a cut unsafe even if the call has now settled.
 - A summary MUST name every entry it summarizes, including earlier summaries it uses.
+- The Runtime MUST accept a completed or output-limited summary response if it contains non-whitespace text and no tool calls. Other summary responses count as failures.
 - The Runtime MUST limit context-overflow recovery to one compaction and one retry. The Harness MUST run compaction during step preparation. The Runtime MUST fail the turn if the summary request fails.
 
 ### Hook execution

@@ -258,7 +258,7 @@ impl Engine {
                 api,
                 "before.step",
                 scope,
-                json!({"request":request,"limits":input.model.info(),"usage":usage}),
+                json!({"request":request,"limits":input.model.info(),"usage":usage,"attempt":attempt}),
             )
             .await?
             .value;
