@@ -84,7 +84,11 @@ impl AcpComposition for Factory {
         let mut standard = self.standard.clone();
         let configured = standard.configuration().settings(project)?;
         let recorded = match reopening {
-            Some(id) => Some(standard.history()?.session_info(id)?),
+            Some(id) => match standard.history()?.session_info(id) {
+                Ok(info) => Some(info),
+                Err(error) if error.code() == modular_agent::Code::Unavailable => None,
+                Err(error) => return Err(error),
+            },
             None => None,
         };
         let fallback = if standard.scripted.is_none() && !standard.conformance {

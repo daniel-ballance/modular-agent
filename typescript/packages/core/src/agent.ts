@@ -555,7 +555,6 @@ export class Agent {
     await checked(() => this.#api.waitForIdle(id));
     return session;
   }
-  /** Retry erasure without opening sessions for ordinary work. */
   async reconcileErasure(options: import("@modular-agent/harness").ReconcileErasureOptions = {}) {
     this.#check();
     return checked(() => this.#h.reconcileErasure(options));
@@ -589,9 +588,11 @@ export class Agent {
     if (!/^[\w-]+$/.test(id)) throw new AgentError("invalid_params", "Invalid session id");
     return checked(() => this.#savedSession(id));
   }
-  async #savedSession(id: string): Promise<SessionInfo> {
+  async #savedSession(id: string, scopeOnly = false): Promise<SessionInfo> {
     const store = this.#h.use<HistoryStore>("history-store")!;
     const { meta, entries } = await store.load(id);
+    const tenant = (entries.find(e => e.kind === "tenant" && !e.erased)?.data as { tenant?: string } | undefined)?.tenant;
+    if (scopeOnly) return { ...meta, updated: 0, settings: {}, tenant };
     const erased = new Set(entries.filter(e => e.erased).map(e => e.id));
     const plans = store.historyErasure && (await store.historyErasure.read(id)).plans;
     if (plans?.some(p => p.copies.some(c => !c.complete || !erased.has(c.entryId))) || store.pendingErasure?.intents().some(i =>
@@ -603,7 +604,6 @@ export class Agent {
       const change = entry.data as { key: string; value: unknown };
       settings[change.key] = change.value;
     }
-    const tenant = (entries.find(e => e.kind === "tenant" && !e.erased)?.data as { tenant?: string } | undefined)?.tenant;
     // Last activity is the last entry's time in append order. A tombstone has no time.
     const last = entries.at(-1);
     const updated = last?.erased ? 0 : last?.time ?? 0;
@@ -806,7 +806,7 @@ export class Agent {
       const inaccessible = () => new AgentError("forbidden", "Session is inaccessible");
       const authorize = async (id: string, tools = false) => {
         const owner = sessions.get(id) ?? this;
-        const saved = owner.#h.liveSessionInfo(id) ?? await this.sessionInfo(id).catch(error => {
+        const saved = owner.#h.liveSessionInfo(id) ?? await checked(() => this.#savedSession(id, true)).catch(error => {
           if (error instanceof AgentError && error.code === "not_found") throw inaccessible();
           throw error;
         });
@@ -879,7 +879,10 @@ export class Agent {
         const row = await this.#api.sessionSummary(id, {actor, allowJoin:true});
         if (!row || row.waiting.turn === "none" || !(scope?.allowTenant(row.tenant ?? null) ?? (row.tenant === undefined))) continue;
         if (row.waiting.turn === "running") { options.onResumeOpen?.(id, "skipped"); continue; }
-        const agent = await selectProject(project, id, await this.sessionInfo(id));
+        const agent = await selectProject(project, id, await this.#savedSession(id).catch(error => {
+          if (error?.pendingErasure) return this.#savedSession(id, true);
+          throw error;
+        }));
         let resumed: boolean;
         try { resumed = await agent.#h.withConnectionActor(actor, () => agent.#h.resumeInterruptedSession(id, actor)); }
         catch (error) { if ((error as {code?: string}).code !== "held") throw error; resumed = false; }
@@ -930,7 +933,7 @@ export class Agent {
             if (!id && !p.allowProject(this.#project)) fail("not_found");
             const owner = id && sessions.get(id) || this;
             const live = id ? owner.#h.liveSessionInfo(id) : undefined;
-            const saved = id && !live ? await owner.sessionInfo(id).catch(e => {
+            const saved = id && !live ? await checked(() => owner.#savedSession(id, true)).catch(e => {
               if (e.code === "not_found" || e.cause?.code === "ENOENT") fail("not_found"); throw e;
             }) : undefined;
             const info = live ?? saved;
