@@ -21,7 +21,7 @@ The shape of the API, in language-neutral terms. [Languages](languages.md) says 
 | `history` | a history store | chosen by `durability`: memory, or files under `dataDir` |
 | `runtime` | a Runtime | chosen by `durability` |
 | `environment` | a working environment | local, rooted at `project` |
-| `credentials` | a credential store | environment variables. To answer a `secret` question, use a store that implements [secret staging](#credential-writes), such as `fileCredentials(path)`. |
+| `credentials` | a credential store | environment variables. To answer a `secret` question, use a writable store that accepts the secret name and implements [secret staging](#credential-writes), such as `fileCredentials(path)`. |
 | `providers` | Providers | none |
 | `tools` | tools | none |
 | `interfaceTools` | list of `{ sourceId, actorId, routeId, resultTimeoutMs, tools: ToolDefinition[] }` | none; no Interface tool source is registered |

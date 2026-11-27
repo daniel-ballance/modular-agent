@@ -41,7 +41,7 @@ To replace the SDK’s Configuration or credential store through an in-process r
 |---|---|---|
 | SDK file store | `modular_agent::file_credentials(path) -> impl CredentialStore` | `fileCredentials(path: string): CredentialStore` from `@modular-agent/core` |
 | Direct named write on the SDK file store | `store.write(name: &str, value: &str) -> Result<()>` | `await store.modify(name, async () => value)` with a string value; `await store.delete(name)` removes the active value. |
-| Staging operations | `stage(receipt, value)`, `lookup_staged(&request)`, `activate(&request)`, `discard(&request)` | `stage(submission, value)`, `lookupStaged(scope)`, `activate(scope)`, `discard(scope)`, returning promises |
+| Staging operations | `stage(receipt, value)`, `lookup_staged(&request)`, `activate(&request)`, `discard(&request)`, plus `writable()` returning `true` (or overriding `accepts(name)` to accept the secret name, since `writable()` defaults to `false`) | `stage(submission, value)`, `lookupStaged(scope)`, `activate(scope)`, `discard(scope)`, returning promises (presence of the four methods enables secret staging) |
 
 Both SDK file stores implement direct writes and staged transactions. So do Rust’s base `credentials_file::FileCredentials` (direct write: `agent_api::CredentialStore::put`) and the `AuthFile` used by Rust `ma` (`CredentialStore::write` or `AuthFile::put_answer`). TypeScript’s `ma` uses `AuthFile.credentials()` with `modify` and `delete`. The separate TypeScript `@modular-agent/credentials-file` package also supports staging and direct modification through `FileCredentialStore`; its `fileCredentials({ path })` returns a base plugin, not the SDK store returned by the core helper.
 
