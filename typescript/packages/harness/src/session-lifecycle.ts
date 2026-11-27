@@ -184,10 +184,15 @@ export class SessionLifecycle {
 	async loadInto(id: string): Promise<Session | undefined> {
 		const store = this.operations.use<HistoryStore>("history-store");
 		if (!store) return undefined;
-		const { meta, entries } = await store.load(id);
+		const loaded = await store.load(id);
+		const s = this.replayStored(loaded);
+		if (s && store.historyErasure) this.operations.erasure().loadTombstones(s, new Set(loaded.entries.filter(e => e.erased === true).map(e => e.id)));
+		return s;
+	}
+
+	replayStored({ meta, entries }: Awaited<ReturnType<HistoryStore["load"]>>): Session | undefined {
 		if (!entries.length) return undefined;
 		const s = new Session(meta, false);
-		if (store.historyErasure) this.operations.erasure().loadTombstones(s, new Set(entries.filter(e => e.erased === true).map(e => e.id)));
 		for (const e of entries) {
 			validateRecordedApproval(e);
 			s.apply(e);
