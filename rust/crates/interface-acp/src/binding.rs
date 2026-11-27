@@ -537,7 +537,7 @@ pub(crate) async fn extension(
                 require(api, &scope, "grant")?;
             }
             ensure!(
-                actors(&api.snapshot(&session.id)?).contains_key(id),
+                actors(&api.authority_snapshot(&session.id)?).contains_key(id),
                 "unknown actor"
             );
             api.append(
@@ -626,7 +626,7 @@ pub(crate) async fn extension(
         "input" => {
             let timing = serde_json::from_value(p["when"].clone())?;
             ensure!(
-                actors(&api.snapshot(&session.id)?).contains_key(actor),
+                actors(&api.authority_snapshot(&session.id)?).contains_key(actor),
                 "unknown actor"
             );
             require_both(if timing == Timing::Propose {
@@ -661,7 +661,7 @@ pub(crate) async fn extension(
             };
             {
                 ensure!(
-                    actors(&api.snapshot(&session.id)?).contains_key(actor),
+                    actors(&api.authority_snapshot(&session.id)?).contains_key(actor),
                     "unknown actor"
                 );
                 let required = if q.kind == RequestKind::Approval {
