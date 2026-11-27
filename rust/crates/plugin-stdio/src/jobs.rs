@@ -26,7 +26,8 @@ impl RemoteJobs {
             "plugin has no access to session"
         );
         let owner = self.owner();
-        Ok(jobs(&api.snapshot(session)?)?
+        Ok(api
+            .job_records(session)?
             .into_iter()
             .filter(|j| j.owner == owner)
             .collect())

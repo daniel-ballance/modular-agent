@@ -199,7 +199,8 @@ impl JobService for Jobs {
             let notified = self.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let job = jobs(&api.snapshot(session)?)?
+            let job = api
+                .job_records(session)?
                 .into_iter()
                 .find(|j| j.id == id)
                 .ok_or_else(|| anyhow!("unknown job"))?;
@@ -220,7 +221,8 @@ impl JobService for Jobs {
             ..Scope::session(session)
         };
         require(api.as_ref(), &scope, "cancel")?;
-        let job = jobs(&api.snapshot(session)?)?
+        let job = api
+            .job_records(session)?
             .into_iter()
             .find(|j| j.id == id)
             .ok_or_else(|| anyhow!("unknown job"))?;

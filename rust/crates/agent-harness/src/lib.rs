@@ -88,6 +88,8 @@ pub struct Harness {
     interface_tools: interface_tools::InterfaceTools,
     admissions: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
     erasure: tokio::sync::RwLock<()>,
+    erasure_requests: tokio::sync::Mutex<()>,
+    turn_settled: tokio::sync::Notify,
     reservations: RwLock<Arc<ReservationPool>>,
     private_erasure: std::sync::OnceLock<Box<PrivateErasure>>,
 }
@@ -119,6 +121,8 @@ impl Harness {
             interface_tools: Default::default(),
             admissions: Mutex::default(),
             erasure: tokio::sync::RwLock::default(),
+            erasure_requests: Default::default(),
+            turn_settled: Default::default(),
             reservations: RwLock::new(Arc::new(ReservationPool::new(ResourceLimits::default()))),
         })
     }

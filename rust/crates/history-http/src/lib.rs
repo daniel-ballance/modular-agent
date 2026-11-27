@@ -763,7 +763,7 @@ impl HttpHistory {
     }
     fn check_append(&self, data: &SessionData, entries: &[Value]) -> Result<String> {
         let (revision, plans) = self.erasure_plans(&data.id)?;
-        check_plans(data, &plans)?;
+        reconcile::check_append_plans(data, &plans, entries)?;
         let mut sources: BTreeSet<_> = entries
             .iter()
             .flat_map(|e| e["sources"].as_array().into_iter().flatten())
@@ -914,7 +914,7 @@ impl HistoryStore for HttpHistory {
             .unwrap_or_else(|| self.temporary_lease(session));
         let lease = state.acquire_with_wait(self.ttl, false)?;
         let (revision, _) = self.erasure_plans(session)?;
-        let sessions = self.list(None)?;
+        let sessions = self.erasure_lineage()?;
         let source = sessions
             .iter()
             .find(|s| s.id == session)

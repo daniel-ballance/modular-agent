@@ -221,7 +221,8 @@ test("plugin binding: refreshes before completing the parent, gates split output
 	assert.doesNotMatch(JSON.stringify(await api.gatedHistory(sid, { recipient: "wire-test" })), /conformance-secret/);
 	const input = api.history(sid).find((e) => e.kind === "input")!;
 	const result = await api.erase(sid, [input.id], "user");
-	assert.deepEqual(result.pending, [input.id]);
+	assert.ok(result.pending.includes(input.id));
+	assert.deepEqual(result.erased, []);
 });
 
 test("plugin binding: the history cursor counts toward the exact 4 MiB result limit", async (t) => {

@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 mod intake;
+pub use intake::erasure_lineage;
 
 fn kind(native: &str) -> String {
     match native {
@@ -607,7 +608,6 @@ pub fn session(meta: &Value, entries: &[Value]) -> Result<SessionData> {
     intake::validate(meta, entries)?;
     decode(meta, entries)
 }
-
 /// Project one live entry without requiring the rest of the session's associations.
 pub fn projection(meta: &Value, entry: &Value) -> Result<SessionData> {
     decode(meta, std::slice::from_ref(entry))

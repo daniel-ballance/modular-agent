@@ -14,7 +14,7 @@ interface TurnModelAccessOperations {
 	newId(): string;
 	turnAuthority(): Pick<AsyncLocalStorage<{ sessionId: string; actors: Set<string>; jobs: Set<string>; state?: Pick<TurnState, "connectionRights" | "startingRights"> }>, "run">;
 	tenantBudgetReached(s: Session): Promise<boolean>;
-	erasure(): Pick<SessionErasure, "admitHistory" | "reconcileProviderErasure" | "checkProviderErasure" | "httpErasure" | "pendingRegistry">;
+	erasure(): Pick<SessionErasure, "admitHistory" | "reconcileProviderErasure" | "checkProviderErasure" | "ensureHttpProviderReset" | "pendingRegistry">;
 	reservations(): Reservations;
 	checkScopedWork(s: Session, right: Authority): void;
 	checkWriter(s: Session): void;
@@ -40,9 +40,7 @@ export class TurnModelAccess {
 				const freshness = await this.operations.erasure().admitHistory(s);
 				await this.operations.erasure().reconcileProviderErasure(s, model.model.provider);
 				this.operations.erasure().checkProviderErasure(s, model.model.provider);
-				if (this.operations.erasure().httpErasure() && freshness !== "[]" && model.supports.keepsState !== false) {
-					throw failure("unavailable", "The history registry cannot verify deletion of kept Provider state");
-				}
+				if (model.supports.keepsState) await this.operations.erasure().ensureHttpProviderReset(s, model.model.provider, freshness);
 				const attempt = `model:${stepId}`;
 				const bounds = this.operations.reservations().limits;
 				const requestBytes = resourceBytes(request);
@@ -147,6 +145,8 @@ export class TurnModelAccess {
 						message = options.signal.aborted ? { role: "assistant", stop: "aborted", content: [] }
 							: { role: "assistant", stop: "failed", content: [], error: { kind: "other", message: String(error) } };
 					}
+					// A Provider can return a final message even after it sees cancellation.
+					if (await this.operations.erasure().admitHistory(s) !== freshness) throw failure("unavailable", "Erasure changed the model view");
 					const reserved: string[] = [];
 					const calls = message.content.filter(isToolCall);
 					const size = resourceBytes(message);

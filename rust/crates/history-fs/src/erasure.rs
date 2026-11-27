@@ -80,6 +80,32 @@ impl FileHistory {
         Ok(())
     }
 
+    pub(super) fn save_with_erasure_check(&self, data: &SessionData) -> Result<()> {
+        match self.check_unlocked(data) {
+            Ok(()) => self.save_unlocked(data),
+            Err(error) if error.is::<PendingErasure>() => {
+                // The portable fold may normalize or synthesize entries. Append only
+                // the content-free settlement to the stored view, not the live prefix.
+                let mut kept = self.load_unlocked(&data.id)?;
+                let new: Vec<_> = data
+                    .entries
+                    .iter()
+                    .rev()
+                    .take_while(|e| erasure_job_settlement(e))
+                    .take_while(|e| !kept.entries.iter().any(|old| old.id == e.id))
+                    .cloned()
+                    .collect();
+                if new.is_empty() || new.last().unwrap().parent != kept.position {
+                    return Err(error);
+                }
+                kept.position = Some(new[0].id.clone());
+                kept.entries.extend(new.into_iter().rev());
+                self.save_unlocked(&kept)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub(super) fn mark(
         &self,
         source: &str,
@@ -97,7 +123,9 @@ impl FileHistory {
         {
             return Ok(old.copies.clone());
         }
-        let sessions = self.all_unlocked().map_err(unavailable)?;
+        let sessions = self
+            .read_snapshots(|bytes| decode_with(bytes, portable::erasure_lineage))
+            .map_err(unavailable)?;
         let source_record = sessions
             .iter()
             .find(|s| s.id == source)
@@ -151,6 +179,26 @@ impl FileHistory {
         Ok(copies)
     }
 
+    pub(super) fn confirmed(&self, session: &str) -> Result<Vec<String>> {
+        let _lock = self.lock().map_err(unavailable)?;
+        let registry = self.read_registry()?;
+        let data = self.load_unlocked(session).map_err(unavailable)?;
+        Ok(registry
+            .intents
+            .iter()
+            .filter_map(|intent| intent.confirmed.get(session))
+            .flatten()
+            .filter(|id| {
+                data.entries
+                    .iter()
+                    .any(|entry| entry.id == **id && entry.content.is_none())
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect())
+    }
+
     pub(super) fn reconcile(
         &self,
         session: &str,
@@ -184,6 +232,14 @@ impl FileHistory {
                 .filter(|e| targets.contains(&e.id) && e.content.is_some())
                 .map(|e| e.id.clone())
                 .collect();
+            if targets.iter().any(|id| {
+                !intent
+                    .confirmed
+                    .get(session)
+                    .is_some_and(|done| done.contains(id))
+            }) {
+                check_erasure_jobs(&data)?;
+            }
             if !kept.is_empty() {
                 let mut staged = data.clone();
                 if !has_bookkeeping {

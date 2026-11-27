@@ -131,6 +131,7 @@ impl Harness {
     }
 
     pub async fn history_view(&self, session: &str) -> Result<Value> {
+        self.reconcile_pending_erasure(session).await?;
         Ok(self
             .output(
                 &Scope::session(session),

@@ -5,6 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { JsonlHistoryStore } from "@modular-agent/history-jsonl";
 import { context, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { InMemorySpanExporter, SimpleSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
@@ -289,13 +290,20 @@ test("the report is schema checked and a processing failure still settles once",
   assert.doesNotMatch(JSON.stringify(results), /REPORT_MARKER/);
 });
 
-test("erasure invalidates a pending handoff and accounts for a delivered copy", async t => {
-  const { session, conn, handoffs } = await fixture(t, false);
+for (const pending of [false, true]) test(`${pending ? "reconciliation" : "erasure"} invalidates a pending handoff`, async t => {
+  const dir = await mkdtemp(join(tmpdir(), "interface-erasure-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { session, conn } = await fixture(t, false, { durability: "kept", project: dir, dataDir: dir }, pending);
   await session.prompt("Pick.");
-  const id = handoffs[0].call.id;
   const start = (await session.history()).find(e => e.kind === "toolStarted")!;
-  const erased = await session.erase([start.id]);
-  assert.ok(erased.outOfReach.length);
+  const id = start.toolCallId!;
+  if (pending) {
+    const registry = new JsonlHistoryStore(join(dir, "history")).pendingErasure;
+    await registry.exclusive(async () => registry.keep({ id: "handoff-erasure", sessionId: session.id, targets: [start.id],
+      actorId: "user", copies: [{ sessionId: session.id, id: start.id, erased: false }] }));
+    await session.history();
+    assert.equal(await conn.release(id), false);
+  } else assert.ok((await session.erase([start.id])).outOfReach.length);
   assert.deepEqual(await conn.reportInterfaceToolResult(report(id)), refused);
   await session.waitIdle();
   const history = await session.history();

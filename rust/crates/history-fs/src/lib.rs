@@ -22,13 +22,20 @@ use std::{
 };
 
 fn decode(bytes: &[u8]) -> Result<SessionData> {
+    decode_with(bytes, portable::session)
+}
+
+fn decode_with(
+    bytes: &[u8],
+    fold: fn(&Value, &[Value]) -> Result<SessionData>,
+) -> Result<SessionData> {
     let v: Value = serde_json::from_slice(bytes)?;
     if v.get("historyBinding").is_none() {
         let data: SessionData = serde_json::from_value(v)?;
         wire::validate_recorded_approval(&data.settings)?;
         return Ok(data);
     }
-    let mut data = portable::session(
+    let mut data = fold(
         &v,
         v["entries"]
             .as_array()
@@ -136,6 +143,12 @@ impl FileHistory {
         decode(&self.read_tracked(&self.path(id)?)?)
     }
     fn all_unlocked(&self) -> Result<Vec<SessionData>> {
+        self.read_snapshots(decode)
+    }
+    fn read_snapshots(
+        &self,
+        decode: impl Fn(&[u8]) -> Result<SessionData>,
+    ) -> Result<Vec<SessionData>> {
         let mut result = vec![];
         let paths = self.snapshots()?;
         self.verify_snapshots(&paths)?;
@@ -182,6 +195,9 @@ impl HistoryStore for FileHistory {
         targets: &[String],
     ) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
         self.mark(source, targets)
+    }
+    fn confirmed_erasure(&self, session: &str) -> Result<Vec<String>> {
+        self.confirmed(session)
     }
     fn reconcile_erasure(
         &self,
@@ -232,8 +248,7 @@ impl HistoryStore for FileHistory {
     }
     fn save(&self, data: &SessionData) -> Result<()> {
         let _lock = self.lock()?;
-        self.check_unlocked(data)?;
-        self.save_unlocked(data)
+        self.save_with_erasure_check(data)
     }
     fn list(&self, project: Option<&Path>) -> Result<Vec<SessionData>> {
         let _lock = self.lock()?;

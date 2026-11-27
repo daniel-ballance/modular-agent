@@ -51,6 +51,7 @@ export interface JobRecord {
 	handle: JobHandle;
 	cancel?: () => void | Promise<void>;
 	cancelling?: Promise<void>;
+	cleanupUnconfirmed?: boolean;
 	ending?: Promise<void>;
 }
 

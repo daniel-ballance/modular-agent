@@ -221,7 +221,9 @@ export class ApprovalReconciliation {
 				const item = waitingApprovals(s).get(w.entry.toolCallId!);
 				return item?.entry === w.entry && !item.result && item.start === w.start && item.decision === w.decision;
 			};
-			const entries = erasing ? guard() && await this.operations.commitNow(s, drafts) : await this.operations.commit(s, drafts, false, guard);
+			const entries = erasing ? guard() && await this.operations.commitNow(s, drafts.map(draft => ({
+				...draft, erased: true, modelVisible: false, data: undefined, message: undefined, sources: undefined,
+			}))) : await this.operations.commit(s, drafts, false, guard);
 			if (!entries || !entries.length) return;
 			if (!w.decision) this.waitingClosed(s, w, { ...body, actorId: "harness" }, reason);
 			if (w.binding.call) this.operations.toolDisposition(w.binding.call, status);

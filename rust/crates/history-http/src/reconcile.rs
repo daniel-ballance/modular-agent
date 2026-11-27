@@ -1,6 +1,42 @@
 use super::*;
 
+pub(super) fn check_append_plans(
+    data: &SessionData,
+    plans: &[pending::Plan],
+    entries: &[Value],
+) -> Result<()> {
+    let settlement = |entry: &Value| {
+        entry["jobId"].is_string()
+            && entry.get("sources").is_none()
+            && entry["modelVisible"] == false
+            && (entry["kind"] == "jobCleanupUnconfirmed"
+                || entry["kind"] == "jobEnded"
+                    && entry["data"]["report"] == false
+                    && entry["data"]["result"].is_null()
+                    && entry["data"]["rust.result"].is_null()
+                    && entry["data"]["outcome"]["error"].is_null())
+    };
+    if !entries.is_empty() && entries.iter().all(settlement) {
+        return Ok(());
+    }
+    check_plans(data, plans)
+}
+
 impl HttpHistory {
+    pub(super) fn erasure_lineage(&self) -> Result<Vec<SessionData>> {
+        let (_, listed) = self.service.pages(&["v1", "sessions"], None, "sessions")?;
+        listed
+            .iter()
+            .map(|meta| {
+                let id = wire::string(meta, "id")?;
+                let (meta, entries) =
+                    self.service
+                        .pages(&["v1", "sessions", id], None, "entries")?;
+                portable::erasure_lineage(&meta, &entries)
+            })
+            .collect()
+    }
+
     pub(super) fn reconcile(
         &self,
         session: &str,
@@ -41,6 +77,7 @@ impl HttpHistory {
                 registry_unavailable("erasure plan changed before reconciliation")
             );
             let (data, raw) = self.fetch(session)?;
+            check_erasure_jobs(&data)?;
             let mut staged = data.clone();
             if !raw.iter().any(|e| e["id"] == plan.record_id) {
                 let keys = erased_input_keys(&data, &targets);

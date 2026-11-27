@@ -483,48 +483,54 @@ const MAX_TIMEOUT: u64 = u64::MAX;
 
 #[tokio::test]
 async fn erasing_arguments_invalidates_a_staged_call_and_accounts_for_the_copy() -> Result<()> {
-    let root = tempfile::tempdir()?;
-    let agent = builder()
-        .project(root.path())
-        .data_dir(root.path().join("agent"))
-        .durability(Durability::Kept)
-        .interface_tools(sources(30_000))
-        .build()
-        .await?;
-    let session = session(&agent).await?;
-    let connection = session.connect_interface_tools(ROUTE, EXECUTOR, rights())?;
-    connection.advertise(&[definition()])?;
-    let turn = session.prompt("Choose").await?;
-    let id = &turn.open_tool_calls[0];
-    let rows = session.history().await?;
-    let start = entry(&rows, "toolStarted");
-    assert!(
-        session
-            .move_to(start["id"].as_str().unwrap())
-            .await
-            .is_err()
-    );
-    let erased = session
-        .erase(vec![
-            entry(&rows, "response")["id"].as_str().unwrap().into(),
-        ])
-        .await
-        .expect("erase the response and its copies");
-    assert!(!erased.out_of_reach.is_empty());
-    assert_eq!(
-        connection
-            .report_tool_result(report(id, "invalidated"))
-            .await
-            .expect("refuse the erased call"),
-        Disposition::Refused { reason: None }
-    );
-    session.wait_idle().await.expect("no erased continuation");
-    let rows = session.history().await.expect("history remains available");
-    assert!(!json!(rows).to_string().contains("argument-marker"));
-    assert!(!rows.iter().any(|r| r["continuesTurnId"].is_string()));
-    assert_eq!(entry(&rows, "toolResult")["erased"], true);
-    assert_eq!(entry(&rows, "toolResult")["toolCallId"], *id);
-    agent.close().await
+    for pending in [false, true] {
+        let root = tempfile::tempdir()?;
+        let store = root.path().join("history");
+        let agent = builder()
+            .project(root.path())
+            .history(modular_agent::file_history(&store)?)
+            .data_dir(root.path().join("agent"))
+            .durability(Durability::Kept)
+            .interface_tools(sources(30_000))
+            .build()
+            .await?;
+        let session = session(&agent).await?;
+        let connection = session.connect_interface_tools(ROUTE, EXECUTOR, rights())?;
+        connection.advertise(&[definition()])?;
+        let turn = session.prompt("Choose").await?;
+        let id = &turn.open_tool_calls[0];
+        let rows = session.history().await?;
+        let start = entry(&rows, "toolStarted");
+        assert!(
+            session
+                .move_to(start["id"].as_str().unwrap())
+                .await
+                .is_err()
+        );
+        let target = entry(&rows, "response")["id"].as_str().unwrap().to_owned();
+        if pending {
+            use agent_api::HistoryStore;
+            history_fs::FileHistory::new(&store)?.mark_erasure(session.id(), &[target])?;
+            session.history().await?;
+        } else {
+            assert!(!session.erase(vec![target]).await?.out_of_reach.is_empty());
+        }
+        assert_eq!(
+            connection
+                .report_tool_result(report(id, "invalidated"))
+                .await
+                .expect("refuse the erased call"),
+            Disposition::Refused { reason: None }
+        );
+        session.wait_idle().await.expect("no erased continuation");
+        let rows = session.history().await.expect("history remains available");
+        assert!(!json!(rows).to_string().contains("argument-marker"));
+        assert!(!rows.iter().any(|r| r["continuesTurnId"].is_string()));
+        assert_eq!(entry(&rows, "toolResult")["erased"], true);
+        assert_eq!(entry(&rows, "toolResult")["toolCallId"], *id);
+        agent.close().await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]

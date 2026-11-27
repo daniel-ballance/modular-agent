@@ -209,7 +209,7 @@ impl Harness {
             result
         });
         if let Err(error) = committed {
-            if !write_failed {
+            if !write_failed || error.is::<PendingErasure>() {
                 return Err(error);
             }
             let lost = error.is::<LostPart>()
@@ -273,10 +273,24 @@ impl Harness {
         {
             return Ok(vec![]);
         }
+        let settling = scope.job.is_some()
+            && self.store().is_some_and(|store| {
+                store
+                    .check_erasure(&open.data)
+                    .is_err_and(|error| error.is::<PendingErasure>())
+            });
+        let input = if settling { None } else { input };
         let mut next = open.data.clone();
         let mut entries = vec![];
         let mut report = None;
         for mut draft in drafts {
+            if settling && draft.kind == "job.end" {
+                let mut job: Job = serde_json::from_value(draft.content)?;
+                job.detail = Value::Null;
+                job.report = false;
+                job.result = None;
+                draft = Draft::new("job.end", false, json!(job));
+            }
             if draft.kind == "job.end"
                 && draft.content["report"] == true
                 && let Some((text, _)) = &input

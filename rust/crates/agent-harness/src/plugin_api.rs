@@ -219,6 +219,11 @@ impl AgentApi for Harness {
     fn snapshot(&self, session: &str) -> Result<SessionData> {
         self.session_snapshot(session)
     }
+    fn job_records(&self, session: &str) -> Result<Vec<Job>> {
+        let sessions = self.sessions.lock().unwrap();
+        let open = sessions.get(session).ok_or(SessionNotOpen)?;
+        jobs(&open.data)
+    }
     fn authority(&self, session: &str, actor: &str) -> Result<Authority> {
         self.actor_authority(session, actor)
     }

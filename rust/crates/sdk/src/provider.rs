@@ -156,6 +156,11 @@ pub trait Provider: Send + Sync + 'static {
         cx: ProviderContext,
     ) -> Result<AssistantMessage>;
     async fn discard_state(&self, _session_id: &str) -> Result<()> {
+        if self.supports().keeps_state {
+            return Err(crate::Error::msg(
+                "Stateful Provider does not implement discard_state",
+            ));
+        }
         Ok(())
     }
 }
@@ -387,7 +392,15 @@ impl Adapter {
         }
     }
 }
+#[async_trait::async_trait]
 impl base::Provider for Adapter {
+    fn needs_erasure_discard(&self) -> bool {
+        self.provider.supports().keeps_state
+    }
+
+    async fn discard_for_erasure(&self, session: &str) -> base::Result<()> {
+        Ok(self.provider.discard_state(session).await?)
+    }
     fn catalog_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
         Some(self.notifier.subscribe())
     }

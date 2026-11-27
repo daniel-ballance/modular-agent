@@ -112,8 +112,9 @@ test("a stateful Provider is asked to delete remote copies before erasure return
 	const id = api.history(sid).find((entry) => entry.kind === "input")!.id;
 	await api.moveTo(sid, api.history(sid).at(-1)!.id);
 	const report = await api.erase(sid, [id], "user");
-	assert.deepEqual(calls, [{ sessionId: sid }, { sessionId: sid, erase: true, entryIds: report.erased }]);
-	assert.deepEqual(report.pending, [id]);
+	assert.deepEqual(calls, [{ sessionId: sid }, { sessionId: sid, erase: true, entryIds: report.pendingPairs.map(copy => copy.id) }]);
+	assert.ok(report.pending.includes(id));
+	assert.deepEqual(report.erased, []);
 	assert.ok(report.outOfReach.includes("provider logs"));
 });
 
@@ -144,12 +145,11 @@ test("unconfirmed Provider deletion blocks model reuse after reopen", async (t) 
 	assert.ok((await first.api.erase(id, [input.id], "user")).outOfReach.includes("Unconfirmed deletion at kept"));
 	await first.h.stop();
 	const second = await start(t, { ...options, home: first.home });
-	await second.api.openSession(id);
-	await second.api.input(id, { content: "Do not contact the Provider", actorId: "user" });
-	await second.api.waitForIdle(id);
+	await assert.rejects(second.api.openSession(id), { code: "unavailable" });
 	assert.equal(requests, 1);
 	assert.equal(discards, 2);
 	confirmed = true;
+	await second.api.openSession(id);
 	await second.api.input(id, { content: "Start with clean state", actorId: "user" });
 	await second.api.waitForIdle(id);
 	assert.equal(requests, 2);

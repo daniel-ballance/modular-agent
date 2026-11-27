@@ -420,7 +420,8 @@ impl Job {
         let event = match &self.backend {
             Backend::Local { api, scope } => {
                 let _guard = self.records.lock().unwrap();
-                let mut job = base::jobs(&api.snapshot(&scope.session)?)?
+                let mut job = api
+                    .job_records(&scope.session)?
                     .into_iter()
                     .find(|j| j.id == self.id && j.state == base::JobState::Running)
                     .ok_or_else(|| Error::new(Code::InvalidRequest, "job is not running"))?;
@@ -501,7 +502,8 @@ impl base::ExternalJobs for LocalOwner {
         if !matches!(cancelled, Ok(Ok(()))) {
             let _guard = self.1.records.lock().unwrap();
             self.1.active.lock().unwrap().remove(&job.id);
-            if base::jobs(&api.snapshot(&job.scope.session)?)?
+            if api
+                .job_records(&job.scope.session)?
                 .iter()
                 .any(|j| j.id == job.id && j.state == base::JobState::Running)
             {
@@ -513,7 +515,7 @@ impl base::ExternalJobs for LocalOwner {
                 return Err(base::LostPart("job cleanup could not be confirmed".into()).into());
             }
         }
-        base::jobs(&api.snapshot(&job.scope.session)?)?
+        api.job_records(&job.scope.session)?
             .into_iter()
             .find(|j| j.id == job.id)
             .ok_or_else(|| base::anyhow!("job disappeared"))

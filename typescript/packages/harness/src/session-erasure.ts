@@ -6,7 +6,7 @@ import { handoffRecords } from "./interface-tools.js";
 import { retainedHistoryBytes, type Reservations } from "./reservations.js";
 import type { RunReceipts } from "./run-receipts.js";
 import { inputIdOf, type Session } from "./session.js";
-import { isToolCall, type AgentEvent, type Authority, type EntryDraft, type HistoryStore, type Provider } from "./types.js";
+import { isToolCall, type AgentEvent, type Authority, type EntryDraft, type HistoryEntry, type HistoryStore, type StoredSession, type Provider } from "./types.js";
 
 interface ErasureOperations {
 	sessions: ReadonlyMap<string, Session>;
@@ -15,7 +15,7 @@ interface ErasureOperations {
 	store(): HistoryStore | undefined;
 	providers(): Provider[];
 	checkWriter(s: Session): void;
-	hasUnfinishedJobs(s: Session): boolean;
+	settleJobs(s: Session): Promise<boolean>;
 	invalidateErasedHandoffs(s: Session, ids: string[]): Promise<void>;
 	commitNow(s: Session, drafts: EntryDraft[]): Promise<unknown>;
 	write(s: Session, write: () => Promise<void> | undefined): Promise<void>;
@@ -81,6 +81,26 @@ export class SessionErasure {
 		};
 	}
 
+	private readonly httpProviderReset = new WeakMap<Session, Map<string, string>>();
+
+	async ensureHttpProviderReset(s: Session, providerId: string, freshness: string): Promise<void> {
+		const registry = this.httpErasure();
+		if (!registry || freshness === "[]" || this.httpProviderReset.get(s)?.get(providerId) === freshness) return;
+		const provider = this.operations.providers().find(p => p.id === providerId);
+		if (!provider?.discardState) throw failure("unavailable", "Provider state cannot be discarded");
+		this.operations.checkWriter(s);
+		const { plans } = await registry.read(s.id);
+		if (JSON.stringify(plans.map(p => p.intentId)) !== freshness || plans.some(p => p.copies.some(c => !c.complete))) {
+			throw failure("unavailable", "Erasure changed the Provider view");
+		}
+		const reply = await provider.discardState(s.id, { erase: true, entryIds: [...new Set(plans.flatMap(p => p.copies.map(c => c.entryId)))] });
+		if (reply?.pending?.length || reply?.outOfReach?.length) throw failure("unavailable", "Provider deletion is unconfirmed");
+		this.operations.checkWriter(s);
+		const reset = this.httpProviderReset.get(s) ?? new Map();
+		reset.set(providerId, freshness);
+		this.httpProviderReset.set(s, reset);
+	}
+
 	async reconcilePending(s: Session): Promise<string> {
 		const remote = this.httpErasure();
 		if (remote && !s.provisional) {
@@ -129,7 +149,7 @@ export class SessionErasure {
 		}
 	}
 
-	private async reconcileErasure(s: Session, operation: string): Promise<void> {
+	private async reconcileErasure(s: Session, operation: string, observe?: Parameters<SessionErasure["reconcileProviderErasure"]>[2]): Promise<void> {
 		const registry = this.pendingRegistry()!;
 		const store = this.operations.store();
 		if (s.erasing || s.moving || s.outsideTools) return;
@@ -139,13 +159,14 @@ export class SessionErasure {
 				s.running.abort.abort();
 				await s.running.done;
 			}
-			if (this.operations.hasUnfinishedJobs(s)) return;
 			await s.committing;
+			if (!await this.operations.settleJobs(s)) return;
+			await this.reconcileProviderErasure(s, undefined, observe);
 			await registry.exclusive(async () => {
 				const intent = registry.intents().find(i => i.id === operation);
 				if (!intent) return;
 				const unresolved = intent.copies.filter(c => c.sessionId === s.id && !c.erased);
-				if (!unresolved.length) return;
+				if (!unresolved.length || intent.providers?.some(copy => copy.sessionId === s.id && !copy.confirmed)) return;
 				const existing = s.order.map(id => s.entries.get(id)!).find(e => e.kind === "erasure" &&
 					(e.data as { operation?: string })?.operation === operation);
 				if (!existing) {
@@ -185,11 +206,17 @@ export class SessionErasure {
 		s.erasing = true;
 		try {
 			if (s.running) { s.running.abort.abort(); await s.running.done; }
-			if (this.operations.hasUnfinishedJobs(s)) return;
 			await s.committing;
+			if (!await this.operations.settleJobs(s)) return;
 			this.operations.checkWriter(s);
 			const pending = plan.copies.filter(copy => !copy.complete).map(copy => copy.entryId);
 			if (!pending.length) return;
+			for (const provider of this.operations.providers().filter(p => p.supports.keepsState)) {
+				if (!provider.discardState) return;
+				const reply = await provider.discardState(s.id, { erase: true, entryIds: plan.copies.map(c => c.entryId) });
+				if (reply?.pending?.length || reply?.outOfReach?.length) return;
+				this.operations.checkWriter(s);
+			}
 			if (!s.entries.has(plan.recordId)) {
 				const entryIds = plan.copies.map(copy => copy.entryId);
 				if (entryIds.some(id => !s.entries.has(id))) throw failure("unavailable", "Erasure plan names missing history");
@@ -225,19 +252,14 @@ export class SessionErasure {
 		const requested = [...new Set(entryIds)].sort();
 		if (!requested.length) throw failure("invalid_request", "Erasure requires at least one entry");
 		let publication: Awaited<ReturnType<HistoryErasureRegistry["publish"]>>;
-		let sessions: Map<string, Session>;
+		let sessions: Map<string, CopyHistory>;
 		for (;;) {
 			this.operations.checkWriter(s);
 			const { revision } = await registry.read(s.id);
 			// Use stored rows rather than open views; another writer may have added
 			// copies, and an erasure record alone is not a verified tombstone.
-			sessions = new Map();
-			const metadata = await store.list();
-			for (const id of new Set([s.id, ...metadata.map(meta => meta.id)])) {
-				const view = await this.operations.loadInto(id);
-				if (!view) throw failure("unavailable", "Cannot discover the full erasure scope");
-				sessions.set(id, view);
-			}
+			sessions = await this.copyHistories(store);
+			if (!sessions.has(s.id)) throw failure("unavailable", "Cannot discover the full erasure scope");
 			const targets = eraseCopies(sessions.get(s.id)!, requested, sessions);
 			this.operations.requireAuthority(s, actorId, "erase");
 			try {
@@ -260,19 +282,12 @@ export class SessionErasure {
 			let plan = await readPlan(id);
 			// Retention can remove the history, but not its plan. Without the
 			// history we cannot verify the actor's right to see its copy IDs.
-			const view = sessions.get(id) ?? await this.operations.loadInto(id).catch(error => {
-				if ((error as { code?: string }).code !== "unknown_session") throw error;
-				return undefined;
-			});
-			if (!view) {
-				s.interruption.signal.throwIfAborted();
-				note("copies in other sessions");
-				continue;
-			}
 			let session = this.operations.sessions.get(id);
+			let view = session;
 			let acquired = false;
 			try {
-				if (plan.copies.some(c => !c.complete)) {
+				view ??= await this.operations.loadInto(id);
+				if (view && plan.copies.some(c => !c.complete)) {
 					if (!session) {
 						await store.openForWriting(id);
 						acquired = true;
@@ -286,7 +301,7 @@ export class SessionErasure {
 			} finally { if (acquired) await store.close(id); }
 			s.interruption.signal.throwIfAborted();
 			plan = await readPlan(id);
-			if (id !== s.id && !this.operations.actorRights(view, actorId).includes("watch")) { note("copies in other sessions"); continue; }
+			if (id !== s.id && (!view || !this.operations.actorRights(view, actorId).includes("watch"))) { note("copies in other sessions"); continue; }
 			for (const copy of plan.copies) {
 				(copy.complete ? report.erased : report.pending).push(copy.entryId);
 				(copy.complete ? report.erasedPairs : report.pendingPairs).push({ sessionId: id, id: copy.entryId });
@@ -297,6 +312,25 @@ export class SessionErasure {
 		return report;
 	}
 
+	private async copyHistories(store: HistoryStore | undefined): Promise<Map<string, CopyHistory>> {
+		const histories = new Map<string, CopyHistory>();
+		for (const [id, session] of this.operations.sessions) {
+			if (session.ephemeral) histories.set(id, session);
+		}
+		for (const { id } of await store?.list() ?? []) {
+			const { meta, entries } = await store!.load(id);
+			const copied = new Set<string>();
+			if (meta.forkedFrom) {
+				for (const entry of entries) {
+					if (!entry.sources?.length && !entry.erased) break;
+					copied.add(entry.id);
+				}
+			}
+			histories.set(id, { id, meta, copied, entries: new Map(entries.map(entry => [entry.id, entry])) });
+		}
+		return histories;
+	}
+
 	async erase(s: Session, entryIds: string[], actorId: string, writer: string): Promise<ErasureReport> {
 		this.operations.requireAuthority(s, actorId, "erase");
 		if (s.provisional) throw failure("invalid_request", "Session has not admitted its first input");
@@ -304,28 +338,23 @@ export class SessionErasure {
 		const registry = this.pendingRegistry();
 		const remote = this.httpErasure();
 		if ((!registry && !remote) || !s.ephemeral && !store?.erase) throw failure("not_supported", "This history has no shared erasure coordination");
-		if (s.running || this.operations.hasUnfinishedJobs(s) || s.erasing || s.moving) throw failure("busy", "Cannot erase during work");
+		if (s.running || s.erasing || s.moving) throw failure("busy", "Cannot erase during work");
 		if (remote) return this.eraseHttp(s, entryIds, actorId, writer, store!, remote);
 		if (!registry) throw failure("not_supported", "Missing local erasure coordination");
-		const sessions = new Map(this.operations.sessions);
 		const requested = [...new Set(entryIds)].sort();
 		const operation = await registry.exclusive(async () => {
 			this.operations.requireAuthority(s, actorId, "erase");
 			const earlier = registry.intents().find(i => i.sessionId === s.id && isDeepStrictEqual(i.targets, requested));
 			if (earlier) return earlier;
-			for (const meta of await store?.list() ?? []) {
-				if (!sessions.has(meta.id)) {
-					const other = await this.operations.loadInto(meta.id);
-					if (other) sessions.set(meta.id, other);
-				}
-			}
-			const targets = eraseCopies(s, requested, sessions);
+			const sessions = await this.copyHistories(store);
+			const origin = sessions.get(s.id);
+			if (!origin) throw failure("unavailable", "Cannot discover the full erasure scope");
+			const targets = eraseCopies(origin, requested, sessions);
 			const stateful = new Set(this.operations.providers().filter(p => p.supports.keepsState).map(p => p.id));
-			const providers = [...targets].flatMap(([session, ids]) => {
+			const providers = [...targets.keys()].flatMap(session => {
 				// A kept-state Provider may have retained data not named in a request record.
 				const used = new Set(stateful);
-				for (const id of ids) {
-					const entry = session.entries.get(id);
+				for (const entry of session.entries.values()) {
 					const data = entry?.data as { model?: { provider?: string }; keepsState?: boolean } | undefined;
 					const provider = data?.model?.provider;
 					if (entry?.kind === "modelRequest" && provider && (data?.keepsState === true || stateful.has(provider))) used.add(provider);
@@ -351,14 +380,13 @@ export class SessionErasure {
 					session = await this.operations.loadInto(id);
 				}
 				if (session) {
-					await this.reconcileErasure(session, operation.id);
-					await this.reconcileProviderErasure(session, undefined, (provider, reply) => replies.set(provider, reply));
+					await this.reconcileErasure(session, operation.id, (provider, reply) => replies.set(provider, reply));
 				}
 			} catch (error) {
 				if ((error as { code?: string }).code !== "held") this.operations.problem(writer, "reconcile erasure", error);
 			} finally { if (acquired) await store!.close(id); }
 			s.interruption.signal.throwIfAborted();
-			const view = session ?? sessions.get(id) ?? await this.operations.loadInto(id).catch(() => undefined);
+			const view = session ?? await this.operations.loadInto(id).catch(() => undefined);
 			const marks = registry.intents().find(intent => intent.id === operation.id)!.copies.filter(copy => copy.sessionId === id);
 			const visible = id === s.id || !!view && this.operations.actorRights(view, actorId).includes("watch");
 			for (const mark of marks) {
@@ -380,11 +408,18 @@ export class SessionErasure {
 	}
 }
 
-/** Walk copy links without treating the previous branch position as a copy. */
-function eraseCopies(origin: Session, ids: string[], sessions: Map<string, Session>): Map<Session, Set<string>> {
-	const targets = new Map<Session, Set<string>>();
+interface CopyHistory {
+	id: string;
+	meta: StoredSession;
+	copied: ReadonlySet<string>;
+	entries: ReadonlyMap<string, HistoryEntry>;
+}
+
+/** Walk stored copy links without replaying intake or treating the branch position as a copy. */
+function eraseCopies(origin: CopyHistory, ids: string[], sessions: Map<string, CopyHistory>): Map<CopyHistory, Set<string>> {
+	const targets = new Map<CopyHistory, Set<string>>();
 	const authority = (kind: string) => ["actorJoined", "actorLeft", "limit", "tenant", "grant", "authority.grant", "authority.revoke", "position", "erasure", "jobCleanupUnconfirmed"].includes(kind);
-	const add = (session: Session, id: string) => {
+	const add = (session: CopyHistory, id: string) => {
 		const e = session.entries.get(id);
 		if (!e || targets.get(session)?.has(id)) return false;
 		if (authority(e.kind) && !session.copied.has(e.id)) throw Object.assign(new Error("Records of authority cannot be erased"), { code: "forbidden" });
@@ -408,7 +443,8 @@ function eraseCopies(origin: Session, ids: string[], sessions: Map<string, Sessi
 			for (const e of entries) {
 				if (targetsHere?.has(e.id) || authority(e.kind)) continue;
 				const forkedFrom = session.copied.has(e.id) ? session.meta.forkedFrom : undefined;
-				const links = forkedFrom ? e.sources?.some((id) => targets.get(sessions.get(forkedFrom.sessionId)!)?.has(id)) : e.sources?.some((id) => targetsHere?.has(id));
+				const links = forkedFrom ? e.sources?.some((id) => targets.get(sessions.get(forkedFrom.sessionId)!)?.has(id)) :
+					e.sources?.some((id) => targetsHere?.has(id) || (!session.entries.has(id) && [...targets.values()].some(ids => ids.has(id))));
 				const callCopy = e.toolCallId && calls.has(e.toolCallId) ||
 					e.kind === "response" && e.message?.role === "assistant" &&
 					e.message.content.some(p => isToolCall(p) && calls.has(p.id) && handoffs.has(p.id));

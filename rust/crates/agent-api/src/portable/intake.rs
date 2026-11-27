@@ -1,6 +1,11 @@
 //! Refuse malformed admissions and recovery records before returning a working view.
 use super::*;
 
+/// Read lineage without authorizing recovery or validating work intake.
+pub fn erasure_lineage(meta: &Value, entries: &[Value]) -> Result<SessionData> {
+    decode(meta, entries)
+}
+
 fn id(value: &Value) -> bool {
     value.as_str().is_some_and(|s| !s.is_empty())
 }

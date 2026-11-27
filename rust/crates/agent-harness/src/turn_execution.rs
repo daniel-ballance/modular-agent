@@ -15,6 +15,7 @@ impl Drop for TurnActivity<'_> {
         if let Some(open) = self.harness.sessions.lock().unwrap().get_mut(self.session) {
             open.active = None;
         }
+        self.harness.turn_settled.notify_waiters();
     }
 }
 
@@ -105,6 +106,7 @@ impl Harness {
         }
         .await;
         self.sessions.lock().unwrap().get_mut(id).unwrap().active = None;
+        self.turn_settled.notify_waiters();
         result
     }
 
@@ -215,6 +217,7 @@ impl Harness {
     }
 
     pub async fn run_next(&self, session: &str) -> Result<Option<TurnResult>> {
+        self.reconcile_pending_erasure(session).await?;
         let (input, cancel, parent, resume, turn_id, erasure, interface) = {
             let mut sessions = self.sessions.lock().unwrap();
             let open = sessions
@@ -353,6 +356,7 @@ impl Harness {
                 op.error("turn_failed");
             }
         }
+        let epoch = self.writer_delivery_epoch(session)?;
         let view = self
             .output(
                 &scope,
@@ -371,6 +375,9 @@ impl Harness {
         let mut event = json!(result);
         event["inputId"] = json!(admitted_input);
         self.emit(Event::new(&scope, "turn.result", event)).await?;
+        let view = (self.writer_delivery_epoch(session)? == epoch)
+            .then_some(view)
+            .flatten();
         Ok(Some(serde_json::from_value(view.unwrap_or_else(|| {
             json!(TurnResult {
                 outcome: result.outcome,

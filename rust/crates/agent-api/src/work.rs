@@ -497,6 +497,32 @@ pub struct Job {
     pub state: JobState,
     pub result: Option<TurnResult>,
 }
+pub fn erasure_job_settlement(entry: &Entry) -> bool {
+    entry.scope.job.is_some()
+        && entry.copies.is_empty()
+        && !entry.visible
+        && match entry.kind.as_str() {
+            "job.cleanup_unconfirmed" => true,
+            "job.end" => entry.content.as_ref().is_some_and(|v| {
+                v["detail"].is_null()
+                    && v["result"].is_null()
+                    && v["report"] == false
+                    && v.get("wireResult").is_none()
+                    && v.get("wireOutcome").is_none()
+            }),
+            _ => false,
+        }
+}
+
+pub fn check_erasure_jobs(data: &SessionData) -> Result<()> {
+    // A writer handoff does not prove that the previous execution stopped.
+    ensure!(
+        !jobs(data)?.iter().any(|job| job.state.is_unfinished()),
+        OperationError::Unavailable("Erasure is pending job settlement".into())
+    );
+    Ok(())
+}
+
 pub fn jobs(data: &SessionData) -> Result<Vec<Job>> {
     let mut result: Vec<Job> = vec![];
     for e in &data.entries {

@@ -192,51 +192,61 @@ async fn policies_and_the_default_live_session_do_not_park_calls() -> Result<()>
 
 #[tokio::test]
 async fn closing_preserves_the_wait_but_erasure_ends_it() -> Result<()> {
-    let dir = tempfile::tempdir()?;
-    let agent = test_agent()
-        .data_dir(dir.path())
-        .durability(Durability::Kept)
-        .approval(Approval::All)
-        .max_approval_wait_ms(60_000)
-        .setting("approvalWait", json!("untilDeadline"))
-        .tool(Tool::new("bump", "Bump").run(|_: Value, _| async { Ok("unexpected effect") }))
-        .script(json!([{"toolCalls":[{"name":"bump","input":{}}]},{"text":"Done"}]))
-        .build()
-        .await?;
-    let session = agent.session().await?;
-    session.prompt("Bump").await?;
-    let req = session
-        .history()
-        .await?
-        .into_iter()
-        .find(|e| e["kind"] == "inputRequest")
-        .unwrap();
-    let id = session.questions_present().await?.remove(0).id;
-    assert!(session.fork().is_err());
-    assert!(
-        session
-            .fork_with(Some(req["sources"][0].as_str().unwrap()))
-            .is_err()
-    );
-    assert!(session.move_to(req["id"].as_str().unwrap()).await.is_err());
-    let sid = session.id().to_owned();
-    session.close().await?;
-    let reopened = agent.open_session(&sid).await?;
-    reopened.wait_idle().await?;
-    assert!(reopened.answer(&id, Answer::Allow).await.is_err());
-    assert_eq!(reopened.questions_present().await?.len(), 1);
-    reopened
-        .erase(vec![req["id"].as_str().unwrap().into()])
-        .await?;
-    assert!(reopened.questions_present().await?.is_empty());
-    assert!(reopened.answer(&id, Answer::Allow).await.is_err());
-    let rows = reopened.history().await?;
-    assert!(!rows.iter().any(|e| e["kind"] == "toolStarted"));
-    assert!(
-        rows.iter()
-            .any(|e| e["kind"] == "toolResult" && e["toolCallId"] == req["toolCallId"])
-    );
-    agent.close().await
+    for pending in [false, true] {
+        let dir = tempfile::tempdir()?;
+        let store = dir.path().join("history");
+        let agent = test_agent()
+            .history(modular_agent::file_history(&store)?)
+            .data_dir(dir.path())
+            .durability(Durability::Kept)
+            .approval(Approval::All)
+            .max_approval_wait_ms(60_000)
+            .setting("approvalWait", json!("untilDeadline"))
+            .tool(Tool::new("bump", "Bump").run(|_: Value, _| async { Ok("unexpected effect") }))
+            .script(json!([{"toolCalls":[{"name":"bump","input":{}}]},{"text":"Done"}]))
+            .build()
+            .await?;
+        let session = agent.session().await?;
+        session.prompt("Bump").await?;
+        let req = session
+            .history()
+            .await?
+            .into_iter()
+            .find(|e| e["kind"] == "inputRequest")
+            .unwrap();
+        let id = session.questions_present().await?.remove(0).id;
+        assert!(session.fork().is_err());
+        assert!(
+            session
+                .fork_with(Some(req["sources"][0].as_str().unwrap()))
+                .is_err()
+        );
+        assert!(session.move_to(req["id"].as_str().unwrap()).await.is_err());
+        let sid = session.id().to_owned();
+        session.close().await?;
+        let reopened = agent.open_session(&sid).await?;
+        reopened.wait_idle().await?;
+        assert!(reopened.answer(&id, Answer::Allow).await.is_err());
+        assert_eq!(reopened.questions_present().await?.len(), 1);
+        let target = req["id"].as_str().unwrap().to_owned();
+        if pending {
+            use agent_api::HistoryStore;
+            history_fs::FileHistory::new(&store)?.mark_erasure(&sid, &[target])?;
+            reopened.history().await?;
+        } else {
+            reopened.erase(vec![target]).await?;
+        }
+        assert!(reopened.questions_present().await?.is_empty());
+        assert!(reopened.answer(&id, Answer::Allow).await.is_err());
+        let rows = reopened.history().await?;
+        assert!(!rows.iter().any(|e| e["kind"] == "toolStarted"));
+        assert!(
+            rows.iter()
+                .any(|e| e["kind"] == "toolResult" && e["toolCallId"] == req["toolCallId"])
+        );
+        agent.close().await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]

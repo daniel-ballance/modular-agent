@@ -410,7 +410,7 @@ export class Harness {
 			store: () => this.use<HistoryStore>("history-store"),
 			providers: () => this.useAll<Provider>("provider"),
 			checkWriter: s => this.lifecycle.checkWriter(s),
-			hasUnfinishedJobs: s => this.jobWork.runningJobs(s).length > 0,
+			settleJobs: s => this.jobWork.settleForErasure(s),
 			invalidateErasedHandoffs: (...args) => this.interfaceTools.invalidateErasedHandoffs(...args),
 			commitNow: (...args) => this.historyCommit.commitNow(...args),
 			write: (s, write) => this.lifecycle.write(s, write),

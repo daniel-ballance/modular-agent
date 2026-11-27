@@ -11,7 +11,7 @@ export interface JobStart { kind: string; key?: string; actorId?: string; actors
 export interface KeptJob { job: Job; key?: string; detail?: unknown; actors?: string[]; rights?: Authority[] }
 
 interface JobsOperations {
-	erasure(): Pick<SessionErasure, "checkPending">;
+	erasure(): Pick<SessionErasure, "checkPending" | "admitHistory">;
 	workActors(s: Session): string[];
 	turnAuthority(): Pick<AsyncLocalStorage<{ sessionId: string; jobs: Set<string> }>, "getStore">;
 	workRights(s: Session, actors: Iterable<string>, jobs?: Iterable<string>): Authority[];
@@ -108,9 +108,10 @@ export class Jobs {
 		const handle: JobHandle = {
 			id: job.id, started: true, ready, startEntryId,
 			progress: (content) => {
-				if (!record.ending && !s.suspended && !s.closed) this.operations.emit(s, "job.progress", { content: typeof content === "string" ? [text(content)] : content }, plugin, { jobId: job.id });
+				if (!record.ending && !record.cleanupUnconfirmed && !s.suspended && !s.closed && !s.erasing) this.operations.emit(s, "job.progress", { content: typeof content === "string" ? [text(content)] : content }, plugin, { jobId: job.id });
 			},
 			finish: (state, result, options) => {
+				if (record.cleanupUnconfirmed) return Promise.reject(failure("lost", "Job cleanup is unconfirmed"));
 				if (record.ending) return Promise.reject(new Error("Job already ended"));
 				const work = async () => {
 					await ready;
@@ -124,7 +125,7 @@ export class Jobs {
 					await this.operations.admit(s, async () => {
 						const rights = this.operations.workRights(s, [], [job.id]);
 						const report = options?.report !== false && !s.closing && !s.erasing && rights.includes("input");
-						const end: EntryDraft = { id: this.operations.newId(), kind: "jobEnded", writer: plugin, modelVisible: false, jobId: job.id, sources: options?.sources, data: { outcome, result: content, report } };
+						const end: EntryDraft = { id: this.operations.newId(), kind: "jobEnded", writer: plugin, modelVisible: false, jobId: job.id, sources: s.erasing ? undefined : options?.sources, data: { outcome: s.erasing ? { kind: outcome.kind } : outcome, result: s.erasing ? undefined : content, report } };
 						let queued: QueuedInput | undefined;
 						const drafts = [end];
 						if (report) {
@@ -166,7 +167,39 @@ export class Jobs {
 		return handle;
 	}
 
+	/** A lease or a lost owner is not evidence that a job stopped. */
+	async settleForErasure(s: Session): Promise<boolean> {
+		for (const { job } of this.runningJobs(s)) {
+			const record = s.jobs.get(job.id);
+			if (!record || record.cleanupUnconfirmed) continue;
+			let deadline: ReturnType<typeof setTimeout> | undefined;
+			try {
+				const cleanup = async () => {
+					await record.handle.ready;
+					if (!record.ending) {
+						if (record.cancel) {
+							await record.cancel();
+							if (!record.cleanupUnconfirmed && !record.ending) await record.handle.finish("cancelled", undefined, { report: false });
+						} else await this.jobCancels.get(job.plugin)?.(job.id);
+					}
+					await record.ending;
+				};
+				await Promise.race([
+					record.cancelling ?? (record.cancelling = cleanup()),
+					new Promise<never>((_, reject) => { deadline = setTimeout(() => reject(failure("lost", "Job cleanup timed out")), 5000); }),
+				]);
+			} catch (error) { this.operations.problem(job.plugin, "cancel job for erasure", error); }
+			finally { clearTimeout(deadline); }
+			if (this.runningJobs(s).some(item => item.job.id === job.id)) {
+				record.cleanupUnconfirmed = true;
+				await this.operations.commit(s, [{ kind: "jobCleanupUnconfirmed", writer: "harness", modelVisible: false, jobId: job.id }]);
+			}
+		}
+		return this.runningJobs(s).length === 0;
+	}
+
 	async cancelJob(s: Session, jobId: string): Promise<void> {
+		await this.operations.erasure().admitHistory(s);
 		const kept = this.runningJobs(s).find(({ job }) => job.id === jobId);
 		if (!kept) { await s.jobs.get(jobId)?.ending; return; }
 		const handle = s.jobs.get(jobId)?.handle ?? this.jobHandle(s, kept);
