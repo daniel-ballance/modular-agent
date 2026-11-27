@@ -530,6 +530,7 @@ export class Agent {
     const connection = this.#h.connectInterfaceTools(sessionId, { ...options, actor: { ...actor, authority: [...rights] } });
     return { ...connection,
       release: id => checked(() => connection.release(id)),
+      withholdStaged: turn => checked(() => connection.withholdStaged(turn)),
       reportInterfaceToolResult: report => checked(() => connection.reportInterfaceToolResult(report)),
     };
   }

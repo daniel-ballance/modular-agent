@@ -28,7 +28,7 @@ export class Exchange {
   private stateSerial = 0; private lastStateSerial = 0;
   inputId?: string; turn?: string; origin?: string; handled?: boolean;
   constructor(readonly r: Route, readonly res: ServerResponse, readonly runId: string, readonly connection: InterfaceToolConnection | undefined,
-    readonly setDeliver: (fn: (call: ToolCall) => void) => void, readonly claim?:ReceiptOperation) {}
+    readonly setDeliver: (fn: (call: ToolCall) => void | "withheld") => void, readonly claim?:ReceiptOperation) {}
   get boundary() { return { threadId: this.r.id, runId: this.runId }; }
   eligible(q: InputRequest) { return this.turn !== undefined && q.turnId === this.turn; }
   private include = (e: AgentEvent) => {
@@ -63,7 +63,10 @@ export class Exchange {
         // A withheld end cannot turn into either a hang or an ungated successful end.
         queueMicrotask(() => { void this.off?.idle().then(async () => {
           if (this.closed || this.turn !== (e.turnId ?? e.data?.request?.turnId)) return;
-          if (e.type === "turn.ended" && !this.endSeen) this.error({ code: "output_withheld" });
+          if (e.type === "turn.ended" && !this.endSeen) {
+            if (e.data?.outcome?.kind === "completed") await this.withholdFinal();
+            this.error({ code: "output_withheld" });
+          }
           if (e.type === "input.request.opened" && e.data?.request && c.presence?.questions.has(e.data.request.id)) {
             c.presence.questions.delete(e.data.request.id); c.presence.rejected.add(e.data.request.id); api.presenceChanged(id);
           }
@@ -94,9 +97,12 @@ export class Exchange {
     this.beat = setInterval(() => { void this.r.current().then(() => this.write(": waiting\n\n"), e => this.error(e)).catch(e => this.error(e)); }, 15_000).unref();
     if (this.handled) await this.finish("completed");
   }
+  private canWrite(data: string) {
+    return !this.closed && !this.failing && !this.res.destroyed && !this.res.writableEnded && this.res.writableLength + Buffer.byteLength(data) <= MAX * 2;
+  }
   private write(data: string) {
     if (!data) return;
-    if (this.closed || this.failing || this.res.destroyed || this.res.writableLength + Buffer.byteLength(data) > MAX * 2) fail("busy");
+    if (!this.canWrite(data)) fail("busy");
     this.res.write(data);
   }
   private prepareRelease(terminal:TerminalClass, proof:ReleaseProof) {
@@ -221,14 +227,34 @@ export class Exchange {
     if (this.steps.has(step)) group.push({ type: "STEP_FINISHED", stepName: step });
     if (group.length) await this.send(group); this.steps.delete(step); this.streams.delete(step);
   }
+  private heldConnection() { return this.r.c.held?.turnId === this.turn ? this.r.c.held : undefined; }
+  private dropHeld(owned: Route["c"]["held"]) {
+    if (owned && this.r.c.held === owned) { owned.connection.disconnect(); this.r.c.held = undefined; }
+  }
+  private async withholdFinal(owned = this.heldConnection()) {
+    try {
+      if (this.turn) await (owned?.connection ?? this.connection)?.withholdStaged(this.turn);
+    } finally { this.dropHeld(owned); }
+  }
   private async finish(kind: string, questions: Interrupt[] = []) {
+    const owned = this.heldConnection();
+    const connection = owned?.connection ?? this.connection;
+    try { await this.finishGroup(kind, questions, connection, owned); }
+    catch (error) {
+      // The terminal group is abandoned. The handle can settle only calls it still
+      // holds, never a call for which an executable write may have been attempted.
+      if (kind === "completed") await this.withholdFinal(owned);
+      throw error;
+    } finally {
+      if (kind !== "interrupt") this.dropHeld(owned);
+    }
+  }
+  private async finishGroup(kind: string, questions: Interrupt[], connection: InterfaceToolConnection | undefined, owned: Route["c"]["held"]) {
     const { r } = this;
     for (const step of new Set([...this.steps, ...this.streams.keys()])) await this.closeStep(step);
     if (kind === "failed") fail("unavailable");
     const presence = r.c.presence;
     const records = await r.records();
-    const owned = r.c.held?.turnId === this.turn ? r.c.held : undefined;
-    const connection = owned?.connection ?? this.connection;
     const calls = kind === "completed" ? r.pending(records).filter(c => c.turnId === this.turn && c.ended) : [];
     // Check for a staged call even if a right was revoked between turn end and projection.
     const staged = records.filter(e => e.turnId === this.turn && e.kind === "modular-agent.interfaceHandoff" && !e.erased && object(e.data) && e.data.routeId === r.p.clientId && e.data.executorActorId === r.p.actor.id && !records.some(x => x.kind === "toolResult" && x.toolCallId === e.toolCallId));
@@ -252,15 +278,16 @@ export class Exchange {
       this.write(tail); if (mark) this.res.once("finish",mark); this.finishedNormally = true; this.res.end(); r.remember(snap); r.c.delivered = new Set(questions.map(q => q.id)); this.stop();
     };
     if (kind === "interrupt" && connection && this.turn && !owned) r.c.held = { connection, turnId: this.turn, setDeliver: this.setDeliver };
-    if (!calls.length) { if (owned && kind !== "interrupt") { owned.connection.disconnect(); r.c.held = undefined; } end(); return; }
+    if (!calls.length) { end(); return; }
     if (!connection) fail("conflict");
     let next = 0;
     (owned?.setDeliver ?? this.setDeliver)(call => {
-      if (!same(call, calls[next]?.call) || !r.rights().includes("watch") || calls.some(c => Date.parse(c.expiresAt) <= Date.now())) fail("refused");
-      this.write(frames[next++]); if (next === calls.length) end();
+      const data = frames[next];
+      if (!same(call, calls[next]?.call) || !r.rights().includes("watch") || calls.some(c => Date.parse(c.expiresAt) <= Date.now()) || !this.canWrite(data)) return "withheld";
+      // Once write is called, a throw, backpressure or terminal failure is ambiguous.
+      this.res.write(data);
+      if (++next === calls.length) end();
     });
-    try {
-      for (const [i, call] of calls.entries()) if (!await connection.release(call.toolCallId) || next !== i + 1) fail("refused");
-    } finally { if (owned) { owned.connection.disconnect(); r.c.held = undefined; } }
+    for (const [i, call] of calls.entries()) if (!await connection.release(call.toolCallId) || next !== i + 1) fail("refused");
   }
 }

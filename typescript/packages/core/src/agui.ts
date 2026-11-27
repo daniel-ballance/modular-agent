@@ -31,7 +31,7 @@ interface Host extends AguiProjectionOptions {
 export interface Presence { delivered: Set<string>; response: ServerResponse; questions: Set<string>; rejected: Set<string>; reopened: Set<string> }
 export interface Client {
   cursor?: { id: string; digest: string; branch: string; http: boolean }; active?: Exchange; busy?: boolean; presence?: Presence;
-  held?: { connection: InterfaceToolConnection; turnId: string; setDeliver(fn: (call: ToolCall) => void): void };
+  held?: { connection: InterfaceToolConnection; turnId: string; setDeliver(fn: (call: ToolCall) => void | "withheld"): void };
   needsSnapshot?: boolean; delivered: Set<string>; runs: Set<string>; hidden: Set<string>;
 }
 export class AguiBinding {
@@ -284,7 +284,7 @@ export class Route {
       });
       if (new Set(offers.map(t => t.name)).size !== offers.length || offers.length && !this.rights().includes("tools")) fail("refused");
       if (seen !== c.cursor || res.destroyed || await this.branchGeneration() !== snap.cursor.branch) fail("conflict");
-      let deliver: (call: ToolCall) => void = () => fail("conflict");
+      let deliver: (call: ToolCall) => void | "withheld" = () => "withheld";
       if (sources.length) {
         conn = this.t.agent.connectInterfaceTools(id, { actor: { id: p.actor.id, kind: p.actor.kind as "user", rights: p.actor.authority }, routeId: p.clientId, defer: true, onHandoff: request => deliver(request.call) });
         conn.advertise(offers);

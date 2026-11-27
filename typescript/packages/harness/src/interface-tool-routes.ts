@@ -18,9 +18,10 @@ export interface InterfaceConnection extends InterfaceToolConnectionOptions {
 	tools: Map<string, ToolDefinition>;
 }
 interface LiveHandoff {
-	deliver(request: InterfaceToolHandoff): void;
+	deliver(request: InterfaceToolHandoff): Promise<boolean>;
 	connection: InterfaceConnection;
-	released: boolean;
+	turnId: string;
+	withheld: boolean;
 	check: () => boolean;
 }
 
@@ -145,6 +146,7 @@ export class InterfaceToolRoutes {
 				connection.tools = next;
 			},
 			release: id => this.releaseInterfaceCall(s, id, connection),
+			withholdStaged: turn => this.withholdStaged(s, connection, turn),
 			reportInterfaceToolResult: report => this.reportInterfaceToolResult(s, connection, report),
 			disconnect: () => { connections.delete(connection); connection.tools.clear(); },
 		};
@@ -235,7 +237,7 @@ export class InterfaceToolRoutes {
 				(!this.operations.erasure().pendingRegistry() || this.operations.erasure().checkPending(s) === freshness));
 			if (!committed.length) return refused();
 			const pinned = AsyncLocalStorage.snapshot();
-			const live: LiveHandoff = { connection, released: false, check: () => pinned(() => eligible() && deadline > this.operations.now()),
+			const live: LiveHandoff = { connection, turnId, withheld: false, check: () => pinned(() => eligible() && deadline > this.operations.now()),
 				deliver: request => pinned(() => this.deliverHandoff(s, live, request)) };
 			const work = this.interfaceWork.get(s) ?? new Map();
 			this.interfaceWork.set(s, work);
@@ -251,12 +253,12 @@ export class InterfaceToolRoutes {
 			}
 			this.operations.checkWriter(s);
 			this.scheduleInterfaceExpiry(s, item);
-			if (!connection.defer) this.deliverHandoff(s, live, request);
+			if (!connection.defer) await this.deliverHandoff(s, live, request);
 			return { callId: call.id, pending: "Waiting for Interface tool result" };
 		});
 	}
 
-	private deliverHandoff(s: Session, live: LiveHandoff, request: InterfaceToolHandoff): void {
+	private async deliverHandoff(s: Session, live: LiveHandoff, request: InterfaceToolHandoff): Promise<boolean> {
 		const { call, turnId } = request;
 		const span = startOperation(`execute_tool ${safeName(call.name) ?? "interface"}`, {
 			...conversation(s.id), "modular_agent.turn.id": turnId, "modular_agent.step.id": call.stepId, ...toolAttributes(call),
@@ -267,18 +269,47 @@ export class InterfaceToolRoutes {
 			this.handoffSpans.set(s, spans);
 			spans.set(call.id, span.spanContext);
 		}
-		live.released = true; // A delivery error cannot establish that nothing ran.
-		this.interfaceWork.get(s)?.delete(call.id);
-		try { span.run(() => live.connection.onHandoff(structuredClone(request))); }
-		catch { this.operations.problem("harness", "Interface handoff", new Error("Interface delivery was not confirmed")); }
-		finally { span.end(); }
+		const work = this.interfaceWork.get(s)!;
+		work.delete(call.id); // An attempted delivery cannot be repeated, even on a throw.
+		try {
+			if (span.run(() => live.connection.onHandoff(structuredClone(request))) !== "withheld") return true;
+		} catch {
+			this.operations.problem("harness", "Interface handoff", new Error("Interface delivery was not confirmed"));
+			return false;
+		} finally { span.end(); }
+		// Only a synchronous, explicit pre-write decision can restore proof of non-delivery.
+		live.withheld = true;
+		work.set(call.id, live);
+		const item = this.interfaceRecords(s).get(call.id);
+		if (item && await this.settleInterfaceCall(s, item)) this.operations.maybeContinueOpenCalls(s);
+		return false;
+	}
+
+	private withholdStaged(s: Session, connection: InterfaceConnection, turnId: string): Promise<void> {
+		return this.operations.admit(s, async () => {
+			if (s.closed || s.suspended || !connection.defer) return;
+			const work = this.interfaceWork.get(s);
+			const staged = [...(work ?? [])].filter(([, live]) => live.connection === connection && live.turnId === turnId);
+			if (!staged.length) return;
+			// Pin abandonment before any awaited work. The original handle can do this even
+			// after disconnect, but a replacement connection cannot abandon its calls.
+			for (const [, live] of staged) live.withheld = true;
+			await this.operations.erasure().admitHistory(s);
+			this.operations.checkWriter(s);
+			const records = this.interfaceRecords(s);
+			for (const [id] of staged) {
+				const item = records.get(id);
+				if (item) await this.settleInterfaceCall(s, item);
+			}
+			this.operations.maybeContinueOpenCalls(s);
+		});
 	}
 
 	private releaseInterfaceCall(s: Session, id: string, connection: InterfaceConnection): Promise<boolean> {
 		return this.operations.admit(s, async () => {
 			const live = this.interfaceWork.get(s)?.get(id);
 			const item = live?.connection === connection && this.interfaceRecords(s).get(id);
-			if (!item || item.result || !live || !this.validHandoff(s, item)) return false;
+			if (!item || item.result || !live || live.withheld || !this.validHandoff(s, item)) return false;
 			const { data, dispatch, checkpoint } = item;
 			const request = { sessionId: s.id, turnId: checkpoint!.turnId!, deadline: data!.deadline, call: dispatch!.call };
 			const freshness = await this.operations.erasure().admitHistory(s);
@@ -286,8 +317,7 @@ export class InterfaceToolRoutes {
 			if (await this.operations.erasure().admitHistory(s) !== freshness) return false;
 			this.operations.checkWriter(s);
 			if (!live.check()) return false;
-			live.deliver(request);
-			return true;
+			return live.deliver(request);
 		});
 	}
 
@@ -406,8 +436,8 @@ export class InterfaceToolRoutes {
 			const checked = submitted && call ? await this.operations.turnAuthority().run({ sessionId: s.id, actors, jobs, state: { startingRights } },
 				() => this.operations.toolAfter(s, { sessionId: s.id, call, result: submitted.report }, true)) : undefined;
 
-			const result: ToolResult = checked?.result ?? { callId: id, status: live && !live.released ? "notStarted" : "outcomeUnknown",
-				content: [text(live && !live.released ? "Interface request was not released" : "Interface tool outcome is unknown")] };
+			const result: ToolResult = checked?.result ?? { callId: id, status: live ? "notStarted" : "outcomeUnknown",
+				content: [text(live ? "Interface request was not released" : "Interface tool outcome is unknown")] };
 			const draft: EntryDraft = { kind: "toolResult", writer: "harness", modelVisible: true, turnId: origin?.turnId,
 				stepId: origin?.stepId, toolCallId: id, actorId: submitted?.actorId,
 				sources: [start?.id, checkpoint?.id].filter((entry): entry is string => !!entry),

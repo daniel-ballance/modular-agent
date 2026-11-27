@@ -16,8 +16,9 @@ export interface InterfaceToolSource {
 export interface InterfaceToolConnectionOptions {
 	actor: Actor;
 	routeId: string;
-	/** A synchronous delivery boundary. Do not buffer executable requests here. */
-	onHandoff(request: InterfaceToolHandoff): void;
+	/** A synchronous delivery boundary. Return `"withheld"` only before attempting any executable write.
+	 * A thrown error does not prove non-delivery. Do not buffer executable requests here. */
+	onHandoff(request: InterfaceToolHandoff): void | "withheld";
 	/** Stage without delivering executable content. Use release() at the delivery boundary. */
 	defer?: boolean;
 }
@@ -42,6 +43,8 @@ export type InterfaceToolReceipt = { status: "accepted" | "alreadySettled" } |
 export interface InterfaceToolConnection {
 	advertise(tools: readonly ToolDefinition[]): void;
 	release(callId: string): Promise<boolean>;
+	/** Abandon this handle’s still-staged calls for the turn. Never affects an attempted delivery. */
+	withholdStaged(turnId: string): Promise<void>;
 	reportInterfaceToolResult(report: InterfaceToolReport): Promise<InterfaceToolReceipt>;
 	disconnect(): void;
 }

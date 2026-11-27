@@ -145,7 +145,9 @@ const agent = await createAgent({ project, severalActors: true, sessionLimits: t
 // Observe delivery at the real connection callback, not a model draft or a snapshot.
 const connect = agent.connectInterfaceTools.bind(agent);
 agent.connectInterfaceTools = (id, options) => connect(id, { ...options, onHandoff(request) {
-  options.onHandoff(request); appendFileSync(join(dataDir, `${id}.dispatches`), JSON.stringify(request.call.id)+'\n');
+  const disposition = options.onHandoff(request);
+  if (disposition !== "withheld") appendFileSync(join(dataDir, `${id}.dispatches`), JSON.stringify(request.call.id)+'\n');
+  return disposition;
 } });
 const tls = name === 'tls' && await disposableTls();
 let tlsOptions;
