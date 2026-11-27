@@ -250,6 +250,7 @@ impl Harness {
                     self.snapshot(session)?
                         .entries
                         .iter()
+                        .filter(|e| e.content.is_some())
                         .map(|e| e.id.clone())
                         .collect(),
                 ),

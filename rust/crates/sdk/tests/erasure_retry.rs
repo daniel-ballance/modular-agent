@@ -1,3 +1,5 @@
+use agent_api::HistoryStore;
+use history_fs::FileHistory;
 use modular_agent::{
     Actor, Code, Durability, ErasureRetryState, ReconcileErasureOptions, Result, file_history,
     testing::test_agent,
@@ -178,5 +180,255 @@ async fn answer_retry_refuses_an_erased_question_without_rebinding() -> Result<(
     let rows = session.history().await?;
     assert!(!json!(rows).to_string().contains("do not bind"));
     assert!(json!(rows).to_string().contains("keep"));
+    Ok(())
+}
+
+const SECRET: &str = "Private retry fixture input";
+
+// Read the backing store: Session::history would itself retry.
+fn reconciled(store: &FileHistory, sid: &str, target: &str) -> Result<agent_api::SessionData> {
+    assert!(store.pending_erasure_ids(sid)?.is_empty());
+    let data = store.inspect(sid)?;
+    assert!(
+        data.entries
+            .iter()
+            .any(|e| e.id == target && e.content.is_none())
+    );
+    assert_eq!(
+        data.entries.iter().filter(|e| e.kind == "erasure").count(),
+        1
+    );
+    assert!(!json!(data.entries).to_string().contains(SECRET));
+    Ok(data)
+}
+
+async fn mark_private(store: &FileHistory, session: &modular_agent::Session) -> Result<String> {
+    session.prompt(SECRET).await?;
+    let before = store.inspect(session.id())?;
+    let target = before
+        .entries
+        .iter()
+        .rfind(|e| e.kind == "input")
+        .unwrap()
+        .id
+        .clone();
+    let entries: Vec<_> = before
+        .entries
+        .iter()
+        .filter(|e| json!(e).to_string().contains(SECRET))
+        .map(|e| e.id.clone())
+        .collect();
+    assert!(entries.contains(&target));
+    store.mark_erasure(session.id(), &entries)?;
+    assert!(store.pending_erasure_ids(session.id())?.contains(&target));
+    Ok(target)
+}
+
+#[tokio::test]
+async fn open_session_retries_pending_erasure_on_the_existing_writer() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("history");
+    let store = FileHistory::new(&path)?;
+    let agent = test_agent()
+        .project(dir.path())
+        .durability(Durability::Kept)
+        .history(file_history(&path)?)
+        .script(json!([{"text":"seed"}]))
+        .build()
+        .await?;
+    let open = agent.session().await?;
+    let target = mark_private(&store, &open).await?;
+    assert_eq!(agent.open_session(open.id()).await?.id(), open.id());
+    reconciled(&store, open.id(), &target)?;
+    open.set_setting("title", json!("existing writer remains usable"))?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn authorized_direct_command_sees_reconciled_history() -> Result<()> {
+    use modular_agent::{Command, Plugin};
+    use std::sync::{Arc, OnceLock};
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("history");
+    let store = FileHistory::new(&path)?;
+    let target = Arc::new(OnceLock::<String>::new());
+    let observed = target.clone();
+    let callback_path = path.clone();
+    let command = Command::new("check_history", "Check persisted history", move |_, cx| {
+        let target = observed.clone();
+        let path = callback_path.clone();
+        async move {
+            reconciled(
+                &FileHistory::new(&path)?,
+                &cx.session_id,
+                target.get().unwrap(),
+            )?;
+            Ok(Some("reconciled".to_owned()))
+        }
+    });
+    let agent = test_agent()
+        .project(dir.path())
+        .durability(Durability::Kept)
+        .history(file_history(&path)?)
+        .plugin(Plugin::new("retry-fixture").command(command))
+        .script(json!([{"text":"seed"}]))
+        .build()
+        .await?;
+    let session = agent.session().await?;
+    target.set(mark_private(&store, &session).await?).unwrap();
+    assert_eq!(
+        session.run_command("/check_history").await?.as_deref(),
+        Some("reconciled")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn rewind_retries_pending_erasure_before_committing_position() -> Result<()> {
+    use modular_agent::{
+        Agent, MoveOptions,
+        testing::{SCRIPTED_MODEL, scripted_provider},
+    };
+    let dir = tempfile::tempdir()?;
+    let project = dir.path().join("project");
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(&project)
+            .status()?
+            .success()
+    );
+    let path = dir.path().join("history");
+    let store = FileHistory::new(&path)?;
+    let marker = project.join("point.txt");
+    std::fs::write(&marker, "saved")?;
+    let agent = Agent::builder()
+        .project(&project)
+        .data_dir(dir.path())
+        .durability(Durability::Kept)
+        .history(file_history(&path)?)
+        .provider(scripted_provider(json!([{"text":"seed"},{"text":"seed"}])))
+        .model(SCRIPTED_MODEL)
+        .build()
+        .await?;
+    let session = agent.session().await?;
+    session.prompt("Save point").await?;
+    let point = store
+        .inspect(session.id())?
+        .entries
+        .iter()
+        .find(|e| e.kind == "turn.end")
+        .unwrap()
+        .id
+        .clone();
+    let target = mark_private(&store, &session).await?;
+    std::fs::write(&marker, "current")?;
+    session
+        .move_to_with(&point, MoveOptions { rewind: true })
+        .await?;
+    let data = reconciled(&store, session.id(), &target)?;
+    assert_eq!(std::fs::read_to_string(marker)?, "saved");
+    assert_eq!(data.position.as_deref(), Some(point.as_str()));
+    let erasure = data
+        .entries
+        .iter()
+        .position(|e| e.kind == "erasure")
+        .unwrap();
+    let rewind = data
+        .entries
+        .iter()
+        .position(|e| e.kind == "position")
+        .unwrap();
+    assert!(erasure < rewind);
+    Ok(())
+}
+
+#[tokio::test]
+async fn approval_decision_retries_and_retires_only_the_affected_view() -> Result<()> {
+    use modular_agent::{Answer, Approval, Tool, ToolContext};
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("history");
+    let store = FileHistory::new(&path)?;
+    let agent = test_agent()
+        .project(dir.path())
+        .durability(Durability::Kept)
+        .history(file_history(&path)?)
+        .approval(Approval::All)
+        .max_approval_wait_ms(60_000)
+        .setting("approvalWait", json!("untilDeadline"))
+        .tool(
+            Tool::new("fixture", "Waiting approval fixture")
+                .run(|_: serde_json::Value, _: ToolContext| async { Ok("ran") }),
+        )
+        .script(json!([
+            {"toolCalls":[{"name":"fixture","input":{"name":"unaffected"}}]},
+            {"toolCalls":[{"name":"fixture","input":{"name":"affected"}}]},
+            {"text":"done"}
+        ]))
+        .build()
+        .await?;
+    let session = agent.session().await?;
+    for name in ["unaffected", "affected"] {
+        assert_eq!(
+            session
+                .prompt(format!("Park {name}"))
+                .await?
+                .open_tool_calls
+                .len(),
+            1
+        );
+    }
+    session.wait_idle().await?;
+    let questions = session.questions_present().await?;
+    let question = |name| {
+        questions
+            .iter()
+            .find(|q| q.call.as_ref().is_some_and(|c| c["input"]["name"] == name))
+            .unwrap()
+    };
+    let (affected, unaffected) = (question("affected"), question("unaffected"));
+    let before = store.inspect(session.id())?;
+    let entry = before
+        .entries
+        .iter()
+        .find(|e| {
+            e.kind == "request.open" && e.content.as_ref().is_some_and(|q| q["id"] == affected.id)
+        })
+        .unwrap();
+    store.mark_erasure(session.id(), std::slice::from_ref(&entry.id))?;
+    assert!(store.pending_erasure_ids(session.id())?.contains(&entry.id));
+    assert_eq!(
+        session
+            .answer(&affected.id, Answer::Allow)
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Conflict
+    );
+    reconciled(&store, session.id(), &entry.id)?;
+    assert!(session.answer(&affected.id, Answer::Allow).await.is_err());
+    // Do not re-poll: the independent view was delivered before erasure.
+    session.answer(&unaffected.id, Answer::Allow).await?;
+    session.wait_idle().await?;
+    assert!(!session.questions()?.iter().any(|q| q.id == affected.id));
+    let data = store.inspect(session.id())?;
+    let results: Vec<_> = data
+        .entries
+        .iter()
+        .filter(|e| e.kind == "tool.result" && e.scope.call == entry.scope.call)
+        .collect();
+    assert_eq!(results.len(), 1);
+    assert!(
+        results[0]
+            .content
+            .as_ref()
+            .is_none_or(|body| body["status"] == "refused")
+    );
+    assert!(
+        !data
+            .entries
+            .iter()
+            .any(|e| e.kind == "tool.started" && e.scope.call == entry.scope.call)
+    );
     Ok(())
 }

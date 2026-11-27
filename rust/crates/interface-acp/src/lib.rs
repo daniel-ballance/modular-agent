@@ -535,7 +535,6 @@ impl State {
                 // Serialize project opens with rewind across session-local Harnesses.
                 let _setup = self.routes.setup.lock().await;
                 let session = self.session(&p)?;
-                binding::require_feature(self.factory.as_ref(), &session, "rewinding")?;
                 require(session.api.as_ref(), &actor_scope(&session.id), "settings")?;
                 if self.project_in_use(&session.project, &session.id) {
                     return Err(request_error("conflict", "cannot rewind a shared project").into());

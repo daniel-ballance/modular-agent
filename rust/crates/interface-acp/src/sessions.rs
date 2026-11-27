@@ -652,6 +652,7 @@ impl State {
                     !session.closing.load(std::sync::atomic::Ordering::SeqCst),
                     request_error("busy", "session is closing")
                 );
+                session.api.retry_open_erasure(id).await?;
                 return self.open_response(&session, method, &cx, &[]).await;
             }
             let shared = self
@@ -662,7 +663,7 @@ impl State {
                 .get(id)
                 .and_then(std::sync::Weak::upgrade);
             if let Some(shared) = shared {
-                let data = shared.api.snapshot(id)?;
+                let data = shared.api.authority_snapshot(id)?;
                 ensure!(
                     discoverable(&self.principal, &data)
                         && self.factory.serves_project(&data.project),

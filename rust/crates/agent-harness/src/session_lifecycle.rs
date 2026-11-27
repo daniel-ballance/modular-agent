@@ -193,9 +193,11 @@ impl Harness {
             if let Ok(data) = snapshot {
                 let rights =
                     SESSION_OPEN_POLICY.with(|policy| self.check_session_open(&data, policy))?;
+                self.retry_open_erasure(id).await?;
                 let mut sessions = self.sessions.lock().unwrap();
                 let open = sessions.get_mut(id).ok_or(SessionNotOpen)?;
-                self.retry_locked_erasure(open)?;
+                self.check_open_writer(open)?;
+                self.check_open_erasure(open)?;
                 open.check_rewind()?;
                 ensure!(
                     same_open_authority(&open.data, &data),

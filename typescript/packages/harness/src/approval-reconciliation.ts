@@ -49,10 +49,6 @@ export class ApprovalReconciliation {
 
 	clear(s: Session): void {
 		clearTimeout(this.approvalTimer.get(s));
-		this.invalidateDeliveries(s);
-	}
-
-	invalidateDeliveries(s: Session): void {
 		this.approvalDeliveries.delete(s);
 	}
 

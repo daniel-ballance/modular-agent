@@ -85,9 +85,10 @@ for group in "${groups[@]}"; do
     history_service "$history_language" "$work/erasure"
     export MODULAR_AGENT_HISTORY_URL="$history_url" MODULAR_AGENT_HISTORY_TOKEN_FILE="$work/erasure/token"
   fi
+  # Only stock ma offers /skills and operator-configured waiting approvals.
   for launcher in ma base; do
-    if [ "$launcher" = ma ]; then command=("${ma[@]}")
-    else command=("${base[@]}"); fi
+    if [ "$launcher" = ma ]; then command=("${ma[@]}"); export MA_ACP_STOCK_MA=1
+    else command=("${base[@]}"); unset MA_ACP_STOCK_MA; fi
     run "ACP $launcher stdio $group" node run.mjs --group "$group" -- "${command[@]}"
     # Each production profile writes an actors policy and supplies its own token files.
     # Replace the shell so the kit gets the agent's exit status and stderr.

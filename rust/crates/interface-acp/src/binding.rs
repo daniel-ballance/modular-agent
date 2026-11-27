@@ -756,6 +756,8 @@ pub(crate) async fn extension(
             api.retry_open_erasure(&session.id).await?;
             if method == "fork" {
                 require_feature(factory, &session, "forking")?;
+            } else if p["rewind"] == true {
+                require_feature(factory, &session, "rewinding")?;
             }
             let data = session.api.snapshot(&session.id)?;
             let branch = data.branch();

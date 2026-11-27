@@ -53,7 +53,7 @@ const fixtureEnv = (kit, role, options) => ({ MODULAR_AGENT_PLUGINS: JSON.string
 
 // The listener deliberately has several credentials. For stdio, a new process
 // loads the next profile over the same trusted data directory.
-async function host(kit, scopes, { extraEnv = {}, dir, which = kit.command, limits } = {}) {
+async function host(kit, scopes, { extraEnv = {}, dir, which = kit.command, limits, approvalWaitMaxMs } = {}) {
 	const peers = [];
 	const tokens = [];
 	const actors = kit.network && scopes.map((scope) => {
@@ -63,8 +63,11 @@ async function host(kit, scopes, { extraEnv = {}, dir, which = kit.command, limi
 		tokens.push(token);
 		return { tokenFile, ...scope };
 	});
-	const env = kit.profile({ stdio: scopes[0], ...(actors ? { actors } : {}), limits }, extraEnv, dir);
+	const env = kit.profile({ stdio: scopes[0], ...(actors ? { actors } : {}), limits, approvalWaitMaxMs }, extraEnv, dir);
 	const directory = env.MODULAR_AGENT_DATA_DIR;
+	if (approvalWaitMaxMs) {
+		writeFileSync(join(directory, "settings.json"), JSON.stringify({ approval: "all" }));
+	}
 	const listener = kit.network && kit.managed.variant(env);
 	return {
 		directory, listener, tokens,
@@ -72,7 +75,7 @@ async function host(kit, scopes, { extraEnv = {}, dir, which = kit.command, limi
 			return listener ? [await listener] : peers.map((peer) => peer.spawned);
 		},
 		async peer(index = 0, version = 1) {
-			const e = !kit.network && index !== 0 ? kit.profile({ stdio: scopes[index], limits }, extraEnv, directory) : env;
+			const e = !kit.network && index !== 0 ? kit.profile({ stdio: scopes[index], limits, approvalWaitMaxMs }, extraEnv, directory) : env;
 			const a = kit.connect(which, e, tokens[index], listener || undefined);
 			peers.push(a);
 			const hello = await kit.within(5000, init(a, version), "initialize ADR profile");
@@ -479,8 +482,11 @@ export async function erasure(kit) {
 	if (declaration?.pendingErasure !== 1) throw Error("erasure fixture requires the shared HTTP pendingErasure: 1 registry");
 	await kit.attempt("erasure: authorized retry triggers", async () => {
 		const proxy = await kit.store.observe({ beforeReply: erasureTriggers.capture });
-		const h = await host(kit, [scoped([kit.project], [null])], { extraEnv: { MODULAR_AGENT_HISTORY_URL: proxy.url } });
-		try { await erasureTriggers(kit, (await h.peer()).a, approvalOff); }
+		const stockMa = process.env.MA_ACP_STOCK_MA === "1";
+		const h = await host(kit, [scoped([kit.project], [null])], {
+			extraEnv: { MODULAR_AGENT_HISTORY_URL: proxy.url }, approvalWaitMaxMs: stockMa ? 60_000 : undefined,
+		});
+		try { await erasureTriggers(kit, (await h.peer()).a, approvalOff, stockMa); }
 		finally { await h.stop(); proxy.stop(); }
 	});
 	for (const cutoff of ["reported pending", "bookkeeping commit", "tombstone commit"]) {

@@ -308,8 +308,9 @@ class HistoryWriter implements HistoryStore {
 		const lease = this.leases.get(id);
 		this.checkWriter(id);
 		const tombstones = batch.filter(e => e.erased);
+		const isBookkeeping = batch.every(entry => entry.kind === "erasure" || erasureSettlement(entry));
 		if (tombstones.length) {
-			if (!pending?.meta.forkedFrom || !this.port.erase) throw unavailable("Cannot store fork tombstones");
+			if (!(pending?.meta.forkedFrom || isBookkeeping) || !this.port.erase) throw unavailable("Cannot store tombstones");
 			// The wire reserves `erased` for the service. Send only the already
 			// redacted envelope, then ask the service to project the tombstone.
 			batch = batch.map(e => {
@@ -318,7 +319,7 @@ class HistoryWriter implements HistoryStore {
 				return { ...entry, ...(usage && (entry.kind === "response" ? { message: { role: "assistant" as const, content: [], usage } } : { data: { usage } })), ...(jobKey && { data: { key: jobKey } }) } as HistoryEntry;
 			});
 		}
-		if (this.historyErasure) await this.guardedAppend(id, lease!, batch, pending?.meta.forkedFrom?.sessionId, options?.forkErasureView);
+		if (this.historyErasure) await this.guardedAppend(id, lease!, batch, isBookkeeping, pending?.meta.forkedFrom?.sessionId, options?.forkErasureView);
 		else await this.mutate(id, signal => this.port.append(id, lease!.value, batch, signal), lease);
 		if (tombstones.length) await this.erase(id, tombstones.map(e => e.id));
 	}
@@ -367,9 +368,8 @@ class HistoryWriter implements HistoryStore {
 			throw Object.assign(new Error("Pending erasure state is unavailable", { cause }), { code: "unavailable" });
 		}
 	}
-	private async guardedAppend(id: string, lease: Lease, batch: HistoryEntry[], forkSource?: string, forkErasureView?: string) {
+	private async guardedAppend(id: string, lease: Lease, batch: HistoryEntry[], isBookkeeping: boolean, forkSource?: string, forkErasureView?: string) {
 		const sources = new Set(batch.flatMap(entry => entry.sources ?? []));
-		const isBookkeeping = batch.every(entry => entry.kind === "erasure" || erasureSettlement(entry));
 		for (;;) {
 			this.checkWriter(id);
 			const dest = await this.plans(id);

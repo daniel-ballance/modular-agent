@@ -1,5 +1,5 @@
 //! History choices. The HTTP client uses the base's lease and portable-record implementation.
-use crate::{Code, Error, Result, core::MemoryHistory};
+use crate::{Agent, Code, Error, Result, Session, core::MemoryHistory};
 use agent_api as base;
 pub use agent_api::HistoryStore;
 pub use history_http::{
@@ -8,6 +8,28 @@ pub use history_http::{
 };
 use serde_json::Value;
 use std::{path::Path, sync::Arc};
+
+impl Agent {
+    /// Reopen a kept session. Interrupted work is recovered, as the Runtime declares,
+    /// before this returns.
+    pub async fn open_session(&self, id: &str) -> Result<Session> {
+        self.check_crashed()?;
+        let harness = self.inner.harness.as_ref();
+        if let Ok(writer) = harness.session_generation(id) {
+            let scope = base::Scope::session(id);
+            base::require(harness, &scope, "watch")?;
+            harness.retry_open_erasure(id).await?;
+            base::AgentApi::snapshot(harness, id)?;
+            base::require(harness, &scope, "watch")?;
+            if writer.is_cancelled() {
+                return Err(Error::new(Code::Lost, "session writer was detached"));
+            }
+            return Ok(Session::new(self.inner.clone(), id.into()));
+        }
+        base::AgentApi::install_recovery(harness, id).await?;
+        self.finish_open(id).await
+    }
+}
 
 /// Serve a dedicated history store on loopback.
 pub async fn serve_history(store: History, options: ServeHistoryOptions) -> Result<()> {
