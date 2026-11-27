@@ -458,16 +458,26 @@ function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>
 				}
 				return {};
 			});
-			peer.handle("host/jobs/unfinished", async (p) => ({
-				jobs: api.unfinishedJobs(sessionOf(p)).map(({ job, key, detail }) => ({ jobId: job.id, kind: job.kind, key, detail, actorId: job.actorId })),
-			}));
+			peer.handle("host/jobs/unfinished", async (p) => {
+				const id = sessionOf(p);
+				await api.checkPending(id);
+				return { jobs: api.unfinishedJobs(id).map(({ job, key, detail }) => ({ jobId: job.id, kind: job.kind, key, detail, actorId: job.actorId })) };
+			});
 			peer.handle("host/jobs/resume", async (p) => {
 				if (activeJobs.has(p.jobId)) throw new WireError("invalid_request", "Job is already running on this connection");
-				try { api.resumeJob(ownJob(p), p.jobId); } catch { throw new WireError("invalid_request", "Job cannot resume"); }
+				try {
+					const id = ownJob(p);
+					await api.checkPending(id);
+					api.resumeJob(id, p.jobId);
+				} catch { throw new WireError("invalid_request", "Job cannot resume"); }
 				activeJobs.add(p.jobId);
 				return {};
 			});
-			api.onJobCancel(async (jobId) => { await peer.request("jobs/cancel", { jobId }); });
+			api.onJobCancel(async (jobId) => { await peer.request("jobs/cancel", { jobId }); }, async (jobId, cleanup) => {
+				activeJobs.delete(jobId);
+				const reply = await peer.request<{ cleanupConfirmed?: boolean }>("jobs/cancel", { jobId, cleanup });
+				if (reply?.cleanupConfirmed !== true) throw new WireError("lost", "Owner did not confirm erasure cleanup");
+			});
 
 			// ---------- what the plugin provides ----------
 			for (const p of reg.providers ?? []) api.provide("provider", new WireProvider(peer, p.id, (p.supports ?? {}) as never, fromWire(p.models) as ModelInfo[], track));

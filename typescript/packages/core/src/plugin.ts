@@ -493,6 +493,9 @@ export async function collect(plugin: Plugin, config: Settings, served = false) 
         const job = (await jobRecovery(api, found.sessionId, () => {}).unfinished()).find(job => job.id === id);
         if (!job) throw new AgentError("invalid_request", `Job ${id} is not unfinished`);
         await owner.cancel(job, { job: sdkJob(await api.resumeJob(found.sessionId, id, true)) });
+      }, async (id, { actorId }) => {
+        // The harness commits a content-free end after the handler confirms cleanup.
+        await owner.cancel({ id, kind: "", actorId, detail: null }, { job: { id, started: false, progress() {}, async end() {} } });
       });
       api.on("session.start", async ({ sessionId, resumed }: { sessionId: string; resumed: boolean }) => {
         if (!resumed || !owner.resume) return;

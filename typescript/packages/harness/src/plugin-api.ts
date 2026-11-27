@@ -157,7 +157,7 @@ export interface PluginApi {
 	workMay(sessionId: string, right: Authority, actors: string[], jobs?: string[]): boolean;
 	jobTrace?(sessionId: string, jobId: string): Operation | undefined;
 	findJob(jobId: string): { sessionId: string } | undefined;
-	onJobCancel(handler: (jobId: string) => Promise<void>): void;
+	onJobCancel(handler: (jobId: string) => Promise<void>, cleanup?: import("./jobs.js").JobCleanup): void;
 	/** Jobs this plugin started that the history shows as never ended, for example because the process stopped. */
 	unfinishedJobs(sessionId: string): KeptJob[];
 	/** Take over a recorded, unfinished job of this plugin's after a restart. */

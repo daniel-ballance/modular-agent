@@ -410,7 +410,7 @@ export class Harness {
 			store: () => this.use<HistoryStore>("history-store"),
 			providers: () => this.useAll<Provider>("provider"),
 			checkWriter: s => this.lifecycle.checkWriter(s),
-			hasUnfinishedJobs: s => this.jobWork.runningJobs(s).length > 0,
+			settleJobs: s => this.jobWork.settleForErasure(s),
 			invalidateErasedHandoffs: (...args) => this.interfaceTools.invalidateErasedHandoffs(...args),
 			commitNow: (...args) => this.historyCommit.commitNow(...args),
 			write: (s, write) => this.lifecycle.write(s, write),
@@ -639,10 +639,11 @@ export class Harness {
 				}
 				return undefined;
 			},
-			onJobCancel: (handler) => this.jobWork.jobCancels.set(pluginName, handler),
-			unfinishedJobs: (id) => this.jobWork.runningJobs(this.session(id)).filter(({ job }) => job.plugin === pluginName),
+			onJobCancel: (handler, cleanup) => this.jobWork.registerCancel(pluginName, handler, cleanup),
+			unfinishedJobs: (id) => this.jobWork.unfinishedByOwner(this.session(id), pluginName),
 			resumeJob: (id, jobId) => {
 				const s = this.session(id);
+				this.erasure.checkPending(s);
 				const found = this.jobWork.runningJobs(s).find((j) => j.job.id === jobId && j.job.plugin === pluginName);
 				if (!found) throw new Error(`No unfinished job ${jobId} of ${pluginName}`);
 				return s.jobs.get(jobId)?.handle ?? this.jobWork.jobHandle(s, found);

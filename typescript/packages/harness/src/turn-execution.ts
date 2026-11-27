@@ -245,6 +245,11 @@ export class TurnExecution {
 		// The process stopped: the turn is interrupted, not ended. Nothing is recorded or announced here;
 		// reopening the session finds the turn and hands it to the Runtime.
 		if (s.suspended) return;
+		if (s.erasing) {
+			await this.operations.commit(s, [{ kind: "turnEnd", writer: "harness", modelVisible: false, turnId,
+				data: { outcome: { kind: "cancelled" }, usage: outcome.usage } }]);
+			return;
+		}
 		if (state?.toolResultError && outcome.outcome.kind !== "limit" && outcome.outcome.kind !== "cancelled") {
 			outcome = { ...outcome, outcome: { kind: "failed", error: state.toolResultError }, result: { openToolCalls: [] } };
 		}

@@ -3,6 +3,7 @@ import type { Transaction, InputOptions } from "./plugin-api.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
 import { InputAdmission } from "./input-admission.js";
 import { InputRequests } from "./input-requests.js";
+import { erasureSettlement } from "./erasure.js";
 import { SessionErasure } from "./session-erasure.js";
 import { ApprovalReconciliation } from "./approval-reconciliation.js";
 import { failure } from "./failure.js";
@@ -20,7 +21,7 @@ const STANDARD_ENTRY_KINDS = new Set("limit tenant actorJoined actorLeft setting
 
 interface HistoryCommitOperations {
 	commit(s: Session, drafts: EntryDraft[], pluginRecord?: boolean): Promise<HistoryEntry[]>;
-	erasure(): Pick<SessionErasure, "pendingRegistry">;
+	erasure(): Pick<SessionErasure, "pendingRegistry" | "checkPending">;
 	receiptOperation(): Pick<AsyncLocalStorage<ReceiptOperation>, "getStore">;
 	receipts(): RunReceipts;
 	newId(): string;
@@ -45,7 +46,16 @@ export class HistoryCommit {
 		// A suspended session's process has stopped: nothing more is recorded for it here.
 		const run = s.committing.then(() => {
 			const registry = this.operations.erasure().pendingRegistry();
-			const write = async () => guard && !await guard() ? [] : this.commitNow(s, drafts, pluginRecord);
+			const write = async () => {
+				if (guard && !await guard()) return [];
+				const control = !pluginRecord && drafts.every(erasureSettlement);
+				if (!control) {
+					this.operations.erasure().checkPending(s);
+					const marked = new Set(registry?.intents().flatMap(intent => intent.copies.map(copy => copy.id)));
+					if (drafts.some(draft => draft.sources?.some(id => marked.has(id)))) throw failure("unavailable", "Write uses erased sources");
+				}
+				return this.commitNow(s, drafts, pluginRecord);
+			};
 			return registry ? registry.exclusive(write) : write();
 		});
 		s.committing = run.catch(() => undefined);

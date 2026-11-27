@@ -6,6 +6,17 @@ import { DatabaseSync } from "node:sqlite";
 import { RestoreWitness } from "./restore-witness.js";
 
 /** History HTTP's shared revision and per-session plans, not Provider state. */
+/** Writes that can settle existing work without retaining its payload. */
+export function erasureSettlement(entry: import("./types.js").EntryDraft): boolean {
+	if (entry.sources?.length || entry.modelVisible || entry.message) return false;
+	const data = entry.data as { report?: boolean; result?: unknown; outcome?: { kind?: string; error?: unknown } } | undefined;
+	if (entry.jobId && (entry.kind === "jobCleanupUnconfirmed" || entry.kind === "jobEnded" &&
+		data?.report === false && data.result == null && data.outcome?.error == null)) return true;
+	if (entry.writer !== "harness") return false;
+	if (entry.erased && entry.data === undefined && (entry.kind === "toolResult" || entry.kind === "inputAnswer")) return true;
+	return entry.kind === "turnEnd" && data?.outcome?.kind === "cancelled" && data.result == null;
+}
+
 export interface ErasurePlan {
 	intentId: string; sourceSessionId: string; recordId: string;
 	copies: { entryId: string; complete: boolean }[];

@@ -130,6 +130,7 @@ impl Harness {
             }),
             OperationError::Forbidden("actor lacks input authority".into())
         );
+        self.reconcile_pending_erasure(session).await?;
         let admission = self
             .admissions
             .lock()

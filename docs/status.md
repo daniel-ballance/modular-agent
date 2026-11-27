@@ -6,7 +6,7 @@ Rust and TypeScript are the two maintained SDKs and `ma` builds ([ADR 0037](adr/
 
 ## Production gaps
 
-Remaining ADR 0030 work is tracked in #19.
+Remaining ADR 0030 work is tracked in #19. [Cross-session erasure](contracts.md#cross-session-coordination) leaves copies pending when affected job cleanup cannot be confirmed.
 
 [ADR 0021](adr/0021-production-edition.md) listed four gaps. [Secret staging and recovery](contracts.md#secrets) shipped first. [ADR 0029](adr/0029-sdk-decisions-after-four-builds.md) settled ACP service token scope and rights ceilings, and [ADR 0030](adr/0030-production-gaps.md) set the rules for the other three. All four SDKs and `ma` passed checks for them on 2026-11-21, using the opt-in kits run through `scripts/production-kits.sh` and `scripts/erasure-matrix.sh`:
 

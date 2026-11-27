@@ -445,7 +445,8 @@ export class InterfaceToolRoutes {
 				message: { role: "toolResult", toolCallId: id, toolName: call?.name ?? "unknown", content: result.content, isError: result.status !== "completed" },
 				data: { status: result.status, value: result.value },
 			};
-			const written = erasure ? await this.operations.commitNow(s, [draft]) : await this.operations.commit(s, [draft], false, async () => {
+			const written = erasure ? await this.operations.commitNow(s, [{ ...draft, erased: true, modelVisible: false,
+				data: undefined, message: undefined, sources: undefined }]) : await this.operations.commit(s, [draft], false, async () => {
 				if (this.interfaceRecords(s).get(id)?.result) return false;
 				if (!submitted) return true;
 				try { await this.operations.erasure().admitHistory(s); } catch { return false; }

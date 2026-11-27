@@ -209,6 +209,10 @@ pub trait AgentApi: Send + Sync {
         json!({"plugin":capability,"toolSource":capability.strip_prefix("tools.").unwrap_or(capability)})
     }
     fn snapshot(&self, session: &str) -> Result<SessionData>;
+    /// Internal job settlement view; not a history read or a grant to run work.
+    fn job_records(&self, session: &str) -> Result<Vec<Job>> {
+        jobs(&self.snapshot(session)?)
+    }
     fn park_approval(&self, _question: &Question) -> Result<Option<bool>> {
         Ok(None)
     }
@@ -525,6 +529,13 @@ pub trait Provider: Send + Sync {
                 .erase_copies(api, &targets.keys().cloned().collect::<Vec<_>>())
                 .await?,
         })
+    }
+    /// Whether reconciliation must await an explicit local state discard.
+    fn needs_erasure_discard(&self) -> bool {
+        false
+    }
+    async fn discard_for_erasure(&self, _session: &str) -> Result<()> {
+        Ok(())
     }
     /// Stop using a session's cached conversation immediately. No remote I/O.
     fn invalidate(&self, _session: &str) {}

@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { isIP } from "node:net";
 import { isDeepStrictEqual } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
-import { erasedEntry, untilAborted, type ErasurePlan, type ErasurePublication, type HistoryErasureRegistry, type HistoryEntry, type HistoryStore, type Plugin, type StoredSession } from "@modular-agent/harness";
+import { erasedEntry, erasureSettlement, untilAborted, type ErasurePlan, type ErasurePublication, type HistoryErasureRegistry, type HistoryEntry, type HistoryStore, type Plugin, type StoredSession } from "@modular-agent/harness";
 import { HistoryServiceError, historyStorageStatuses, type HistoryReadOptions } from "./history-backend.js";
 import { call, type ClientOptions, ServiceError } from "./http.js";
 import { HISTORY_BINDING, MAX_LEASE_BYTES, validLease } from "./history-service.js";
@@ -326,7 +326,7 @@ class HistoryWriter implements HistoryStore {
 	}
 	private async guardedAppend(id: string, lease: Lease, batch: HistoryEntry[], forkSource?: string, forkErasureView?: string) {
 		const sources = new Set(batch.flatMap(entry => entry.sources ?? []));
-		const isBookkeeping = batch.every(entry => entry.kind === "erasure");
+		const isBookkeeping = batch.every(entry => entry.kind === "erasure" || erasureSettlement(entry));
 		for (;;) {
 			this.checkWriter(id);
 			const dest = await this.plans(id);

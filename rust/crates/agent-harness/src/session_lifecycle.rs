@@ -183,6 +183,7 @@ impl Harness {
             .try_with(|policy| policy.session == id)
             .unwrap_or(false)
         {
+            self.reconcile_pending_erasure(id).await?;
             let snapshot = self.snapshot(id);
             if let Ok(data) = snapshot {
                 let rights =
@@ -219,10 +220,6 @@ impl Harness {
         let op = Operation::internal("modular_agent.session.open", &Scope::session(id));
         op.attr("modular_agent.session.operation", "load");
         op.run(async {
-            let _erasure = self
-                .erasure
-                .try_read()
-                .map_err(|_| anyhow!("erasure in progress"))?;
             ensure!(
                 !self.sessions.lock().unwrap().contains_key(id),
                 OperationError::Busy("session already open here".into())
@@ -232,20 +229,46 @@ impl Harness {
             let loaded = tokio::task::spawn_blocking(move || -> Result<_> {
                 let lease = store.acquire(&session_id)?;
                 let loaded = store.load(&session_id)?;
-                if !select(&loaded)? {
-                    return Ok(None);
-                }
-                let (data, erased) = match store.reconcile_erasure(&session_id)? {
+                Ok(select(&loaded)?.then_some((store, lease, loaded)))
+            })
+            .await??;
+            let Some((store, lease, mut loaded)) = loaded else {
+                return Ok(None);
+            };
+            let pending = match store.check_erasure(&loaded) {
+                Ok(()) => false,
+                Err(error) if error.is::<PendingErasure>() => true,
+                Err(error) => return Err(error),
+            };
+            if pending {
+                SESSION_OPEN_POLICY
+                    .try_with(|policy| {
+                        if policy.session == id {
+                            self.check_session_open(&loaded, policy).map(|_| ())
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .unwrap_or(Ok(()))?;
+                self.settle_stored_erasure_jobs(&store, lease.as_ref(), &mut loaded)
+                    .await?;
+                self.discard_local_provider_state(id).await?;
+                lease.check()?;
+            }
+            let (mut data, erased) = tokio::task::spawn_blocking(move || -> Result<_> {
+                let reconciled = if pending {
+                    store.reconcile_erasure(&loaded.id)?
+                } else {
+                    None
+                };
+                let (data, erased) = match reconciled {
                     Some((data, _)) => (data, true),
                     None => (loaded, false),
                 };
                 store.check_erasure(&data)?;
-                Ok(Some((lease, data, erased)))
+                Ok((data, erased))
             })
             .await??;
-            let Some((lease, mut data, erased)) = loaded else {
-                return Ok(None);
-            };
             let open_rights = SESSION_OPEN_POLICY
                 .try_with(|policy| {
                     (policy.session == id).then(|| self.check_session_open(&data, policy))
@@ -453,6 +476,13 @@ impl Harness {
                             .unwrap()
                             .insert(open.data.project.clone(), id.into());
                     }
+                    sessions.remove(id);
+                    return Ok(());
+                }
+                if sessions
+                    .get(id)
+                    .is_some_and(|open| self.can_release_pending_writer(open))
+                {
                     sessions.remove(id);
                     return Ok(());
                 }

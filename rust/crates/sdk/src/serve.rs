@@ -786,6 +786,21 @@ impl Endpoint for Served {
                     .jobs
                     .as_ref()
                     .ok_or_else(|| Fault::new("invalid_request", "no job owner registered"))?;
+                if let Some(cleanup) = p.get("cleanup") {
+                    owner
+                        .cleanup_for_erasure(
+                            Backend::Remote {
+                                peer,
+                                parent: Value::Null,
+                            },
+                            base::wire::string(cleanup, "sessionId")?,
+                            base::wire::string(cleanup, "actorId")?,
+                            base::wire::string(&p, "jobId")?,
+                        )
+                        .await
+                        .map_err(to_fault)?;
+                    return Ok(json!({"cleanupConfirmed":true}));
+                }
                 owner
                     .cancel_id(base::wire::string(&p, "jobId")?)
                     .await

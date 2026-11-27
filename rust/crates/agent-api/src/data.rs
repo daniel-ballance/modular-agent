@@ -222,6 +222,40 @@ pub fn erased_input_keys(data: &SessionData, targets: &[String]) -> Vec<Value> {
         .collect()
 }
 pub fn record_erasure(data: &mut SessionData, entry_ids: Vec<String>, input_keys: Vec<Value>) {
+    // A turn may have stopped at the freshness fence before recording its end.
+    for start in data
+        .branch()
+        .into_iter()
+        .filter(|e| e.kind == "turn.start" && e.scope.turn.is_some())
+    {
+        if data
+            .entries
+            .iter()
+            .any(|e| e.scope.turn == start.scope.turn && entry_ids.contains(&e.id))
+            && !data
+                .entries
+                .iter()
+                .any(|e| e.kind == "turn.end" && e.scope.turn == start.scope.turn)
+        {
+            let entry = Entry {
+                id: id(),
+                parent: data.position.clone(),
+                input_id: start.input_id.clone(),
+                scope: start.scope,
+                writer: "harness".into(),
+                at: now(),
+                kind: "turn.end".into(),
+                visible: false,
+                copies: vec![],
+                content: Some(json!(TurnResult {
+                    outcome: Outcome::Cancelled,
+                    ..TurnResult::default()
+                })),
+            };
+            data.position = Some(entry.id.clone());
+            data.entries.push(entry);
+        }
+    }
     // Erasing approval evidence ends the unstarted call. Retain terminal
     // identities only: a result derived from erased evidence is also erased.
     let branch = data.branch();

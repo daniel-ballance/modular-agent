@@ -8,10 +8,12 @@ import { type QueuedInput, Session } from "./session.js";
 import { type AgentEvent, type Authority, type EntryDraft, type HistoryEntry, type Job, type JobState, type ToolCall, text, zeroUsage } from "./types.js";
 
 export interface JobStart { kind: string; key?: string; actorId?: string; actors?: string[]; jobs?: string[]; toolCallId?: string; detail?: unknown }
+export type JobCleanup = (id: string, scope: { sessionId: string; actorId?: string }) => Promise<void>;
+
 export interface KeptJob { job: Job; key?: string; detail?: unknown; actors?: string[]; rights?: Authority[] }
 
 interface JobsOperations {
-	erasure(): Pick<SessionErasure, "checkPending">;
+	erasure(): Pick<SessionErasure, "checkPending" | "admitHistory">;
 	workActors(s: Session): string[];
 	turnAuthority(): Pick<AsyncLocalStorage<{ sessionId: string; jobs: Set<string> }>, "getStore">;
 	workRights(s: Session, actors: Iterable<string>, jobs?: Iterable<string>): Authority[];
@@ -33,6 +35,13 @@ export class Jobs {
 	jobSpans = new WeakMap<Session, Map<string, Operation>>();
 
 	jobCancels = new Map<string, (jobId: string) => Promise<void>>();
+
+	private jobCleanups = new Map<string, JobCleanup>();
+
+	registerCancel(plugin: string, handler: (id: string) => Promise<void>, cleanup?: JobCleanup): void {
+		this.jobCancels.set(plugin, handler);
+		if (cleanup) this.jobCleanups.set(plugin, cleanup);
+	}
 
 	startJob(s: Session, options: JobStart, plugin: string): JobHandle {
 		this.operations.erasure().checkPending(s);
@@ -101,6 +110,12 @@ export class Jobs {
 		return [...jobs.values()];
 	}
 
+	unfinishedByOwner(s: Session, owner: string): KeptJob[] {
+		this.operations.erasure().checkPending(s);
+		if (s.erasing) throw failure("unavailable", "Session has unresolved pending erasure");
+		return this.runningJobs(s).filter(({ job }) => job.plugin === owner);
+	}
+
 	jobHandle(s: Session, kept: KeptJob, startEntryId?: string, ready: Promise<unknown> = Promise.resolve()): JobHandle {
 		const { job } = kept;
 		const plugin = job.plugin;
@@ -108,9 +123,10 @@ export class Jobs {
 		const handle: JobHandle = {
 			id: job.id, started: true, ready, startEntryId,
 			progress: (content) => {
-				if (!record.ending && !s.suspended && !s.closed) this.operations.emit(s, "job.progress", { content: typeof content === "string" ? [text(content)] : content }, plugin, { jobId: job.id });
+				if (!record.ending && !record.cleanupUnconfirmed && !s.suspended && !s.closed && !s.erasing) this.operations.emit(s, "job.progress", { content: typeof content === "string" ? [text(content)] : content }, plugin, { jobId: job.id });
 			},
 			finish: (state, result, options) => {
+				if (record.cleanupUnconfirmed) return Promise.reject(failure("lost", "Job cleanup is unconfirmed"));
 				if (record.ending) return Promise.reject(new Error("Job already ended"));
 				const work = async () => {
 					await ready;
@@ -122,9 +138,10 @@ export class Jobs {
 						? { kind: "failed", error: "Job outcome is unknown" }
 						: { kind: state, error: options?.error };
 					await this.operations.admit(s, async () => {
+						if (record.cleanupUnconfirmed) throw failure("lost", "Job cleanup is unconfirmed");
 						const rights = this.operations.workRights(s, [], [job.id]);
 						const report = options?.report !== false && !s.closing && !s.erasing && rights.includes("input");
-						const end: EntryDraft = { id: this.operations.newId(), kind: "jobEnded", writer: plugin, modelVisible: false, jobId: job.id, sources: options?.sources, data: { outcome, result: content, report } };
+						const end: EntryDraft = { id: this.operations.newId(), kind: "jobEnded", writer: plugin, modelVisible: false, jobId: job.id, sources: s.erasing ? undefined : options?.sources, data: { outcome: s.erasing ? { kind: outcome.kind } : outcome, result: s.erasing ? undefined : content, report } };
 						let queued: QueuedInput | undefined;
 						const drafts = [end];
 						if (report) {
@@ -166,7 +183,46 @@ export class Jobs {
 		return handle;
 	}
 
+	/** A lease or a lost owner is not evidence that a job stopped. */
+	async settleForErasure(s: Session): Promise<boolean> {
+		const marked = new Set([...s.entries.values()].filter(e => e.kind === "jobCleanupUnconfirmed").map(e => e.jobId));
+		for (const { job } of this.runningJobs(s)) {
+			const record = s.jobs.get(job.id);
+			const handler = this.jobCleanups.get(job.plugin);
+			const cancel = record?.cancel ?? (handler && (() => handler(job.id, { sessionId: s.id, actorId: job.actorId })));
+			// This execution remains fenced even if the owner later confirms cleanup.
+			if (record) record.cleanupUnconfirmed = true;
+			let deadline: ReturnType<typeof setTimeout> | undefined;
+			let confirmed = false;
+			try {
+				if (cancel && !record?.cancelling) {
+					await Promise.race([Promise.resolve().then(cancel), new Promise<never>((_, reject) => {
+						deadline = setTimeout(() => reject(failure("lost", "Job cleanup timed out")), 5000);
+					})]);
+					confirmed = true;
+				}
+			} catch (error) { this.operations.problem(job.plugin, "cancel job for erasure", error); }
+			finally { clearTimeout(deadline); }
+			await record?.ending?.catch(() => {});
+			if (!this.runningJobs(s).some(item => item.job.id === job.id)) continue;
+			if (confirmed) {
+				await this.operations.commit(s, [{ kind: "jobEnded", writer: job.plugin, modelVisible: false, jobId: job.id,
+					data: { outcome: { kind: "cancelled" }, report: false } }]);
+				this.operations.reservations().release(s, `job:${job.id}`);
+				const span = this.jobSpans.get(s)?.get(job.id);
+				span?.set("modular_agent.job.outcome", "cancelled");
+				span?.end();
+				this.jobSpans.get(s)?.delete(job.id);
+				s.jobs.delete(job.id);
+			} else if (!marked.has(job.id)) {
+				await this.operations.commit(s, [{ kind: "jobCleanupUnconfirmed", writer: "harness", modelVisible: false, jobId: job.id }]);
+			}
+		}
+		return this.runningJobs(s).length === 0;
+	}
+
 	async cancelJob(s: Session, jobId: string): Promise<void> {
+		await this.operations.erasure().admitHistory(s);
 		const kept = this.runningJobs(s).find(({ job }) => job.id === jobId);
 		if (!kept) { await s.jobs.get(jobId)?.ending; return; }
 		const handle = s.jobs.get(jobId)?.handle ?? this.jobHandle(s, kept);

@@ -153,7 +153,8 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 	type JobHandle = import("@modular-agent/harness").JobHandle;
 	type PendingJob = ReturnType<PluginApi["unfinishedJobs"]>[number];
 	const jobs = new Map<string, PendingJob>();
-	let cancelJob: ((id: string) => Promise<void> | void) | undefined;
+	let cancelJob: Parameters<PluginApi["onJobCancel"]>[0] | undefined;
+	let cleanupJob: Parameters<PluginApi["onJobCancel"]>[1];
 	const jobHandle = (id: string, started = true): JobHandle => ({
 		id, started, ready: Promise.resolve(),
 		progress(content) {
@@ -176,6 +177,13 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 			return jobHandle(jobId, started);
 		};
 	peer.handle("jobs/cancel", async p => {
+		if (p.cleanup !== undefined) {
+			if (!cleanupJob || typeof p.jobId !== "string" || typeof p.cleanup?.sessionId !== "string" ||
+				(p.cleanup.actorId !== undefined && typeof p.cleanup.actorId !== "string")) throw new WireError("invalid_request", "Cannot confirm job cleanup");
+			jobs.delete(p.jobId);
+			await cleanupJob(p.jobId, p.cleanup);
+			return { cleanupConfirmed: true };
+		}
 		if (!cancelJob || !jobs.has(p.jobId)) throw new WireError("invalid_request", "No active job of this plugin");
 		await cancelJob(p.jobId);
 		if (jobs.has(p.jobId)) throw new WireError("lost", "Job cancellation did not end the job");
@@ -260,7 +268,7 @@ export function servePlugins(options: ServeOptions, service?: ServiceConnection)
 			reportProblem: (where: string, error: unknown) => peer.notify("host/problem", { where, message: error instanceof Error ? error.message : String(error) }),
 			emit: (sessionId: string, type: string, data?: unknown) => peer.notify("host/emit", { sessionId, type, data: toWire(data) }),
 			onEvent: () => () => undefined,
-			onJobCancel: (handler: typeof cancelJob) => { cancelJob = handler; },
+			onJobCancel: (handler: typeof cancelJob, cleanup: typeof cleanupJob) => { cancelJob = handler; cleanupJob = cleanup; },
 			findJob: (id: string) => jobs.get(id)?.job,
 			unfinishedJobs: async (sessionId: string) => {
 				const reply = await peer.request<{ jobs: { jobId: string; kind: string; actorId?: string; key?: string; detail: unknown }[] }>("host/jobs/unfinished", { sessionId });

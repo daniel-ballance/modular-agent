@@ -5,6 +5,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { JsonlHistoryStore } from "@modular-agent/history-jsonl";
 import { amount, reviewer, waitingAgent } from "./fixtures/waiting-approval.js";
 import { definePlugin, tool, transientRuntime, type AgentOptions } from "../src/index.js";
 import { restart, testAgent } from "../src/testing.js";
@@ -212,13 +213,19 @@ for (const remote of [false, true]) {
     });
   }
 
-  test(where + ": erasing an open request retires its view, call and queued effects", async t => {
+  for (const pending of [false, true]) test(where + `: ${pending ? "reconciling" : "erasing"} an open request retires its view, call and queued effects`, async t => {
     const dir = await directory(t), agent = await waitingAgent(dir,remote); t.after(()=>agent.close());
     const session = await agent.session();
     const origin = await session.prompt("Increment"), [q] = await session.questions({present:true});
     const entries = await session.history(), req = entries.find(e=>e.requestId===q.id)!;
     await assert.rejects(session.fork(),{code:"busy"}); await assert.rejects(session.moveTo(entries[0].id),{code:"busy"});
-    await session.erase([req.id]); await assert.rejects(session.answer(q.id,"allow")); await session.waitIdle();
+    if (pending) {
+      const registry = new JsonlHistoryStore(join(dir, "history")).pendingErasure;
+      await registry.exclusive(async () => registry.keep({ id: "approval-erasure", sessionId: session.id, targets: [req.id],
+        actorId: "user", copies: [{ sessionId: session.id, id: req.id, erased: false }] }));
+      await session.history();
+    } else await session.erase([req.id]);
+    await assert.rejects(session.answer(q.id,"allow")); await session.waitIdle();
     const records = await session.history();
     assert.ok(records.find(e=>e.id===req.id)?.erased);
     assert.equal(records.filter(e=>e.kind==="toolResult" && e.toolCallId===origin.openToolCalls[0]).length,1);

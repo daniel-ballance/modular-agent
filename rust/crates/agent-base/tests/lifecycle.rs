@@ -245,6 +245,63 @@ async fn erasure_keeps_a_fork_pending_while_its_lease_is_held_elsewhere() {
     assert!(store.check_erasure(&store.load(&fork).unwrap()).is_ok());
 }
 #[tokio::test]
+async fn erasure_discovers_copies_without_replaying_legacy_admissions() {
+    let rig = Rig::new(vec![text("finished")]).await;
+    rig.run("private input").await;
+    let input = rig
+        .data()
+        .entries
+        .into_iter()
+        .find(|e| e.kind == "input")
+        .unwrap();
+    let store = history_fs::FileHistory::new(&rig.root.path().join("sessions")).unwrap();
+    let project = rig.data().project;
+    let mut legacy = SessionData {
+        id: "legacy".into(),
+        project,
+        settings: json!({}),
+        plugins: vec![],
+        position: Some("copy".into()),
+        entries: vec![],
+        origin: None,
+    };
+    let scope = Scope::session(&legacy.id);
+    legacy.entries.push(Entry {
+        id: "admission".into(),
+        input_id: None,
+        parent: None,
+        scope: scope.clone(),
+        writer: "harness".into(),
+        at: 0,
+        kind: "input.accepted".into(),
+        visible: false,
+        copies: vec![],
+        content: Some(json!({"text":"legacy", "timing":"after", "taken":"after"})),
+    });
+    legacy.entries.push(Entry {
+        id: "copy".into(),
+        input_id: None,
+        parent: Some("admission".into()),
+        scope,
+        writer: "test".into(),
+        at: 0,
+        kind: "summary".into(),
+        visible: true,
+        copies: vec![input.id.clone()],
+        content: Some(json!({"text":"private input"})),
+    });
+    store.save(&legacy).unwrap();
+    let report = rig
+        .h
+        .erase(&Scope::session(&rig.id), vec![input.id])
+        .await
+        .unwrap();
+    assert!(!report.erased.is_empty());
+    assert!(report.pending.iter().any(|id| id == "copy"));
+    assert!(store.load("legacy").is_err());
+}
+
+#[tokio::test]
 async fn output_limit_maps_to_a_limit_outcome() {
     let mut response = ModelResponse::text("partial");
     response.stop = "limit".into();

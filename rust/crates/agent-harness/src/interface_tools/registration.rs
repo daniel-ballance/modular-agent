@@ -466,10 +466,6 @@ impl Harness {
         connection: &InterfaceConnection,
         id: &str,
     ) -> Result<Option<Value>> {
-        let _erasure = self
-            .erasure
-            .try_read()
-            .map_err(|_| anyhow!("erasure in progress"))?;
         let read = |data: &SessionData| -> Option<(Entry, ToolCall)> {
             let handoff = data
                 .branch()

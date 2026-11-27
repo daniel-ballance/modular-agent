@@ -26,7 +26,8 @@ impl RemoteJobs {
             "plugin has no access to session"
         );
         let owner = self.owner();
-        Ok(jobs(&api.snapshot(session)?)?
+        Ok(api
+            .job_records(session)?
             .into_iter()
             .filter(|j| j.owner == owner)
             .collect())
@@ -107,7 +108,10 @@ impl RemoteJobs {
                 Ok(json!({"jobId":job.id,"started":true}))
             }
             "host/jobs/unfinished" => {
-                let jobs = self.own_jobs(&api, wire::string(p,"sessionId")?)?.into_iter()
+                let session = wire::string(p, "sessionId")?;
+                let jobs = self.own_jobs(&api, session)?;
+                api.snapshot(session)?; // Do not supply job detail across a pending erasure fence.
+                let jobs = jobs.into_iter()
                     .filter(|j| j.state.is_unfinished())
                     .map(|j| { let mut v = json!({"jobId":j.id,"kind":j.kind,"detail":j.detail,"actorId":j.scope.actor});
                         if j.state == JobState::CleanupUnconfirmed { v["cleanup"] = json!("unconfirmed"); }
@@ -118,6 +122,7 @@ impl RemoteJobs {
                 let job = self.find(&api, wire::string(p, "jobId")?)?;
                 if method == "host/jobs/resume" {
                     api.check_writer(&job.scope.session)?;
+                    api.snapshot(&job.scope.session)?;
                     ensure!(
                         job.state == JobState::Running,
                         "job ended or cleanup is unconfirmed"
@@ -234,6 +239,32 @@ impl RemoteJobs {
 impl ExternalJobs for RemoteJobs {
     fn owner(&self) -> String {
         RemoteJobs::owner(self)
+    }
+    async fn cleanup_for_erasure(
+        &self,
+        _api: Api,
+        session: &str,
+        actor: &str,
+        id: &str,
+    ) -> Result<()> {
+        let cancel = CancellationToken::new();
+        let _cutoff = cancel.clone().drop_guard();
+        self.shared.running_jobs.lock().unwrap().remove(id);
+        self.peer.finish_job(id, "interrupted");
+        let reply = self
+            .peer
+            .call(
+                "jobs/cancel",
+                json!({"jobId":id,"cleanup":{"sessionId":session,"actorId":actor}}),
+                None,
+                cancel,
+            )
+            .await?;
+        ensure!(
+            reply["cleanupConfirmed"] == true,
+            "owner did not confirm erasure cleanup"
+        );
+        Ok(())
     }
     async fn cancel(&self, api: Api, job: Job) -> Result<Job> {
         ensure!(job.owner == self.owner(), "wrong job owner");
