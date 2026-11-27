@@ -1,6 +1,6 @@
 //! Claude runs in the TypeScript SDK's process plugin. Rust does not read or
 //! pass Claude credentials, and never signs in on the caller's behalf.
-use crate::{Code, Error, ProcessPlugin, Result};
+use crate::{Code, Error, ProcessPlugin, ProviderAvailability, Result};
 use plugin_stdio::ProviderReadiness;
 use std::{path::PathBuf, time::Duration};
 
@@ -54,17 +54,12 @@ impl ClaudeProvider {
         READINESS.id
     }
 
-    /// Whether the Claude program reports a Claude plan sign-in. This checks
-    /// readiness without making a model request.
-    pub async fn available(&self) -> bool {
-        self.unavailable_reason().await.is_none()
-    }
-
-    pub async fn unavailable_reason(&self) -> Option<String> {
+    /// Check for a Claude plan sign-in without making a model request.
+    pub async fn availability(&self) -> ProviderAvailability {
         self.probe(READINESS).await
     }
 
-    async fn probe(&self, readiness: ProviderReadiness) -> Option<String> {
+    async fn probe(&self, readiness: ProviderReadiness) -> ProviderAvailability {
         let result = async {
             let state = tempfile::tempdir()?;
             readiness
@@ -72,8 +67,12 @@ impl ClaudeProvider {
                 .await
         }
         .await;
-        result.unwrap_or_else(|error| {
-            Some(format!("could not check the Claude Code sign-in through the Claude program (Node.js): {error:#}"))
+        result.unwrap_or_else(|_| ProviderAvailability::Unavailable {
+            // Do not turn arbitrary protocol or process errors into a public reason.
+            reason: Some(
+                "could not check the Claude Code sign-in through the Claude program (Node.js)"
+                    .into(),
+            ),
         })
     }
 
@@ -106,12 +105,10 @@ mod tests {
             .probe(ProviderReadiness { guard, ..READINESS })
             .await;
         assert!(start.elapsed() >= guard);
-        assert_eq!(
-            reason.as_deref(),
-            Some(
-                "could not check the Claude Code sign-in through the Claude program (Node.js): the claude program did not answer provider/available within 100ms"
-            )
-        );
+        assert!(matches!(
+            reason,
+            ProviderAvailability::Unavailable { reason: Some(_) }
+        ));
         Ok(())
     }
 }

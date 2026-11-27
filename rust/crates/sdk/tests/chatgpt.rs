@@ -106,9 +106,9 @@ async fn browser_sign_in_checks_state_and_binds_pkce_to_the_exchange() -> Result
             .encode(sha2::Sha256::digest(verifier))
     );
     let provider = chatgpt(ChatGptOptions::new(logins.clone()))?;
-    assert!(provider.available());
+    assert!(provider.availability().await.is_available());
     sign_out("chatgpt", &logins).await?;
-    assert!(!provider.available());
+    assert!(!provider.availability().await.is_available());
     Ok(())
 }
 
@@ -452,7 +452,12 @@ async fn invalid_identity_and_modes_are_refused_without_contacting_the_service()
     assert_eq!(error.code(), Code::InvalidParams);
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&auth, std::fs::Permissions::from_mode(0o644))?;
-    assert!(!chatgpt(ChatGptOptions::new(logins.clone()))?.available());
+    assert!(
+        !chatgpt(ChatGptOptions::new(logins.clone()))?
+            .availability()
+            .await
+            .is_available()
+    );
     let error = sign_out("chatgpt", &logins).await.unwrap_err();
     assert!(error.message().contains("readable by others"));
     Ok(())

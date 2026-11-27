@@ -1,7 +1,8 @@
 use futures_util::StreamExt;
 use modular_agent::{
     Agent, AssistantMessage, Code, CredentialStore, Error, Event, ModelError, ModelErrorKind,
-    ModelInfo, ModelRef, ModelRequest, Piece, Provider, ProviderContext, ProviderSupport, Result,
+    ModelInfo, ModelRef, ModelRequest, Piece, Provider, ProviderAvailability, ProviderContext,
+    ProviderSupport, Result,
 };
 use modular_agent::{CatalogNotifier, Plugin};
 use serde_json::json;
@@ -35,10 +36,6 @@ impl Provider for Beacon {
             extra: serde_json::from_value(serde_json::json!({"input":["text"],"reasoning":false}))
                 .unwrap(),
         }]
-    }
-
-    fn available(&self) -> bool {
-        true
     }
 
     fn supports(&self) -> ProviderSupport {
@@ -109,6 +106,7 @@ async fn provider_audio_arrives_as_a_custom_session_event() -> Result<()> {
 
 struct DynamicBeacon {
     ready: Arc<AtomicBool>,
+    reason: Option<&'static str>,
     notifier: Arc<Mutex<Option<CatalogNotifier>>>,
 }
 
@@ -128,8 +126,14 @@ impl Provider for DynamicBeacon {
         models
     }
 
-    fn available(&self) -> bool {
-        self.ready.load(Ordering::Relaxed)
+    async fn availability(&self) -> ProviderAvailability {
+        if self.ready.load(Ordering::Relaxed) {
+            ProviderAvailability::Available
+        } else {
+            ProviderAvailability::Unavailable {
+                reason: self.reason.map(str::to_owned),
+            }
+        }
     }
 
     fn catalog_notifier(&self, notifier: CatalogNotifier) {
@@ -142,18 +146,110 @@ impl Provider for DynamicBeacon {
         request: ModelRequest,
         cx: ProviderContext,
     ) -> Result<AssistantMessage> {
-        assert!(self.available(), "unavailable Provider received a request");
+        assert!(
+            self.availability().await.is_available(),
+            "unavailable Provider received a request"
+        );
         Beacon.request(model, request, cx).await
     }
 }
 
 #[tokio::test]
+async fn sdk_server_reports_the_exact_availability_shape() -> Result<()> {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    use tokio_util::sync::CancellationToken;
+
+    async fn rpc(
+        conn: &mut transport_websocket::Connection,
+        id: u32,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let request = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
+        conn.outgoing.send(request.to_string()).await.unwrap();
+        let mut reply: serde_json::Value =
+            serde_json::from_str(&conn.incoming.recv().await.unwrap()).unwrap();
+        assert_eq!(reply["id"], id, "{reply}");
+        assert!(reply["result"].is_object(), "{reply}");
+        reply["result"].take()
+    }
+
+    let dir = tempfile::tempdir()?;
+    let token = dir.path().join("token");
+    writeln!(
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&token)?,
+        "disposable-beacon-test-credential"
+    )?;
+    for (ready, reason, expected) in [
+        (true, None, json!({"available":true})),
+        (false, None, json!({"available":false})),
+        (false, Some(""), json!({"available":false})),
+        (false, Some("   "), json!({"available":false})),
+        (
+            false,
+            Some("Beacon is offline"),
+            json!({"available":false,"reason":"Beacon is offline"}),
+        ),
+    ] {
+        let service = modular_agent::serve_websocket(
+            Plugin::new("beacon").provider(DynamicBeacon {
+                ready: Arc::new(AtomicBool::new(ready)),
+                reason,
+                notifier: Arc::new(Mutex::new(None)),
+            }),
+            modular_agent::ServeOptions {
+                listen: "127.0.0.1:0".into(),
+                token_file: token.clone(),
+                tls: None,
+                projects: vec![],
+            },
+        )
+        .await?;
+        let socket =
+            transport_websocket::connect(&service.url, &token, transport_websocket::PLUGIN).await?;
+        let init = json!({"binding":"modular-agent-plugin/1","host":{"name":"test","version":"1"},
+            "project":dir.path(),"home":dir.path(),"config":{}});
+        let run =
+            transport_websocket::run(socket, CancellationToken::new(), |mut conn| async move {
+                let reply = rpc(&mut conn, 1, "plugin/initialize", init).await;
+                assert_eq!(reply["binding"], "modular-agent-plugin/1");
+                let reply = rpc(
+                    &mut conn,
+                    2,
+                    "provider/available",
+                    json!({"provider":"beacon"}),
+                )
+                .await;
+                assert_eq!(reply, expected);
+            });
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("availability query timed out");
+        service.close().await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn dynamic_catalog_and_readiness() -> Result<()> {
-    for served in [false, true] {
+    for (served, reason) in [false, true].into_iter().flat_map(|served| {
+        [
+            None,
+            Some(""),
+            Some("   "),
+            Some("Beacon is waiting for its operator"),
+        ]
+        .map(|reason| (served, reason))
+    }) {
         let ready = Arc::new(AtomicBool::new(false));
         let notifier = Arc::new(Mutex::new(None));
         let plugin = Plugin::new("beacon").provider(DynamicBeacon {
             ready: ready.clone(),
+            reason,
             notifier: notifier.clone(),
         });
         let builder = modular_agent::testing::test_agent()
@@ -172,10 +268,20 @@ async fn dynamic_catalog_and_readiness() -> Result<()> {
             Some(agent.model_changes("beacon")?)
         };
         let unavailable = agent.session().await?.prompt("Check the beacon.").await?;
-        assert!(matches!(
-            unavailable.outcome,
-            Some(modular_agent::Outcome::Failed { .. })
-        ));
+        let fallback = if served {
+            "external Provider is unavailable"
+        } else {
+            "Provider is unavailable"
+        };
+        let expected = reason
+            .filter(|reason| !reason.trim().is_empty())
+            .unwrap_or(fallback);
+        assert!(
+            matches!(unavailable.outcome,
+            Some(modular_agent::Outcome::Failed { ref error }) if error.contains(expected)),
+            "expected {expected}, got {:?}",
+            unavailable.outcome
+        );
         assert!(unavailable.text.is_empty());
         ready.store(true, Ordering::Relaxed);
         notifier.lock().unwrap().as_ref().unwrap().changed();

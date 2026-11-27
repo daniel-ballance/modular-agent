@@ -367,9 +367,13 @@ A **Provider** has:
 | `id` | unique in the agent; the first half of every ModelRef it offers |
 | `models() -> ModelInfo[]` | the full current catalog. In process, call `changed()` after updating it to tell subscribers to read it again. |
 | `supports` | `keepsState` and `safeToRepeat` ([Provider support](../bindings/plugin.md#the-host-asks-a-provider)) |
-| `available() -> boolean` | optional: whether it can take requests now, for example whether it has credentials |
+| `availability() -> ProviderAvailability` | optional: whether it can take requests now, for example whether it has credentials. Defaults to available. |
 | `request(model, request, context) -> AssistantMessage` | makes one model request |
 | `discardState(sessionId)` | optional, for a Provider that keeps state |
+
+`availability()` may probe asynchronously. In Rust it returns `ProviderAvailability::Available` or `ProviderAvailability::Unavailable { reason: Option<String> }`. In TypeScript it returns `{ available: true }` or `{ available: false, reason?: string }`, directly or in a Promise. The optional reason is safe to show to a user: never put a credential in it. If the SDK refuses model work because the Provider is unavailable, it reports the reason when supplied and a generic message otherwise.
+
+The server returns that status from `provider/available`. It omits `reason` when the Provider is available or gives no reason. The server and host treat empty and whitespace-only reasons as absent.
 
 The [plugin binding](../bindings/plugin.md#the-host-asks-a-provider) has no Provider catalog notification. Before preparing a step, the host queries the served Provider's catalog and readiness with `provider/models` and `provider/available`. Do not send a private catalog notification.
 

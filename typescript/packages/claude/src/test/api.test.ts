@@ -10,7 +10,7 @@ for (const served of [false, true]) {
   test(`claude uses host tools and streams reasoning (${placement})`, async t => {
     const fake = createFake(), replies: AssistantMessage[] = [];
     const p = claude({ test: { query: fake.query, loginVisible: () => true, env: {} } });
-    assert.equal(await p.available(), true);
+    assert.deepEqual(await p.availability(), { available: true });
     assert.ok(p.models().some(m => m.id === "claude-haiku-5-5"));
     const plugin = definePlugin({ name: "claude-fixture", setup: r => r.provider(p), stop: p.close });
     let runs = 0;
@@ -40,20 +40,25 @@ for (const served of [false, true]) {
   });
 }
 
-test("claude reports an API key source without sending a prompt", async () => {
-  const fake = createFake({ subscriptionType: "max", apiKeySource: "user" });
-  const p = claude({ test: { query: fake.query, loginVisible: () => true, env: {} } });
-  try {
-    assert.equal(await p.available(), false);
-    assert.match(p.unavailableReason() ?? "", /API key from user/);
-    assert.deepEqual(fake.log.prompts, []);
-  } finally { p.close(); }
+test("claude reports only known API key sources without sending a prompt", async () => {
+  for (const source of ["user", "test-secret-sentinel"]) {
+    const fake = createFake({ subscriptionType: "max", apiKeySource: source });
+    const p = claude({ test: { query: fake.query, loginVisible: () => true, env: {} } });
+    try {
+      const status = await p.availability();
+      assert.equal(status.available, false);
+      assert.match(status.reason ?? "", source === "user" ? /API key from user/ : /using an API key\)/);
+      assert.doesNotMatch(status.reason ?? "", /test-secret-sentinel/);
+      assert.deepEqual(fake.log.prompts, []);
+    } finally { p.close(); }
+  }
 });
 
 test("live Claude plan returns text", { skip: process.env.MODULAR_AGENT_LIVE !== "1" || !process.env.MODULAR_AGENT_LIVE_LOGINS }, async t => {
   const p = claude();
   t.after(p.close);
-  if (!await p.available()) { t.skip(p.unavailableReason()); return; }
+  const status = await p.availability();
+  if (!status.available) { t.skip(status.reason); return; }
   const model = process.env.MODULAR_AGENT_LIVE_CLAUDE_MODEL || "claude-haiku-5-5";
   const agent = await createAgent({ providers: [p], model: `claude/${model}`, environment: memoryEnvironment(), settings: { maxOutput: 128 } });
   t.after(() => agent.close());

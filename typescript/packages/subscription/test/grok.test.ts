@@ -31,7 +31,7 @@ for (const identity of [undefined, "fixture-grok_2.0"]) {
   test(`Grok device sign-in uses ${identity ?? "the default identity"} and follows polling backoff`, async t => {
     const logins = await loginFile(t), steps: SignInStep[] = [];
     const p = grok({ logins });
-    assert.equal(await p.available(), false);
+    assert.deepEqual(await p.availability(), { available: false });
     const complete = identity ? `${verification}?code=FIXTURE` : undefined;
     const errors = ["authorization_pending", "slow_down", "authorization_pending", "slow_down"];
     let polls = 0, starts = 0;
@@ -60,14 +60,14 @@ for (const identity of [undefined, "fixture-grok_2.0"]) {
     assert.equal(polls, 5);
     const interval = identity ? 2_000 : 5_000;
     assert.deepEqual(clock.delays, [interval, interval, interval + 5_000, interval + 5_000, interval + 10_000]);
-    assert.equal(await p.available(), true);
+    assert.deepEqual(await p.availability(), { available: true });
     const login = await logins.login("grok");
     assert.equal(login?.type, "oauth");
     assert.equal(login.access, fresh.access_token);
     assert.equal(login.refresh, fresh.refresh_token);
     assert.equal(Object.hasOwn(login, "account"), false);
     await signOut("grok", logins);
-    assert.equal(await p.available(), false);
+    assert.deepEqual(await p.availability(), { available: false });
   });
 }
 

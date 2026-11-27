@@ -1,3 +1,4 @@
+import type { ProviderAvailability } from "@modular-agent/core";
 import type { ModelEnrollment } from "@modular-agent/subscription";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -53,9 +54,17 @@ export function loginVisible(env: NodeJS.ProcessEnv, exists: (path: string) => b
 	return platform === "darwin" && !!env.HOME && exists(join(env.HOME, ".claude.json"));
 }
 
+// Only known source labels may appear in a public reason, never arbitrary account data.
+const API_PROVIDERS = new Set<string>(["bedrock", "vertex", "foundry", "anthropicAws", "anthropicGoogleCloud", "mantle", "gateway"]);
+const KEY_SOURCES = new Set(["ANTHROPIC_API_KEY", "apiKeyHelper", "/login managed key", "user", "project", "org", "temporary", "oauth"]);
+
 function describe(account: AccountInfo | undefined): string {
-	if (account?.apiProvider && account.apiProvider !== "firstParty") return ` (it is using ${account.apiProvider})`;
-	if (account?.apiKeySource && account.apiKeySource !== "none") return ` (it is using an API key from ${account.apiKeySource})`;
+	if (account?.apiProvider && account.apiProvider !== "firstParty") {
+		return API_PROVIDERS.has(account.apiProvider) ? ` (it is using ${account.apiProvider})` : " (it is using another API Provider)";
+	}
+	if (account?.apiKeySource && account.apiKeySource !== "none") {
+		return KEY_SOURCES.has(account.apiKeySource) ? ` (it is using an API key from ${account.apiKeySource})` : " (it is using an API key)";
+	}
 	return "";
 }
 
@@ -118,8 +127,8 @@ export class ClaudeProvider {
 		return this.models.find((model) => model.id === id);
 	}
 
-	/** Whether requests can be taken: a login is visible and Claude Code has not said it is no subscription. */
-	available(): boolean {
+	/** Whether Claude Code may have a plan sign-in worth probing. */
+	private canProbe(): boolean {
 		const visible = this.options.loginVisible ? this.options.loginVisible() : loginVisible(this.options.env);
 		return visible && !this.routingReason() && (this.account === undefined || this.usesPlan(this.account));
 	}
@@ -127,16 +136,14 @@ export class ClaudeProvider {
 	private routingReason() { return this.options.checkApiRouting ? apiRoutingReason(this.options.env) : undefined; }
 	private usesPlan(account?: AccountInfo) { return !!account?.subscriptionType && !describe(account); }
 
-	unavailableReason(): string | undefined {
-		return this.routingReason() ?? (!this.usesPlan(this.account) ?
-			`Claude Code is not signed in with a Claude subscription${describe(this.account)}. ${SIGN_IN}` : undefined);
-	}
-
-	async ready(): Promise<boolean> {
-		if (!this.closed && this.account === undefined && this.available()) {
+	async availability(): Promise<ProviderAvailability> {
+		if (!this.closed && this.account === undefined && this.canProbe()) {
 			await this.check().accountChecked;
 		}
-		return !this.closed && this.available() && this.usesPlan(this.account);
+		if (this.closed) return { available: false };
+		if (this.canProbe() && this.usesPlan(this.account)) return { available: true };
+		return { available: false, reason: this.routingReason() ??
+			`Claude Code is not signed in with a Claude subscription${describe(this.account)}. ${SIGN_IN}` };
 	}
 
 	/** Stop every Claude Code process this Provider started. */
@@ -171,7 +178,7 @@ export class ClaudeProvider {
 	}
 
 	private async probe(accountChecked: () => void): Promise<void> {
-		if (!this.available() || this.closed) return;
+		if (!this.canProbe() || this.closed) return;
 		const abort = this.probeAbort = new AbortController();
 		const { signal } = abort;
 		const timer = setTimeout(() => abort.abort(new Error("Claude Code did not answer in time")), PROBE_MS);

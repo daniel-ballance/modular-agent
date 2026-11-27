@@ -9,7 +9,7 @@ const beacon: Provider = {
     provider: "beacon", id: "demo", contextWindow: 4096, maxOutput: 256,
     input: ["text"], reasoning: false,
   }],
-  available: () => true,
+  availability: () => ({ available: true }),
   supports: { keepsState: false, safeToRepeat: true },
   async request(_model, _request, cx) {
     const key = await cx.credential();

@@ -2,7 +2,6 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { relative, isAbsolute, sep } from "node:path";
-import { isDeepStrictEqual } from "node:util";
 import { addUsage, interruptedNote, isToolCall, pendingToolCalls, restoreAnsweredStep, text, zeroUsage, type Harness, type HistoryEntry, type Usage } from "@modular-agent/harness";
 import type {
 	Answer,
@@ -21,8 +20,6 @@ import type {
 	ModelRequest,
 	Plugin,
 	PluginApi,
-	Provider,
-	RequestOptions,
 	ToolCall,
 	ToolContext,
 	ToolDefinition,
@@ -32,7 +29,8 @@ import type {
 	WorkingEnvironment,
 } from "@modular-agent/harness";
 import { checkOutputSize, mapOutput } from "@modular-agent/harness";
-import { fromWire, toWire } from "./translate.js";
+import { fromWire, toWire, wireEqual } from "./translate.js";
+import { WireProvider, type ProviderAttempt } from "./provider-host.js";
 import { connectWebSocket, PLUGIN_PROTOCOL, receiveMessages } from "./websocket.js";
 import { execTimeout, listDirectory, notFoundAsEnoent, optionalMethod, PLUGIN_BINDING, WireError, WirePeer } from "./wire.js";
 
@@ -224,17 +222,6 @@ interface Parent {
 	sessionId?: string;
 	tool?: ToolContext;
 	signal?: AbortSignal;
-}
-
-interface ProviderAttempt {
-	model: ModelRef;
-	request: unknown;
-	prepare?: () => Promise<ModelRequest>;
-	handoff?: RequestOptions["handoff"];
-	begun?: boolean;
-	committed?: boolean;
-	response?: unknown;
-	failure?: unknown;
 }
 
 function hostPlugin(peer: WirePeer, reg: Registration, stop: () => Promise<void>): Plugin {
@@ -581,8 +568,6 @@ interface Turn {
 	replay?: HistoryEntry;
 }
 const invalidState = (message: string) => new WireError("invalid_request", message);
-const comparable = (value: unknown) => JSON.parse(JSON.stringify(value ?? null));
-const wireEqual = (a: unknown, b: unknown) => isDeepStrictEqual(comparable(a), comparable(b));
 const sameCall = (a: ToolCall, b: ToolCall) => a?.id === b.id && a?.name === b.name && a?.startedBy === b.startedBy &&
 	(a.stepId === undefined || a.stepId === b.stepId) && (a.actorId === undefined || a.actorId === b.actorId) && wireEqual(a.input, b.input);
 
@@ -906,66 +891,6 @@ class WireRuntime implements Runtime {
 }
 
 type Track = <T>(p: Promise<T> & { id: number }, parent: Parent) => Promise<T>;
-
-class WireProvider implements Provider {
-	readonly prepareOnWire = true;
-	constructor(private peer: WirePeer, readonly id: string, readonly supports: Provider["supports"], private list: ModelInfo[], private track: Track) {}
-	models(): ModelInfo[] {
-		return this.list;
-	}
-	private refresh?: Promise<void>;
-	private changed = new Set<() => void>();
-	onChange(handler: () => void): () => void {
-		this.changed.add(handler);
-		return () => { this.changed.delete(handler); };
-	}
-	refreshModels(): Promise<void> {
-		return this.refresh ??= this.peer.request<{ models: ModelInfo[] }>("provider/models", { provider: this.id }).then(reply => {
-			const models = fromWire(reply.models) as ModelInfo[];
-			if (!wireEqual(models, this.list)) {
-				this.list = models;
-				for (const handler of this.changed) handler();
-			}
-		}).finally(() => { this.refresh = undefined; });
-	}
-	async available(): Promise<boolean> {
-		return (await this.peer.request<{ available: boolean }>("provider/available", { provider: this.id })).available === true;
-	}
-	async request(model: ModelRef, request: ModelRequest, options: RequestOptions): Promise<AssistantMessage> {
-		const attempt: ProviderAttempt = { model, request: toWire(request), prepare: options.prepareDispatch, handoff: options.handoff };
-		const req = this.peer.request("provider/request", { provider: this.id, model, request: attempt.request, sessionId: options.sessionId }, options.signal);
-		const onEvent = (p: { parentRequestId: number; event: { type: "text" | "reasoning" | "toolInput"; delta: string } }) => {
-			if (p.parentRequestId === req.id && attempt.committed && !attempt.response && !options.signal.aborted) options.onEvent?.(p.event);
-		};
-		WireProvider.listen(this.peer, req.id, onEvent);
-		try {
-			const answer = await this.track(req, { provider: attempt, sessionId: options.sessionId, signal: options.signal });
-			if (!attempt.committed || !attempt.response || !wireEqual(answer, attempt.response)) throw invalidState("Provider did not settle the committed attempt consistently");
-			return fromWire(answer) as AssistantMessage;
-		} catch (error) {
-			if (attempt.failure) throw attempt.failure;
-			if (!attempt.committed && options.prepareDispatch) throw error;
-			if (options.signal.aborted) return { role: "assistant", content: [], stop: "aborted" };
-			return { role: "assistant", content: [], stop: "failed", error: { kind: "temporary", message: error instanceof Error ? error.message : String(error) } };
-		} finally {
-			WireProvider.listeners.get(this.peer)?.delete(req.id);
-		}
-	}
-	async discardState(sessionId: string, options?: { erase?: boolean; entryIds?: string[] }): Promise<{ pending?: string[]; outOfReach?: string[] }> {
-		return this.peer.request("provider/discard", { provider: this.id, sessionId, erase: options?.erase, entryIds: options?.entryIds });
-	}
-	static listeners = new WeakMap<WirePeer, Map<number, (p: any) => void>>();
-	static listen(peer: WirePeer, id: number, fn: (p: any) => void): void {
-		let m = WireProvider.listeners.get(peer);
-		if (!m) {
-			m = new Map();
-			WireProvider.listeners.set(peer, m);
-			const all = m;
-			peer.onNotification("provider/event", (p) => all.get(p?.parentRequestId)?.(p));
-		}
-		m.set(id, fn);
-	}
-}
 
 class WireToolSource implements ToolSource {
 	static changed = new WeakMap<WirePeer, Map<string, WireToolSource>>();

@@ -1,6 +1,7 @@
 //! Developer Providers and their call-scoped context.
 use crate::{Code, Error, Result};
 use agent_api as base;
+pub use agent_api::ProviderAvailability;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -141,8 +142,9 @@ pub trait Provider: Send + Sync + 'static {
     fn supports(&self) -> ProviderSupport {
         ProviderSupport::default()
     }
-    fn available(&self) -> bool {
-        true
+    /// Check whether requests can be taken now without making a model request.
+    async fn availability(&self) -> ProviderAvailability {
+        ProviderAvailability::Available
     }
     /// Install an optional notifier during plugin setup. Call `changed()`
     /// after changing the catalog, not from `models()`.
@@ -431,7 +433,17 @@ impl base::ModelAccess for Bound {
         _scope: &base::Scope,
         _cancel: CancellationToken,
     ) -> base::Result<()> {
-        base::ensure!(self.adapter.provider.available(), "Provider is unavailable");
+        if let ProviderAvailability::Unavailable { reason } =
+            self.adapter.provider.availability().await
+        {
+            base::bail!(
+                "{}",
+                reason
+                    .as_deref()
+                    .filter(|reason| !reason.trim().is_empty())
+                    .unwrap_or("Provider is unavailable")
+            );
+        }
         base::ensure!(
             self.adapter
                 .provider
@@ -453,10 +465,14 @@ impl base::ModelAccess for Bound {
             kind: base::FailureKind::Other,
             message: e.message().into(),
         };
-        if !self.adapter.provider.available() {
+        if let ProviderAvailability::Unavailable { reason } =
+            self.adapter.provider.availability().await
+        {
             return Err(base::ModelFailure {
                 kind: base::FailureKind::Temporary,
-                message: "Provider is unavailable".into(),
+                message: reason
+                    .filter(|reason| !reason.trim().is_empty())
+                    .unwrap_or_else(|| "Provider is unavailable".into()),
             });
         }
         let stream = base::id();

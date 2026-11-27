@@ -23,13 +23,13 @@ test("ChatGPT sign-in exchanges a pasted code and sign-out changes availability"
     assert.equal(form.get("code"), "fixture-code");
     res.end(JSON.stringify(tokens));
   });
-  assert.equal(await p.available(), false);
+  assert.deepEqual(await p.availability(), { available: false });
   await signIn("chatgpt", logins, { test: { endpoints: { codexToken: server.url, codexAuthorize: server.url }, port: 0 },
     onStep(step) { assert.equal(step.kind, "openAndPaste"); }, paste: () => "fixture-code" });
-  assert.equal(await p.available(), true);
+  assert.deepEqual(await p.availability(), { available: true });
   assert.equal((await logins.login("chatgpt"))?.type, "oauth");
   await signOut("chatgpt", logins);
-  assert.equal(await p.available(), false);
+  assert.deepEqual(await p.availability(), { available: false });
 });
 
 for (const mode of ["redirect", "query", "fragment", "address", "bare"] as const) {

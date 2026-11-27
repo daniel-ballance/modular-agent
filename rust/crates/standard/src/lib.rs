@@ -314,7 +314,7 @@ pub async fn default_model(standard: &Standard) -> Option<&'static str> {
     } else if signed_in("grok") {
         Some("grok/grok-4.7")
     } else if let Ok(provider) = claude(ClaudeOptions::default())
-        && provider.available().await
+        && provider.availability().await.is_available()
     {
         Some("claude/claude-sonnet-5-5")
     } else {

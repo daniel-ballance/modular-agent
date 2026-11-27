@@ -121,7 +121,7 @@ async fn chatgpt_live() -> Result<()> {
         return Ok(());
     };
     let provider = chatgpt(ChatGptOptions::new(logins))?;
-    if !provider.available() {
+    if !provider.availability().await.is_available() {
         eprintln!("skip chatgpt: no plan sign-in");
         return Ok(());
     }
@@ -146,7 +146,7 @@ async fn grok_live() -> Result<()> {
         return Ok(());
     };
     let provider = grok(GrokOptions::new(logins))?;
-    if !provider.available() {
+    if !provider.availability().await.is_available() {
         eprintln!("skip grok: no plan sign-in");
         return Ok(());
     }
@@ -172,7 +172,7 @@ async fn grok_live() -> Result<()> {
 
 #[tokio::test]
 async fn claude_live() -> Result<()> {
-    use modular_agent::{ClaudeOptions, claude};
+    use modular_agent::{ClaudeOptions, ProviderAvailability, claude};
     if live_logins().is_none() {
         return Ok(());
     }
@@ -180,8 +180,11 @@ async fn claude_live() -> Result<()> {
         eprintln!("skip claude: TypeScript program not installed");
         return Ok(());
     };
-    if let Some(reason) = provider.unavailable_reason().await {
-        eprintln!("skip claude: {reason}");
+    if let ProviderAvailability::Unavailable { reason } = provider.availability().await {
+        eprintln!(
+            "skip claude: {}",
+            reason.as_deref().unwrap_or("no plan sign-in")
+        );
         return Ok(());
     }
     let model = std::env::var("MODULAR_AGENT_LIVE_CLAUDE_MODEL")

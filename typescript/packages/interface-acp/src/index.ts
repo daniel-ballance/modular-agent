@@ -943,7 +943,7 @@ export class AcpInterface implements InterfaceCapability {
 		const providers = this.apiFor(sessionId).useAll<Provider>("provider");
 		const usable = await Promise.all(providers.map(async p => {
 			try {
-				if (await p.available?.() === false) return undefined;
+				if ((await p.availability?.())?.available === false) return undefined;
 				await p.refreshModels?.();
 				return p;
 			} catch { return undefined; }

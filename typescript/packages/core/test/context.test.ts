@@ -130,11 +130,11 @@ if (!process.env.CONTEXT_PLUGIN) {
     const reads: string[] = [];
     const provider: Provider = { id: "beacon", models: () => [{ id: "demo", provider: "beacon", input: ["text"], reasoning: false, contextWindow: 4096, maxOutput: 256 }],
       supports: { keepsState: false, safeToRepeat: true }, inProcessOnly: local,
-      async available(cx) {
+      async availability(cx) {
         availability = cx;
         assert.equal(await cx.credential(), secret);
         if (local) assert.equal(await cx.credential("named"), secret);
-        return true;
+        return { available: true };
       },
       async request(_, __, cx) {
         retained = cx;

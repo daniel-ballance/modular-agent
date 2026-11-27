@@ -47,7 +47,7 @@ async fn device_sign_in_uses_forms_and_reports_only_device_and_waiting() -> Resu
         let logins = subscription_logins(&auth);
         let provider = grok(GrokOptions::new(logins.clone()))?;
         assert_eq!(provider.id(), "grok");
-        assert!(!provider.available());
+        assert!(!provider.availability().await.is_available());
         let mut device = device();
         let complete = format!("{VERIFY}?code=TEST-ONLY");
         let expected_url = if configured {
@@ -130,14 +130,14 @@ async fn device_sign_in_uses_forms_and_reports_only_device_and_waiting() -> Resu
                 ])
             );
         }
-        assert!(provider.available());
+        assert!(provider.availability().await.is_available());
         let file: Value = serde_json::from_slice(&std::fs::read(&auth)?)?;
         let stored = file["logins"]["grok"].as_object().unwrap();
         assert_eq!(stored["access"], "fixture-access");
         assert_eq!(stored["refresh"], "fixture-refresh");
         assert!(!stored.contains_key("account"));
         sign_out("grok", &logins).await?;
-        assert!(!provider.available());
+        assert!(!provider.availability().await.is_available());
     }
     Ok(())
 }

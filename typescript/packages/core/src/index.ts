@@ -23,6 +23,6 @@ export type { AgentInterface, ToolCatalog, CallContext, CustomHook, CommandConte
 export type * from "./data.js";
 export type { Job, JobOutcome, JobOwner, JobRecovery, JobStarter, UnfinishedJob } from "./jobs.js";
 export { defineProvider, ModelFailure } from "./provider.js";
-export type { Provider, ProviderContext } from "./provider.js";
+export type { Provider, ProviderAvailability, ProviderContext } from "./provider.js";
 export { serve } from "./serve.js";
 export type { PluginListenOptions, NamedPluginListenOptions, NamedCaller, ServiceServer } from "@modular-agent/plugin-wire";

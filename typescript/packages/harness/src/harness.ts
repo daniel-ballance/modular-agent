@@ -28,6 +28,7 @@ import { HookRegistry } from "./hooks.js";
 import { INTERFACE_SOURCE, type InterfaceToolConnection, type InterfaceToolConnectionOptions, type InterfaceToolSource } from "./interface-tools.js";
 import { Session } from "./session.js";
 import {
+	providerAvailability,
 	type Actor,
 	type AgentEvent,
 	type Authority,
@@ -41,6 +42,7 @@ import {
 	type ModelAccess,
 	type ModelInfo,
 	type Provider,
+	type ProviderAvailability,
 	type Runtime,
 	type ToolDefinition,
 	type ToolSource,
@@ -908,10 +910,11 @@ export class Harness {
 			prepareOnWire: provider.prepareOnWire,
 			inProcessInference: provider.inProcessInference,
 			request: async (request, options) => {
-				const available = provider.prepareOnWire ? true : await provider.available?.().catch(() => false);
+				const status: ProviderAvailability = provider.prepareOnWire ? { available: true } :
+					await providerAvailability(provider).catch((): ProviderAvailability => ({ available: false }));
 				options.signal.throwIfAborted();
-				if (available === false) return { role: "assistant", stop: "failed", content: [],
-					error: { kind: "credentials", message: "Provider is not available" } };
+				if (status.available === false) return { role: "assistant", stop: "failed", content: [],
+					error: { kind: "credentials", message: status.reason ?? "Provider is not available" } };
 				return provider.request(ref, request, { ...options, sessionId: s.id });
 			},
 		};

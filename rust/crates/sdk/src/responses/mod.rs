@@ -4,7 +4,7 @@ mod body;
 use crate::{
     AssistantMessage, ClientIdentity, Code, Error, Login, ModelError,
     ModelErrorKind as FailureKind, ModelInfo, ModelRef, ModelRequest, Piece, Provider,
-    ProviderContext, SubscriptionLogins, async_trait,
+    ProviderAvailability, ProviderContext, SubscriptionLogins, async_trait,
 };
 use anyhow::{Result, ensure};
 use futures_util::{StreamExt, future::BoxFuture};
@@ -164,11 +164,16 @@ impl Provider for ResponsesProvider {
             .collect()
     }
 
-    fn available(&self) -> bool {
-        self.auth.login(self.id).is_ok_and(|v| match self.format {
+    async fn availability(&self) -> ProviderAvailability {
+        let available = self.auth.login(self.id).is_ok_and(|v| match self.format {
             ResponsesFormat::ChatGpt => matches!(v, Some(Login::Oauth { .. })),
             ResponsesFormat::SystemMessage => v.is_some(),
-        })
+        });
+        if available {
+            ProviderAvailability::Available
+        } else {
+            ProviderAvailability::Unavailable { reason: None }
+        }
     }
 
     async fn request(

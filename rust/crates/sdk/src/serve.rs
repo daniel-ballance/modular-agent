@@ -1,5 +1,6 @@
 //! Serving a plugin over the plugin binding on stdio (docs/sdk/placement.md).
 use crate::{
+    ProviderAvailability,
     error::{Code, Error, Result},
     plugin::{CommandContext, Plugin, Registrar, cannot_serve, command_reply},
     tool::{Backend, ToolContext, ToolStatus, execute},
@@ -499,7 +500,15 @@ impl Endpoint for Served {
                     .ok_or_else(|| Fault::new("invalid_request", "unknown Provider"))?;
                 match method {
                     "provider/models" => Ok(json!({"models":provider.models()})),
-                    "provider/available" => Ok(json!({"available":provider.available()})),
+                    "provider/available" => Ok(match provider.availability().await {
+                        ProviderAvailability::Available => json!({"available":true}),
+                        ProviderAvailability::Unavailable {
+                            reason: Some(reason),
+                        } if !reason.trim().is_empty() => {
+                            json!({"available":false,"reason":reason})
+                        }
+                        ProviderAvailability::Unavailable { .. } => json!({"available":false}),
+                    }),
                     "provider/discard" => {
                         let session = p["sessionId"]
                             .as_str()
@@ -516,8 +525,16 @@ impl Endpoint for Served {
                         {
                             return Err(Fault::new("invalid_request", "unknown model"));
                         }
-                        if !provider.available() {
-                            return Err(Fault::new("invalid_request", "Provider is unavailable"));
+                        if let ProviderAvailability::Unavailable { reason } =
+                            provider.availability().await
+                        {
+                            return Err(Fault::new(
+                                "invalid_request",
+                                reason
+                                    .as_deref()
+                                    .filter(|reason| !reason.trim().is_empty())
+                                    .unwrap_or("Provider is unavailable"),
+                            ));
                         }
                         let session = p["sessionId"].as_str().filter(|s| !s.is_empty());
                         if (!p["sessionId"].is_null() && session.is_none())
