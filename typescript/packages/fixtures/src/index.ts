@@ -1,7 +1,7 @@
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { AgentError, definePlugin, tool, type Plugin } from "@modular-agent/core";
+import { AgentError, definePlugin, tool, type Plugin, type ToolOutput } from "@modular-agent/core";
 import { textOf } from "@modular-agent/harness";
 import { z } from "zod";
 
@@ -24,6 +24,15 @@ export function count(path: string): number {
 export function fixture(name: string, config?: Record<string, unknown>, yes = "yes"): Plugin {
   switch (name) {
     case "tide": return definePlugin({ name, config, tools: [tide] });
+    case "chart": return definePlugin({ name, config, tools: [tool({
+      name: "chart", description: "Return a sample chart.", input: z.object({}), readOnly: true,
+      run(): ToolOutput {
+        return { content: [
+          { type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==" },
+          { type: "text", text: "Sample chart" },
+        ] };
+      },
+    })] });
     case "counter": return definePlugin({ name, config, setup(r) {
       const { path } = r.config();
       if (typeof path !== "string" || !isAbsolute(path)) throw new AgentError("invalid_params", "counter needs an absolute config path");

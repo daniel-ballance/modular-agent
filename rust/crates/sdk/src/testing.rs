@@ -405,6 +405,7 @@ pub mod fixtures {
     pub fn fixture(name: &str) -> Option<Plugin> {
         Some(match name {
             "tide" => Plugin::new("tide").tool(tide()),
+            "chart" => Plugin::new("chart").tool(chart()),
             "quay" => Plugin::new("quay").tool(Tool::new("moor", "Moor at a harbour.").run(
                 |_: TideInput, cx: ToolContext| async move {
                     Err::<String, _>(cx.refuse("the quay is closed"))
@@ -453,6 +454,20 @@ pub mod fixtures {
     struct TideInput {
         /// The harbour to look up.
         harbour: String,
+    }
+
+    #[derive(Deserialize, JsonSchema)]
+    struct ChartInput {}
+
+    fn chart() -> Tool {
+        Tool::new("chart", "Return a sample chart.")
+            .read_only()
+            .run(|_: ChartInput, _: ToolContext| async move {
+                Ok(crate::ToolOutput::from("").with_content(vec![
+                    json!({"type":"image", "mimeType":"image/png", "data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg=="}),
+                    json!({"type":"text", "text":"Sample chart"}),
+                ]))
+            })
     }
 
     pub fn tide() -> Tool {

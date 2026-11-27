@@ -8,8 +8,8 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
-import { AgentError, createAgent, fileHistory, httpHistory, serveHistory, type Actor, type AgentOptions, type Answer, type InputTiming, type PromptResult, type ServicePlugin, type Session } from "@modular-agent/core";
+import { isDeepStrictEqual, promisify } from "node:util";
+import { AgentError, createAgent, fileHistory, httpHistory, serveHistory, type Actor, type AgentOptions, type Answer, type Content, type InputTiming, type PromptResult, type ServicePlugin, type Session } from "@modular-agent/core";
 import { answers, memoryEnvironment, scriptedProvider, testAgent, type ScriptStep } from "@modular-agent/core/testing";
 import { count, fixture } from "./index.js";
 import { ScenarioEvidence, type TelemetryRun } from "./telemetry-scenario.js";
@@ -51,7 +51,7 @@ export function placements(require = process.env.MODULAR_AGENT_SDK_REQUIRE): Pla
   return [...out, ...services];
 }
 
-type Expect = { outcome?: string; text?: string; toolResults?: { name: string; status: string; text?: string; contains?: string }[]; records?: string[]; count?: number; error?: string };
+type Expect = { outcome?: string; text?: string; toolResults?: { name: string; status: string; text?: string; contains?: string; content?: Content }[]; records?: string[]; count?: number; error?: string };
 type Crash = { record: string } | { count: number };
 type Step = ({ prompt: string; as?: string; crashWhen?: Crash } | { reopen: true } |
   { send: string; timing?: InputTiming } | { answer: Answer } | { wait: true }) & { expect?: Expect };
@@ -322,6 +322,9 @@ export async function runScenario(path: string, p: Placement, run?: TelemetryRun
         for (const [j, item] of want.toolResults.entries()) {
           compare(`toolResults[${j}].name`, item.name, got[j]?.name);
           compare(`toolResults[${j}].status`, item.status, got[j]?.status);
+          if (item.content !== undefined && !isDeepStrictEqual(got[j]?.content, item.content)) {
+            fail(`toolResults[${j}].content`, item.content, got[j]?.content);
+          }
           const text = got[j]?.text();
           compare(`toolResults[${j}].text`, item.text, text);
           if (item.contains !== undefined && !text?.includes(item.contains)) fail(`toolResults[${j}].contains`, item.contains, text);

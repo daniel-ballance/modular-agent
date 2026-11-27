@@ -148,7 +148,3 @@ Proposed replacement text; the shared documents are unchanged in this branch.
 |---|---|---|
 | `questionsOutlastTurns` | boolean | false. Enables both `questionsOutlastTurns` and `lateAnswersStartTurns`. |
 | `settingsDuringTurn` | `nextTurn` or `refused` | `nextTurn`. With `refused`, changing settings during a running turn raises `busy`. |
-
-**SDK — Command time units.** In the scoped environment row, replace `exec(command, { timeout })` with:
-
-> `exec(command, { timeout })`, with `timeout` in milliseconds,

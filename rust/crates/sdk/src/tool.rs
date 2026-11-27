@@ -912,6 +912,35 @@ pub(crate) struct Settled {
     pub content: Option<Vec<Value>>,
 }
 
+impl Settled {
+    pub(crate) fn into_local_result(self, call: &base::ToolCall) -> base::ToolResult {
+        let status = self.status.to_base();
+        if let Some(content) = self.content {
+            // Explicit content supplies the text, just as for a served result.
+            // A separate text here would make the wire view discard the parts.
+            let content = Value::Array(content);
+            let text = base::wire::text(&content);
+            let mut wire = json!({"content":content});
+            if let Some(value) = self.value {
+                wire["value"] = value;
+            }
+            return base::ToolResult {
+                call: call.id.clone(),
+                status,
+                text,
+                value: Some(json!({"_pluginWire":wire})),
+            };
+        }
+        // ToolResult::new words a text-only refusal itself.
+        let mut result = base::ToolResult::new(call, status, self.text);
+        // Keep developer-owned values opaque, including JSON null.
+        result.value = self
+            .value
+            .map(|value| json!({"_pluginWire":{"value":value}}));
+        result
+    }
+}
+
 /// Run a tool's function with a context, wherever the agent is.
 pub(crate) async fn execute(tool: &Tool, input: Value, cx: ToolContext) -> Option<Settled> {
     let cancel = cx.cancelled.clone();
