@@ -60,16 +60,22 @@ export class PiAiProvider implements Provider {
 		};
 		const reasoning = lowerReasoning(req.settings.reasoning, toInfo(model));
 		let final: PiAssistantMessage;
+		let usageOmitted = false;
 		try {
-			const common = { signal: options.signal, apiKey: options.apiKey, sessionId: options.sessionId, maxTokens: req.settings.maxOutput };
+			const common = { signal: options.signal, apiKey: options.apiKey, sessionId: options.sessionId, maxTokens: req.settings.maxOutput,
+				...(model.api === "openai-responses" && { onProviderStreamEvent(data: unknown) {
+					const event = data as { type?: string; response?: { usage?: object | null } } | null;
+					if (event?.type === "response.completed" || event?.type === "response.incomplete") {
+						// pi-ai's meter starts at zero even if the terminal response omits usage.
+						usageOmitted = event.response?.usage == null;
+					}
+				} }),
+			};
 			const stream = entry ? this.collection.stream(model, context, {
 				...common, onPayload: payload => reasoningPayload(payload as Record<string, unknown>, entry, req.settings.reasoning),
 			}) : this.collection.streamSimple(model, context, {
-				signal: options.signal,
-				apiKey: options.apiKey,
-				sessionId: options.sessionId,
+				...common,
 				reasoning: reasoning === "off" ? undefined : reasoning as never,
-				maxTokens: req.settings.maxOutput,
 			});
 			for await (const event of stream) {
 				if (event.type === "text_delta") options.onEvent?.({ type: "text", delta: event.delta });
@@ -81,6 +87,7 @@ export class PiAiProvider implements Provider {
 			return failed(error instanceof Error ? error.message : String(error), "other");
 		}
 		const message = fromPi(final, model);
+		if (usageOmitted) delete message.usage;
 		if (!options.signal.aborted && !options.requestPrepared && this.api) await this.api.runHook("provider.response", { sessionId: options.sessionId, provider: this.id, model: { provider: this.id, id: ref.id }, message });
 		return message;
 	}
