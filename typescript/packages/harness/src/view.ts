@@ -1,4 +1,4 @@
-import { type ContentPart, type HistoryEntry, type InterruptedTurn, type ModelMessage, type ResumedStep, type ToolCall, isToolCall, text } from "./types.js";
+import { type ContentPart, type HistoryEntry, type InterruptedTurn, type ModelMessage, type ResumedStep, type RuntimeHost, type ToolCall, isToolCall, text } from "./types.js";
 
 import { INTERFACE_HANDOFF } from "./interface-tools.js";
 
@@ -56,6 +56,39 @@ export function pendingToolCalls(branch: HistoryEntry[], turnId: string, kept = 
 		for (const part of e.message.content) if (isToolCall(part) && pending.delete(part.id)) ordered.push(part.id);
 	}
 	return [...ordered, ...pending];
+}
+
+/** Read the branch checkpoint and the kept gate and terminal facts used during recovery. */
+export async function readRecoveryHistory(host: RuntimeHost, turnId: string) {
+	if (host.historySelect !== 1) return { branch: await host.history(), kept: await host.history({ all: true }) };
+	const branch = await host.history({ select: { turnId } });
+	const calls = new Set<string>();
+	for (const entry of branch) {
+		if (entry.toolCallId) calls.add(entry.toolCallId);
+		if (entry.kind === "response" && entry.message?.role === "assistant") {
+			for (const part of entry.message.content) if (isToolCall(part)) calls.add(part.id);
+		}
+	}
+	const start = branch.find(e => e.kind === "turnStart" && !e.erased);
+	const firstInput = branch.find(e => e.kind === "input");
+	if (!start || (!start.continuesTurnId && (!firstInput || firstInput.erased))) throw new Error("Cannot establish the interrupted turn checkpoint");
+	const origin = start.continuesTurnId;
+	if (origin) {
+		const checkpoint = (await host.history({ select: { turnId: origin } })).find(e => e.kind === "turnEnd" && !e.erased);
+		const open = (checkpoint?.data as { result?: { openToolCalls?: string[] } } | undefined)?.result?.openToolCalls;
+		if (!Array.isArray(open) || open.some(id => typeof id !== "string" || !id)) throw new Error("Cannot establish the originating turn checkpoint");
+		for (const id of open) calls.add(id);
+	}
+
+	const ids = [...calls];
+	const kept = await host.history({ all: true, select: { turnId, ...(ids.length ? { toolCallIds: ids.slice(0, 64) } : {}) } });
+	const seen = new Set(kept.map(entry => entry.id));
+	for (let i = 64; i < ids.length; i += 64) {
+		for (const entry of await host.history({ all: true, select: { toolCallIds: ids.slice(i, i + 64) } })) {
+			if (!seen.has(entry.id)) { kept.push(entry); seen.add(entry.id); }
+		}
+	}
+	return { branch, kept };
 }
 
 /** Strip opaque reasoning from a model or recipient projection, not from storage. */

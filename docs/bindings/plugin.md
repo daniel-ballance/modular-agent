@@ -45,10 +45,12 @@ The host MUST treat unexpected EOF, process exit, an unusable stream, a required
 
 | Host request | Params | Result | Errors |
 |---|---|---|---|
-| `plugin/initialize` | `{ binding: string, host: { name: string, version: string }, project: string, home: string, config: object }` | `Registration` | `not_supported` for an unsupported version |
+| `plugin/initialize` | `{ binding: string, host: { name: string, version: string }, project: string, home: string, config: object, historySelect?: 1 }` | `Registration` | `not_supported` for an unsupported version |
 | `plugin/shutdown` | `{ reason: "stop" \| "reload" \| "refused", detail?: string }` | `{}` | Common errors only |
 
 The first frame MUST be `plugin/initialize`, with `binding: "modular-agent-plugin/1"`. This binding uses the [shared data vocabulary](data.md). `project` and `home` are absolute paths to the project and the plugin's state folder. `config` is the plugin's settings, `{}` if none. A plugin MUST reject a second initialize with `invalid_request`. Until registration is accepted, only initialize, ping, cancel, shutdown and `host/problem` are available; there is no separate acceptance frame. The host's first request for registered work signals acceptance.
+
+The host MAY offer `historySelect: 1` in `plugin/initialize`. The plugin MAY accept by returning `historySelect: 1` in its registration. The agreement applies only to this connection. Without agreement, the plugin uses unfiltered requests and a host implementing the extension MUST reject a request containing `select` with `invalid_request`.
 
 **Registration**
 
@@ -56,6 +58,7 @@ The first frame MUST be `plugin/initialize`, with `binding: "modular-agent-plugi
 |---|---|
 | `binding` | `"modular-agent-plugin/1"` |
 | `name` | Nonempty string, stable plugin identity |
+| `historySelect?` | `1` to accept the host’s offer |
 | `providers?` | `{ id: Id, supports: ProviderSupports, models: ModelInfo[] }[]`; default `[]` |
 | `toolSources?` | `{ id: Id, tools: ToolDefinition[], perSession?: boolean }[]`; defaults `[]` and `perSession: false` |
 | `workingEnvironment?` | `{ containment: "strong" \| "processGroup" \| "none", platforms?: string[], points?: boolean, confinesFiles?: boolean }`; default absent; omitted platforms makes no platform claim; omitted flags are false |
@@ -351,7 +354,7 @@ Trace context on a callback MUST come from work under a live `parentRequestId` o
 | `host/tools/call` | `{ parentRequestId: RpcId, name: Id, input: object }` | [ToolResult](data.md#tools) of the nested call | `invalid_request` for a bad parent, name or input shape; `not_supported` if the host does not run nested calls; `cancelled` if the parent was cancelled before the nested call was admitted |
 | `host/hook` | `{ parentRequestId: RpcId, hook: "provider.request" \| "provider.response", payload: object }` from the [hook table](#from-core-hooks-to-wire-hooks) | Full transformed payload for `provider.request`; `null` for `provider.response` | `invalid_request` for wrong hook, scope, phase or payload, or a response before its attempt was committed; `internal` for a failed request transform; `lost` if the commit cannot be confirmed; `turn_limit` for a host limit |
 | `host/credentials/read` | `{ provider: Id }` | `{ credential: Credential \| null }`, in the [shared shape](data.md#credentials); `null` if none | `invalid_request` for a Provider not registered by that connection |
-| `host/history` | `{ sessionId: Id, parentRequestId?: RpcId, after?: Id, limit?: integer, all?: boolean }` | `{ entries: HistoryEntry[], next?: Id }` | `invalid_request` for invalid cursor, limit or session; `result_too_large` for an entry that cannot fit |
+| `host/history` | `{ sessionId: Id, parentRequestId?: RpcId, after?: Id, limit?: integer, all?: boolean, select?: { turnId?: Id, toolCallIds?: Id[] } }` | `{ entries: HistoryEntry[], next?: Id }` | `invalid_request` for invalid selector, cursor, limit or session; `result_too_large` for an entry that cannot fit |
 | `host/session` | `{ sessionId: Id, parentRequestId?: RpcId }` | `{ id: Id, project: string, settings: object, busy: boolean, actors: Actor[] }` | `invalid_request` for invalid session or parent |
 | `host/declaration` | `{ sessionId?: Id, parentRequestId?: RpcId }` | [Declaration](acp.md#the-declaration) | `invalid_request` for invalid session or parent |
 | `host/emit` | `{ sessionId: Id, parentRequestId?: RpcId, type: string, data: JSON }` | notify | No reply |
@@ -373,9 +376,17 @@ The host MUST omit `turnStart.data.traceContext` and send `modular-agent.turnTra
 
 The host MUST fit the whole `result` it sends, including any `next`, in 4 MiB. It MUST return `next` as the last returned id only when more entries remain. The host MUST include at least one entry when entries remain; if that entry and any required cursor do not fit, the host MUST return `result_too_large` rather than split or skip it. A host MUST NOT commit an entry that would make its own Runtime unable to page it. An external record already too large is a recovery failure, not an empty page.
 
+With [agreement](#starting-the-handshake), a request MAY include `select`. It MUST be an object containing at least one of `turnId` and `toolCallIds` and no other members. Each ID MUST be a nonempty string. If present, `toolCallIds` MUST contain 1–64 distinct IDs. Invalid shapes or values are `invalid_request`.
+
+A selected read has the same connection, loaded-plugin, open-session, supplied live-parent and session scope, and any read-rights ceiling as an unfiltered read. It never resolves a session or authorizes a callback or effect. The host MUST read the current, erasure-fresh branch or kept view, then match entries whose envelope `turnId` equals the supplied `turnId` or whose envelope `toolCallId` is in `toolCallIds`. Each match appears once in view order, with the same trace projection. Identity-only tombstones match by their retained associations. The host MUST NOT follow `continuesTurnId`, source links or payload IDs, infer an association from content, or recover erased content.
+
+The host MUST apply `after`, `limit` and the 4 MiB result cap to matching entries. `after` MUST identify an entry in the current filtered view or the host MUST return `invalid_request`. `next` identifies the last returned match only if more matches remain. If the first match and its required cursor exceed the cap, the host MUST return `result_too_large`. An empty match returns `{ entries: [] }` without `next`. Callers traverse using the same session, view and selector. A cursor identifies an entry in the current view and can lose membership after an append, position move or erasure. The host MUST check pending-erasure freshness on every page, including an empty result, and return `internal` when freshness cannot be established.
+
+A Runtime using selectors for recovery reads the branch by interrupted turn ID, then reads kept history for that turn’s gate decisions and for relevant call IDs, in batches of at most 64 call IDs. It derives those IDs from the committed offer and response, pending or handoff checkpoint, and the linked origin checkpoint for inherited work. The host can already have filtered `interrupted.calls`. A terminal result in a later turn, detached from the branch or erased to its envelope, still settles that call ID. A Runtime MUST fail recovery when it cannot establish the committed checkpoint. Only the host’s final current authorization and settlement checks authorize dispatch.
+
 ### Authority
 
-**For services ([ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md)).** An operator can [name the caller at WebSocket authentication](websocket.md#named-callers). There is no new field in `plugin/initialize`, `tools/call` or callbacks. The `host.name` in the handshake describes software. Neither it, `config`, `sessionId` nor `call.actorId` authenticates the connecting Harness. A name assigned by the listener does not change the checks below or give the plugin access to another connection.
+**For services ([ADR 0035](../adr/0035-host-limits-from-the-ops-desk.md)).** An operator can [name the caller at WebSocket authentication](websocket.md#named-callers). Named callers add no field to `plugin/initialize`, `tools/call` or callbacks. The `host.name` in the handshake describes software. Neither it, `config`, `sessionId` nor `call.actorId` authenticates the connecting Harness. A name assigned by the listener does not change the checks below or give the plugin access to another connection.
 
 For a hosted connection, the host MUST resolve parent RPC IDs and plugin ownership in that connection's state, not across connections, even when the same service supplies multiple registrations or hosts. See [plugin services](websocket.md#a-plugin-service).
 
@@ -430,6 +441,8 @@ A build serving the conformance plugin MUST document its command and support the
 - The `tool.before` fixture MUST refuse a call whose input JSON contains `conformance-forbidden`, with reason `refused by the conformance plugin`. The `turn.before` fixture MUST contribute `{ "system": "The conformance plugin is loaded." }`. The `output` fixture MUST replace `conformance-secret` with `[redacted]` in editable strings, including a match across text events within one segment, without making other changes.
 
 ## Changes
+
+- **2026-11-26.** Added negotiated turn and tool-call selectors to plugin history pages and specified how recovery finds late settlements in kept history ([#85](https://github.com/daniel-ballance/modular-agent/issues/85)).
 
 - **2026-11-26.** Kept the `/1` model-request callback schemas unchanged after measuring Rust and TypeScript served pairings ([#84](https://github.com/daniel-ballance/modular-agent/issues/84)) and clarified that the `provider.request` authorization reply still carries the effective Provider-facing projection when no handler changes the request.
 

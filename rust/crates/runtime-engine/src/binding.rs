@@ -14,6 +14,18 @@ pub trait Host: Sync {
     async fn history_all(&self, session: &Value, after: Option<&Value>) -> Result<Value> {
         self.history(session, after).await
     }
+    fn history_select(&self) -> bool {
+        false
+    }
+    async fn selected_history(
+        &self,
+        _session: &Value,
+        _after: Option<&Value>,
+        _all: bool,
+        _select: &Value,
+    ) -> Result<Value> {
+        bail!("history selectors are unavailable")
+    }
     fn cancelled(&self) -> bool;
     fn entries(&self) -> Value;
 }
@@ -48,25 +60,7 @@ pub async fn run(host: &dyn Host, method: &str, p: Value, durable: bool) -> Resu
     );
     let mut prior = vec![];
     if method == "runtime/resumeTurn" {
-        prior = read_history(host, &t["sessionId"], false)
-            .await?
-            .into_iter()
-            .filter(|e| e["turnId"] == t["turnId"])
-            .collect();
-        if durable {
-            // Branch choice selects the answered step, not terminal facts or
-            // committed gate decisions.
-            prior.retain(|e| !matches!(e["kind"].as_str(), Some("toolResult" | STEP_AFTER)));
-            prior.extend(
-                read_history(host, &t["sessionId"], true)
-                    .await?
-                    .into_iter()
-                    .filter(|e| {
-                        e["kind"] == "toolResult"
-                            || (e["kind"] == STEP_AFTER && e["turnId"] == t["turnId"])
-                    }),
-            );
-        }
+        prior = recovery_history(host, t, durable).await?;
     }
     let restored = if method == "runtime/resumeTurn" && durable {
         validate_resume(&p, &prior).map_err(|e| InvalidResume(e.to_string()))?
@@ -130,12 +124,110 @@ struct Turn<'a> {
 fn array(v: &Value) -> &[Value] {
     v.as_array().map(Vec::as_slice).unwrap_or(&[])
 }
-async fn read_history(host: &dyn Host, session: &Value, all: bool) -> Result<Vec<Value>> {
+async fn recovery_history(host: &dyn Host, turn: &Value, durable: bool) -> Result<Vec<Value>> {
+    let session = &turn["sessionId"];
+    let turn_id = &turn["turnId"];
+    let selector = json!({"turnId":turn_id});
+    let selected = host.history_select().then_some(&selector);
+    let mut branch = read_history(host, session, false, selected).await?;
+    branch.retain(|e| e["turnId"] == *turn_id);
+    if selected.is_some() {
+        let start = branch
+            .iter()
+            .find(|e| e["kind"] == "turnStart" && e["erased"] != true)
+            .ok_or_else(|| {
+                InvalidResume("Cannot establish the interrupted turn checkpoint".into())
+            })?;
+        if start["continuesTurnId"].is_null()
+            && !branch
+                .iter()
+                .find(|e| e["kind"] == "input")
+                .is_some_and(|e| e["erased"] != true)
+        {
+            return Err(InvalidResume("Cannot establish the interrupted turn input".into()).into());
+        }
+    }
+    if !durable {
+        return Ok(branch);
+    }
+
+    // Branch choice selects the answered step. Kept history also proves gate
+    // decisions and global terminal facts, including erased result envelopes.
+    let kept = if selected.is_some() {
+        let mut calls: BTreeSet<String> = branch
+            .iter()
+            .flat_map(|e| {
+                e["toolCallId"].as_str().into_iter().chain(
+                    array(&e["message"]["content"])
+                        .iter()
+                        .filter(|part| e["kind"] == "response" && part["type"] == "toolCall")
+                        .filter_map(|part| part["id"].as_str()),
+                )
+            })
+            .map(str::to_owned)
+            .collect();
+        if let Some(origin_id) = branch
+            .iter()
+            .find(|e| e["kind"] == "turnStart")
+            .and_then(|e| e["continuesTurnId"].as_str())
+        {
+            let origin =
+                read_history(host, session, false, Some(&json!({"turnId":origin_id}))).await?;
+            let open = origin
+                .iter()
+                .find(|e| e["turnId"] == origin_id && e["kind"] == "turnEnd" && e["erased"] != true)
+                .and_then(|e| e["data"]["result"]["openToolCalls"].as_array())
+                .ok_or_else(|| {
+                    InvalidResume("Cannot establish the originating turn checkpoint".into())
+                })?;
+            for id in open {
+                calls.insert(
+                    id.as_str()
+                        .filter(|id| !id.is_empty())
+                        .ok_or_else(|| InvalidResume("Invalid originating call ID".into()))?
+                        .to_owned(),
+                );
+            }
+        }
+        let calls: Vec<_> = calls.into_iter().collect();
+        let mut kept = Vec::new();
+        for (index, ids) in calls.chunks(64).enumerate() {
+            let mut select = json!({"toolCallIds":ids});
+            if index == 0 {
+                select["turnId"] = turn_id.clone();
+            }
+            kept.extend(read_history(host, session, true, Some(&select)).await?);
+        }
+        if calls.is_empty() {
+            kept = read_history(host, session, true, selected).await?;
+        }
+        kept
+    } else {
+        read_history(host, session, true, None).await?
+    };
+    branch.retain(|e| !matches!(e["kind"].as_str(), Some("toolResult" | STEP_AFTER)));
+    let mut seen = BTreeSet::new();
+    branch.extend(kept.into_iter().filter(|e| {
+        (e["kind"] == "toolResult" || (e["kind"] == STEP_AFTER && e["turnId"] == *turn_id))
+            && e["id"].as_str().is_none_or(|id| seen.insert(id.to_owned()))
+    }));
+    Ok(branch)
+}
+
+async fn read_history(
+    host: &dyn Host,
+    session: &Value,
+    all: bool,
+    select: Option<&Value>,
+) -> Result<Vec<Value>> {
     let mut entries = vec![];
     let mut seen = BTreeSet::new();
     let mut cursor = None;
     loop {
-        let page = if all {
+        let page = if let Some(select) = select {
+            host.selected_history(session, cursor.as_ref(), all, select)
+                .await?
+        } else if all {
             host.history_all(session, cursor.as_ref()).await?
         } else {
             host.history(session, cursor.as_ref()).await?

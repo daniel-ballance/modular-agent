@@ -5,6 +5,7 @@ import { appendFileSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileS
 import { dirname, join, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { isDeepStrictEqual as equal } from "node:util";
+import { checkHostSelectors } from "./history-select.mjs";
 import { codeOf, outcome, rpcError, serve } from "./peer.mjs";
 
 const BINDING = "modular-agent-plugin/1";
@@ -13,7 +14,7 @@ const models = [{ ...model, contextWindow: 4096, maxOutput: 512, input: ["text"]
 const PROBE = { name: "probe", description: "Check the host callbacks.", parameters: { type: "object", properties: {} } };
 const EFFECT = { name: "probe-effect", description: "Record a fixture invocation.", parameters: { type: "object", properties: { value: { type: "string" } } }, hints: { readOnly: true, openWorld: false } };
 const trace = (data) => { const out = config.traceOut ?? config.out; if (out) appendFileSync(out, JSON.stringify(data) + "\n"); };
-let config = {}, stopping = false;
+let config = {}, stopping = false, offeredHistorySelect = false;
 let refreshed = false;
 const fixtureTool = (name, description, properties = {}) => ({ name, description, parameters: { type: "object", properties } });
 const QUESTION = fixtureTool("probe-question", "Ask one fixture question.", { late: { type: "boolean" } });
@@ -38,7 +39,7 @@ async function untilFile(path, signal) {
 const points = new Map();
 let pointProject, pointDir;
 function registration() {
-	const base = { binding: BINDING, name: `probe-${config.role ?? "probe"}` };
+	const base = { binding: BINDING, name: `probe-${config.role ?? "probe"}`, ...(offeredHistorySelect && config.role === "probe" ? { historySelect: 1 } : {}) };
 	switch (config.role) {
 		// Starting: the handshake. These negative fixtures run only in separate startups.
 		case "refuse-hook": return { ...base, hooks: [{ hook: "probe.no-such-point", handlerId: 1 }] };
@@ -89,6 +90,10 @@ async function runChecks(m, { ask, request, recent, signal }) {
 		check("host/history: unknown cursor and limits 0 and 501 are invalid_request", await invalid("host/history", { ...all, after: "probe-no-such-entry" }) && await invalid("host/history", { ...all, limit: 0 }) && await invalid("host/history", { ...all, limit: 501 }));
 		check("host/history: direct read of an open session is allowed", Array.isArray((await ask("host/history", { sessionId })).entries));
 		check("host/history: unknown session is refused", await invalid("host/history", { sessionId: randomUUID() }));
+		if (offeredHistorySelect) {
+			const reason = await checkHostSelectors({ ask, invalid, scope, entries, callId: m.params.call.id, deadParent: recent[0] });
+			check("host/history: negotiated selectors filter before paging and retain read authority", !reason, reason);
+		}
 	});
 	await group("callback authority", async () => {
 		check("authority: environment callback without parent is refused", await invalid("host/env/exists", { sessionId, cwd, path: "absent" }));
@@ -117,6 +122,10 @@ async function runtime(m, { ask }) {
 	const callHost = (method, params = {}) => ask(`host/runtime/${method}`, { parentRequestId: m.id, ...params });
 	const record = (entry) => callHost("record", { entry });
 	const history = () => ask("host/history", { sessionId: turn.sessionId, parentRequestId: m.id, all: true }).then((r) => r.entries);
+	if (offeredHistorySelect) {
+		const unagreed = await outcome(ask("host/history", { sessionId: turn.sessionId, parentRequestId: m.id, select: { turnId: turn.turnId } }));
+		if (codeOf(unagreed.error) !== "invalid_request") throw rpcError("internal", "Host accepted an unnegotiated selector");
+	}
 	const checks = {};
 	const entries = [];
 	let usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
@@ -298,6 +307,7 @@ serve("probe", async (m, ctx) => {
 		case "plugin/initialize":
 			if (p.binding !== BINDING) throw rpcError("not_supported");
 			config = p.config ?? {};
+			offeredHistorySelect = p.historySelect === 1;
 			if (config.role === "project-observer") trace({ projectSetup: p.project });
 			if (config.role === "remote-points") {
 				pointProject = p.project;
