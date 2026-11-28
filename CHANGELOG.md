@@ -2,6 +2,26 @@
 
 The two SDKs and `ma` share one project version. The [SDK specification](docs/sdk/README.md) has its own revision. Nothing is published to a registry; a version names a commit on `main`.
 
+## 0.5.0
+
+The fifth release. Both SDKs implement the remaining production rules from ADR 0030. Operators can retry erasure in quiet sessions, and both ACP builds pass the portable checks over WebSocket. Results are in [docs/status.md](docs/status.md#050).
+
+- **Production rules in both SDKs ([ADR 0030](docs/adr/0030-production-gaps.md)).**
+  - Plugin RPC queues and ACP refusal queues have bounds. The plugin transport rechecks authority and freshness at the final handoff.
+  - Durable byte reservation ledgers account for all encoded history writes. A malformed session still counts toward reserved storage and does not stop discovery of other erasure copies.
+  - Erasure settles affected live effects before removing history. If job cancellation cannot be confirmed, the copy stays pending so cleanup can be retried.
+  - A restored history store checks an independent freshness witness before it serves history again.
+- **Erasure retries and quiet sessions ([#123](https://github.com/daniel-ballance/modular-agent/issues/123), [#19](https://github.com/daniel-ballance/modular-agent/issues/19)).** Authorization, pending-copy retries and freshness checks are separate. `reconcileErasure` and `Agent::reconcile_erasure` let an operator retry a quiet session without a prompt. HTTP history services can declare `pendingErasureIndex: 1` and list pending destinations through `GET /v1/pending-erasure`. `ma erasure retry` accepts explicit session IDs or discovers pending destinations. ACP, AG-UI, history and reference checks cover the paths in both languages.
+- **ACP and AG-UI.**
+  - The operator's `joinOnOpen` policy defaults to `false` on network ACP and AG-UI. Opening an existing session does not by itself join it.
+  - Both ACP builds pass the portable checks over WebSocket. Both negotiate newer ACP initialization offers down to protocol version 1 and report the effective rights of the connection. TypeScript can open sessions through more than one ACP listener on one agent.
+  - The ACP specification describes the project inputs to composition and recovery. Rust's ACP binding no longer makes project trust decisions, and the Rust base build removes its host-policy plugin option.
+  - TypeScript AG-UI records definite non-delivery when an Interface tool handoff is withheld before writing to the client.
+- **Providers and model context.** Rust ships the API-key Providers in `modular-agent-openai` and `modular-agent-anthropic`. Both SDKs report why a Provider is unavailable and deliver Provider audio as custom events. Long turns can compact settled steps before the turn ends. Claude keeps replay cache marks stable as history grows. ChatGPT counts cached input once.
+- **History and input.** The SDKs check that a custom history store can renew one session's lease while another session is writing. A served history plugin can negotiate recovery selectors instead of returning the full history. Retrying queued input after cancellation uses the original receipt. History records the turn-before source for additions to a turn. Saved session information and session listings use the same last activity.
+- **`ma`.** TypeScript `find` follows Rust's ignore rules. The `ma` prompt gives the model guidance on using `codemode`. The root, Rust SDK and Rust `ma` READMEs now point to issues for gaps that remain.
+- **Checks and process.** `docs-review.mjs` tracks reference links where a section uses them. Check slots and per-run temporary directories isolate concurrent runs. Delegates remove their scratch and Rust build artifacts on handback. The standing `ma` session review files reproducible findings from real work.
+
 ## 0.4.0
 
 The fourth release, and the first in two languages: Go and Python are removed from `main`, so Rust and TypeScript are the two SDKs and `ma` builds. The two `ma` builds now give the same help, terminal commands, session listing and tools. Fixes cover history leases, erasure, handoffs and input under load, and the checks run in about 19 minutes. Results are in [docs/status.md](docs/status.md#040).

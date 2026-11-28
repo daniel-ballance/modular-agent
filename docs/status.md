@@ -8,15 +8,32 @@ Rust and TypeScript are the two maintained SDKs and `ma` builds ([ADR 0037](adr/
 
 [Cross-session erasure](contracts.md#cross-session-coordination) retries at authorized entry points and through operator reconciliation. A copy stays pending when affected job cleanup cannot be confirmed.
 
-[ADR 0021](adr/0021-production-edition.md) listed four gaps. [Secret staging and recovery](contracts.md#secrets) shipped first. [ADR 0029](adr/0029-sdk-decisions-after-four-builds.md) settled ACP service token scope and rights ceilings, and [ADR 0030](adr/0030-production-gaps.md) set the rules for the other three. All four SDKs and `ma` passed checks for them on 2026-11-21, using the opt-in kits run through `scripts/production-kits.sh` and `scripts/erasure-matrix.sh`:
+[ADR 0021](adr/0021-production-edition.md) listed four gaps. [Secret staging and recovery](contracts.md#secrets) shipped first. [ADR 0029](adr/0029-sdk-decisions-after-four-builds.md) settled ACP service token scope and rights ceilings, and [ADR 0030](adr/0030-production-gaps.md) set the rules for the other three. All four SDKs and `ma` passed the original checks on 2026-11-21. The Rust and TypeScript checks at [0.5.0](#050) also cover the remaining rules, including erasure retry triggers and quiet-session reconciliation ([#123](https://github.com/daniel-ballance/modular-agent/issues/123)). The checks run through the production and erasure kits and the language, binding and reference suites:
 
 | Gap | Rules | Checked |
 |---|---|---|
-| Per-connection isolation | [Authority](contracts.md#authority), [ACP authorization](bindings/acp.md#authorization), [plugin service isolation](bindings/websocket.md#a-plugin-service), [raw history isolation](bindings/history-http.md#the-basics) | ACP `--isolation-checks` on each `ma` and base agent, stdio and WebSocket; plugin isolation across separate listeners; history isolation across two services |
-| Resource reservations | [Resource reservations](contracts.md#resource-reservations), [Security](security.md#resource-limits-and-denial-of-service) | ACP `--capacity-checks`: races for the last slot, `busy` with no admission, settlement of questions and jobs while full, `capacity` inside a turn |
-| Cross-session erasure coordination | [Cross-session coordination](contracts.md#cross-session-coordination), [pending-erasure registry profile](bindings/history-http.md#pending-erasure-registry-profile-pendingerasure-1) | ACP `--erasure-checks`, including crash cutoffs and the next writer completing; the history kit's registry checks across a restart in all four services; each language's agents on every language's history service, 16 pairings |
+| Per-connection isolation | [Authority](contracts.md#authority), [ACP authorization](bindings/acp.md#authorization), [plugin service isolation](bindings/websocket.md#a-plugin-service), [raw history isolation](bindings/history-http.md#the-basics) | ACP `--isolation-checks` on each `ma` and base agent, stdio and WebSocket; plugin isolation across separate listeners; history isolation across two services; authority and freshness rechecked at final plugin transport handoff |
+| Resource reservations | [Resource reservations](contracts.md#resource-reservations), [Security](security.md#resource-limits-and-denial-of-service) | ACP `--capacity-checks`: races for the last slot, `busy` with no admission, settlement of questions and jobs while full, `capacity` inside a turn; bounded plugin RPC and ACP refusal queues; byte reservations for encoded durable history writes |
+| Cross-session erasure coordination | [Cross-session coordination](contracts.md#cross-session-coordination), [pending-erasure registry profile](bindings/history-http.md#pending-erasure-registry-profile-pendingerasure-1) | ACP `--erasure-checks`, including crash cutoffs and the next writer completing; history registry and independent restore freshness; affected live effects settle before erasure, and job cancellation can be retried; authorized entry points and operator reconciliation retry pending copies |
 
-**What the checks do not establish.** Byte limits are counted logically: they do not reserve physical disk, and the operator provides the extra space a backend needs for framing, journals and atomic replacement. These checks do not attest deletion by external recipients or changes to independently managed authority. Restoring a backup still needs separate proof that it is current. Full production readiness is not claimed.
+**What the checks do not establish.** Byte limits are counted logically: they do not reserve physical disk, and the operator provides the extra space a backend needs for framing, journals and atomic replacement. These checks do not attest deletion by external recipients or changes to independently managed authority. The restore checks verify that history fails closed without an independent freshness witness. They do not establish that a deployment supplies and preserves that witness. Full production readiness is not claimed.
+
+## 0.5.0
+
+Recorded on 2026-11-27 for the release commit, from `scripts/check.sh` on Linux (Fedora 44, x86-64, 32 logical CPUs; 44 steps, all passed). `scripts/macos-check.sh` has not yet been run on macOS for 0.5.0.
+
+| Check | Rust | TypeScript |
+|---|---|---|
+| Shared SDK scenarios, every placement | pass | 240/240 |
+| Reference checks against `ma` | 39/39 | 39/39 |
+| ACP kit against `ma`: core, covered approvals, approvals that wait, stdio rights | 219, 2, 50, 20 | 219, 2, 50, 20 |
+| Over WebSocket: plugin kit, listener isolation, named callers, ACP kit, portability with two credentials | 158, 14, 29, 224, 9 | 158, 14, 29, 224, 9 |
+| [AG-UI kit](../conformance/agui/README.md) against `ma` and an SDK fixture | 51/51 | 51/51 |
+| [Telemetry check](../conformance/telemetry/README.md), as host: in process and with the other language's plugins | 16, 2 | 16, 2 |
+| [ADR 0030](adr/0030-production-gaps.md) kits: ACP and history | 424/424 | 424/424 |
+| Own suites | 555 tests | 782 in each of two layouts, 5 live skipped; Claude sidecar: 56 passed, 1 live skipped |
+
+Rust's scenario runner reports pass or fail, not a count of scenarios. Each language's agents passed the erasure checks on the other language's history service: 2 of 2 pairings. The [project notes demo](../demos/project-notes/README.md) passed its scripted and crash runs. The [ops desk](../demos/ops-desk/README.md) passed its eight scripted checks. Every result above used scripted models.
 
 ## 0.4.0
 
